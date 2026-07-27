@@ -1,0 +1,12 @@
+[package]
+name = "xtask"
+version = "0.0.0"
+description = "Workspace task runner: codegen and release glue (cargo run -p xtask -- <task>)"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
