@@ -107,19 +107,37 @@ impl TransitionGuard for AttemptState {
 
 /// Decide one transition. Check order:
 ///
-/// 1. **Idempotent retry** — a request whose key equals the last APPLIED key
+/// 1. **Actor guard** ([`TransitionGuard::guard`], e.g. the D5 flip rule) —
+///    FIRST, before every other check, so a caller the guard refuses gets the
+///    guard's refusal and learns nothing about the aggregate's current state
+///    or version (`IllegalEdge` carries `from`, `StaleVersion` carries
+///    `actual` — neither may reach an unauthorized actor). Ahead of the
+///    idempotency short-circuit deliberately: a replayed key from an
+///    unauthorized actor on a guarded edge must be refused, not answered,
+///    or the short-circuit becomes a state probe. A legitimate retry resends
+///    the same complete request (same actor, same receipt), so it passes the
+///    guard again and stays stable. Unguarded edges are untouched.
+/// 2. **Idempotent retry** — a request whose key equals the last APPLIED key
 ///    AND whose target state the cursor already holds returns the current
 ///    cursor unchanged (stable even after the version advanced; the
 ///    transition already happened). A matching key requesting any OTHER
 ///    state falls through to its honest refusal — a replayed key never
 ///    converts a wrong request into an apply.
-/// 2. **Edge legality** against [`StateMachine::EDGES`].
-/// 3. **CAS version** — `expected_version` must equal the cursor's version.
-/// 4. **Actor guard** ([`TransitionGuard::guard`], e.g. the D5 flip rule).
+/// 3. **Edge legality** against [`StateMachine::EDGES`].
+/// 4. **CAS version** — `expected_version` must equal the cursor's version.
 pub fn apply<S: TransitionGuard>(
     cursor: &Cursor<S>,
     req: &TransitionRequest<'_, S>,
 ) -> TransitionResult<S> {
+    let ctx = GuardCtx {
+        actor: req.actor,
+        receipt_id: req.receipt_id,
+    };
+    if let Err(violation) = S::guard(cursor.state, req.to, &ctx) {
+        return TransitionResult::UnauthorizedActor {
+            reason: violation.to_string(),
+        };
+    }
     if let (Some(key), Some(applied)) =
         (req.idempotency_key, cursor.applied_idempotency_key.as_ref())
         && key == applied
@@ -140,15 +158,6 @@ pub fn apply<S: TransitionGuard>(
         return TransitionResult::StaleVersion {
             actual: cursor.version,
             expected: req.expected_version,
-        };
-    }
-    let ctx = GuardCtx {
-        actor: req.actor,
-        receipt_id: req.receipt_id,
-    };
-    if let Err(violation) = S::guard(cursor.state, req.to, &ctx) {
-        return TransitionResult::UnauthorizedActor {
-            reason: violation.to_string(),
         };
     }
     TransitionResult::Applied {
@@ -208,7 +217,9 @@ mod tests {
     #[test]
     fn illegal_edge_is_refused_before_version() {
         let actor = kernel();
-        // Wrong edge AND wrong version: the edge refusal wins.
+        // Pins the refusal order guard -> idempotency -> edge -> CAS on an
+        // UNGUARDED edge: wrong edge AND wrong version, the edge refusal wins.
+        // (Guard precedence has its own pin below.)
         let result = apply(
             &cursor(AttemptState::Queued, 3),
             &TransitionRequest {
@@ -382,6 +393,88 @@ mod tests {
                 expected: 1
             }
         );
+    }
+
+    #[test]
+    fn guarded_flip_refuses_the_wrong_actor_before_disclosing_the_version() {
+        // A wrong-actor request on the running -> blocked flip, carrying a
+        // harvested idempotency key AND a stale expected_version, gets the
+        // actor refusal — never StaleVersion { actual } (a version probe) and
+        // never a keyed Applied echo.
+        let engine = Actor {
+            kind: "engine".into(),
+            id: Some("e-1".into()),
+        };
+        let key = IdempotencyKey::new("flip-once");
+        let receipt = ReceiptId::new("r-forged");
+        let result = apply(
+            &Cursor {
+                state: AttemptState::Running,
+                version: 5,
+                applied_idempotency_key: Some(key.clone()),
+            },
+            &TransitionRequest {
+                to: AttemptState::Blocked,
+                expected_version: 999,
+                actor: &engine,
+                idempotency_key: Some(&key),
+                receipt_id: Some(&receipt),
+            },
+        );
+        assert!(matches!(result, TransitionResult::UnauthorizedActor { .. }));
+    }
+
+    /// A test-only machine whose guard covers EVERY requested transition, so
+    /// the guard's precedence over the idempotency short-circuit, the edge
+    /// check, and the CAS check is observable in one request. (The real
+    /// attempt flip pairs are all legal edges, so they cannot exercise the
+    /// guard-vs-IllegalEdge ordering.)
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Gated {
+        Shut,
+    }
+
+    impl StateMachine for Gated {
+        const STATES: &'static [Self] = &[Self::Shut];
+        const EDGES: &'static [(Self, Self)] = &[];
+        const ESCAPE: &'static [Self] = &[];
+    }
+
+    impl TransitionGuard for Gated {
+        fn guard(_from: Self, _to: Self, ctx: &GuardCtx<'_>) -> Result<(), GuardViolation> {
+            if ctx.actor.kind != "gatekeeper" {
+                return Err(GuardViolation::WrongActor {
+                    required_kind: "gatekeeper",
+                });
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn guard_refusal_precedes_idempotency_edge_and_version() {
+        // Everything else would fire: the key matches the last applied key
+        // AND the cursor holds the requested state (idempotency would echo
+        // Applied), the edge is not in the table (IllegalEdge would disclose
+        // `from`), and the version is stale (StaleVersion would disclose
+        // `actual`). The guard answers first; the caller learns nothing.
+        let intruder = kernel();
+        let key = IdempotencyKey::new("harvested");
+        let result = apply(
+            &Cursor {
+                state: Gated::Shut,
+                version: 4,
+                applied_idempotency_key: Some(key.clone()),
+            },
+            &TransitionRequest {
+                to: Gated::Shut,
+                expected_version: 999,
+                actor: &intruder,
+                idempotency_key: Some(&key),
+                receipt_id: None,
+            },
+        );
+        assert!(matches!(result, TransitionResult::UnauthorizedActor { .. }));
     }
 
     #[test]
