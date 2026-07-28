@@ -227,7 +227,8 @@ pub fn check_stream(events: &[EventEnvelope]) -> Vec<Finding> {
         }
 
         if is_creation {
-            if replay.contains_key(&agg_key) {
+            let already_exists = replay.contains_key(&agg_key);
+            if already_exists {
                 findings.push(at(
                     FindingCode::CreatedNotFirst,
                     "creation event on an aggregate that already exists".to_string(),
@@ -253,13 +254,18 @@ pub fn check_stream(events: &[EventEnvelope]) -> Vec<Finding> {
                 }
                 None => seeded.unwrap_or(""),
             };
-            replay.insert(
-                agg_key.clone(),
-                ReplayState {
-                    state: initial.to_string(),
-                    version: event.aggregate_version,
-                },
-            );
+            // A duplicate creation must NOT reset an existing aggregate's
+            // replay cursor to its initial state — that would erase a terminal
+            // and mask the mutation that followed. Seed only the first one.
+            if !already_exists {
+                replay.insert(
+                    agg_key.clone(),
+                    ReplayState {
+                        state: initial.to_string(),
+                        version: event.aggregate_version,
+                    },
+                );
+            }
             if event.aggregate_type == "command" {
                 let targets = payload_targets(event).unwrap_or_default();
                 let pre_canceled = targets
@@ -409,7 +415,15 @@ pub fn check_stream(events: &[EventEnvelope]) -> Vec<Finding> {
                                 }
                             }
                         }
-                        Some(_) => {}
+                        // `partial` and `unknown` are legitimate outcomes with
+                        // no target-agreement to judge.
+                        Some("partial") | Some("unknown") => {}
+                        // Any other string is not a real outcome — accepting it
+                        // silently would skip the whole agreement check.
+                        Some(other) => findings.push(at(
+                            FindingCode::StateChangeMalformed,
+                            format!("outcome {other} is not one of clean, partial, unknown"),
+                        )),
                     }
                 } else if outcome.is_some() {
                     findings.push(at(

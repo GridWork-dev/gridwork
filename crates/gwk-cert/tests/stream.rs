@@ -632,6 +632,44 @@ fn mutant_clean_claimed_before_the_cancel_completed() {
 }
 
 #[test]
+fn mutant_unrecognized_outcome_is_a_finding() {
+    let mut events = valid_stream();
+    // "Clean" (capitalized) is not the wire outcome `clean`; it must not skip
+    // the agreement check silently — it is a malformed outcome.
+    events[15].payload["outcome"] = serde_json::json!("Clean");
+    assert!(codes(&events).contains(&FindingCode::StateChangeMalformed));
+}
+
+#[test]
+fn mutant_duplicate_creation_does_not_reset_a_terminal_aggregate() {
+    let mut events = valid_stream();
+    // task-1 is already `canceled` (terminal). A duplicate creation must not
+    // rewind its cursor to `submitted` — the follow-on `submitted -> working`
+    // then mismatches the real (terminal) state instead of certifying clean.
+    events.push(event(
+        2000,
+        "task",
+        "task-1",
+        4,
+        "task_created",
+        "operator",
+        serde_json::json!({}),
+    ));
+    events.push(event(
+        2001,
+        "task",
+        "task-1",
+        5,
+        "task_state_changed",
+        "kernel",
+        change("submitted", "working"),
+    ));
+    let found = codes(&events);
+    assert!(found.contains(&FindingCode::CreatedNotFirst));
+    assert!(found.contains(&FindingCode::FromStateMismatch));
+}
+
+#[test]
 fn mutant_duplicate_idempotency_key() {
     let mut events = valid_stream();
     events[4].idempotency_key = events[3].idempotency_key.clone();
