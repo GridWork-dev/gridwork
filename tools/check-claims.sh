@@ -31,12 +31,19 @@ need README.md 'web console' "terminal-only"
 need ROADMAP.md 'No web console' "terminal-only"
 need site/index.html 'no web console' "terminal-only"
 
-# C4 — the current stage number agrees across README, site, and ROADMAP
+# C4 — the current stage number agrees across README, site, ROADMAP, the threat
+# model, and the naming doc (the last two now also carry "stage N of 5")
 readme_stage=$(grep -oE 'stage [0-9] of 5' README.md | grep -oE '^stage [0-9]' | grep -oE '[0-9]' | head -1)
 site_stage=$(grep -oE 'stage [0-9]/5' site/index.html | grep -oE '[0-9]' | head -1)
 roadmap_stage=$(grep -oE '^## [0-9] · .*\(current\)' ROADMAP.md | grep -oE '[0-9]' | head -1)
-if [ -z "$readme_stage" ] || [ "$readme_stage" != "$site_stage" ] || [ "$readme_stage" != "$roadmap_stage" ]; then
-  echo "check-claims: current-stage disagreement — README='$readme_stage' site='$site_stage' ROADMAP='$roadmap_stage'" >&2
+threat_stage=$(grep -oE 'stage [0-9] of 5' docs/security/THREAT_MODEL.md | grep -oE '^stage [0-9]' | grep -oE '[0-9]' | head -1)
+naming_stage=$(grep -oE 'stage [0-9] of 5' docs/contract/NAMING.md | grep -oE '^stage [0-9]' | grep -oE '[0-9]' | head -1)
+if [ -z "$readme_stage" ] \
+  || [ "$readme_stage" != "$site_stage" ] \
+  || [ "$readme_stage" != "$roadmap_stage" ] \
+  || [ "$readme_stage" != "$threat_stage" ] \
+  || [ "$readme_stage" != "$naming_stage" ]; then
+  echo "check-claims: current-stage disagreement — README='$readme_stage' site='$site_stage' ROADMAP='$roadmap_stage' THREAT_MODEL='$threat_stage' NAMING='$naming_stage'" >&2
   fail=1
 fi
 
