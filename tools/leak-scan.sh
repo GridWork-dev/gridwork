@@ -23,8 +23,12 @@ fi
 
 cd "$here/.."
 # Reject binary-looking tracked files: grep -I silently skips them, which would blind
-# the gate. Text-safe encodings only; no allowlist until a real asset needs one.
-binaries=$(git ls-files -z | xargs -0 -r file --mime-type | grep -Ev ': *(text/|inode/x-empty|application/json)' || true)
+# the gate. Key on ENCODING, not mime family — file(1) types scripts as
+# application/javascript etc.; what matters is that the bytes are greppable text.
+# Empty files report encoding "binary" but are trivially safe.
+binaries=$(git ls-files -z | xargs -0 -r file --mime-encoding \
+  | grep -Ev ': *(us-ascii|utf-8|ascii)$' \
+  | while IFS=: read -r f _; do [[ -s "$f" ]] && echo "$f: non-text encoding"; done || true)
 if [[ -n "$binaries" ]]; then
   echo "$binaries"
   echo 'leak-scan: binary tracked files are unscannable — use text-safe encodings' >&2
