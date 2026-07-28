@@ -59,11 +59,13 @@ and then never see N. Assigning at commit closes the hole by construction —
 `schema/0001_contract.sql` encodes this, and the storage conformance suite
 (`gwk-cert::conformance`) certifies it for any backend.
 
-## The storage port
+## The storage ports
 
-Storage is engine-neutral behind one trait (`gwk-domain::port::EventStore`):
-atomic append with an expected-version CAS, read-by-cursor, watermark, and
-fencing. The first production backend is PostgreSQL; an **embedded backend is
+Storage is engine-neutral behind two traits in `gwk-domain::port`. `EventStore`
+is the log: atomic append with an expected-version CAS, read-by-cursor,
+watermark, and fencing. `BlobStore` is the out-of-line content spine:
+streaming upload, read, stat, pin/unpin, sweep, and crypto-shred over
+plaintext-addressed blobs. The first production backend is PostgreSQL; an **embedded backend is
 a real release phase, not an aspiration** — the port and its conformance
 suite exist so that claim is testable, and engine-specific mechanics
 (queues, notification channels, lock strategies) are confined to backend and

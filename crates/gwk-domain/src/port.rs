@@ -1,7 +1,7 @@
-//! The storage port: what any event-store backend must provide.
+//! The storage ports: what any event-store and blob backend must provide.
 //!
 //! The contract keeps storage engine-neutral — engine-specific mechanics
-//! (queues, notifications, locks) live in a backend crate behind this trait
+//! (queues, notifications, locks) live in a backend crate behind these traits
 //! and in deployment docs, never in contract semantics. A backend proves
 //! itself by passing `gwk-cert`'s conformance suite, not by being the first
 //! implementation.
@@ -11,8 +11,9 @@
 //! NOT gapless. Client-supplied `global_sequence`/`appended_at` values on
 //! input envelopes are ignored and overwritten.
 
+use crate::blob::{BlobAddress, BlobDescriptor};
 use crate::envelope::EventEnvelope;
-use crate::ids::{FenceToken, Seq};
+use crate::ids::{BlobUploadId, ByteCount, EvidenceId, FenceToken, Seq};
 
 /// Why an append was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,4 +102,120 @@ pub trait EventStore {
     /// Grant/rotate the append fence. Each grant returns a token strictly
     /// greater than every earlier one and invalidates them.
     fn grant_fence(&self) -> impl Future<Output = Result<FenceToken, StorageError>>;
+}
+
+/// Why a blob operation was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlobError {
+    /// No blob at that address, or no such upload.
+    NotFound,
+    /// Crypto-shredded: the wrapped DEK is gone. This is PERMANENT and is
+    /// answered even while ciphertext cleanup is still pending, so a delayed
+    /// sweep never turns a shredded blob back into a readable one.
+    Tombstoned,
+    /// The committed plaintext did not hash to the address the caller claimed.
+    DigestMismatch {
+        expected: BlobAddress,
+        actual: BlobAddress,
+    },
+    /// AEAD authentication, container header, or chunk-length verification
+    /// failed — tampering or truncation, not a decode preference.
+    Integrity(String),
+    /// Still pinned as evidence; sweep and shred must not touch it.
+    Pinned,
+    /// Backend failure, opaque to the contract.
+    Storage(String),
+}
+
+impl std::fmt::Display for BlobError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound => f.write_str("blob not found"),
+            Self::Tombstoned => f.write_str("blob tombstoned: the wrapped key is gone"),
+            Self::DigestMismatch { expected, actual } => {
+                write!(f, "digest mismatch: expected {expected}, got {actual}")
+            }
+            Self::Integrity(reason) => write!(f, "blob integrity failure: {reason}"),
+            Self::Pinned => f.write_str("blob is pinned as evidence"),
+            Self::Storage(reason) => write!(f, "storage error: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for BlobError {}
+
+/// A content-addressed store for payloads too large to inline.
+///
+/// Addresses are digests over PLAINTEXT, so deduplication works across
+/// deployments while encryption stays a storage concern (ADR 0003).
+/// Implementations never accept a caller-supplied path: the validated digest
+/// alone determines where bytes land.
+pub trait BlobStore {
+    /// Start an upload. The caller declares what it intends to write; the
+    /// store mints the id and owns the temporary file.
+    fn begin(
+        &self,
+        media_type: String,
+        byte_size: ByteCount,
+    ) -> impl Future<Output = Result<BlobUploadId, BlobError>>;
+
+    /// Append one plaintext chunk. `sequence` is contiguous from `0`; a gap or
+    /// a repeat is refused rather than reordered.
+    fn write_chunk(
+        &self,
+        upload: &BlobUploadId,
+        sequence: u32,
+        chunk: &[u8],
+    ) -> impl Future<Output = Result<(), BlobError>>;
+
+    /// Finish the upload, requiring the plaintext to hash to `address`.
+    ///
+    /// Returns the descriptor and whether an identical blob (digest, size, AND
+    /// media type) already existed — a dedup hit writes nothing new.
+    fn commit(
+        &self,
+        upload: BlobUploadId,
+        address: BlobAddress,
+    ) -> impl Future<Output = Result<(BlobDescriptor, bool), BlobError>>;
+
+    /// Discard an upload and its temporary file. Uncommitted uploads also
+    /// expire on their own after an hour.
+    fn abort(&self, upload: BlobUploadId) -> impl Future<Output = Result<(), BlobError>>;
+
+    /// Read a bounded range of plaintext.
+    fn read(
+        &self,
+        address: &BlobAddress,
+        offset: ByteCount,
+        length: ByteCount,
+    ) -> impl Future<Output = Result<Vec<u8>, BlobError>>;
+
+    /// Describe a committed blob. `Ok(None)` means it never existed;
+    /// [`BlobError::Tombstoned`] means it did and was shredded — a distinction
+    /// a retention audit needs.
+    fn stat(
+        &self,
+        address: &BlobAddress,
+    ) -> impl Future<Output = Result<Option<BlobDescriptor>, BlobError>>;
+
+    /// Pin as evidence, blocking sweep until every pin is released.
+    fn pin(
+        &self,
+        address: &BlobAddress,
+        evidence: &EvidenceId,
+    ) -> impl Future<Output = Result<(), BlobError>>;
+
+    fn unpin(
+        &self,
+        address: &BlobAddress,
+        evidence: &EvidenceId,
+    ) -> impl Future<Output = Result<(), BlobError>>;
+
+    /// Remove unreferenced, unpinned blobs; returns what it removed.
+    fn sweep(&self) -> impl Future<Output = Result<Vec<BlobAddress>, BlobError>>;
+
+    /// Crypto-shred: commit the tombstone and drop the wrapped DEK FIRST, then
+    /// remove ciphertext. Ordered that way so a crash mid-shred leaves an
+    /// unreadable blob, never a readable one.
+    fn shred(&self, address: &BlobAddress) -> impl Future<Output = Result<(), BlobError>>;
 }

@@ -136,6 +136,16 @@ string_id!(
     /// never a breaking enum change).
     EngineId
 );
+string_id!(
+    /// Correlates one wire request with its response, event batch, or stream
+    /// close. Client-minted and echoed back unchanged.
+    RequestId
+);
+string_id!(
+    /// One in-flight blob upload. Kernel-minted: a caller never names a
+    /// storage location, and an uncommitted upload expires after an hour.
+    BlobUploadId
+);
 
 u64_decimal_string!(
     /// A position in the global event log. Assigned by the kernel append actor
@@ -150,6 +160,18 @@ u64_decimal_string!(
 u64_decimal_string!(
     /// A size in bytes.
     ByteCount
+);
+u64_decimal_string!(
+    /// The durable writer epoch: incremented under row lock at every kernel
+    /// boot and compared by every mutating transaction, so a resurrected old
+    /// writer cannot commit. NOT a log position — [`Seq`] is.
+    WriterEpoch
+);
+u64_decimal_string!(
+    /// A count of events. Distinct from [`Seq`]: the fresh-epoch proof asserts
+    /// the log holds exactly ONE event, which says nothing about the sequence
+    /// the database assigned it.
+    EventCount
 );
 u64_decimal_string!(
     /// A cost amount in micro-USD (1_000_000 = $1).

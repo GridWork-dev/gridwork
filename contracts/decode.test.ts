@@ -60,6 +60,23 @@ const _expectedExtendsGenerated: Extends<ExpectedEventEnvelope, B.EventEnvelope_
 // Omitting every optional field must COMPILE; that is the `?:` proof.
 const _minimalCheckpoint: B.OrchestratorCheckpoint_Serialize = { seq: "7" };
 
+// ---- compile-time contract: a unit request carries ONLY its tag ----
+// If `health` ever grew a required field, this stops compiling.
+const _unitRequest: B.KernelRequest_Serialize = { type: "health" };
+
+// ---- compile-time contract: the protocol major is a NUMBER, counters are STRINGS ----
+// The one place the decimal-string rule does not apply is the small bounded
+// version; getting that backwards in either direction fails here.
+const _helloShape: B.ClientControl_Serialize = {
+  type: "hello",
+  protocol_major: 1,
+  protocol_minor: 0,
+  capabilities: ["event_subscribe"],
+};
+const _batchShape: Pick<Extract<B.ServerControl_Serialize, { type: "event_batch" }>, "cursor"> = {
+  cursor: "9007199254740993",
+};
+
 test("event-envelope-full: decimal-string counters, ref key, typed use", async () => {
   const raw = await golden("event-envelope-full.json");
   if (!isRecord(raw)) throw new Error("golden is not an object");
@@ -180,6 +197,173 @@ test("checkpoint: tri-state — absent omitted, empty list kept", async () => {
   expect(checkpoint.seq).toMatch(DECIMAL);
   expect(checkpoint.pending_approvals?.[0]?.kind).toBe("design_fork");
   await reemit("orchestrator-checkpoint.json", checkpoint);
+});
+
+test("client control: tagged frames, number major, decimal-string cursor", async () => {
+  const raw = await golden("kernel-client-control.json");
+  if (!Array.isArray(raw)) throw new Error("golden is not an array");
+  const frames = raw as B.ClientControl_Serialize[];
+  expect(frames.map((f) => f.type)).toEqual([
+    "hello",
+    "request",
+    "request",
+    "request",
+    "request",
+    "request",
+  ]);
+
+  for (const frame of frames) {
+    // Exhaustive narrow: a third ClientControl variant fails the `never` arm.
+    switch (frame.type) {
+      case "hello": {
+        // The version is a bounded JSON NUMBER — the decimal-string rule is
+        // for 64-bit counters, not for this.
+        const major: number = frame.protocol_major;
+        expect(major).toBe(1);
+        expect(frame.capabilities).toEqual(["event_subscribe", "blob"]);
+        for (const name of frame.capabilities) expect(name).toMatch(/^[a-z][a-z0-9_]*$/);
+        break;
+      }
+      case "request": {
+        expect(typeof frame.request_id).toBe("string");
+        break;
+      }
+      default: {
+        const unreachable: never = frame;
+        throw new Error(`unknown frame: ${JSON.stringify(unreachable)}`);
+      }
+    }
+  }
+
+  // A unit request is exactly its tag — no null-filled fields.
+  const verifySealed = raw[1];
+  if (!isRecord(verifySealed)) throw new Error("frame 1 missing");
+  expect(verifySealed["request"]).toEqual({ type: "verify_sealed" });
+
+  // The typed command travels AS the envelope payload; command_type names the
+  // same variant the payload's own tag does.
+  const submit = raw[2];
+  if (!isRecord(submit)) throw new Error("frame 2 missing");
+  const request = submit["request"];
+  if (!isRecord(request)) throw new Error("request missing");
+  const envelope = request["envelope"];
+  if (!isRecord(envelope)) throw new Error("envelope missing");
+  const payload = envelope["payload"];
+  if (!isRecord(payload)) throw new Error("payload missing");
+  expect(envelope["command_type"]).toBe("activate_kernel");
+  expect(payload["type"]).toBe("activate_kernel");
+  expect(payload["archive_manifest_sha256"]).toMatch(/^[0-9a-f]{64}$/);
+
+  const read = raw[3];
+  if (!isRecord(read)) throw new Error("frame 3 missing");
+  const readRequest = read["request"];
+  if (!isRecord(readRequest)) throw new Error("read request missing");
+  expect(readRequest["cursor"]).toMatch(DECIMAL);
+  expect(BigInt(String(readRequest["cursor"])) > 2n ** 53n).toBe(true);
+  // Absent optionals stay ABSENT inside a tagged variant too.
+  const list = raw[4];
+  if (!isRecord(list)) throw new Error("frame 4 missing");
+  const listRequest = list["request"];
+  if (!isRecord(listRequest)) throw new Error("list request missing");
+  expect("cursor" in listRequest).toBe(false);
+
+  await reemit("kernel-client-control.json", frames);
+});
+
+test("server control: refusals are values, cursors survive a disconnect", async () => {
+  const raw = await golden("kernel-server-control.json");
+  if (!Array.isArray(raw)) throw new Error("golden is not an array");
+  const frames = raw as B.ServerControl_Serialize[];
+  expect(frames.map((f) => f.type)).toEqual([
+    "hello_ack",
+    "hello_refusal",
+    "response",
+    "response",
+    "response",
+    "event_batch",
+    "stream_closed",
+  ]);
+
+  for (const frame of frames) {
+    // Exhaustive narrow over every server frame kind.
+    switch (frame.type) {
+      case "hello_ack": {
+        // The INTERSECTION: the client asked for two capabilities and was
+        // granted one. A client must not assume the one that is absent.
+        expect(frame.capabilities).toEqual(["event_subscribe"]);
+        expect(frame.sealed).toBe(true);
+        break;
+      }
+      case "hello_refusal": {
+        const code: B.KernelErrorCode = frame.code;
+        expect(code).toBe("unsupported_version");
+        break;
+      }
+      case "response": {
+        expect(typeof frame.request_id).toBe("string");
+        break;
+      }
+      case "event_batch": {
+        expect(frame.cursor).toMatch(DECIMAL);
+        expect(frame.events).toHaveLength(1);
+        break;
+      }
+      case "stream_closed": {
+        expect(frame.code).toBe("slow_consumer");
+        // The last delivered cursor rides the disconnect, so the consumer
+        // resumes instead of replaying from the start.
+        expect(frame.last_cursor).toMatch(DECIMAL);
+        break;
+      }
+      default: {
+        const unreachable: never = frame;
+        throw new Error(`unknown frame: ${JSON.stringify(unreachable)}`);
+      }
+    }
+  }
+
+  const sealed = raw[2];
+  if (!isRecord(sealed)) throw new Error("frame 2 missing");
+  const sealedResult = sealed["result"];
+  if (!isRecord(sealedResult)) throw new Error("sealed result missing");
+  expect(sealedResult["type"]).toBe("sealed_verification");
+  expect(sealedResult["event_count"]).toBe("1");
+  // The genesis sequence is DATABASE-assigned: certification must never
+  // assume the numeral 1 (ADR 0026).
+  expect(sealedResult["genesis_watermark"]).toMatch(DECIMAL);
+  expect(sealedResult["genesis_watermark"]).not.toBe("1");
+
+  // An error is an ordinary response, not an out-of-band condition.
+  const refused = raw[3];
+  if (!isRecord(refused)) throw new Error("frame 3 missing");
+  const errorResult = refused["result"];
+  if (!isRecord(errorResult)) throw new Error("error result missing");
+  expect(errorResult["type"]).toBe("error");
+  expect(errorResult["code"]).toBe("idempotency_conflict");
+
+  const blob = raw[4];
+  if (!isRecord(blob)) throw new Error("frame 4 missing");
+  const blobResult = blob["result"];
+  if (!isRecord(blobResult)) throw new Error("blob result missing");
+  const descriptor = blobResult["descriptor"];
+  if (!isRecord(descriptor)) throw new Error("descriptor missing");
+  expect(descriptor["address"]).toMatch(/^sha256:[0-9a-f]{64}$/);
+  expect(descriptor["byte_size"]).toMatch(DECIMAL);
+  expect(blobResult["deduplicated"]).toBe(false);
+
+  await reemit("kernel-server-control.json", frames);
+});
+
+test("kernel checkpoint: decimal-string sequence, lowercase digest", async () => {
+  const raw = await golden("kernel-checkpoint.json");
+  if (!isRecord(raw)) throw new Error("golden is not an object");
+  const checkpoint = raw as B.Checkpoint_Serialize;
+  expect(checkpoint.schema_version).toBe(1);
+  expect(checkpoint.through_sequence).toMatch(DECIMAL);
+  expect(BigInt(checkpoint.through_sequence) > 2n ** 53n).toBe(true);
+  expect(checkpoint.projection_hash).toMatch(/^[0-9a-f]{64}$/);
+  expect(checkpoint.records_ref.byte_size).toMatch(DECIMAL);
+  await reemit("kernel-checkpoint.json", checkpoint);
 });
 
 test("signal theme: 12 tokens, crate order, hex values", async () => {
