@@ -538,15 +538,17 @@ mod tests {
 
     #[test]
     fn check_orphans_flags_an_unexpected_json_file() {
-        let dir = std::env::temp_dir().join(format!("xtask-orphan-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("create temp dir");
+        // Private, unpredictable, auto-cleaned dir — never a guessable name in
+        // a world-writable /tmp that a symlink race could redirect.
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let dir = tmp.path();
         std::fs::write(dir.join("task.json"), "{}").expect("write expected golden");
         std::fs::write(dir.join("renamed-task.json"), "{}").expect("write orphan golden");
 
         let mut drift = Vec::new();
-        check_orphans(&dir, &["task.json"], &mut drift);
+        check_orphans(dir, &["task.json"], &mut drift);
 
-        std::fs::remove_dir_all(&dir).expect("cleanup temp dir");
+        // `tmp` drops at end of scope and removes the dir.
         assert_eq!(
             drift.len(),
             1,
