@@ -1,0 +1,99 @@
+# Architecture
+
+The implementation contract behind the roadmap: what owns truth, what the
+pieces are, and which decisions are locked versus deliberately deferred.
+Locked decisions change only by a recorded amendment, not by drift.
+
+## Truth ownership
+
+The event log owns **operational history** — not every byte in the system.
+
+| Truth | Owner |
+| --- | --- |
+| Tasks, attempts, messages, commands, gates, receipts, budgets, telemetry | the append-only event log (`gwk.event`) — everything else is a projection |
+| Current-state views, queues, boards, watermarks | projections — derived, rebuildable from the log, never hand-edited |
+| Large payloads (transcripts, diffs, recordings) | content-addressed blobs, referenced from events by digest (`payload_ref`) |
+| Working trees, repositories | git — the log records *references* (SHAs, branches, lease state), never file contents |
+| Ephemeral runtime observation (liveness, load) | TTL'd observed state — explicitly OUTSIDE the log and the FSMs |
+
+One consequence is non-negotiable: there is no second operational database.
+A view that cannot be rebuilt from the log is a bug.
+
+## Topology
+
+**One artifact.** `gw` is a single binary with three modes: the kernel daemon
+(owns the store and every write), the CLI (headless verbs over the same
+protocol), and the TUI (the only human surface — there is no web console).
+Clients are thin; policy, state machines, and authority live behind the
+kernel boundary.
+
+**Transport.** Local clients connect over a Unix domain socket. Remote use is
+SSH to the host, then the same socket — the kernel does not listen on a
+network interface, and will not until a dedicated authentication ADR
+introduces one deliberately. Filesystem permissions on the socket are the
+local trust boundary.
+
+**Singleton fencing.** One kernel writes per store. Fencing tokens (strictly
+increasing, invalidated on re-grant) make a deposed writer's appends fail
+loudly instead of corrupting order.
+
+## The append actor
+
+`global_sequence` is assigned by a **dedicated append actor at commit time**,
+in commit order. It is unique and strictly increasing, and explicitly NOT
+gapless. Database serial/identity columns were rejected as an ordering proof:
+they allocate at insert time while transactions commit in another order, so a
+reader paging an allocation-ordered column can observe N+1 before N commits
+and then never see N. Assigning at commit closes the hole by construction —
+`schema/0001_contract.sql` encodes this, and the storage conformance suite
+(`gwk-cert::conformance`) certifies it for any backend.
+
+## The storage port
+
+Storage is engine-neutral behind one trait (`gwk-domain::port::EventStore`):
+atomic append with an expected-version CAS, read-by-cursor, watermark, and
+fencing. The first production backend is PostgreSQL; an **embedded backend is
+a real release phase, not an aspiration** — the port and its conformance
+suite exist so that claim is testable, and engine-specific mechanics
+(queues, notification channels, lock strategies) are confined to backend and
+deployment layers, never contract semantics.
+
+## Projections and watermarks
+
+Every consumer holds a durable cursor (`global_sequence`). Notifications are
+an optimization, never load-bearing: a consumer that sleeps through every
+wakeup recovers the complete suffix by re-reading from its cursor. Rebuild is
+deterministic — replaying the same log yields the same projection, byte for
+byte.
+
+## Payloads and blobs
+
+Events carry bounded inline JSON metadata (64 KiB serialized). Anything
+larger lives outside the log as an **encrypted, content-addressed blob**
+referenced by digest, media type, and size. Blobs carry a retention class;
+deletion is by retention sweep or crypto-shred (destroying the key), and an
+`evidence_pin` exempts a blob from sweeps while it backs an audit trail. The
+log itself never shrinks.
+
+## Crash recovery
+
+The kernel checkpoints its coordination state (open attempts, held leases,
+pending approvals, budget cursor) as data. Recovery is: load the checkpoint,
+re-read the log from its cursor, reconcile against live observation — and
+trust the log over the checkpoint wherever they disagree. Attempts whose real
+outcome cannot be established terminate as `unknown`, never a fabricated
+`failed` or `succeeded`.
+
+## Contract surfaces
+
+The Rust crate `gwk-domain` is canonical. Two derived surfaces are checked,
+not trusted: the generated TypeScript (`contracts/bindings.ts`, with golden
+round-trip fixtures decoded at runtime in CI) and the SQL DDL
+(`schema/0001_contract.sql`, applied and guard-tested against the pinned
+PostgreSQL major in CI). `gwk-cert` certifies event streams against the same
+tables the types are built from. Naming rules: `docs/contract/NAMING.md`.
+
+## Platforms
+
+Linux and macOS are first-class targets. Windows is supported via WSL2 on a
+best-effort basis; a native Windows port is out of scope pre-1.0.
