@@ -256,9 +256,18 @@ CREATE TRIGGER task_no_delete
   BEFORE DELETE ON gwk.task
   FOR EACH ROW EXECUTE FUNCTION gwk.forbid_state_row_delete('task');
 
+-- Row-level triggers never fire on TRUNCATE, so the delete guard needs a
+-- statement-level partner — else TRUNCATE wipes the table and every id is free
+-- to be re-inserted at the initial state, the exact DELETE-then-INSERT
+-- walk-around task_no_delete exists to stop, in one statement.
+CREATE TRIGGER task_no_truncate
+  BEFORE TRUNCATE ON gwk.task
+  FOR EACH STATEMENT EXECUTE FUNCTION gwk.forbid_state_row_delete('task');
+
 ALTER TABLE gwk.task ENABLE ALWAYS TRIGGER task_transition;
 ALTER TABLE gwk.task ENABLE ALWAYS TRIGGER task_born_initial;
 ALTER TABLE gwk.task ENABLE ALWAYS TRIGGER task_no_delete;
+ALTER TABLE gwk.task ENABLE ALWAYS TRIGGER task_no_truncate;
 
 CREATE TABLE gwk.attempt (
   id                      text PRIMARY KEY,
@@ -302,9 +311,14 @@ CREATE TRIGGER attempt_no_delete
   BEFORE DELETE ON gwk.attempt
   FOR EACH ROW EXECUTE FUNCTION gwk.forbid_state_row_delete('attempt');
 
+CREATE TRIGGER attempt_no_truncate
+  BEFORE TRUNCATE ON gwk.attempt
+  FOR EACH STATEMENT EXECUTE FUNCTION gwk.forbid_state_row_delete('attempt');
+
 ALTER TABLE gwk.attempt ENABLE ALWAYS TRIGGER attempt_transition;
 ALTER TABLE gwk.attempt ENABLE ALWAYS TRIGGER attempt_born_initial;
 ALTER TABLE gwk.attempt ENABLE ALWAYS TRIGGER attempt_no_delete;
+ALTER TABLE gwk.attempt ENABLE ALWAYS TRIGGER attempt_no_truncate;
 
 CREATE TABLE gwk.engine_session (
   id                   text PRIMARY KEY,
@@ -350,9 +364,14 @@ CREATE TRIGGER message_no_delete
   BEFORE DELETE ON gwk.message
   FOR EACH ROW EXECUTE FUNCTION gwk.forbid_state_row_delete('message');
 
+CREATE TRIGGER message_no_truncate
+  BEFORE TRUNCATE ON gwk.message
+  FOR EACH STATEMENT EXECUTE FUNCTION gwk.forbid_state_row_delete('message');
+
 ALTER TABLE gwk.message ENABLE ALWAYS TRIGGER message_transition;
 ALTER TABLE gwk.message ENABLE ALWAYS TRIGGER message_born_initial;
 ALTER TABLE gwk.message ENABLE ALWAYS TRIGGER message_no_delete;
+ALTER TABLE gwk.message ENABLE ALWAYS TRIGGER message_no_truncate;
 
 CREATE TABLE gwk.command (
   id              text PRIMARY KEY,
@@ -387,9 +406,14 @@ CREATE TRIGGER command_no_delete
   BEFORE DELETE ON gwk.command
   FOR EACH ROW EXECUTE FUNCTION gwk.forbid_state_row_delete('command');
 
+CREATE TRIGGER command_no_truncate
+  BEFORE TRUNCATE ON gwk.command
+  FOR EACH STATEMENT EXECUTE FUNCTION gwk.forbid_state_row_delete('command');
+
 ALTER TABLE gwk.command ENABLE ALWAYS TRIGGER command_transition;
 ALTER TABLE gwk.command ENABLE ALWAYS TRIGGER command_born_initial;
 ALTER TABLE gwk.command ENABLE ALWAYS TRIGGER command_no_delete;
+ALTER TABLE gwk.command ENABLE ALWAYS TRIGGER command_no_truncate;
 
 CREATE TABLE gwk.gate (
   id           text PRIMARY KEY,
