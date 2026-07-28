@@ -39,7 +39,17 @@ macro_rules! edges {
 
 /// Tracker-visible work item lifecycle (A2A-semantically-verbatim, snake-normalized).
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, specta::Type,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    specta::Type,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum TaskState {
@@ -76,7 +86,17 @@ impl StateMachine for TaskState {
 /// One engine execution of a task. `unknown` is a first-class terminal — an
 /// attempt whose real outcome cannot be determined is never mapped to `failed`.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, specta::Type,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    specta::Type,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum AttemptState {
@@ -133,7 +153,17 @@ impl StateMachine for AttemptState {
 
 /// Governed inter-party message delivery.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, specta::Type,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    specta::Type,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum MessageState {
@@ -170,7 +200,17 @@ impl StateMachine for MessageState {
 /// verification RAN — the result lives in [`Outcome`], written atomically with
 /// the terminal transition.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, specta::Type,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    specta::Type,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum CommandState {
@@ -200,7 +240,17 @@ impl StateMachine for CommandState {
 /// A command's verified result — a plain column, NOT an FSM state. Present iff
 /// the command reached `verification_complete`; written in the same transaction.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, specta::Type,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    specta::Type,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
@@ -211,7 +261,17 @@ pub enum Outcome {
 
 /// A gate's verdict — a CLOSED set (the gate `kind` is open).
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, specta::Type,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    specta::Type,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum GateVerdict {
@@ -224,7 +284,17 @@ pub enum GateVerdict {
 /// A lease's status set (not one of the four public FSMs — expiry is
 /// time-driven, release is holder-driven).
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, specta::Type,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    specta::Type,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum LeaseState {
@@ -235,7 +305,17 @@ pub enum LeaseState {
 
 /// Lease sharing mode.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, specta::Type,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    specta::Type,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum LeaseMode {
