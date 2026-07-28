@@ -320,7 +320,18 @@ pub fn check_stream(events: &[EventEnvelope]) -> Vec<Finding> {
                 ));
                 continue;
             };
-            if let Some(current) = replay.get(&agg_key)
+            // FromStateMismatch is a claim about a KNOWN prior state. `replay`
+            // now holds a version-only placeholder (state = "") for every
+            // aggregate on first sight — open-world types and any governed
+            // aggregate whose creation we never saw included. Neither has an
+            // established state to disagree with, so only compare once a
+            // creation has seeded the real one. `seen_creation` is exactly the
+            // set `replay` held pre-round-2 (populated on creation alone), so
+            // this restores that behavior: an open-world aggregate whose first
+            // event is a `_state_changed` no longer false-reds a mismatch
+            // against "".
+            if seen_creation.contains(&agg_key)
+                && let Some(current) = replay.get(&agg_key)
                 && current.state != from
             {
                 findings.push(at(

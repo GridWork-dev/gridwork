@@ -774,6 +774,36 @@ fn open_world_contiguous_versions_certify_clean() {
 }
 
 #[test]
+fn open_world_first_event_state_changed_certifies_clean() {
+    // An open-world aggregate ("session") whose FIRST stream event is a
+    // `_state_changed`. It has no known prior state, so the replay ledger's
+    // version-only placeholder ("") must NOT be compared against the event's
+    // `from`. Round 2 briefly false-red FromStateMismatch here (baseline was
+    // clean); open world = envelope-level checks only.
+    let events = vec![
+        event(
+            1,
+            "session",
+            "sess-1",
+            1,
+            "session_state_changed",
+            "kernel",
+            change("draft", "active"),
+        ),
+        event(
+            2,
+            "session",
+            "sess-1",
+            2,
+            "session_state_changed",
+            "kernel",
+            change("active", "closed"),
+        ),
+    ];
+    assert_eq!(check_stream(&events), vec![]);
+}
+
+#[test]
 fn uncreated_machine_aggregate_reds_creation_missing_exactly_once() {
     // Three non-state events on an attempt that was never created. Keyed off a
     // separate seen-creation set, CreationMissing fires once — not once per
