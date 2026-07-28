@@ -218,7 +218,7 @@ jobs:
         env:
           BASE_REF: ${{ github.base_ref }}
         run: |
-          git log -p "origin/${BASE_REF}..HEAD" | ./tools/leak-scan.sh --stdin
+          git log -p --diff-merges=first-parent "origin/${BASE_REF}..HEAD" | ./tools/leak-scan.sh --stdin
       - name: scan pushed commit messages and content
         if: github.event_name == 'push'
         shell: bash
@@ -230,10 +230,10 @@ jobs:
             # Branch creation / first publication: there is no before SHA, so the
             # pushed range is the full history of the pushed SHA — messages AND content.
             git log --format=%B "$AFTER" | ./tools/leak-scan.sh --stdin
-            git log -p "$AFTER" | ./tools/leak-scan.sh --stdin
+            git log -p --diff-merges=first-parent "$AFTER" | ./tools/leak-scan.sh --stdin
           else
             git log --format=%B "${BEFORE}..${AFTER}" | ./tools/leak-scan.sh --stdin
-            git log -p "${BEFORE}..${AFTER}" | ./tools/leak-scan.sh --stdin
+            git log -p --diff-merges=first-parent "${BEFORE}..${AFTER}" | ./tools/leak-scan.sh --stdin
           fi
       - name: prove the gate can fail (seeded violation)
         run: |
@@ -257,7 +257,7 @@ jobs:
           printf 'clean\n'      > "$tmp/f"; git -C "$tmp" add f; git -C "$tmp" commit -qm base
           printf '%s\n' "$seed" > "$tmp/f"; git -C "$tmp" add f; git -C "$tmp" commit -qm intermediate
           printf 'clean\n'      > "$tmp/f"; git -C "$tmp" add f; git -C "$tmp" commit -qm cleanup
-          if git -C "$tmp" log -p | ./tools/leak-scan.sh --stdin; then
+          if git -C "$tmp" log -p --diff-merges=first-parent | ./tools/leak-scan.sh --stdin; then
             echo 'content scan missed an intermediate-commit leak — the gate is broken' >&2
             exit 1
           fi

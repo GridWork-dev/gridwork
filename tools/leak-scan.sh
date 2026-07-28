@@ -48,9 +48,11 @@ if [[ "${1:-}" == "--history" ]]; then
   # net-zero across a range diff — is still provable. Default is ALL history; an
   # optional range (or any git-log revision args) narrows it: `--history main..HEAD`.
   # The DEFAULT no-arg tracked-tree scan below is unchanged and stays green.
+  # --diff-merges=first-parent so a leak introduced only by an evil merge (plain
+  # `git log -p` shows no diff for merge commits) is still scanned.
   shift
   status=0
-  git log -p "$@" | "$here/$(basename "$0")" --stdin || status=$?
+  git log -p --diff-merges=first-parent "$@" | "$here/$(basename "$0")" --stdin || status=$?
   exit "$status"
 fi
 
