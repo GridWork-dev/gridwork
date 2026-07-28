@@ -1,5 +1,6 @@
 [package]
 name = "gwk-cert"
+publish = false
 version = "0.0.0"
 description = "Contract conformance checker: verifies an event stream against the gwk-domain state machines"
 edition.workspace = true

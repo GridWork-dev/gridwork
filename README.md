@@ -61,7 +61,7 @@ tool). **The binary is `gw`** — from the first build, permanently; installatio
 
 ## Building
 
-Stable Rust, MSRV 1.88.
+Stable Rust, MSRV 1.94.
 
 ```bash
 cargo build --workspace

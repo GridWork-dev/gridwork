@@ -37,9 +37,17 @@ cargo test --workspace --doc --locked
 cargo deny check
 ```
 
-CI also enforces MSRV (1.88) and a leak scan. Commit style is
+CI also enforces MSRV (1.94) and a leak scan. Commit style is
 [Conventional Commits](https://www.conventionalcommits.org) (`feat(scope):`,
 `fix(scope):`, `chore(scope):`).
+
+## Provenance
+
+- Contributions must be yours to submit: by opening a PR you attest you have the
+  right to contribute the work under Apache-2.0. There is no CLA and no DCO sign-off.
+- AI-assisted work is welcome and is disclosed with a non-authorship trailer —
+  `AI-Assisted-By: <tool>` — on the commits it applies to. AI tools are never listed
+  as authors or co-authors.
 
 ## Code floor (the short version)
 
