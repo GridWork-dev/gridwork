@@ -1,7 +1,6 @@
 [package]
 name = "gwk-theme"
-publish = false
-version = "0.0.0"
+version = "0.0.1"
 description = "The SIGNAL design tokens: one data-only source of truth for site, TUI, and generated TypeScript"
 edition.workspace = true
 rust-version.workspace = true

@@ -1,7 +1,6 @@
 [package]
 name = "gwk-domain"
-publish = false
-version = "0.0.0"
+version = "0.0.1"
 description = "GridWork contract crate: shared domain types, events, and state machines"
 edition.workspace = true
 rust-version.workspace = true
