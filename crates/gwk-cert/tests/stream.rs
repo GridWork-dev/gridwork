@@ -446,6 +446,31 @@ fn mutant_second_creation() {
 }
 
 #[test]
+fn mutant_state_change_on_an_uncreated_aggregate() {
+    let mut events = valid_stream();
+    // An aggregate fabricated mid-stream, straight into a terminal — the
+    // guarded ladder never ran.
+    events.push(event(
+        2000,
+        "attempt",
+        "att-ghost",
+        1,
+        "attempt_state_changed",
+        "kernel",
+        change("running", "succeeded"),
+    ));
+    assert!(codes(&events).contains(&FindingCode::CreationMissing));
+}
+
+#[test]
+fn mutant_created_in_a_non_initial_state() {
+    let mut events = valid_stream();
+    // Born terminal: no transition ever runs, the whole ladder is skipped.
+    events[0].payload = serde_json::json!({ "state": "completed" });
+    assert!(codes(&events).contains(&FindingCode::CreationStateInvalid));
+}
+
+#[test]
 fn malformed_envelope_becomes_a_finding_not_an_abort() {
     let (events, findings) = parse_stream(r#"[{ "not": "an envelope" }]"#);
     assert!(events.is_empty());

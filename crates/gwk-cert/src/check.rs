@@ -32,6 +32,8 @@ pub enum FindingCode {
     SchemaVersionUnknown,
     SeqNotIncreasing,
     CreatedNotFirst,
+    CreationMissing,
+    CreationStateInvalid,
     AggregateVersionGap,
     StateChangeMalformed,
     FromStateMismatch,
@@ -80,6 +82,18 @@ fn payload_targets(event: &EventEnvelope) -> Option<Vec<String>> {
                 .filter_map(|t| t.as_str().map(String::from))
                 .collect()
         })
+}
+
+/// The declared initial state of a machine-governed aggregate type.
+/// Returns None when `aggregate_type` is not FSM-governed (open world).
+fn machine_initial(aggregate_type: &str) -> Option<&'static str> {
+    Some(match aggregate_type {
+        "task" => "submitted",
+        "attempt" => "queued",
+        "message" => "accepted",
+        "command" => "issued",
+        _ => return None,
+    })
 }
 
 /// Edge legality + terminality for one of the four public FSMs, by wire name.
@@ -187,22 +201,49 @@ pub fn check_stream(events: &[EventEnvelope]) -> Vec<Finding> {
         if let Some(current) = replay.get_mut(&agg_key) {
             current.version = event.aggregate_version;
         }
+        // A machine-governed aggregate's history begins at its creation event;
+        // anything else fabricates an aggregate mid-stream and skips the ladder.
+        let is_creation = event.event_type.ends_with("_created");
+        if !is_creation
+            && machine_initial(&event.aggregate_type).is_some()
+            && !replay.contains_key(&agg_key)
+        {
+            findings.push(at(
+                FindingCode::CreationMissing,
+                format!(
+                    "first event for this {} is {} — a machine-governed aggregate starts at its creation event",
+                    event.aggregate_type, event.event_type
+                ),
+            ));
+        }
 
-        if event.event_type.ends_with("_created") {
+        if is_creation {
             if replay.contains_key(&agg_key) {
                 findings.push(at(
                     FindingCode::CreatedNotFirst,
                     "creation event on an aggregate that already exists".to_string(),
                 ));
             }
-            let initial =
-                payload_str(event, "state").unwrap_or(match event.aggregate_type.as_str() {
-                    "task" => "submitted",
-                    "attempt" => "queued",
-                    "message" => "accepted",
-                    "command" => "issued",
-                    _ => "",
-                });
+            let seeded = payload_str(event, "state");
+            let initial = match machine_initial(&event.aggregate_type) {
+                // A machine-governed aggregate is born in its declared initial
+                // state, nothing else; replay proceeds from the lawful one.
+                Some(want) => {
+                    if let Some(seeded) = seeded
+                        && seeded != want
+                    {
+                        findings.push(at(
+                            FindingCode::CreationStateInvalid,
+                            format!(
+                                "created with state {seeded} but a {} begins at {want}",
+                                event.aggregate_type
+                            ),
+                        ));
+                    }
+                    want
+                }
+                None => seeded.unwrap_or(""),
+            };
             replay.insert(
                 agg_key.clone(),
                 ReplayState {
