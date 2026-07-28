@@ -69,6 +69,18 @@ CREATE TRIGGER event_append_only
   BEFORE UPDATE OR DELETE ON gwk.event
   FOR EACH ROW EXECUTE FUNCTION gwk.forbid_event_mutation();
 
+-- Row-level triggers never fire on TRUNCATE, so append-only needs a
+-- statement-level trigger too — without it one statement erases the log.
+CREATE TRIGGER event_no_truncate
+  BEFORE TRUNCATE ON gwk.event
+  FOR EACH STATEMENT EXECUTE FUNCTION gwk.forbid_event_mutation();
+
+-- ENABLE ALWAYS on every guard trigger in this file: ordinary triggers are
+-- suppressed under SET session_replication_role = 'replica', which would
+-- otherwise switch every invariant off in one statement.
+ALTER TABLE gwk.event ENABLE ALWAYS TRIGGER event_append_only;
+ALTER TABLE gwk.event ENABLE ALWAYS TRIGGER event_no_truncate;
+
 -- ============================================================
 -- FSM edge data + the transition guard
 -- ============================================================
@@ -191,6 +203,8 @@ CREATE TRIGGER task_transition
   BEFORE UPDATE ON gwk.task
   FOR EACH ROW EXECUTE FUNCTION gwk.assert_transition('task');
 
+ALTER TABLE gwk.task ENABLE ALWAYS TRIGGER task_transition;
+
 CREATE TABLE gwk.attempt (
   id                      text PRIMARY KEY,
   version                 integer NOT NULL DEFAULT 1 CHECK (version >= 1),
@@ -224,6 +238,8 @@ CREATE TABLE gwk.attempt (
 CREATE TRIGGER attempt_transition
   BEFORE UPDATE ON gwk.attempt
   FOR EACH ROW EXECUTE FUNCTION gwk.assert_transition('attempt');
+
+ALTER TABLE gwk.attempt ENABLE ALWAYS TRIGGER attempt_transition;
 
 CREATE TABLE gwk.engine_session (
   id                   text PRIMARY KEY,
@@ -261,6 +277,8 @@ CREATE TRIGGER message_transition
   BEFORE UPDATE ON gwk.message
   FOR EACH ROW EXECUTE FUNCTION gwk.assert_transition('message');
 
+ALTER TABLE gwk.message ENABLE ALWAYS TRIGGER message_transition;
+
 CREATE TABLE gwk.command (
   id              text PRIMARY KEY,
   version         integer NOT NULL DEFAULT 1 CHECK (version >= 1),
@@ -285,6 +303,8 @@ CREATE TABLE gwk.command (
 CREATE TRIGGER command_transition
   BEFORE UPDATE ON gwk.command
   FOR EACH ROW EXECUTE FUNCTION gwk.assert_transition('command');
+
+ALTER TABLE gwk.command ENABLE ALWAYS TRIGGER command_transition;
 
 CREATE TABLE gwk.gate (
   id           text PRIMARY KEY,
@@ -333,6 +353,14 @@ END $$;
 CREATE TRIGGER receipt_append_only
   BEFORE UPDATE OR DELETE ON gwk.receipt
   FOR EACH ROW EXECUTE FUNCTION gwk.forbid_receipt_mutation();
+
+-- Statement-level TRUNCATE cover, as on gwk.event.
+CREATE TRIGGER receipt_no_truncate
+  BEFORE TRUNCATE ON gwk.receipt
+  FOR EACH STATEMENT EXECUTE FUNCTION gwk.forbid_receipt_mutation();
+
+ALTER TABLE gwk.receipt ENABLE ALWAYS TRIGGER receipt_append_only;
+ALTER TABLE gwk.receipt ENABLE ALWAYS TRIGGER receipt_no_truncate;
 
 CREATE TABLE gwk.evidence (
   id         text PRIMARY KEY,
