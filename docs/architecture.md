@@ -4,6 +4,15 @@ The implementation contract behind the roadmap: what owns truth, what the
 pieces are, and which decisions are locked versus deliberately deferred.
 Locked decisions change only by a recorded amendment, not by drift.
 
+> **Read this as a design contract, not a description of running code.** It is
+> written in the present tense throughout because it specifies what the pieces
+> must do — but the kernel, the socket, projections, blobs, the PTY engine, the
+> adapters, and the TUI are today all zero lines of code. What exists
+> today is the contract itself: `gwk-domain`, `gwk-cert`, `gwk-theme`, the SQL
+> DDL, and the generated TypeScript. `docs/security/THREAT_MODEL.md` labels each
+> stance **in force** / **partial** / **designed, not yet built**; when this file
+> and that one disagree about status, that one is right.
+
 ## Truth ownership
 
 The event log owns **operational history** — not every byte in the system.

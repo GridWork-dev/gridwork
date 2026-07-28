@@ -1,0 +1,53 @@
+name: Contract feedback
+description: A missing edge, a wrong guard, an unusable shape — argue with the contract.
+labels: ["contract"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is the most useful issue you can open right now. Stage 1 froze a contract
+        that everything else will be built on, so a hole found today is cheap and the
+        same hole found at stage 4 is not.
+
+        The state machines are data — `crates/gwk-domain/src/fsm.rs` is an enum plus a
+        fixed edge table per machine. You can check them by reading.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part
+      options:
+        - State machines (fsm.rs)
+        - The transition function (transition.rs)
+        - Storage port / conformance suite
+        - Envelopes and wire shapes
+        - SQL DDL (schema/0001_contract.sql)
+        - Generated TypeScript (contracts/bindings.ts)
+        - Naming and casing policy
+        - Something else
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What's wrong or missing
+      description: Point at the specific state, edge, guard, field, or type.
+    validations:
+      required: true
+
+  - type: textarea
+    id: consequence
+    attributes:
+      label: What breaks because of it
+      description: >
+        A concrete sequence is worth more than a principle — "an attempt in this state
+        can reach that one without a receipt, so X" beats "this seems inconsistent".
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: Optional. A contract change is breaking by definition, so the cost matters as much as the fix.

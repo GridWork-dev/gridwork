@@ -1,0 +1,48 @@
+name: Bug report
+description: Something in the repo behaves differently than it says it does.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Pre-1.0, so first: there is no kernel, no socket, and no TUI in this tree yet.
+        If the report is "the daemon won't start", that's the roadmap, not a bug.
+        The parts that can actually misbehave today are `gwk-cert`, the contract
+        crates, the generated TypeScript, the SQL DDL, and the CI gates.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you expected, and what you got instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: >
+        The exact commands, and the input if it matters. For a `gwk-cert` finding,
+        the smallest event stream that triggers it is worth more than a description
+        of it.
+      render: shell
+    validations:
+      required: true
+
+  - type: input
+    id: commit
+    attributes:
+      label: Commit or crate version
+      description: Output of `git rev-parse --short HEAD`, or the published version you installed.
+    validations:
+      required: true
+
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      description: OS, and `rustc --version`. Note that CI only ever runs on Linux.
+      placeholder: "Ubuntu 24.04, rustc 1.94.0"
+    validations:
+      required: true

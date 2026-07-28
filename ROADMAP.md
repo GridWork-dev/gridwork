@@ -3,16 +3,31 @@
 GridWork is built in public, pre-1.0. Stages land in order, and each stage exits with
 working, tested code — there are no aspirational branches.
 
-## 1 · Contract *(current)*
+No dates. A stage is done when its gates are green, not when a calendar says so.
 
-The shared language everything else speaks.
+## 1 · Contract *(shipped)*
 
-- Domain types, event schemas, and state machines in `gwk-domain`, with property tests
-- Event-stream conformance checking in `gwk-cert`
+The shared language everything else speaks. Published to crates.io at 0.0.1 under
+Apache-2.0, all five crates with live docs.rs pages.
+
+- Domain types, event schemas, and four state machines in `gwk-domain`. Each machine is
+  an enum plus a fixed edge table, and the table *is* the contract: terminality is
+  derived from it, so a state and its legal moves cannot drift apart. The invariant
+  suite walks those tables exhaustively and a mutation battery proves the suite
+  actually catches a tampered edge
+- One pure transition function every writer goes through. It returns what happened as a
+  value — applied, illegal edge, stale version, unauthorized actor — and never panics
+- A storage port with a conformance suite any backend runs against its own event store,
+  plus `gwk-cert`: a checker that replays an exported event stream against the contract
 - A generated TypeScript contract for non-Rust consumers, CI-checked against the
-  committed artifact
+  committed artifact, with a golden round trip that decodes in Bun and re-verifies in
+  Rust by value
+- A SQL DDL that CI applies to a pinned PostgreSQL and then attacks: truncating a state
+  table must fail, and clearing a set lease fence must fail
 
-## 2 · Kernel
+## 2 · Kernel *(current)*
+
+In flight — nothing merged yet.
 
 - A daemon owning an append-only event store — the sole writer; every other view is a
   projection
