@@ -162,9 +162,18 @@ pub fn apply<S: TransitionGuard>(
             expected: req.expected_version,
         };
     }
+    // A transition at the u32 version ceiling is a refusal, not a panic (debug)
+    // or a silent wrap to 0 (release, a version REWIND — the other thing this
+    // module forbids). Reuse the StaleVersion refusal the caller already knows.
+    let Some(next_version) = req.expected_version.checked_add(1) else {
+        return TransitionResult::StaleVersion {
+            actual: cursor.version,
+            expected: req.expected_version,
+        };
+    };
     TransitionResult::Applied {
         state: req.to,
-        version: req.expected_version + 1,
+        version: next_version,
     }
 }
 
@@ -259,6 +268,35 @@ mod tests {
             TransitionResult::StaleVersion {
                 actual: 7,
                 expected: 6
+            }
+        );
+    }
+
+    #[test]
+    fn version_ceiling_is_refused_not_overflowed() {
+        // At version u32::MAX the "+1" would panic in debug and silently wrap
+        // to 0 (a version rewind) in release. A legal, CAS-matching request at
+        // the ceiling must instead get the honest StaleVersion refusal.
+        let actor = kernel();
+        let result = apply(
+            &Cursor {
+                state: TaskState::Submitted,
+                version: u32::MAX,
+                applied_idempotency_key: None,
+            },
+            &TransitionRequest {
+                to: TaskState::Working,
+                expected_version: u32::MAX,
+                actor: &actor,
+                idempotency_key: None,
+                receipt_id: None,
+            },
+        );
+        assert_eq!(
+            result,
+            TransitionResult::StaleVersion {
+                actual: u32::MAX,
+                expected: u32::MAX,
             }
         );
     }
