@@ -153,8 +153,9 @@ jobs:
 
   # Commit messages and every line added or deleted inside the PR range publish
   # too — the final tracked tree is not the whole exposure. Same seeded proof.
+  # Direct pushes to main (including the very first publication push, which
+  # carries the entire history) get their pushed range scanned as well.
   commit-messages:
-    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -163,6 +164,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: scan PR commit messages
+        if: github.event_name == 'pull_request'
         # explicit bash = -o pipefail, so a git-log failure fails the gate
         # instead of feeding the scan empty stdin (fail-open otherwise).
         shell: bash
@@ -171,11 +173,26 @@ jobs:
         run: |
           git log --format=%B "origin/${BASE_REF}..HEAD" | ./tools/leak-scan.sh --stdin
       - name: scan PR diff range (added and deleted lines)
+        if: github.event_name == 'pull_request'
         shell: bash
         env:
           BASE_REF: ${{ github.base_ref }}
         run: |
           git diff --unified=0 "origin/${BASE_REF}...HEAD" | ./tools/leak-scan.sh --stdin
+      - name: scan pushed commit messages
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after }}
+        run: |
+          if [[ -z "$BEFORE" || "$BEFORE" =~ ^0+$ ]]; then
+            # Branch creation: there is no before SHA, so the pushed range is
+            # the full history of the pushed SHA.
+            git log --format=%B "$AFTER" | ./tools/leak-scan.sh --stdin
+          else
+            git log --format=%B "${BEFORE}..${AFTER}" | ./tools/leak-scan.sh --stdin
+          fi
       - name: prove the gate can fail (seeded violation)
         run: |
           seed=$(printf 'see claude.ai/code/ses%s_EXAMPLE' 'sion')
