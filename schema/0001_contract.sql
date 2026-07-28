@@ -134,9 +134,32 @@ INSERT INTO gwk.transition (entity, from_state, to_state) VALUES
   ('command', 'targeted', 'signaled'),
   ('command', 'signaled', 'verification_complete');
 
+-- The edge table is the data the transition guard trusts: a plain INSERT here
+-- would legalise a previously forbidden edge for every subsequent transition.
+-- Seeded above, then frozen — these triggers refuse every later write.
+CREATE FUNCTION gwk.forbid_transition_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'gwk.transition is immutable seed data (% refused)', TG_OP;
+END $$;
+
+CREATE TRIGGER transition_immutable
+  BEFORE INSERT OR UPDATE OR DELETE ON gwk.transition
+  FOR EACH ROW EXECUTE FUNCTION gwk.forbid_transition_mutation();
+
+CREATE TRIGGER transition_no_truncate
+  BEFORE TRUNCATE ON gwk.transition
+  FOR EACH STATEMENT EXECUTE FUNCTION gwk.forbid_transition_mutation();
+
+ALTER TABLE gwk.transition ENABLE ALWAYS TRIGGER transition_immutable;
+ALTER TABLE gwk.transition ENABLE ALWAYS TRIGGER transition_no_truncate;
+
 -- The row-level guard behind every FSM table: edge legality against
 -- gwk.transition, and CAS discipline — EVERY update advances version by
 -- exactly 1 (terminal immutability follows from terminals having no edges).
+-- NOT enforced here: the liveness-producer flip rule (which actor may drive
+-- running <-> blocked) lives in the domain crate's transition apply path —
+-- every writer must route through it.
 CREATE FUNCTION gwk.assert_transition() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
@@ -154,6 +177,27 @@ BEGIN
       TG_ARGV[0], OLD.version, NEW.version;
   END IF;
   RETURN NEW;
+END $$;
+
+-- Companion guards on every FSM table. A row must be BORN at its machine's
+-- initial state at version 1: a row inserted mid-spine — or born terminal,
+-- e.g. a command inserted directly at verification_complete — satisfies every
+-- CHECK yet skips the whole edge guard. And rows are never deleted:
+-- DELETE-then-INSERT would walk around the edge table the same way.
+CREATE FUNCTION gwk.assert_initial_state() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.state IS DISTINCT FROM TG_ARGV[1] OR NEW.version IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION '% rows must be born in state % at version 1 (got %, version %)',
+      TG_ARGV[0], TG_ARGV[1], NEW.state, NEW.version;
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION gwk.forbid_state_row_delete() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION '% rows cannot be deleted', TG_ARGV[0];
 END $$;
 
 -- ============================================================
@@ -203,7 +247,17 @@ CREATE TRIGGER task_transition
   BEFORE UPDATE ON gwk.task
   FOR EACH ROW EXECUTE FUNCTION gwk.assert_transition('task');
 
+CREATE TRIGGER task_born_initial
+  BEFORE INSERT ON gwk.task
+  FOR EACH ROW EXECUTE FUNCTION gwk.assert_initial_state('task', 'submitted');
+
+CREATE TRIGGER task_no_delete
+  BEFORE DELETE ON gwk.task
+  FOR EACH ROW EXECUTE FUNCTION gwk.forbid_state_row_delete('task');
+
 ALTER TABLE gwk.task ENABLE ALWAYS TRIGGER task_transition;
+ALTER TABLE gwk.task ENABLE ALWAYS TRIGGER task_born_initial;
+ALTER TABLE gwk.task ENABLE ALWAYS TRIGGER task_no_delete;
 
 CREATE TABLE gwk.attempt (
   id                      text PRIMARY KEY,
@@ -239,7 +293,17 @@ CREATE TRIGGER attempt_transition
   BEFORE UPDATE ON gwk.attempt
   FOR EACH ROW EXECUTE FUNCTION gwk.assert_transition('attempt');
 
+CREATE TRIGGER attempt_born_initial
+  BEFORE INSERT ON gwk.attempt
+  FOR EACH ROW EXECUTE FUNCTION gwk.assert_initial_state('attempt', 'queued');
+
+CREATE TRIGGER attempt_no_delete
+  BEFORE DELETE ON gwk.attempt
+  FOR EACH ROW EXECUTE FUNCTION gwk.forbid_state_row_delete('attempt');
+
 ALTER TABLE gwk.attempt ENABLE ALWAYS TRIGGER attempt_transition;
+ALTER TABLE gwk.attempt ENABLE ALWAYS TRIGGER attempt_born_initial;
+ALTER TABLE gwk.attempt ENABLE ALWAYS TRIGGER attempt_no_delete;
 
 CREATE TABLE gwk.engine_session (
   id                   text PRIMARY KEY,
@@ -277,7 +341,17 @@ CREATE TRIGGER message_transition
   BEFORE UPDATE ON gwk.message
   FOR EACH ROW EXECUTE FUNCTION gwk.assert_transition('message');
 
+CREATE TRIGGER message_born_initial
+  BEFORE INSERT ON gwk.message
+  FOR EACH ROW EXECUTE FUNCTION gwk.assert_initial_state('message', 'accepted');
+
+CREATE TRIGGER message_no_delete
+  BEFORE DELETE ON gwk.message
+  FOR EACH ROW EXECUTE FUNCTION gwk.forbid_state_row_delete('message');
+
 ALTER TABLE gwk.message ENABLE ALWAYS TRIGGER message_transition;
+ALTER TABLE gwk.message ENABLE ALWAYS TRIGGER message_born_initial;
+ALTER TABLE gwk.message ENABLE ALWAYS TRIGGER message_no_delete;
 
 CREATE TABLE gwk.command (
   id              text PRIMARY KEY,
@@ -304,7 +378,17 @@ CREATE TRIGGER command_transition
   BEFORE UPDATE ON gwk.command
   FOR EACH ROW EXECUTE FUNCTION gwk.assert_transition('command');
 
+CREATE TRIGGER command_born_initial
+  BEFORE INSERT ON gwk.command
+  FOR EACH ROW EXECUTE FUNCTION gwk.assert_initial_state('command', 'issued');
+
+CREATE TRIGGER command_no_delete
+  BEFORE DELETE ON gwk.command
+  FOR EACH ROW EXECUTE FUNCTION gwk.forbid_state_row_delete('command');
+
 ALTER TABLE gwk.command ENABLE ALWAYS TRIGGER command_transition;
+ALTER TABLE gwk.command ENABLE ALWAYS TRIGGER command_born_initial;
+ALTER TABLE gwk.command ENABLE ALWAYS TRIGGER command_no_delete;
 
 CREATE TABLE gwk.gate (
   id           text PRIMARY KEY,
