@@ -15,7 +15,8 @@ This project independently implements terminal multiplexing and agent orchestrat
 **Do not submit code copied, ported, or mechanically translated from AGPL-licensed (or
 any incompatibly-licensed) projects.** Concept-level inspiration is fine; derived code
 is not, and terminal-engine-adjacent changes get an additional independent review for
-exactly this reason.
+exactly this reason. The full procedure — who may read what, derivation citations, the
+second review — is public policy in [CLEANROOM.md](CLEANROOM.md).
 
 ## AI-assisted contributions
 

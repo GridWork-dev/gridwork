@@ -1,0 +1,5 @@
+# Paths under the clean-room second-review gate (see CLEANROOM.md).
+# Prefix match; one entry per line; comments with '#'.
+crates/gwk-pty/
+crates/gwk-adapter-
+crates/gwk-tui/src/workspace/
