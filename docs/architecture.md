@@ -29,7 +29,7 @@ kernel boundary.
 
 **Transport.** Local clients connect over a Unix domain socket. Remote use is
 SSH to the host, then the same socket — the kernel does not listen on a
-network interface, and will not until a dedicated authentication ADR
+network interface, and will not until a recorded authentication decision
 introduces one deliberately. Filesystem permissions on the socket are the
 local trust boundary.
 

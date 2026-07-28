@@ -2,8 +2,8 @@
 
 The client↔kernel contract. **Semantics below are locked at the contract
 phase; the exact byte-level frame encoding is finalized with the kernel and
-recorded as an ADR** — clients written against the semantics will not need
-redesign, only a codec.
+captured as a recorded decision** — clients written against the semantics
+will not need redesign, only a codec.
 
 ## Connection and hello
 
@@ -37,8 +37,8 @@ types). Bounds are part of the contract:
 Locally, the socket's filesystem permissions are the boundary — a process
 that can open the socket is the operator. Remotely, SSH provides transport
 and identity. There are no bearer tokens on this surface today because there
-is no network listener; introducing one requires a dedicated authentication
-ADR first (a locked architecture decision, not an oversight).
+is no network listener; introducing one requires a dedicated, recorded
+authentication decision first (a deliberate choice, not an oversight).
 
 ## Subscriptions and reconnect-by-cursor
 

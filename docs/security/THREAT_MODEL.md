@@ -67,7 +67,7 @@ Any local process with socket access can send arbitrary frames.
 `docs/protocol.md`); strict framing bounds and `deny_unknown_fields`
 decoding bound WHAT they can say; commands are CAS-guarded, idempotent, and
 policy-checked, so a misbehaving client can be refused but not corrupt
-order. No network listener exists before a dedicated auth ADR.
+order. No network listener exists before a recorded authentication decision.
 
 **Status: partial.** Strict unknown-field rejection and the CAS + idempotency
 command semantics are implemented in the contract crates; the framing bounds,
