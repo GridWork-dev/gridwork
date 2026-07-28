@@ -12,7 +12,7 @@
 
 use gwk_domain::envelope::{Actor, EventEnvelope, Origin};
 use gwk_domain::ids::{AggregateId, EventId, ProjectId, Seq, Timestamp};
-use gwk_domain::port::{AppendError, EventStore};
+use gwk_domain::port::{AppendError, EventStore, MAX_READ_LIMIT};
 
 /// A minimal valid envelope for conformance traffic. `global_sequence` and
 /// `appended_at` carry sentinel values the store MUST overwrite.
@@ -207,6 +207,27 @@ pub async fn check_watermark<S: EventStore>(store: &S) {
     );
 }
 
+/// The read clamp: `port.rs` documents [`MAX_READ_LIMIT`] as a ceiling a
+/// conforming store MUST honour. A `read_from` with an enormous `limit` must
+/// not error and must return at most that many events — no caller can demand an
+/// unbounded page.
+pub async fn check_read_limit_is_clamped<S: EventStore>(store: &S) {
+    for i in 1..=8u32 {
+        store
+            .append(i - 1, None, vec![fixture_event("agg", i)])
+            .await
+            .expect("append");
+    }
+    let page = store
+        .read_from(None, usize::MAX)
+        .await
+        .expect("a huge limit must not error");
+    assert!(
+        page.len() <= MAX_READ_LIMIT,
+        "read_from must clamp to MAX_READ_LIMIT"
+    );
+}
+
 async fn read_all<S: EventStore>(store: &S) -> Vec<(String, u32, u64)> {
     store
         .read_from(None, usize::MAX)
@@ -232,6 +253,7 @@ pub async fn run_all<S: EventStore, F: Fn() -> S>(fresh: F) {
     check_cursor_recovery(&fresh()).await;
     check_deterministic_rebuild(&fresh()).await;
     check_watermark(&fresh()).await;
+    check_read_limit_is_clamped(&fresh()).await;
 }
 
 pub mod memory {
