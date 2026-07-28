@@ -131,6 +131,7 @@ jobs:
         with:
           persist-credentials: false
       - run: ./tools/leak-scan.sh
+      - run: ./tools/check-claims.sh
       - name: prove the gate can fail (seeded violation)
         run: |
           seed=$(printf 'creds at /ho%s/example/data' 'me')

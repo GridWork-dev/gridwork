@@ -8,4 +8,6 @@ days; pre-1.0 there is no bug bounty.
 
 ## Supported versions
 
-Pre-1.0, only the latest `main` is supported. There are no backports.
+Pre-1.0 there are **no supported releases**. `main` is a development branch — run it
+to develop GridWork, not to depend on it. Vulnerability reports are welcome against
+the latest `main`; there are no backports.

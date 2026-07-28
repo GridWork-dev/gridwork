@@ -14,8 +14,8 @@ been running a real software operation for months: spec-driven phases, authority
 deciding what agents may do unattended, event-sourced telemetry, and a fleet of coding
 agents (Claude Code, Codex, opencode) shipping production systems under it.
 
-This profile's contribution graph is the receipt — **7,300+ contributions in five
-months, nearly all agent-authored, all of it in private repos**. This is the first
+This profile's contribution graph is the receipt — **7,300+ contributions in the five
+months to July 2026, nearly all agent-authored, all of it in private repos**. This is the first
 public one, and the agents that produced that graph are writing this codebase too:
 most commits here are agent-authored under human direction and review. That's
 disclosed as a fact, not a caveat — the same gates apply regardless of who typed the
@@ -61,7 +61,8 @@ tool). **The binary is `gw`** — from the first build, permanently; installatio
 
 ## Building
 
-Stable Rust, MSRV 1.94.
+Stable Rust, MSRV 1.94. This builds the stage-1 skeleton — the contract crates and
+their gates — not a usable product yet (see [ROADMAP.md](ROADMAP.md)).
 
 ```bash
 cargo build --workspace
