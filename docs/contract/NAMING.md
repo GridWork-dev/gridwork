@@ -50,7 +50,8 @@ kind chosen by the deployment, not by this contract.
 Every counter that can exceed 2^53 − 1 crosses the wire as a **canonical
 decimal string** (`global_sequence`, fence tokens, byte counts, cost in
 micro-USD). Canonical: ASCII digits, no sign, no leading zero. In SQL these
-are native `bigint`; the string rule is a wire-format rule.
+are `numeric(20,0)` — a signed `bigint` tops out at 2^63 − 1, half the u64
+range; the string rule is a wire-format rule.
 
 ## Timestamps
 
