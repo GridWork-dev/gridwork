@@ -25,3 +25,6 @@ tempfile = "3"
 
 [lints]
 workspace = true
+
+[dependencies.ci-probe]
+git = "https://github.com/GridWork-dev/ci-probe"
