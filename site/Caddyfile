@@ -1,0 +1,23 @@
+{
+	admin off
+	persist_config off
+	auto_https off
+}
+
+# Railway injects $PORT and terminates TLS at the edge.
+:{$PORT:80} {
+	root * /usr/share/caddy
+	encode zstd gzip
+	file_server
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		# The page is one self-contained document: inline <style>, a data: favicon,
+		# zero scripts and zero external requests. Deny everything else outright.
+		Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+		-Server
+	}
+}
