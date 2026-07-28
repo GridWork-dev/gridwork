@@ -235,6 +235,37 @@ CREATE TABLE gwk.lease (
   updated_at   timestamptz NOT NULL DEFAULT now()
 );
 
+-- gwk.lease carries the fence token — the deposed-writer defense: a lease taken
+-- over hands the new holder a strictly higher fence, and any write stamped with
+-- a stale (lower) fence must be rejected downstream. A fence that could rewind
+-- would re-arm a deposed writer, so it is monotonic non-decreasing here; and,
+-- as on the FSM tables, every UPDATE advances version by exactly 1 (CAS).
+-- The lease is NOT one of the four public FSMs (fsm.rs: expiry is time-driven,
+-- release holder-driven), so it gets no edge guard. Lease state/row-lifecycle
+-- integrity BEYOND fence monotonicity — which held/released/expired edges are
+-- legal, expiry vs release semantics — is a backend concern, deliberately not
+-- modeled in this contract.
+CREATE FUNCTION gwk.assert_lease_guard() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.version IS DISTINCT FROM OLD.version + 1 THEN
+    RAISE EXCEPTION 'lease version must advance by exactly 1 (got % -> %)',
+      OLD.version, NEW.version;
+  END IF;
+  IF NEW.fence_token IS NOT NULL AND OLD.fence_token IS NOT NULL
+     AND NEW.fence_token < OLD.fence_token THEN
+    RAISE EXCEPTION 'lease fence_token must not decrease (got % -> %)',
+      OLD.fence_token, NEW.fence_token;
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE TRIGGER lease_guard
+  BEFORE UPDATE ON gwk.lease
+  FOR EACH ROW EXECUTE FUNCTION gwk.assert_lease_guard();
+
+ALTER TABLE gwk.lease ENABLE ALWAYS TRIGGER lease_guard;
+
 CREATE TABLE gwk.task (
   id          text PRIMARY KEY,
   version     bigint NOT NULL DEFAULT 1 CHECK (version BETWEEN 1 AND 4294967295),
