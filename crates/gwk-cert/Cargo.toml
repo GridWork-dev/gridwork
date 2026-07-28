@@ -2,6 +2,9 @@
 name = "gwk-cert"
 version = "0.0.1"
 description = "Contract conformance checker: verifies an event stream against the gwk-domain state machines"
+homepage = "https://gridwork.dev"
+keywords = ["gridwork", "event-sourcing", "conformance", "contract", "verification"]
+categories = ["command-line-utilities", "development-tools"]
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

@@ -1,7 +1,7 @@
-//! The GridWork kernel namespace — the umbrella for the `gwk-*` contract crates.
+//! **This crate has no API.** Nothing is exported and there is nothing to import.
 //!
-//! This crate carries no API yet. It holds the short namespace prefix so the
-//! contract crates published under `gwk-*` share one owned root:
+//! It holds the short namespace prefix so the contract crates published under
+//! `gwk-*` share one owned root. Those crates are where the work is:
 //!
 //! - [`gwk-domain`](https://docs.rs/gwk-domain) — shared domain types, events, and state machines
 //! - [`gwk-cert`](https://docs.rs/gwk-cert) — conformance checker for an event stream

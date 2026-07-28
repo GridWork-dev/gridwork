@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a vulnerability
+    url: https://github.com/GridWork-dev/gridwork/security/advisories/new
+    about: Anything exploitable goes through private advisory reporting, never a public issue.
+  - name: What's useful to work on
+    url: https://github.com/GridWork-dev/gridwork/blob/main/CONTRIBUTING.md
+    about: Prerequisites, the local gate, and the two gates most likely to surprise you.
+  - name: Is this planned already?
+    url: https://github.com/GridWork-dev/gridwork/blob/main/ROADMAP.md
+    about: Five stages, in order. Most missing features are a stage, not a gap.

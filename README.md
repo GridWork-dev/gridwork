@@ -3,28 +3,23 @@
 **An agent operating system for the terminal.** One Rust binary, one append-only event
 log as the source of truth, and a TUI as the only surface.
 
+[![ci](https://github.com/GridWork-dev/gridwork/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/GridWork-dev/gridwork/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/gwk-domain.svg)](https://crates.io/crates/gwk-domain)
+[![docs.rs](https://img.shields.io/docsrs/gwk-domain)](https://docs.rs/gwk-domain)
+[![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
+[gridwork.dev](https://gridwork.dev)
+
 > **Pre-1.0 — expect breakage.** This project is being built in the open from its first
 > commit. Schemas, protocols, and the binary itself change without notice until 1.0.
 > Don't run `main` anywhere you care about.
 
-## Built by the thing it builds
-
-GridWork is not a cold start. It is the open rebuild of an internal agent OS that has
-been running a real software operation for months: spec-driven phases, authority gates
-deciding what agents may do unattended, event-sourced telemetry, and a fleet of coding
-agents (Claude Code, Codex, opencode) shipping production systems under it.
-
-This profile's contribution graph is the receipt — **7,300+ contributions in the five
-months to July 2026, nearly all agent-authored, all of it in private repos**. This is the first
-public one, and the agents that produced that graph are writing this codebase too:
-most commits here are agent-authored under human direction and review. That's
-disclosed as a fact, not a caveat — the same gates apply regardless of who typed the
-code.
-
 ## What this is
 
-Coding agents are multiplying faster than the tools that supervise them. GridWork is an
-operating layer for a fleet of terminal agents:
+Coding agents are multiplying faster than the tools that supervise them. Run more than
+one and you lose the things a single terminal used to give you for free: one place that
+says what needs you, one record of what happened, and one answer to whether an agent was
+allowed to do that. GridWork is an operating layer for a fleet of terminal agents:
 
 - **One log.** Every platform truth — tasks, messages, gates, budgets, telemetry — is a
   projection of a single append-only event log. No dashboard database, no second truth.
@@ -34,49 +29,148 @@ operating layer for a fleet of terminal agents:
 - **Terminal-native.** The surface is a TUI: an orchestration mode (attention queue,
   work board, a live view of the fleet) and a workspace mode (a real multiplexer). No
   web console, ever.
-- **Engine-agnostic.** Agents are driven over [ACP](https://agentclientprotocol.com)
-  plus engine hooks and PTY — control never rides keystrokes.
+- **Engine-agnostic.** Agents are driven over [ACP](https://agentclientprotocol.com) —
+  an open protocol for talking to coding agents — plus engine hooks and PTY. Control
+  never rides keystrokes.
 
-## Status and roadmap
+## Where it actually is
 
-Pre-alpha, stage 1 of 5. The build order — contract → kernel → engines → console →
-workspace — with what each stage delivers, lives in [ROADMAP.md](ROADMAP.md).
+Pre-alpha, stage 2 of 5. **Stage 1 — the contract — shipped** and is published on
+crates.io. Stage 2, the kernel, is being built now and none of it has merged.
+
+Be clear about what that means before you clone: there is **no daemon, no socket, no PTY
+engine, no adapters and no TUI in this tree**. The four bullets above describe what
+GridWork is being built to be. What exists today is the contract those pieces must agree
+on, and the gates that keep it honest — which is exactly what stage 1 was for.
+
+The build order — contract → kernel → engines → console → workspace — with what each
+stage delivers, is in [ROADMAP.md](ROADMAP.md). For per-boundary status, the threat
+model labels every stance *in force*, *partial*, or *designed, not yet built*.
+
+## What you can run today
+
+One thing, and it works:
+
+```bash
+git clone https://github.com/GridWork-dev/gridwork
+cd gridwork
+cargo run -p gwk-cert -- crates/gwk-cert/fixtures/valid-stream.json
+```
+
+```
+[]
+gwk-cert: certified — 16 events, 0 findings
+```
+
+`gwk-cert` replays an exported event stream against the contract: envelope structure,
+sequence monotonicity, state-machine edge legality, version discipline, terminal
+immutability, and payload bounds. Findings go to stdout as typed JSON so CI can parse
+them; the human summary goes to stderr. Exit `0` certified, `1` findings, `2` usage.
+
+It takes one argument — a file path. There are no flags, so `--help` is read as a
+filename.
+
+**Explicit non-claim:** this proves *contract conformance*, not authenticity. A
+coherent forged stream passes. Tamper evidence belongs to the storage layer, not to
+stream inspection.
+
+`cargo install gwk-cert` installs the same checker without a clone. The sample stream
+ships inside the published crate too, under `fixtures/` in the unpacked source.
+
+## Built by the thing it builds
+
+GridWork is not a cold start. It is the open rebuild of an internal agent OS that has
+been running a real software operation for months: spec-driven phases, authority gates
+deciding what agents may do unattended, event-sourced telemetry, and a fleet of coding
+agents (Claude Code, Codex, opencode) shipping production systems under it.
+
+This profile's contribution graph is the receipt — **7,300+ contributions in the five
+months to July 2026, nearly all agent-authored, and until this repo, all of it in private repos**. This is the first
+public one, and the agents that produced that graph are writing this codebase too:
+most commits here are agent-authored under human direction and review. That's
+disclosed as a fact, not a caveat — the same gates apply regardless of who typed the
+code.
 
 ## Crates
 
 | Crate | What | Status |
 |---|---|---|
-| `gwk-domain` | Shared types, events, state machines — the contract | skeleton |
-| `gwk-cert` | Contract conformance checker for event streams | skeleton |
-| `xtask` | Codegen + release glue | skeleton |
+| [`gwk-domain`](https://docs.rs/gwk-domain) | Shared types, events, state machines — the contract | 0.0.1 |
+| [`gwk-cert`](https://docs.rs/gwk-cert) | Stream checker, plus the storage suite a backend runs against its own event store | 0.0.1 |
+| [`gwk-theme`](https://docs.rs/gwk-theme) | The 12 SIGNAL design tokens — one source for the site, the TUI, and the generated TypeScript | 0.0.1 |
+| [`gwk`](https://docs.rs/gwk) | Namespace root for the `gwk-*` crates. **No API** | name only |
+| [`gridwork`](https://docs.rs/gridwork) | Will ship the `gw` binary. **No API yet** | name only |
+| `xtask` | Codegen and release glue. Not published | in-tree |
 | `gwk-kernel` | Daemon: event store, projections, attention, authority | planned |
 | `gwk-pty` | PTY engine: server-side VT, render-state deltas, reattach | planned |
 | `gwk-adapter-*` | Per-engine ACP + hooks adapters | planned |
 | `gwk-tui` | The client: modes, lenses, palette | planned |
-| `gridwork` | CLI crate — headless verb twin of the TUI; ships the `gw` binary | planned |
+
+`gridwork` and `gwk` are published deliberately as **name reservations with no API** —
+a module doc block each, pointing at the crates that do the work.
+They are not libraries and are not padded into looking like libraries.
+`cargo install gridwork` gets you nothing today; it becomes the install command when
+that crate ships the binary.
 
 Library crates are prefixed `gwk-` (the crates.io name `gw` belongs to an unrelated
-tool). **The binary is `gw`** — from the first build, permanently; installation is
-`cargo install gridwork` once the CLI crate publishes.
+tool). **The binary is `gw`** — from the first build, permanently.
+
+## Where to start reading
+
+The contract is the whole of stage 1, and it reads in this order:
+
+1. [`crates/gwk-domain/src/fsm.rs`](crates/gwk-domain/src/fsm.rs) — the four state
+   machines. Each is an enum plus a fixed `EDGES` table, and the table *is* the
+   contract: terminality is derived from it, so states and their legal moves cannot
+   drift apart.
+2. [`crates/gwk-domain/src/transition.rs`](crates/gwk-domain/src/transition.rs) — the
+   one transition function every writer goes through. Pure, returns what happened as a
+   value, never panics.
+3. [`schema/0001_contract.sql`](schema/0001_contract.sql) — the same guarantees as
+   database constraints. CI applies it to a pinned PostgreSQL and then attacks it:
+   truncating a state table must fail, and clearing a set lease fence must fail.
+4. [`docs/security/THREAT_MODEL.md`](docs/security/THREAT_MODEL.md) — the honest
+   per-boundary status of everything above.
+
+## Docs
+
+| | |
+|---|---|
+| [ROADMAP.md](ROADMAP.md) | The five stages and what each delivers |
+| [docs/architecture.md](docs/architecture.md) | What owns truth, what the pieces are, which decisions are locked |
+| [docs/protocol.md](docs/protocol.md) | The client↔kernel contract (semantics locked, nothing implemented) |
+| [docs/contract/NAMING.md](docs/contract/NAMING.md) | The casing and wire-shape rules the contract is frozen under |
+| [docs/security/THREAT_MODEL.md](docs/security/THREAT_MODEL.md) | What GridWork defends against, and what it deliberately does not |
+| [CLEANROOM.md](CLEANROOM.md) | The independent-implementation policy for terminal-engine work |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Gates, prerequisites, and the traps worth knowing first |
+| [SECURITY.md](SECURITY.md) | Reporting a vulnerability |
 
 ## Building
 
-Stable Rust, MSRV 1.94. This builds the stage-1 skeleton — the contract crates and
-their gates — not a usable product yet (see [ROADMAP.md](ROADMAP.md)).
+Stable Rust, MSRV 1.94. This builds the contract crates and their gates — not a usable
+product yet (see [ROADMAP.md](ROADMAP.md)).
 
 ```bash
 cargo build --workspace
 ```
 
-The quality gate that CI enforces (all green before any PR):
+The Rust half of the gate CI enforces:
 
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --all-targets --locked
 cargo test --workspace --doc --locked
-cargo deny check
+cargo +1.94 check --workspace --all-targets --locked
+cargo deny check bans licenses sources
 ```
+
+`cargo deny check` on its own also runs `advisories`, which CI deliberately keeps
+non-blocking so a newly published advisory can't redden an unchanged PR.
+
+CI also checks the generated TypeScript, the SQL DDL, the site image, and two
+publication gates. [CONTRIBUTING.md](CONTRIBUTING.md) has the rest of the list, the
+tools you need installed, and the two gates most likely to surprise you.
 
 ## License
 

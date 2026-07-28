@@ -352,10 +352,11 @@ ul.rows li:last-child { margin-bottom:0 }
 .gauge .bar b { color:var(--hue); font-weight:400 }
 
 /* The rail carries the state: lit through the stage in flight, then faded for
-   everything still planned. */
+   everything still planned. The two hue stops track the CURRENT stage — move
+   them down roughly one card (~17%) each time .stage--now moves. */
 .stages {
   margin:var(--s7) 0 0; padding:0 0 0 var(--s5); list-style:none;
-  background:linear-gradient(180deg,var(--hue-dim) 0,var(--hue-dim) 9%,var(--line) 26%,var(--line) 100%)
+  background:linear-gradient(180deg,var(--hue-dim) 0,var(--hue-dim) 26%,var(--line) 43%,var(--line) 100%)
              left top/1px 100% no-repeat;
 }
 .stage { position:relative; padding-bottom:var(--s7) }
@@ -385,6 +386,9 @@ ul.rows li:last-child { margin-bottom:0 }
   white-space:nowrap;
 }
 .pill--now { color:var(--hue-bright); border-color:rgba(107,219,255,.42); background:rgba(107,219,255,.10) }
+/* --ok (#6EE7A8) as rgba, same derivation as --hue above; theme-sync compares
+   solid hex custom properties only, so these stay site-local. */
+.pill--done { color:var(--ok); border-color:rgba(110,231,168,.42); background:rgba(110,231,168,.10) }
 
 .locked { margin-top:var(--s7) }
 .locked ul { margin:var(--s4) 0 0; padding:0; list-style:none; display:grid; gap:var(--s3) }
@@ -441,7 +445,7 @@ footer .wrap { padding-block:var(--s7) }
   <div class="wrap">
     <b><span class="cursor" aria-hidden="true">&#9611;</span>&nbsp;gridwork</b>
     <span class="seg hide-sm">apache-2.0</span>
-    <span class="seg">stage 1/5 &middot; contract</span>
+    <span class="seg">stage 2/5 &middot; kernel</span>
     <span class="spacer"></span>
     <span class="tag">pre-1.0</span>
   </div>
@@ -477,8 +481,9 @@ footer .wrap { padding-block:var(--s7) }
 
     <div class="cmd">
       <code>git clone https://github.com/GridWork-dev/gridwork</code>
-      <code>cargo build --workspace<i>   # stable rust &middot; msrv 1.88</i></code>
-      <span class="note"><code>cargo install gridwork</code> lands when the CLI crate publishes at 1.0.</span>
+      <code>cargo build --workspace<i>   # stable rust &middot; msrv 1.94</i></code>
+      <span class="note"><code>cargo install gridwork</code> lands when that crate ships the binary. Today it is a
+      published name with no API; the one thing you can run is <code>gwk-cert</code>.</span>
     </div>
 
     <div class="actions">
@@ -601,31 +606,32 @@ footer .wrap { padding-block:var(--s7) }
     </div>
 
     <p class="gauge">
-      <span class="bar" aria-hidden="true"><b>&#9608;</b>&#9617;&#9617;&#9617;&#9617;</span>
-      <span>stage 1 of 5 &mdash; contract, in progress</span>
+      <span class="bar" aria-hidden="true">&#9608;<b>&#9608;</b>&#9617;&#9617;&#9617;</span>
+      <span>stage 2 of 5 &mdash; kernel, in progress. Stage 1 shipped.</span>
     </p>
 
     <ol class="stages">
-      <li class="stage stage--now">
+      <li class="stage">
         <div class="stage__hd">
           <span class="stage__no">01</span>
           <h3>Contract</h3>
-          <span class="pill pill--now">current</span>
+          <span class="pill pill--done">shipped</span>
         </div>
-        <p class="stage__sub">The shared language everything else speaks.</p>
+        <p class="stage__sub">The shared language everything else speaks. Published at 0.0.1.</p>
         <ul class="rows">
-          <li>Domain types, event schemas, and state machines in <code>gwk-domain</code>, with property tests</li>
-          <li>Event-stream conformance checking in <code>gwk-cert</code></li>
+          <li>Domain types, event schemas, and four state machines in <code>gwk-domain</code>, with an invariant suite that walks the edge tables exhaustively</li>
+          <li>Event-stream conformance checking in <code>gwk-cert</code>, plus a storage suite any backend runs against its own event store</li>
           <li>A generated TypeScript contract for non-Rust consumers, CI-checked against the committed artifact</li>
         </ul>
       </li>
 
-      <li class="stage">
+      <li class="stage stage--now">
         <div class="stage__hd">
           <span class="stage__no">02</span>
           <h3>Kernel</h3>
-          <span class="pill">planned</span>
+          <span class="pill pill--now">current</span>
         </div>
+        <p class="stage__sub">In flight &mdash; nothing merged yet.</p>
         <ul class="rows">
           <li>A daemon owning an append-only event store &mdash; the sole writer; every other view is a projection</li>
           <li>The attention queue: one prioritized feed of everything that needs a human</li>
@@ -707,19 +713,21 @@ footer .wrap { padding-block:var(--s7) }
 
     <div class="tbl-wrap">
       <table>
-        <caption>Workspace crates &mdash; stable Rust, MSRV 1.88</caption>
+        <caption>Workspace crates &mdash; stable Rust, MSRV 1.94</caption>
         <thead>
           <tr><th scope="col">Crate</th><th scope="col">What</th><th scope="col">Status</th></tr>
         </thead>
         <tbody>
-          <tr><td>gwk-domain</td><td>Shared types, events, state machines &mdash; the contract</td><td><span class="pill">skeleton</span></td></tr>
-          <tr><td>gwk-cert</td><td>Contract conformance checker for event streams</td><td><span class="pill">skeleton</span></td></tr>
-          <tr><td>xtask</td><td>Codegen and release glue</td><td><span class="pill">skeleton</span></td></tr>
+          <tr><td>gwk-domain</td><td>Shared types, events, state machines &mdash; the contract</td><td><span class="pill pill--done">0.0.1</span></td></tr>
+          <tr><td>gwk-cert</td><td>Conformance checker for event streams, and the storage suite a backend runs against its own store</td><td><span class="pill pill--done">0.0.1</span></td></tr>
+          <tr><td>gwk-theme</td><td>The 12 SIGNAL tokens &mdash; one source for this page, the TUI, and the generated TypeScript</td><td><span class="pill pill--done">0.0.1</span></td></tr>
+          <tr><td>gwk</td><td>Namespace root for the <code>gwk-</code> crates. No API</td><td><span class="pill">name only</span></td></tr>
+          <tr><td>gridwork</td><td>Will ship the <code>gw</code> binary. No API yet</td><td><span class="pill">name only</span></td></tr>
+          <tr><td>xtask</td><td>Codegen and release glue. Not published</td><td><span class="pill">in-tree</span></td></tr>
           <tr><td>gwk-kernel</td><td>Daemon: event store, projections, attention, authority</td><td><span class="pill">planned</span></td></tr>
           <tr><td>gwk-pty</td><td>PTY engine: server-side VT, render-state deltas, reattach</td><td><span class="pill">planned</span></td></tr>
           <tr><td>gwk-adapter-*</td><td>Per-engine ACP and hooks adapters</td><td><span class="pill">planned</span></td></tr>
           <tr><td>gwk-tui</td><td>The client: modes, lenses, palette</td><td><span class="pill">planned</span></td></tr>
-          <tr><td>gridwork</td><td>CLI crate &mdash; headless verb twin of the TUI; ships <code>gw</code></td><td><span class="pill">planned</span></td></tr>
         </tbody>
       </table>
     </div>

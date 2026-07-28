@@ -5,7 +5,7 @@ mitigation lives. Written for contributors: if your change touches one of
 these boundaries, the relevant stance is review criteria, not background
 reading. Reporting: see `SECURITY.md`.
 
-GridWork is pre-alpha, stage 1 of 5 (see `ROADMAP.md`) — several stances below
+GridWork is pre-alpha, stage 2 of 5 (see `ROADMAP.md`) — several stances below
 are design commitments whose enforcing code does not exist yet. Each stance
 therefore carries a status: **in force** (enforced at HEAD), **partial**
 (naming what is enforced versus designed), or **designed, not yet built**. A

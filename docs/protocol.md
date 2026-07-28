@@ -5,6 +5,10 @@ phase; the exact byte-level frame encoding is finalized with the kernel and
 captured as a recorded decision** — clients written against the semantics
 will not need redesign, only a codec.
 
+> **Nothing here is implemented.** There is no kernel, no socket, and no
+> framing code in the tree — write a client against these semantics if you want
+> to be ready, but you cannot connect to anything today.
+
 ## Connection and hello
 
 Clients connect to the kernel's Unix domain socket (remote: SSH to the host,
