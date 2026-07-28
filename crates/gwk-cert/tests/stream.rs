@@ -754,6 +754,103 @@ fn mutant_state_change_on_an_uncreated_aggregate() {
 }
 
 #[test]
+fn capitalized_aggregate_type_still_runs_the_fsm_ladder() {
+    // "Attempt" used to fall into the open world and skip the flip rule, so a
+    // running->blocked flip by the wrong actor with no receipt certified
+    // clean. Normalized, it runs the ladder and reds both — plus the
+    // non-canonical spelling itself.
+    let events = vec![
+        event(
+            1,
+            "Attempt",
+            "att-1",
+            1,
+            "attempt_created",
+            "kernel",
+            serde_json::json!({}),
+        ),
+        event(
+            2,
+            "Attempt",
+            "att-1",
+            2,
+            "attempt_state_changed",
+            "kernel",
+            change("queued", "leased"),
+        ),
+        event(
+            3,
+            "Attempt",
+            "att-1",
+            3,
+            "attempt_state_changed",
+            "kernel",
+            change("leased", "starting"),
+        ),
+        event(
+            4,
+            "Attempt",
+            "att-1",
+            4,
+            "attempt_state_changed",
+            "kernel",
+            change("starting", "running"),
+        ),
+        event(
+            5,
+            "Attempt",
+            "att-1",
+            5,
+            "attempt_state_changed",
+            "engine",
+            change("running", "blocked"),
+        ),
+    ];
+    let found = codes(&events);
+    assert!(found.contains(&FindingCode::FlipWrongActor));
+    assert!(found.contains(&FindingCode::FlipMissingReceipt));
+    assert!(found.contains(&FindingCode::EnvelopeMalformed));
+}
+
+#[test]
+fn trailing_space_aggregate_type_still_catches_a_terminal_mutation() {
+    // "task " (trailing space) used to skip the FSM, so leaving a terminal
+    // certified clean. Normalized, the terminal mutation reds.
+    let events = vec![
+        event(
+            1,
+            "task ",
+            "task-1",
+            1,
+            "task_created",
+            "operator",
+            serde_json::json!({}),
+        ),
+        event(
+            2,
+            "task ",
+            "task-1",
+            2,
+            "task_state_changed",
+            "kernel",
+            change("submitted", "canceled"),
+        ),
+        event(
+            3,
+            "task ",
+            "task-1",
+            3,
+            "task_state_changed",
+            "kernel",
+            change("canceled", "working"),
+        ),
+    ];
+    let found = codes(&events);
+    assert!(found.contains(&FindingCode::TerminalMutation));
+    assert!(found.contains(&FindingCode::EnvelopeMalformed));
+}
+
+#[test]
 fn mutant_created_in_a_non_initial_state() {
     let mut events = valid_stream();
     // Born terminal: no transition ever runs, the whole ladder is skipped.

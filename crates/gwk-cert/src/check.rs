@@ -194,6 +194,21 @@ pub fn check_stream(events: &[EventEnvelope]) -> Vec<Finding> {
 
         // -- aggregate replay --
         let agg_key = (event.aggregate_type.clone(), event.aggregate_id.0.clone());
+        // A governed FSM is keyed by its canonical (trimmed, ascii-lowercase)
+        // aggregate_type. A non-canonical spelling ("Task", "task ") must NOT
+        // slip into the open world and get envelope checks only — normalize
+        // before every FSM dispatch, and red the malformed spelling itself so
+        // an evasion by casing/whitespace still runs the full ladder.
+        let agg_type = event.aggregate_type.trim().to_ascii_lowercase();
+        if agg_type != event.aggregate_type && machine_initial(&agg_type).is_some() {
+            findings.push(at(
+                FindingCode::EnvelopeMalformed,
+                format!(
+                    "aggregate_type {:?} is a non-canonical spelling of the governed FSM {agg_type:?}",
+                    event.aggregate_type
+                ),
+            ));
+        }
         let expected_version = replay.get(&agg_key).map(|r| r.version + 1).unwrap_or(1);
         if event.aggregate_version != expected_version {
             findings.push(at(
@@ -213,10 +228,7 @@ pub fn check_stream(events: &[EventEnvelope]) -> Vec<Finding> {
         // A machine-governed aggregate's history begins at its creation event;
         // anything else fabricates an aggregate mid-stream and skips the ladder.
         let is_creation = event.event_type.ends_with("_created");
-        if !is_creation
-            && machine_initial(&event.aggregate_type).is_some()
-            && !replay.contains_key(&agg_key)
-        {
+        if !is_creation && machine_initial(&agg_type).is_some() && !replay.contains_key(&agg_key) {
             findings.push(at(
                 FindingCode::CreationMissing,
                 format!(
@@ -235,7 +247,7 @@ pub fn check_stream(events: &[EventEnvelope]) -> Vec<Finding> {
                 ));
             }
             let seeded = payload_str(event, "state");
-            let initial = match machine_initial(&event.aggregate_type) {
+            let initial = match machine_initial(&agg_type) {
                 // A machine-governed aggregate is born in its declared initial
                 // state, nothing else; replay proceeds from the lawful one.
                 Some(want) => {
@@ -266,7 +278,7 @@ pub fn check_stream(events: &[EventEnvelope]) -> Vec<Finding> {
                     },
                 );
             }
-            if event.aggregate_type == "command" {
+            if agg_type == "command" {
                 let targets = payload_targets(event).unwrap_or_default();
                 let pre_canceled = targets
                     .iter()
@@ -302,7 +314,7 @@ pub fn check_stream(events: &[EventEnvelope]) -> Vec<Finding> {
                     format!("payload.from is {from} but replay says {}", current.state),
                 ));
             }
-            match fsm_check(&event.aggregate_type, from, to) {
+            match fsm_check(&agg_type, from, to) {
                 Some((_, true)) => {
                     findings.push(at(
                         FindingCode::TerminalMutation,
@@ -321,7 +333,7 @@ pub fn check_stream(events: &[EventEnvelope]) -> Vec<Finding> {
                 _ => {}
             }
             // The blocked-flip rule: this flip demands the liveness producer and a receipt.
-            if event.aggregate_type == "attempt"
+            if agg_type == "attempt"
                 && ((from == "running" && to == "blocked")
                     || (from == "blocked" && to == "running"))
             {
@@ -343,7 +355,7 @@ pub fn check_stream(events: &[EventEnvelope]) -> Vec<Finding> {
             }
             // Command outcome discipline (ruling: outcome iff terminal,
             // written with the terminal transition).
-            if event.aggregate_type == "command" {
+            if agg_type == "command" {
                 let outcome = payload_str(event, "outcome");
                 if to == "verification_complete" {
                     match outcome {
