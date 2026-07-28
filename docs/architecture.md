@@ -69,7 +69,10 @@ plaintext-addressed blobs. The first production backend is PostgreSQL; an **embe
 a real release phase, not an aspiration** — the port and its conformance
 suite exist so that claim is testable, and engine-specific mechanics
 (queues, notification channels, lock strategies) are confined to backend and
-deployment layers, never contract semantics.
+deployment layers, never contract semantics. For PostgreSQL that boundary is
+literal: `gwk-kernel` owns the driver, and everything it needs beyond the
+contract lives in a separate `gwk_internal` schema, so which schema an object
+sits in tells you whether it is contract or mechanism.
 
 ## Projections and watermarks
 
@@ -100,12 +103,15 @@ outcome cannot be established terminate as `unknown`, never a fabricated
 
 ## Contract surfaces
 
-The Rust crate `gwk-domain` is canonical. Two derived surfaces are checked,
+The Rust crate `gwk-domain` is canonical. Three derived surfaces are checked,
 not trusted: the generated TypeScript (`contracts/bindings.ts`, with golden
-round-trip fixtures decoded at runtime in CI) and the SQL DDL
+round-trip fixtures decoded at runtime in CI), the SQL DDL
 (`schema/0001_contract.sql`, applied clean against the pinned
-PostgreSQL major in CI). `gwk-cert` certifies event streams against the same
-tables the types are built from. Naming rules: `docs/contract/NAMING.md`.
+PostgreSQL major in CI), and the kernel's embedded copy of that DDL
+(`crates/gwk-kernel/src/contract_sql.rs`, which a published crate needs because
+`include_str!` cannot reach outside its own package). `gwk-cert` certifies
+event streams against the same tables the types are built from. Naming rules:
+`docs/contract/NAMING.md`.
 
 ## Platforms
 

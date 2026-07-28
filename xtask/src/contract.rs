@@ -600,6 +600,11 @@ pub fn run(check: bool) {
     let theme_json = signal_theme_json();
     let golden_files = goldens();
 
+    let contract_sql_path = root.join(crate::schema::GENERATED_PATH);
+    let contract_sql = std::fs::read_to_string(root.join("schema/0001_contract.sql"))
+        .expect("read schema/0001_contract.sql");
+    let contract_sql_rs = crate::schema::contract_sql_rs(&contract_sql);
+
     if !check {
         std::fs::create_dir_all(&goldens_dir).expect("create contracts/goldens");
         std::fs::write(contracts.join("bindings.ts"), &bindings_ts).expect("write bindings.ts");
@@ -608,15 +613,18 @@ pub fn run(check: bool) {
         for (name, content) in &golden_files {
             std::fs::write(goldens_dir.join(name), content).expect("write golden");
         }
+        std::fs::write(&contract_sql_path, &contract_sql_rs).expect("write contract_sql.rs");
         eprintln!(
-            "contract: wrote bindings.ts, signal-theme.json, {} goldens",
-            golden_files.len()
+            "contract: wrote bindings.ts, signal-theme.json, {} goldens, {}",
+            golden_files.len(),
+            crate::schema::GENERATED_PATH
         );
         return;
     }
 
     let mut drift: Vec<String> = Vec::new();
     check_file(&contracts.join("bindings.ts"), &bindings_ts, &mut drift);
+    check_file(&contract_sql_path, &contract_sql_rs, &mut drift);
     check_file(
         &contracts.join("signal-theme.json"),
         &theme_json,

@@ -1,0 +1,23 @@
+[package]
+name = "gwk-kernel"
+version = "0.0.1"
+description = "The GridWork kernel: the PostgreSQL backend behind the gwk contract"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# Held back from crates.io until the kernel serves the wire. The contract
+# crates are published because other people build against them; a half-built
+# daemon has no such audience.
+publish = false
+
+[dependencies]
+secrecy.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true
