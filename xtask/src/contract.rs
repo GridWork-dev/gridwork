@@ -509,32 +509,22 @@ mod tests {
 
     #[test]
     fn bindings_registry_matches_its_pin() {
-        // Scoped to the `bindings()` function BODY (brace-matched), not the
-        // whole file — this doc comment and this very test both say
-        // `.register::<T>()` in prose, and a whole-file scan would count
-        // its own words.
+        // Scoped to the `bindings()` function, not the whole file — this doc
+        // comment and this very test both say `.register::<T>()` in prose, and
+        // a whole-file scan would count its own words. The scope runs from the
+        // signature to the function's terminating column-0 `}` (the `"\n}\n"`
+        // guaranteed by the `cargo fmt --check` gate). No brace-depth counting,
+        // so a stray `}` inside a string or comment in the body — a future
+        // `format!("... }}")`, a lone `}` in a literal — can't underflow a
+        // usize (panic) or mis-scope: it is indented, never column-0.
         let source = include_str!("contract.rs");
         let sig_at = source
             .find("fn bindings() -> String {")
             .expect("bindings() signature present");
-        let body_start = sig_at + source[sig_at..].find('{').expect("opening brace");
-        let mut depth = 0usize;
-        let mut body_end = body_start;
-        for (offset, ch) in source[body_start..].char_indices() {
-            match ch {
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        body_end = body_start + offset;
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        assert!(body_end > body_start, "no matching closing brace found");
-        let body = &source[body_start..=body_end];
+        let close_rel = source[sig_at..]
+            .find("\n}\n")
+            .expect("bindings() closing brace");
+        let body = &source[sig_at..sig_at + close_rel];
         let actual = body.matches(".register::<").count();
         assert_eq!(
             actual, REGISTERED_ROOT_COUNT,
