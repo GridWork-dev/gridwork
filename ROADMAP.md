@@ -41,9 +41,9 @@ The shared language everything else speaks.
 
 ## 1.0
 
-All pillars complete and packaged. The binary takes its final name (`gw`), and
-distribution stops assuming you run your own postgres — a zero-setup embedded backend
-is part of 1.0 packaging, not before.
+All pillars complete and packaged: single-command install (`cargo install gridwork`
+and friends), and distribution stops assuming you run your own postgres — a zero-setup
+embedded backend is part of 1.0 packaging, not before.
 
 ## Principles that won't move
 

@@ -53,10 +53,11 @@ workspace — with what each stage delivers, lives in [ROADMAP.md](ROADMAP.md).
 | `gwk-pty` | PTY engine: server-side VT, render-state deltas, reattach | planned |
 | `gwk-adapter-*` | Per-engine ACP + hooks adapters | planned |
 | `gwk-tui` | The client: modes, lenses, palette | planned |
-| `gwk-cli` | Headless verb twin of the TUI | planned |
+| `gridwork` | CLI crate — headless verb twin of the TUI; ships the `gw` binary | planned |
 
-Crates are prefixed `gwk-` (the crates.io name `gw` is taken). The installed binary is
-`gwk` during pre-1.0 development and ships as `gw` at 1.0.
+Library crates are prefixed `gwk-` (the crates.io name `gw` belongs to an unrelated
+tool). **The binary is `gw`** — from the first build, permanently; installation is
+`cargo install gridwork` once the CLI crate publishes.
 
 ## Building
 
