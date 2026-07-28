@@ -396,12 +396,20 @@ export type EngineSession_Serialize = {
 /**
  *  One appended event. Immutable once written; `global_sequence` is assigned by
  *  the kernel append actor in commit order.
+ * 
+ *  The inline-payload byte bound ([`INLINE_PAYLOAD_MAX_BYTES`]) is enforced by
+ *  the certifier; consuming kernels must re-check it — this type itself is not
+ *  size-bounded.
  */
 export type EventEnvelope = EventEnvelope_Serialize | EventEnvelope_Deserialize;
 
 /**
  *  One appended event. Immutable once written; `global_sequence` is assigned by
  *  the kernel append actor in commit order.
+ * 
+ *  The inline-payload byte bound ([`INLINE_PAYLOAD_MAX_BYTES`]) is enforced by
+ *  the certifier; consuming kernels must re-check it — this type itself is not
+ *  size-bounded.
  */
 export type EventEnvelope_Deserialize = {
 	event_id: EventId,
@@ -432,6 +440,10 @@ export type EventEnvelope_Deserialize = {
 /**
  *  One appended event. Immutable once written; `global_sequence` is assigned by
  *  the kernel append actor in commit order.
+ * 
+ *  The inline-payload byte bound ([`INLINE_PAYLOAD_MAX_BYTES`]) is enforced by
+ *  the certifier; consuming kernels must re-check it — this type itself is not
+ *  size-bounded.
  */
 export type EventEnvelope_Serialize = {
 	event_id: EventId,
