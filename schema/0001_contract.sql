@@ -8,9 +8,11 @@
 -- Conventions:
 --   * every identifier snake_case; ids are opaque text
 --   * state values are exactly the wire strings of gwk-domain's FSM enums
---   * u64 counters (seq, fence_token, byte_size) are numeric(20,0) IN STORAGE
---     — a signed bigint tops out at 2^63-1, half the u64 wire range; the
---     decimal-string rule is a WIRE-format rule (JSON), not a storage rule
+--   * u64 counters (seq, fence_token, byte_size) are numeric(20,0) IN STORAGE,
+--     CHECK-bounded to [0, 2^64-1] (18446744073709551615) — numeric(20,0)
+--     alone admits ±(10^20-1), overshooting u64 in both directions. A signed
+--     bigint tops out at 2^63-1, half the u64 wire range; the decimal-string
+--     rule is a WIRE-format rule (JSON), not a storage rule
 --   * timestamps are timestamptz
 
 BEGIN;
@@ -30,7 +32,8 @@ CREATE SCHEMA IF NOT EXISTS gwk;
 -- seq N+1 before an uncommitted seq N exists, then never see N. A single
 -- append actor assigning seq at commit closes that hole by construction.
 CREATE TABLE gwk.event (
-  seq               numeric(20,0) PRIMARY KEY,
+  seq               numeric(20,0) PRIMARY KEY
+                      CHECK (seq >= 0 AND seq <= 18446744073709551615),
   event_id          text NOT NULL UNIQUE,
   project_id        text NOT NULL,
   aggregate_type    text NOT NULL,
@@ -218,7 +221,8 @@ CREATE TABLE gwk.lease (
   path         text,
   branch       text,
   base_sha     text,
-  fence_token  numeric(20,0),
+  fence_token  numeric(20,0)
+                 CHECK (fence_token >= 0 AND fence_token <= 18446744073709551615),
   heartbeat_at timestamptz,
   expires_at   timestamptz,
   dirty        boolean NOT NULL DEFAULT false,
@@ -477,7 +481,8 @@ CREATE TABLE gwk.evidence (
   kind       text NOT NULL,
   ref        text NOT NULL,
   digest     text,
-  byte_size  numeric(20,0) CHECK (byte_size >= 0),
+  byte_size  numeric(20,0)
+               CHECK (byte_size >= 0 AND byte_size <= 18446744073709551615),
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
