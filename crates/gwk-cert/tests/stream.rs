@@ -281,6 +281,47 @@ fn mutant_one_version_gap() {
 }
 
 #[test]
+fn interleaved_non_state_event_keeps_the_version_cursor_in_sync() {
+    let mut events = valid_stream();
+    // A non-state event between two state changes consumes a version like any
+    // other append; the stream stays contiguous and must certify clean.
+    events.insert(
+        14,
+        event(
+            700,
+            "task",
+            "task-1",
+            3,
+            "task_note_added",
+            "operator",
+            serde_json::json!({ "note": "checkpoint" }),
+        ),
+    );
+    events[15].aggregate_version = 4; // working->canceled now sits at v4
+    assert_eq!(check_stream(&events), vec![]);
+}
+
+#[test]
+fn mutant_reused_aggregate_version() {
+    let mut events = valid_stream();
+    // A non-state event takes version 2, then the state change REUSES 2 —
+    // unrepresentable in a store with a unique version constraint.
+    events.insert(
+        3,
+        event(
+            4,
+            "attempt",
+            "att-1",
+            2,
+            "attempt_output_appended",
+            "kernel",
+            serde_json::json!({ "chunk": "x" }),
+        ),
+    );
+    assert!(codes(&events).contains(&FindingCode::AggregateVersionGap));
+}
+
+#[test]
 fn mutant_flip_by_wrong_actor() {
     let mut events = valid_stream();
     events[6].actor.kind = "engine".into();

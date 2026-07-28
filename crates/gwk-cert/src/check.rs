@@ -166,6 +166,12 @@ pub fn check_stream(events: &[EventEnvelope]) -> Vec<Finding> {
                 ),
             ));
         }
+        // The version cursor advances on EVERY event of a tracked aggregate —
+        // state-bearing or not — so a non-state event counts toward contiguity
+        // and a reused or rewound aggregate_version cannot hide behind one.
+        if let Some(current) = replay.get_mut(&agg_key) {
+            current.version = event.aggregate_version;
+        }
 
         if event.event_type.ends_with("_created") {
             if replay.contains_key(&agg_key) {
@@ -279,7 +285,6 @@ pub fn check_stream(events: &[EventEnvelope]) -> Vec<Finding> {
             }
             if let Some(current) = replay.get_mut(&agg_key) {
                 current.state = to.to_string();
-                current.version = event.aggregate_version;
             } else {
                 replay.insert(
                     agg_key.clone(),
