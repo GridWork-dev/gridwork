@@ -25,10 +25,11 @@ granted in the hello.
 
 ## Framing and bounds
 
-Messages carry a big-endian unsigned 32-bit length followed by exactly one UTF-8 JSON
-value. The frame maximum is 1 MiB. Empty, oversized, invalid UTF-8, recursively
-duplicate-keyed, unknown-field, and trailing-byte inputs are refused. Bounds are part of
-the contract:
+Messages carry a big-endian unsigned 32-bit body length, a one-byte frame kind, and the
+body. The length includes the kind byte and excludes the prefix; it is
+`1..=4,194,304`. Kind `0x01` is strict UTF-8 JSON control; kind `0x02` is reserved and
+refused in v1. Empty, oversized, unknown-kind, invalid UTF-8, recursively duplicate-keyed,
+unknown-field, and trailing-byte inputs are refused. Bounds are part of the contract:
 
 - a frame has a hard maximum size (rejected, not truncated, when exceeded),
 - inline event payloads are bounded at 64 KiB serialized — larger content

@@ -12,12 +12,16 @@ silently weakening a major-version boundary.
 
 ## Decision
 
-Protocol v1 uses one unsigned big-endian 32-bit payload length followed by exactly one
-UTF-8 JSON value. The maximum payload length is 1 MiB. A zero-length frame, oversized
-length, invalid UTF-8, trailing bytes, duplicate key at any nesting depth, unknown field,
-noncanonical decimal string, or unsupported major version is a typed refusal.
+Protocol v1 uses one unsigned big-endian 32-bit body length, a one-byte frame kind, then
+the frame body. The length includes the kind byte and excludes the prefix; it is
+`1..=4,194,304`. Kind `0x01` carries exactly one UTF-8 JSON control value. Kind `0x02` is
+reserved for the later terminal engine and is neither advertised nor accepted in v1. A
+zero or oversized length, unknown kind, invalid UTF-8, trailing bytes, duplicate key at
+any nesting depth, unknown field, noncanonical decimal string, or unsupported major
+version is a typed refusal.
 
-The first request is `hello`; no other request is decoded before negotiation succeeds.
+The first control frame is `hello`, is at most 64 KiB, and must arrive within five
+seconds; no other request is decoded before negotiation succeeds.
 All envelopes carry `protocol_version = 1` and a request ID. Wire `u64` values are
 canonical decimal strings. JSON objects use generated strict schemas and tagged unions;
 clients never infer a variant from field presence.
