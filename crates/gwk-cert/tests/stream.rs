@@ -371,6 +371,145 @@ fn mutant_clean_outcome_with_no_targets_anywhere() {
 }
 
 #[test]
+fn mutant_clean_over_a_narrowed_target_list_reds_the_dropped_target() {
+    // Creation declares two targets; the terminal event narrows its list to
+    // one, leaving att-2 running. The creation-declared set is the floor — the
+    // dropped target must red, not be silently forgiven.
+    let events = vec![
+        event(
+            1,
+            "attempt",
+            "att-1",
+            1,
+            "attempt_created",
+            "kernel",
+            serde_json::json!({}),
+        ),
+        event(
+            2,
+            "attempt",
+            "att-1",
+            2,
+            "attempt_state_changed",
+            "kernel",
+            change("queued", "leased"),
+        ),
+        event(
+            3,
+            "attempt",
+            "att-1",
+            3,
+            "attempt_state_changed",
+            "kernel",
+            change("leased", "starting"),
+        ),
+        event(
+            4,
+            "attempt",
+            "att-1",
+            4,
+            "attempt_state_changed",
+            "kernel",
+            change("starting", "running"),
+        ),
+        event(
+            5,
+            "attempt",
+            "att-1",
+            5,
+            "attempt_state_changed",
+            "kernel",
+            change("running", "canceling"),
+        ),
+        event(
+            6,
+            "attempt",
+            "att-1",
+            6,
+            "attempt_state_changed",
+            "kernel",
+            change("canceling", "canceled"),
+        ),
+        event(
+            7,
+            "attempt",
+            "att-2",
+            1,
+            "attempt_created",
+            "kernel",
+            serde_json::json!({}),
+        ),
+        event(
+            8,
+            "attempt",
+            "att-2",
+            2,
+            "attempt_state_changed",
+            "kernel",
+            change("queued", "leased"),
+        ),
+        event(
+            9,
+            "attempt",
+            "att-2",
+            3,
+            "attempt_state_changed",
+            "kernel",
+            change("leased", "starting"),
+        ),
+        event(
+            10,
+            "attempt",
+            "att-2",
+            4,
+            "attempt_state_changed",
+            "kernel",
+            change("starting", "running"),
+        ),
+        event(
+            11,
+            "command",
+            "cmd-1",
+            1,
+            "command_created",
+            "operator",
+            serde_json::json!({ "kind": "stop_attempt", "targets": ["att-1", "att-2"] }),
+        ),
+        event(
+            12,
+            "command",
+            "cmd-1",
+            2,
+            "command_state_changed",
+            "kernel",
+            change("issued", "targeted"),
+        ),
+        event(
+            13,
+            "command",
+            "cmd-1",
+            3,
+            "command_state_changed",
+            "kernel",
+            change("targeted", "signaled"),
+        ),
+        event(
+            14,
+            "command",
+            "cmd-1",
+            4,
+            "command_state_changed",
+            "kernel",
+            serde_json::json!({
+                "from": "signaled", "to": "verification_complete",
+                "outcome": "clean", "targets": ["att-1"]
+            }),
+        ),
+    ];
+    assert!(codes(&events).contains(&FindingCode::OutcomeDisagreesWithTargets));
+}
+
+#[test]
 fn mutant_clean_outcome_with_unstopped_target() {
     let mut events = valid_stream();
     // The attempt ends `unknown` instead of `canceled`; `clean` now lies.

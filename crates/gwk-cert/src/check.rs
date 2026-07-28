@@ -354,11 +354,32 @@ pub fn check_stream(events: &[EventEnvelope]) -> Vec<Finding> {
                             // its targets: each must be `canceled` right now,
                             // and not already canceled before it was issued.
                             let ctx = commands.get(&event.aggregate_id.0);
-                            // Prefer the terminal event's own targets, else
-                            // the ones carried from the command's creation.
-                            let targets = payload_targets(event)
-                                .or_else(|| ctx.map(|c| c.targets.clone()))
-                                .unwrap_or_default();
+                            // The creation-declared set is the FLOOR a `clean`
+                            // claim must cover. The terminal event may RESTATE
+                            // the targets but never NARROW them: union the two,
+                            // red any declared target the terminal event
+                            // dropped, and judge agreement over the full set.
+                            let created: Vec<String> =
+                                ctx.map(|c| c.targets.clone()).unwrap_or_default();
+                            let restated = payload_targets(event);
+                            if let Some(listed) = &restated {
+                                for dropped in created.iter().filter(|t| !listed.contains(t)) {
+                                    findings.push(at(
+                                        FindingCode::OutcomeDisagreesWithTargets,
+                                        format!(
+                                            "outcome clean but declared target {dropped} was dropped from the terminal event's target list"
+                                        ),
+                                    ));
+                                }
+                            }
+                            let mut targets = created;
+                            if let Some(listed) = restated {
+                                for t in listed {
+                                    if !targets.contains(&t) {
+                                        targets.push(t);
+                                    }
+                                }
+                            }
                             if targets.is_empty() {
                                 findings.push(at(
                                     FindingCode::OutcomeDisagreesWithTargets,
