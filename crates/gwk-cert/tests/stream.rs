@@ -737,6 +737,84 @@ fn mutant_second_creation() {
 }
 
 #[test]
+fn open_world_contiguous_versions_certify_clean() {
+    // A "gate" is outside the four public FSMs. Its contiguous versions must be
+    // tracked like any aggregate's — non-state events used to leave it untracked
+    // and false-red an AggregateVersionGap at v2 ("expects 1").
+    let events = vec![
+        event(
+            1,
+            "gate",
+            "gate-1",
+            1,
+            "gate_opened",
+            "kernel",
+            serde_json::json!({}),
+        ),
+        event(
+            2,
+            "gate",
+            "gate-1",
+            2,
+            "gate_checked",
+            "kernel",
+            serde_json::json!({}),
+        ),
+        event(
+            3,
+            "gate",
+            "gate-1",
+            3,
+            "gate_closed",
+            "kernel",
+            serde_json::json!({}),
+        ),
+    ];
+    assert_eq!(check_stream(&events), vec![]);
+}
+
+#[test]
+fn uncreated_machine_aggregate_reds_creation_missing_exactly_once() {
+    // Three non-state events on an attempt that was never created. Keyed off a
+    // separate seen-creation set, CreationMissing fires once — not once per
+    // event as it did when keyed on `!replay.contains_key`.
+    let events = vec![
+        event(
+            1,
+            "attempt",
+            "att-x",
+            1,
+            "attempt_note_added",
+            "kernel",
+            serde_json::json!({}),
+        ),
+        event(
+            2,
+            "attempt",
+            "att-x",
+            2,
+            "attempt_note_added",
+            "kernel",
+            serde_json::json!({}),
+        ),
+        event(
+            3,
+            "attempt",
+            "att-x",
+            3,
+            "attempt_note_added",
+            "kernel",
+            serde_json::json!({}),
+        ),
+    ];
+    let missing = check_stream(&events)
+        .into_iter()
+        .filter(|f| f.code == FindingCode::CreationMissing)
+        .count();
+    assert_eq!(missing, 1);
+}
+
+#[test]
 fn mutant_state_change_on_an_uncreated_aggregate() {
     let mut events = valid_stream();
     // An aggregate fabricated mid-stream, straight into a terminal — the

@@ -16,7 +16,7 @@
 //! requires the storage layer (append-only enforcement + provenance), not
 //! stream inspection.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use gwk_domain::envelope::{
     ENVELOPE_SCHEMA_VERSION, EventEnvelope, INLINE_PAYLOAD_MAX_BYTES, accept_schema_version,
@@ -135,6 +135,10 @@ pub fn check_stream(events: &[EventEnvelope]) -> Vec<Finding> {
     let mut last_seq: Option<u64> = None;
     let mut replay: HashMap<(String, String), ReplayState> = HashMap::new();
     let mut seen_keys: HashMap<(String, String, String), ()> = HashMap::new();
+    // Aggregates that have had their `_created` event — the ledger that keys
+    // CreatedNotFirst and CreationMissing, kept separate from `replay` (which
+    // now tracks EVERY aggregate for version contiguity, created or not).
+    let mut seen_creation: HashSet<(String, String)> = HashSet::new();
     // command aggregate id -> what creation declared
     let mut commands: HashMap<String, CommandCtx> = HashMap::new();
 
@@ -219,16 +223,25 @@ pub fn check_stream(events: &[EventEnvelope]) -> Vec<Finding> {
                 ),
             ));
         }
-        // The version cursor advances on EVERY event of a tracked aggregate —
-        // state-bearing or not — so a non-state event counts toward contiguity
-        // and a reused or rewound aggregate_version cannot hide behind one.
-        if let Some(current) = replay.get_mut(&agg_key) {
-            current.version = event.aggregate_version;
-        }
+        // The version cursor advances on EVERY event of ANY aggregate the
+        // checker sees — governed or open-world, state-bearing or not — so a
+        // non-state event counts toward contiguity (an open-world type's
+        // versions 1,2,3 no longer false-red a gap) and a reused or rewound
+        // aggregate_version cannot hide behind one. `first_seen` is captured
+        // before the entry lands: this is the aggregate's first event.
+        let first_seen = !replay.contains_key(&agg_key);
+        replay
+            .entry(agg_key.clone())
+            .and_modify(|current| current.version = event.aggregate_version)
+            .or_insert_with(|| ReplayState {
+                state: String::new(),
+                version: event.aggregate_version,
+            });
         // A machine-governed aggregate's history begins at its creation event;
         // anything else fabricates an aggregate mid-stream and skips the ladder.
+        // Reported ONCE, on that first event — not once per following event.
         let is_creation = event.event_type.ends_with("_created");
-        if !is_creation && machine_initial(&agg_type).is_some() && !replay.contains_key(&agg_key) {
+        if first_seen && !is_creation && machine_initial(&agg_type).is_some() {
             findings.push(at(
                 FindingCode::CreationMissing,
                 format!(
@@ -239,8 +252,8 @@ pub fn check_stream(events: &[EventEnvelope]) -> Vec<Finding> {
         }
 
         if is_creation {
-            let already_exists = replay.contains_key(&agg_key);
-            if already_exists {
+            let already_created = seen_creation.contains(&agg_key);
+            if already_created {
                 findings.push(at(
                     FindingCode::CreatedNotFirst,
                     "creation event on an aggregate that already exists".to_string(),
@@ -267,16 +280,14 @@ pub fn check_stream(events: &[EventEnvelope]) -> Vec<Finding> {
                 None => seeded.unwrap_or(""),
             };
             // A duplicate creation must NOT reset an existing aggregate's
-            // replay cursor to its initial state — that would erase a terminal
-            // and mask the mutation that followed. Seed only the first one.
-            if !already_exists {
-                replay.insert(
-                    agg_key.clone(),
-                    ReplayState {
-                        state: initial.to_string(),
-                        version: event.aggregate_version,
-                    },
-                );
+            // replay state to its initial one — that would erase a terminal and
+            // mask the mutation that followed. Seed the state only on the first
+            // real creation; the version cursor was already advanced above.
+            if !already_created {
+                seen_creation.insert(agg_key.clone());
+                if let Some(current) = replay.get_mut(&agg_key) {
+                    current.state = initial.to_string();
+                }
             }
             if agg_type == "command" {
                 let targets = payload_targets(event).unwrap_or_default();
@@ -444,16 +455,10 @@ pub fn check_stream(events: &[EventEnvelope]) -> Vec<Finding> {
                     ));
                 }
             }
+            // The version cursor was advanced above; record only the resulting
+            // state. The tracking entry always exists by now.
             if let Some(current) = replay.get_mut(&agg_key) {
                 current.state = to.to_string();
-            } else {
-                replay.insert(
-                    agg_key.clone(),
-                    ReplayState {
-                        state: to.to_string(),
-                        version: event.aggregate_version,
-                    },
-                );
             }
         }
     }
