@@ -218,12 +218,24 @@ pub async fn check_read_limit_is_clamped<S: EventStore>(store: &S) {
             .await
             .expect("append");
     }
-    let page = store
+    // A `limit` below the page size is honoured EXACTLY — a store that ignored
+    // `limit` would return all 8 here. (The prior assertion, `len() <= 65536`,
+    // was vacuous: 8 is always <= MAX_READ_LIMIT.)
+    let short = store.read_from(None, 3).await.expect("read");
+    assert_eq!(
+        short.len(),
+        3,
+        "read_from must honour a limit below the page size"
+    );
+    // An enormous `limit` must not error and must clamp to MAX_READ_LIMIT — with
+    // 8 stored events that means all 8 come back, never more.
+    let huge = store
         .read_from(None, usize::MAX)
         .await
         .expect("a huge limit must not error");
+    assert_eq!(huge.len(), 8, "a huge limit returns all available events");
     assert!(
-        page.len() <= MAX_READ_LIMIT,
+        huge.len() <= MAX_READ_LIMIT,
         "read_from must clamp to MAX_READ_LIMIT"
     );
 }
