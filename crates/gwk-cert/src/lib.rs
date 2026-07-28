@@ -11,4 +11,5 @@
 //! - the STREAM checker (the `gwk-cert` CLI) — validates any exported event
 //!   stream against the contract.
 
+pub mod check;
 pub mod conformance;

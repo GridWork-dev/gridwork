@@ -15,6 +15,7 @@ dependencies = [
  "gwk-domain",
  "serde",
  "serde_json",
+ "specta",
 ]
 
 [[package]]

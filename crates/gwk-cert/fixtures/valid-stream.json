@@ -1,0 +1,408 @@
+[
+  {
+    "event_id": "evt-0001",
+    "project_id": "proj-slice",
+    "aggregate_type": "task",
+    "aggregate_id": "task-1",
+    "aggregate_version": 1,
+    "event_type": "task_created",
+    "schema_version": 1,
+    "global_sequence": "1",
+    "occurred_at": "2026-07-27T12:00:00Z",
+    "appended_at": "2026-07-27T12:00:00Z",
+    "actor": {
+      "kind": "operator",
+      "id": "operator-1"
+    },
+    "origin": {
+      "system": "kernel"
+    },
+    "correlation_id": "slice-1",
+    "idempotency_key": "key-1",
+    "payload": {}
+  },
+  {
+    "event_id": "evt-0002",
+    "project_id": "proj-slice",
+    "aggregate_type": "task",
+    "aggregate_id": "task-1",
+    "aggregate_version": 2,
+    "event_type": "task_state_changed",
+    "schema_version": 1,
+    "global_sequence": "2",
+    "occurred_at": "2026-07-27T12:00:00Z",
+    "appended_at": "2026-07-27T12:00:00Z",
+    "actor": {
+      "kind": "kernel",
+      "id": "kernel-1"
+    },
+    "origin": {
+      "system": "kernel"
+    },
+    "correlation_id": "slice-1",
+    "idempotency_key": "key-2",
+    "payload": {
+      "from": "submitted",
+      "to": "working"
+    }
+  },
+  {
+    "event_id": "evt-0003",
+    "project_id": "proj-slice",
+    "aggregate_type": "attempt",
+    "aggregate_id": "att-1",
+    "aggregate_version": 1,
+    "event_type": "attempt_created",
+    "schema_version": 1,
+    "global_sequence": "3",
+    "occurred_at": "2026-07-27T12:00:00Z",
+    "appended_at": "2026-07-27T12:00:00Z",
+    "actor": {
+      "kind": "kernel",
+      "id": "kernel-1"
+    },
+    "origin": {
+      "system": "kernel"
+    },
+    "correlation_id": "slice-1",
+    "idempotency_key": "key-3",
+    "payload": {}
+  },
+  {
+    "event_id": "evt-0005",
+    "project_id": "proj-slice",
+    "aggregate_type": "attempt",
+    "aggregate_id": "att-1",
+    "aggregate_version": 2,
+    "event_type": "attempt_state_changed",
+    "schema_version": 1,
+    "global_sequence": "5",
+    "occurred_at": "2026-07-27T12:00:00Z",
+    "appended_at": "2026-07-27T12:00:00Z",
+    "actor": {
+      "kind": "kernel",
+      "id": "kernel-1"
+    },
+    "origin": {
+      "system": "kernel"
+    },
+    "correlation_id": "slice-1",
+    "idempotency_key": "key-5",
+    "payload": {
+      "from": "queued",
+      "to": "leased"
+    }
+  },
+  {
+    "event_id": "evt-0008",
+    "project_id": "proj-slice",
+    "aggregate_type": "attempt",
+    "aggregate_id": "att-1",
+    "aggregate_version": 3,
+    "event_type": "attempt_state_changed",
+    "schema_version": 1,
+    "global_sequence": "8",
+    "occurred_at": "2026-07-27T12:00:00Z",
+    "appended_at": "2026-07-27T12:00:00Z",
+    "actor": {
+      "kind": "kernel",
+      "id": "kernel-1"
+    },
+    "origin": {
+      "system": "kernel"
+    },
+    "correlation_id": "slice-1",
+    "idempotency_key": "key-8",
+    "payload": {
+      "from": "leased",
+      "to": "starting"
+    }
+  },
+  {
+    "event_id": "evt-0013",
+    "project_id": "proj-slice",
+    "aggregate_type": "attempt",
+    "aggregate_id": "att-1",
+    "aggregate_version": 4,
+    "event_type": "attempt_state_changed",
+    "schema_version": 1,
+    "global_sequence": "13",
+    "occurred_at": "2026-07-27T12:00:00Z",
+    "appended_at": "2026-07-27T12:00:00Z",
+    "actor": {
+      "kind": "kernel",
+      "id": "kernel-1"
+    },
+    "origin": {
+      "system": "kernel"
+    },
+    "correlation_id": "slice-1",
+    "idempotency_key": "key-13",
+    "payload": {
+      "from": "starting",
+      "to": "running"
+    }
+  },
+  {
+    "event_id": "evt-0021",
+    "project_id": "proj-slice",
+    "aggregate_type": "attempt",
+    "aggregate_id": "att-1",
+    "aggregate_version": 5,
+    "event_type": "attempt_state_changed",
+    "schema_version": 1,
+    "global_sequence": "21",
+    "occurred_at": "2026-07-27T12:00:00Z",
+    "appended_at": "2026-07-27T12:00:00Z",
+    "actor": {
+      "kind": "liveness_producer",
+      "id": "liveness_producer-1"
+    },
+    "origin": {
+      "system": "kernel"
+    },
+    "correlation_id": "slice-1",
+    "idempotency_key": "key-21",
+    "payload": {
+      "from": "running",
+      "receipt_id": "r-1",
+      "to": "blocked"
+    }
+  },
+  {
+    "event_id": "evt-0034",
+    "project_id": "proj-slice",
+    "aggregate_type": "receipt",
+    "aggregate_id": "r-1",
+    "aggregate_version": 1,
+    "event_type": "receipt_recorded",
+    "schema_version": 1,
+    "global_sequence": "34",
+    "occurred_at": "2026-07-27T12:00:00Z",
+    "appended_at": "2026-07-27T12:00:00Z",
+    "actor": {
+      "kind": "liveness_producer",
+      "id": "liveness_producer-1"
+    },
+    "origin": {
+      "system": "kernel"
+    },
+    "correlation_id": "slice-1",
+    "idempotency_key": "key-34",
+    "payload": {
+      "action": "state_flip",
+      "from": "running",
+      "observed_basis": "no heartbeat 120s",
+      "subject_id": "att-1",
+      "subject_type": "attempt",
+      "to": "blocked"
+    }
+  },
+  {
+    "event_id": "evt-0055",
+    "project_id": "proj-slice",
+    "aggregate_type": "attempt",
+    "aggregate_id": "att-1",
+    "aggregate_version": 6,
+    "event_type": "attempt_state_changed",
+    "schema_version": 1,
+    "global_sequence": "55",
+    "occurred_at": "2026-07-27T12:00:00Z",
+    "appended_at": "2026-07-27T12:00:00Z",
+    "actor": {
+      "kind": "liveness_producer",
+      "id": "liveness_producer-1"
+    },
+    "origin": {
+      "system": "kernel"
+    },
+    "correlation_id": "slice-1",
+    "idempotency_key": "key-55",
+    "payload": {
+      "from": "blocked",
+      "receipt_id": "r-2",
+      "to": "running"
+    }
+  },
+  {
+    "event_id": "evt-0089",
+    "project_id": "proj-slice",
+    "aggregate_type": "command",
+    "aggregate_id": "cmd-1",
+    "aggregate_version": 1,
+    "event_type": "command_created",
+    "schema_version": 1,
+    "global_sequence": "89",
+    "occurred_at": "2026-07-27T12:00:00Z",
+    "appended_at": "2026-07-27T12:00:00Z",
+    "actor": {
+      "kind": "operator",
+      "id": "operator-1"
+    },
+    "origin": {
+      "system": "kernel"
+    },
+    "correlation_id": "slice-1",
+    "idempotency_key": "key-89",
+    "payload": {
+      "kind": "stop_attempt",
+      "targets": [
+        "att-1"
+      ]
+    }
+  },
+  {
+    "event_id": "evt-0144",
+    "project_id": "proj-slice",
+    "aggregate_type": "command",
+    "aggregate_id": "cmd-1",
+    "aggregate_version": 2,
+    "event_type": "command_state_changed",
+    "schema_version": 1,
+    "global_sequence": "144",
+    "occurred_at": "2026-07-27T12:00:00Z",
+    "appended_at": "2026-07-27T12:00:00Z",
+    "actor": {
+      "kind": "kernel",
+      "id": "kernel-1"
+    },
+    "origin": {
+      "system": "kernel"
+    },
+    "correlation_id": "slice-1",
+    "idempotency_key": "key-144",
+    "payload": {
+      "from": "issued",
+      "to": "targeted"
+    }
+  },
+  {
+    "event_id": "evt-0233",
+    "project_id": "proj-slice",
+    "aggregate_type": "command",
+    "aggregate_id": "cmd-1",
+    "aggregate_version": 3,
+    "event_type": "command_state_changed",
+    "schema_version": 1,
+    "global_sequence": "233",
+    "occurred_at": "2026-07-27T12:00:00Z",
+    "appended_at": "2026-07-27T12:00:00Z",
+    "actor": {
+      "kind": "kernel",
+      "id": "kernel-1"
+    },
+    "origin": {
+      "system": "kernel"
+    },
+    "correlation_id": "slice-1",
+    "idempotency_key": "key-233",
+    "payload": {
+      "from": "targeted",
+      "to": "signaled"
+    }
+  },
+  {
+    "event_id": "evt-0377",
+    "project_id": "proj-slice",
+    "aggregate_type": "attempt",
+    "aggregate_id": "att-1",
+    "aggregate_version": 7,
+    "event_type": "attempt_state_changed",
+    "schema_version": 1,
+    "global_sequence": "377",
+    "occurred_at": "2026-07-27T12:00:00Z",
+    "appended_at": "2026-07-27T12:00:00Z",
+    "actor": {
+      "kind": "kernel",
+      "id": "kernel-1"
+    },
+    "origin": {
+      "system": "kernel"
+    },
+    "correlation_id": "slice-1",
+    "idempotency_key": "key-377",
+    "payload": {
+      "from": "running",
+      "to": "canceling"
+    }
+  },
+  {
+    "event_id": "evt-0610",
+    "project_id": "proj-slice",
+    "aggregate_type": "attempt",
+    "aggregate_id": "att-1",
+    "aggregate_version": 8,
+    "event_type": "attempt_state_changed",
+    "schema_version": 1,
+    "global_sequence": "610",
+    "occurred_at": "2026-07-27T12:00:00Z",
+    "appended_at": "2026-07-27T12:00:00Z",
+    "actor": {
+      "kind": "kernel",
+      "id": "kernel-1"
+    },
+    "origin": {
+      "system": "kernel"
+    },
+    "correlation_id": "slice-1",
+    "idempotency_key": "key-610",
+    "payload": {
+      "from": "canceling",
+      "to": "canceled"
+    }
+  },
+  {
+    "event_id": "evt-0987",
+    "project_id": "proj-slice",
+    "aggregate_type": "task",
+    "aggregate_id": "task-1",
+    "aggregate_version": 3,
+    "event_type": "task_state_changed",
+    "schema_version": 1,
+    "global_sequence": "987",
+    "occurred_at": "2026-07-27T12:00:00Z",
+    "appended_at": "2026-07-27T12:00:00Z",
+    "actor": {
+      "kind": "kernel",
+      "id": "kernel-1"
+    },
+    "origin": {
+      "system": "kernel"
+    },
+    "correlation_id": "slice-1",
+    "idempotency_key": "key-987",
+    "payload": {
+      "from": "working",
+      "to": "canceled"
+    }
+  },
+  {
+    "event_id": "evt-1597",
+    "project_id": "proj-slice",
+    "aggregate_type": "command",
+    "aggregate_id": "cmd-1",
+    "aggregate_version": 4,
+    "event_type": "command_state_changed",
+    "schema_version": 1,
+    "global_sequence": "1597",
+    "occurred_at": "2026-07-27T12:00:00Z",
+    "appended_at": "2026-07-27T12:00:00Z",
+    "actor": {
+      "kind": "kernel",
+      "id": "kernel-1"
+    },
+    "origin": {
+      "system": "kernel"
+    },
+    "correlation_id": "slice-1",
+    "idempotency_key": "key-1597",
+    "payload": {
+      "from": "signaled",
+      "outcome": "clean",
+      "targets": [
+        "att-1"
+      ],
+      "to": "verification_complete"
+    }
+  }
+]
