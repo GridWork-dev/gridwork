@@ -1,0 +1,5 @@
+# Allowlist form: the site image needs ONLY site/. Everything else — source,
+# history, contracts, tooling — stays out of every build context by default.
+*
+!site/
+site/README.md

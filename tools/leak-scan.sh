@@ -26,7 +26,9 @@ cd "$here/.."
 # the gate. Key on ENCODING, not mime family — file(1) types scripts as
 # application/javascript etc.; what matters is that the bytes are greppable text.
 # Empty files report encoding "binary" but are trivially safe.
-binaries=$(git ls-files -z | xargs -0 -r file --mime-encoding \
+# One reviewed binary asset is exempt: site/og.png (the share card — tool-generated
+# from public copy + the public palette, never hand-edited).
+binaries=$(git ls-files -z ':!site/og.png' | xargs -0 -r file --mime-encoding \
   | grep -Ev ': *(us-ascii|utf-8|ascii)$' \
   | while IFS=: read -r f _; do [[ -s "$f" ]] && echo "$f: non-text encoding"; done || true)
 if [[ -n "$binaries" ]]; then

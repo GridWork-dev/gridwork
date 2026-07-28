@@ -94,6 +94,17 @@ jobs:
         working-directory: contracts
       - run: ./tools/check-theme-sync.sh
 
+  # The site container must stay buildable: repo-root context (allowlist
+  # .dockerignore), digest-pinned base, Caddyfile validated at build time.
+  site:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - run: docker build -f site/Dockerfile .
+
   # bans/licenses/sources block merges; advisories run separately below so a
   # newly published advisory can't redden an unchanged PR.
   deny:

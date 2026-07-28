@@ -2,9 +2,12 @@
 # `build.dockerfilePath` (railway.json) resolved relative to it — so COPY sources
 # are repo-root-relative. Copying explicitly rather than `COPY . /usr/share/caddy`
 # keeps the rest of the repository out of the web root.
-FROM caddy:2-alpine
+# Pinned by digest: the tag rides point releases, the digest is what we
+# reviewed. Bump deliberately (re-pin) — dependabot tracks the tag.
+FROM caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
 
 COPY site/Caddyfile /etc/caddy/Caddyfile
 COPY site/index.html /usr/share/caddy/index.html
+COPY site/og.png /usr/share/caddy/og.png
 
 RUN caddy validate --config /etc/caddy/Caddyfile
