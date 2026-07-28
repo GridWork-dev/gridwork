@@ -40,7 +40,9 @@ kernel boundary.
 SSH to the host, then the same socket — the kernel does not listen on a
 network interface, and will not until a recorded authentication decision
 introduces one deliberately. Filesystem permissions on the socket are the
-local trust boundary.
+local trust boundary, reinforced by a same-EUID peer check. See
+`docs/decisions/0001-wire-codec.md` and
+`docs/decisions/0002-listener-before-auth.md`.
 
 **Singleton fencing.** One kernel writes per store. Fencing tokens (strictly
 increasing, invalidated on re-grant) make a deposed writer's appends fail
@@ -82,7 +84,8 @@ larger lives outside the log as an **encrypted, content-addressed blob**
 referenced by digest, media type, and size. Blobs carry a retention class;
 deletion is by retention sweep or crypto-shred (destroying the key), and an
 `evidence_pin` exempts a blob from sweeps while it backs an audit trail. The
-log itself never shrinks.
+log itself never shrinks. The persisted format and key hierarchy are locked by
+`docs/decisions/0003-payload-encryption.md`.
 
 ## Crash recovery
 

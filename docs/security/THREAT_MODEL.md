@@ -67,12 +67,13 @@ Any local process with socket access can send arbitrary frames.
 `docs/protocol.md`); strict framing bounds and `deny_unknown_fields`
 decoding bound WHAT they can say; commands are CAS-guarded, idempotent, and
 policy-checked, so a misbehaving client can be refused but not corrupt
-order. No network listener exists before a recorded authentication decision.
+order. Same-EUID peer validation reinforces socket permissions. No network listener
+exists before the authentication decision required by ADR 0002.
 
-**Status: partial.** Strict unknown-field rejection and the CAS + idempotency
-command semantics are implemented in the contract crates; the framing bounds,
-the filesystem-permission boundary, and the policy check are designed, not yet
-built — there is no socket to connect to yet.
+**Status: partial.** Strict unknown-field rejection and the CAS + idempotency command
+semantics are implemented in the contract crates. ADRs 0001 and 0002 now lock framing and
+the filesystem/same-EUID boundary; their enforcing socket code and the policy check are
+not yet built.
 
 ### 4. Log tampering and projection poisoning
 
@@ -116,7 +117,8 @@ with retention classes and crypto-shred deletion; a redaction pass gates
 transcript capture; CI leak-scans the public repository — the tracked tree
 plus the commit content across each pushed and pull-request range — with a
 seeded violation proving the gate can fail. Secrets never appear in contract
-types.
+types. ADR 0003 locks the chunked AEAD container, envelope encryption, and tombstone-first
+crypto-shred ordering.
 
 **Status: partial.** The CI leak scan — the tracked tree plus commit content
 across each pushed and PR range, with its seeded proof of failure — and the

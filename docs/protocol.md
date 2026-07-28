@@ -1,9 +1,8 @@
 # Protocol
 
-The client↔kernel contract. **Semantics below are locked at the contract
-phase; the exact byte-level frame encoding is finalized with the kernel and
-captured as a recorded decision** — clients written against the semantics
-will not need redesign, only a codec.
+The client↔kernel contract. Semantics and byte-level framing are locked by
+[ADR 0001](decisions/0001-wire-codec.md). The UDS-only authentication boundary
+is locked by [ADR 0002](decisions/0002-listener-before-auth.md).
 
 > **Nothing here is implemented.** There is no kernel, no socket, and no
 > framing code in the tree — write a client against these semantics if you want
@@ -26,9 +25,10 @@ granted in the hello.
 
 ## Framing and bounds
 
-Messages are length-prefixed frames carrying one JSON value, encoded per the
-generated contract (`contracts/bindings.ts` mirrors the canonical Rust
-types). Bounds are part of the contract:
+Messages carry a big-endian unsigned 32-bit length followed by exactly one UTF-8 JSON
+value. The frame maximum is 1 MiB. Empty, oversized, invalid UTF-8, recursively
+duplicate-keyed, unknown-field, and trailing-byte inputs are refused. Bounds are part of
+the contract:
 
 - a frame has a hard maximum size (rejected, not truncated, when exceeded),
 - inline event payloads are bounded at 64 KiB serialized — larger content
