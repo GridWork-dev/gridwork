@@ -132,6 +132,32 @@ fn fsm_check(aggregate_type: &str, from: &str, to: &str) -> Option<(bool, bool)>
     }
 }
 
+/// Fold the common Cyrillic/Greek homoglyphs of the ASCII letters that spell
+/// the four governed FSM names, so a lookalike ("тask", "mеssage") cannot slip
+/// into the open world and skip the ladder. Curated, not exhaustive: an
+/// unmapped confusable still passes — no worse than an un-normalized spelling
+/// did before — so this only ever pulls MORE evasions onto the ladder. Swap in
+/// a Unicode TR39 confusable skeleton if the threat surface widens. ASCII input
+/// is returned unchanged (`g` and `n` have no confident lowercase homoglyph, so
+/// a lookalike must keep those two letters ASCII to fold onto a governed name).
+fn fold_confusables(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            'а' | 'α' => 'a', // U+0430 Cyrillic a · U+03B1 Greek alpha
+            'е' | 'ε' => 'e', // U+0435 Cyrillic ie · U+03B5 Greek epsilon
+            'о' | 'ο' => 'o', // U+043E Cyrillic o · U+03BF Greek omicron
+            'с' => 'c',       // U+0441 Cyrillic es
+            'р' | 'ρ' => 'p', // U+0440 Cyrillic er · U+03C1 Greek rho
+            'т' | 'τ' => 't', // U+0442 Cyrillic te · U+03C4 Greek tau
+            'к' | 'κ' => 'k', // U+043A Cyrillic ka · U+03BA Greek kappa
+            'м' | 'μ' => 'm', // U+043C Cyrillic em · U+03BC Greek mu
+            'ѕ' => 's',       // U+0455 Cyrillic dze
+            'ԁ' => 'd',       // U+0501 Cyrillic komi de
+            _ => c,
+        })
+        .collect()
+}
+
 /// Replay `events` (in stream order) and return every violation found.
 pub fn check_stream(events: &[EventEnvelope]) -> Vec<Finding> {
     let mut findings = Vec::new();
@@ -202,11 +228,23 @@ pub fn check_stream(events: &[EventEnvelope]) -> Vec<Finding> {
         // -- aggregate replay --
         let agg_key = (event.aggregate_type.clone(), event.aggregate_id.0.clone());
         // A governed FSM is keyed by its canonical (trimmed, ascii-lowercase)
-        // aggregate_type. A non-canonical spelling ("Task", "task ") must NOT
-        // slip into the open world and get envelope checks only — normalize
-        // before every FSM dispatch, and red the malformed spelling itself so
-        // an evasion by casing/whitespace still runs the full ladder.
-        let agg_type = event.aggregate_type.trim().to_ascii_lowercase();
+        // aggregate_type. A non-canonical spelling — ASCII case/whitespace
+        // ("Task", "task ") OR a Cyrillic/Greek homoglyph ("тask") — must NOT
+        // slip into the open world and get envelope checks only. Normalize
+        // (trim + lowercase, then fold confusables only if that reveals a
+        // governed name) before every FSM dispatch, and red the malformed
+        // spelling itself so any such evasion still runs the full ladder.
+        let trimmed = event.aggregate_type.trim().to_ascii_lowercase();
+        let agg_type = if machine_initial(&trimmed).is_some() {
+            trimmed
+        } else {
+            let folded = fold_confusables(&trimmed);
+            if machine_initial(&folded).is_some() {
+                folded
+            } else {
+                trimmed
+            }
+        };
         if agg_type != event.aggregate_type && machine_initial(&agg_type).is_some() {
             findings.push(at(
                 FindingCode::EnvelopeMalformed,

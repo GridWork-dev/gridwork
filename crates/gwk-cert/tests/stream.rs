@@ -959,6 +959,27 @@ fn trailing_space_aggregate_type_still_catches_a_terminal_mutation() {
 }
 
 #[test]
+fn cyrillic_homoglyph_aggregate_type_still_runs_the_fsm_ladder() {
+    // "тask" (U+0442 Cyrillic te + a s k) renders identically to the ASCII
+    // governed "task" but is a different byte string, so `to_ascii_lowercase`
+    // alone leaves it open-world — born terminal, zero findings. Folding the
+    // homoglyph pulls it back onto the ladder: the non-canonical spelling reds,
+    // and the born-terminal creation reds CreationStateInvalid.
+    let events = vec![event(
+        1,
+        "тask",
+        "task-1",
+        1,
+        "тask_created",
+        "operator",
+        serde_json::json!({ "state": "completed" }),
+    )];
+    let found = codes(&events);
+    assert!(found.contains(&FindingCode::EnvelopeMalformed));
+    assert!(found.contains(&FindingCode::CreationStateInvalid));
+}
+
+#[test]
 fn mutant_created_in_a_non_initial_state() {
     let mut events = valid_stream();
     // Born terminal: no transition ever runs, the whole ladder is skipped.
