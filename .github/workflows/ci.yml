@@ -51,7 +51,9 @@ jobs:
     timeout-minutes: 10
     services:
       postgres:
-        image: postgres:16
+        # Digest-pinned like every action above; dependabot / a manual bump tracks
+        # the postgres:16 tag.
+        image: postgres:16@sha256:33f923b05f64ca54ac4401c01126a6b92afe839a0aa0a52bc5aeb5cc958e5f20
         env:
           POSTGRES_PASSWORD: ci
         ports:
@@ -66,6 +68,15 @@ jobs:
         with:
           persist-credentials: false
       - run: psql "postgresql://postgres:ci@localhost:5432/postgres" -v ON_ERROR_STOP=1 -f schema/0001_contract.sql
+      # Row-level DELETE guards never fire on TRUNCATE; the state tables need a
+      # statement-level BEFORE TRUNCATE cover to stay append-only. This single
+      # psql -c MUST fail — a passing TRUNCATE means the guard on gwk.command regressed.
+      - name: TRUNCATE on the command state table must error
+        run: |
+          if psql "postgresql://postgres:ci@localhost:5432/postgres" -v ON_ERROR_STOP=1 -c 'TRUNCATE gwk.command;'; then
+            echo 'TRUNCATE gwk.command succeeded — the state-table truncate guard is missing' >&2
+            exit 1
+          fi
 
   # The generated TypeScript contract, goldens, and theme must match the Rust
   # source exactly (xtask --check), decode at runtime under bun, typecheck
