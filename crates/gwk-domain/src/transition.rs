@@ -109,7 +109,9 @@ impl TransitionGuard for AttemptState {
                     required_kind: LIVENESS_PRODUCER_KIND,
                 });
             }
-            if ctx.receipt_id.is_none() {
+            // A present-but-empty receipt ("") is missing, not a receipt —
+            // align with the certifier, which rejects it (gwk-cert `check.rs`).
+            if ctx.receipt_id.is_none_or(|r| r.as_str().is_empty()) {
                 return Err(GuardViolation::MissingReceipt);
             }
         }
@@ -367,6 +369,26 @@ mod tests {
                 version: 6
             }
         );
+    }
+
+    #[test]
+    fn blocked_flip_rejects_a_present_but_empty_receipt() {
+        // The certifier rejects an empty receipt_id; the domain guard must
+        // agree, or a present-but-empty "" would slip a flip past the receipt
+        // requirement the certifier later refuses.
+        let actor = liveness();
+        let empty = ReceiptId::new("");
+        let result = apply(
+            &cursor(AttemptState::Blocked, 5),
+            &TransitionRequest {
+                to: AttemptState::Running,
+                expected_version: 5,
+                actor: &actor,
+                idempotency_key: None,
+                receipt_id: Some(&empty),
+            },
+        );
+        assert!(matches!(result, TransitionResult::UnauthorizedActor { .. }));
     }
 
     #[test]
