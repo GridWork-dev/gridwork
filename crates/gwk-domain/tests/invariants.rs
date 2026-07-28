@@ -372,6 +372,7 @@ fn blocked_round_trip_is_a_receipted_cas_walk() {
         state: AttemptState::Running,
         version: 10,
         applied_idempotency_key: None,
+        applied_by: None,
     };
     // running -> blocked -> running -> blocked: every hop receipted, +1 each.
     for (hop, to) in [
@@ -447,6 +448,7 @@ fn terminals_refuse_every_transition_through_apply() {
                     state: terminal,
                     version: 1,
                     applied_idempotency_key: None,
+                    applied_by: None,
                 },
                 &TransitionRequest {
                     to: *to,
@@ -514,6 +516,7 @@ fn mutant_version_skip_is_caught() {
         state: TaskState::Submitted,
         version: 3,
         applied_idempotency_key: None,
+        applied_by: None,
     };
     let result = apply(
         &cursor,
@@ -548,6 +551,7 @@ fn mutant_wrong_actor_flip_is_caught() {
             state: AttemptState::Running,
             version: 5,
             applied_idempotency_key: None,
+            applied_by: None,
         },
         &TransitionRequest {
             to: AttemptState::Blocked,
@@ -571,6 +575,10 @@ fn mutant_duplicate_idempotency_key_does_not_double_apply() {
         state: TaskState::Working,
         version: 2,
         applied_idempotency_key: Some(key.clone()),
+        // The retry below is the SAME actor that recorded the applied key, so
+        // the idempotent echo still fires — a keyed replay is bound to its
+        // recording actor.
+        applied_by: Some(actor.clone()),
     };
     let result = apply(
         &cursor,

@@ -16,11 +16,22 @@ pub const LIVENESS_PRODUCER_KIND: &str = "liveness_producer";
 
 /// An aggregate's current position: state, CAS version, and the idempotency
 /// key of the last applied transition (what makes retries stable).
+///
+/// This is an in-memory value passed to [`apply`], NOT a wire/bindings type
+/// (no `serde`/`specta` derive), so it can carry the identity that recorded the
+/// last applied transition without touching the generated contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cursor<S> {
     pub state: S,
     pub version: u32,
     pub applied_idempotency_key: Option<IdempotencyKey>,
+    /// The actor that RECORDED the transition named by
+    /// `applied_idempotency_key`. A keyed replay must present this same actor
+    /// identity to receive the stable idempotent echo; a harvested key replayed
+    /// by any other actor falls through to the honest refusal instead of being
+    /// handed the current state+version. `None` when no attributed transition
+    /// has been applied yet.
+    pub applied_by: Option<Actor>,
 }
 
 /// One requested transition.
@@ -144,6 +155,7 @@ pub fn apply<S: TransitionGuard>(
         (req.idempotency_key, cursor.applied_idempotency_key.as_ref())
         && key == applied
         && cursor.state == req.to
+        && cursor.applied_by.as_ref() == Some(req.actor)
     {
         return TransitionResult::Applied {
             state: cursor.state,
@@ -200,6 +212,7 @@ mod tests {
             state,
             version,
             applied_idempotency_key: None,
+            applied_by: None,
         }
     }
 
@@ -283,6 +296,7 @@ mod tests {
                 state: TaskState::Submitted,
                 version: u32::MAX,
                 applied_idempotency_key: None,
+                applied_by: None,
             },
             &TransitionRequest {
                 to: TaskState::Working,
@@ -393,6 +407,7 @@ mod tests {
             state: TaskState::Working,
             version: 2,
             applied_idempotency_key: Some(key.clone()),
+            applied_by: Some(kernel()),
         };
         // The caller retries with its original expected_version (1) — stale by
         // now — and the SAME key: stable Applied, no double-apply, no conflict.
@@ -452,6 +467,7 @@ mod tests {
                 state: AttemptState::Running,
                 version: 5,
                 applied_idempotency_key: Some(key.clone()),
+                applied_by: None,
             },
             &TransitionRequest {
                 to: AttemptState::Blocked,
@@ -462,6 +478,69 @@ mod tests {
             },
         );
         assert!(matches!(result, TransitionResult::UnauthorizedActor { .. }));
+    }
+
+    #[test]
+    fn keyed_replay_requires_the_recording_actor_not_just_the_key() {
+        // After a guarded flip that the liveness producer applied, the cursor
+        // remembers WHO applied it. The (blocked, blocked) self-edge is not a
+        // flip, so the guard does not fire on a replay to the current state —
+        // the idempotency arm decides. Binding that arm to the recording actor
+        // is what stops a harvested key from becoming a state+version probe.
+        let lp = liveness();
+        let key = IdempotencyKey::new("flip-once");
+        let cur = Cursor {
+            state: AttemptState::Blocked,
+            version: 6,
+            applied_idempotency_key: Some(key.clone()),
+            applied_by: Some(lp.clone()),
+        };
+
+        // The recording actor replaying the key on the current state still gets
+        // the stable idempotent echo — retries stay stable.
+        let stable = apply(
+            &cur,
+            &TransitionRequest {
+                to: AttemptState::Blocked,
+                expected_version: 6,
+                actor: &lp,
+                idempotency_key: Some(&key),
+                receipt_id: None,
+            },
+        );
+        assert_eq!(
+            stable,
+            TransitionResult::Applied {
+                state: AttemptState::Blocked,
+                version: 6
+            }
+        );
+
+        // A DIFFERENT actor replaying the harvested key falls through to the
+        // honest refusal — never a keyed Applied { .., 6 } echo. The version
+        // stays undisclosed; the residual `from` in IllegalEdge is the
+        // CAS-retry contract's acknowledged, world-readable channel.
+        let engine = Actor {
+            kind: "engine".into(),
+            id: Some("e-1".into()),
+        };
+        let probe = apply(
+            &cur,
+            &TransitionRequest {
+                to: AttemptState::Blocked,
+                expected_version: 6,
+                actor: &engine,
+                idempotency_key: Some(&key),
+                receipt_id: None,
+            },
+        );
+        assert_eq!(
+            probe,
+            TransitionResult::IllegalEdge {
+                from: AttemptState::Blocked,
+                to: AttemptState::Blocked
+            }
+        );
     }
 
     /// A test-only machine whose guard covers EVERY requested transition, so
@@ -505,6 +584,7 @@ mod tests {
                 state: Gated::Shut,
                 version: 4,
                 applied_idempotency_key: Some(key.clone()),
+                applied_by: None,
             },
             &TransitionRequest {
                 to: Gated::Shut,
@@ -532,6 +612,7 @@ mod tests {
             state: AttemptState::Running,
             version: 5,
             applied_idempotency_key: Some(key.clone()),
+            applied_by: None,
         };
         // Legal edge, stale version: the CAS refusal wins.
         let result = apply(
