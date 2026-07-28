@@ -78,6 +78,10 @@ pub struct PayloadRef {
 
 /// One appended event. Immutable once written; `global_sequence` is assigned by
 /// the kernel append actor in commit order.
+///
+/// The inline-payload byte bound ([`INLINE_PAYLOAD_MAX_BYTES`]) is enforced by
+/// the certifier; consuming kernels must re-check it — this type itself is not
+/// size-bounded.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, specta::Type)]
 #[serde(deny_unknown_fields)]
 pub struct EventEnvelope {

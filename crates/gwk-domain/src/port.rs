@@ -60,6 +60,12 @@ impl std::fmt::Display for StorageError {
 
 impl std::error::Error for StorageError {}
 
+/// Ceiling on a single `read_from` page. Conforming stores CLAMP `limit`
+/// to this value — a larger request returns at most this many events, it is
+/// not an error. The write path bounds inline payload bytes; this bounds the
+/// read path so no caller can demand an unbounded page.
+pub const MAX_READ_LIMIT: usize = 65_536;
+
 /// An append-only, commit-ordered event store.
 pub trait EventStore {
     /// Atomically append one aggregate's batch.
@@ -78,7 +84,8 @@ pub trait EventStore {
     ) -> impl Future<Output = Result<Vec<EventEnvelope>, AppendError>>;
 
     /// Read committed events with `global_sequence` strictly after `cursor`
-    /// (`None` = from the beginning), ascending, at most `limit`.
+    /// (`None` = from the beginning), ascending, at most `limit` (clamped to
+    /// [`MAX_READ_LIMIT`]).
     ///
     /// This is the recovery path: a consumer that lost wakeups re-reads from
     /// its durable cursor and misses nothing.

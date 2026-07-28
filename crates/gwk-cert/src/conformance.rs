@@ -242,7 +242,7 @@ pub mod memory {
 
     use gwk_domain::envelope::EventEnvelope;
     use gwk_domain::ids::{FenceToken, Seq, Timestamp};
-    use gwk_domain::port::{AppendError, EventStore, StorageError};
+    use gwk_domain::port::{AppendError, EventStore, MAX_READ_LIMIT, StorageError};
 
     #[derive(Default)]
     struct Inner {
@@ -335,7 +335,7 @@ pub mod memory {
                 .events
                 .iter()
                 .filter(|e| e.global_sequence.value() > after)
-                .take(limit)
+                .take(limit.min(MAX_READ_LIMIT))
                 .cloned()
                 .collect())
         }
