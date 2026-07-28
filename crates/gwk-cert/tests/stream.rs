@@ -379,6 +379,120 @@ fn mutant_clean_outcome_with_unstopped_target() {
 }
 
 #[test]
+fn mutant_clean_when_the_target_was_canceled_before_the_command_existed() {
+    // The attempt cancels on its own; only THEN is the stop command issued
+    // and walked to a clean claim. The target is `canceled` at the terminal
+    // event, but this command stopped nothing.
+    let events = vec![
+        event(
+            1,
+            "attempt",
+            "att-1",
+            1,
+            "attempt_created",
+            "kernel",
+            serde_json::json!({}),
+        ),
+        event(
+            2,
+            "attempt",
+            "att-1",
+            2,
+            "attempt_state_changed",
+            "kernel",
+            change("queued", "leased"),
+        ),
+        event(
+            3,
+            "attempt",
+            "att-1",
+            3,
+            "attempt_state_changed",
+            "kernel",
+            change("leased", "starting"),
+        ),
+        event(
+            4,
+            "attempt",
+            "att-1",
+            4,
+            "attempt_state_changed",
+            "kernel",
+            change("starting", "running"),
+        ),
+        event(
+            5,
+            "attempt",
+            "att-1",
+            5,
+            "attempt_state_changed",
+            "kernel",
+            change("running", "canceling"),
+        ),
+        event(
+            6,
+            "attempt",
+            "att-1",
+            6,
+            "attempt_state_changed",
+            "kernel",
+            change("canceling", "canceled"),
+        ),
+        event(
+            7,
+            "command",
+            "cmd-1",
+            1,
+            "command_created",
+            "operator",
+            serde_json::json!({ "kind": "stop_attempt", "targets": ["att-1"] }),
+        ),
+        event(
+            8,
+            "command",
+            "cmd-1",
+            2,
+            "command_state_changed",
+            "kernel",
+            change("issued", "targeted"),
+        ),
+        event(
+            9,
+            "command",
+            "cmd-1",
+            3,
+            "command_state_changed",
+            "kernel",
+            change("targeted", "signaled"),
+        ),
+        event(
+            10,
+            "command",
+            "cmd-1",
+            4,
+            "command_state_changed",
+            "kernel",
+            serde_json::json!({
+                "from": "signaled", "to": "verification_complete",
+                "outcome": "clean", "targets": ["att-1"]
+            }),
+        ),
+    ];
+    assert!(codes(&events).contains(&FindingCode::OutcomeDisagreesWithTargets));
+}
+
+#[test]
+fn mutant_clean_claimed_before_the_cancel_completed() {
+    let mut events = valid_stream();
+    // The cancel completes only AFTER verification claimed clean; as of the
+    // terminal event the target was still `canceling`.
+    let mut cancel = events.remove(13);
+    cancel.global_sequence = Seq::new(2000);
+    events.push(cancel);
+    assert!(codes(&events).contains(&FindingCode::OutcomeDisagreesWithTargets));
+}
+
+#[test]
 fn mutant_duplicate_idempotency_key() {
     let mut events = valid_stream();
     events[4].idempotency_key = events[3].idempotency_key.clone();

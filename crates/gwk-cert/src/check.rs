@@ -69,6 +69,14 @@ struct ReplayState {
     version: u32,
 }
 
+/// What creation told us about a stop command: the targets it named, and
+/// which of them were ALREADY canceled when it was issued — a later `clean`
+/// cannot claim this command stopped those.
+struct CommandCtx {
+    targets: Vec<String>,
+    pre_canceled: Vec<String>,
+}
+
 fn payload_str<'a>(event: &'a EventEnvelope, key: &str) -> Option<&'a str> {
     event.payload.get(key).and_then(|v| v.as_str())
 }
@@ -126,11 +134,8 @@ pub fn check_stream(events: &[EventEnvelope]) -> Vec<Finding> {
     let mut last_seq: Option<u64> = None;
     let mut replay: HashMap<(String, String), ReplayState> = HashMap::new();
     let mut seen_keys: HashMap<(String, String, String), ()> = HashMap::new();
-    // command aggregate id -> stop targets named at creation
-    let mut command_targets: HashMap<String, Vec<String>> = HashMap::new();
-    // command aggregate id -> (targets, outcome)
-    let mut command_outcomes: Vec<(EventId, Vec<String>, String)> = Vec::new();
-    let mut attempt_final: HashMap<String, String> = HashMap::new();
+    // command aggregate id -> what creation declared
+    let mut commands: HashMap<String, CommandCtx> = HashMap::new();
 
     for event in events {
         let at = |code: FindingCode, message: String| Finding {
@@ -254,10 +259,24 @@ pub fn check_stream(events: &[EventEnvelope]) -> Vec<Finding> {
                     version: event.aggregate_version,
                 },
             );
-            if event.aggregate_type == "command"
-                && let Some(targets) = payload_targets(event)
-            {
-                command_targets.insert(event.aggregate_id.0.clone(), targets);
+            if event.aggregate_type == "command" {
+                let targets = payload_targets(event).unwrap_or_default();
+                let pre_canceled = targets
+                    .iter()
+                    .filter(|t| {
+                        replay
+                            .get(&("attempt".to_string(), (*t).clone()))
+                            .is_some_and(|r| r.state == "canceled")
+                    })
+                    .cloned()
+                    .collect();
+                commands.insert(
+                    event.aggregate_id.0.clone(),
+                    CommandCtx {
+                        targets,
+                        pre_canceled,
+                    },
+                );
             }
         } else if event.event_type.ends_with("_state_changed") {
             let (Some(from), Some(to)) = (payload_str(event, "from"), payload_str(event, "to"))
@@ -326,21 +345,49 @@ pub fn check_stream(events: &[EventEnvelope]) -> Vec<Finding> {
                             "verification_complete without an outcome in the same event"
                                 .to_string(),
                         )),
-                        Some(o) => {
+                        Some("clean") => {
+                            // The agreement is judged HERE, at the terminal
+                            // event: replay holds every target's state as of
+                            // this point in the stream, not at stream end.
+                            // `clean` claims THIS command verifiably stopped
+                            // its targets: each must be `canceled` right now,
+                            // and not already canceled before it was issued.
+                            let ctx = commands.get(&event.aggregate_id.0);
                             // Prefer the terminal event's own targets, else
                             // the ones carried from the command's creation.
                             let targets = payload_targets(event)
-                                .or_else(|| command_targets.get(&event.aggregate_id.0).cloned())
+                                .or_else(|| ctx.map(|c| c.targets.clone()))
                                 .unwrap_or_default();
-                            if o == "clean" && targets.is_empty() {
+                            if targets.is_empty() {
                                 findings.push(at(
                                     FindingCode::OutcomeDisagreesWithTargets,
                                     "outcome clean but the command names no targets to agree with"
                                         .to_string(),
                                 ));
                             }
-                            command_outcomes.push((event.event_id.clone(), targets, o.to_string()));
+                            for target in &targets {
+                                let state = replay
+                                    .get(&("attempt".to_string(), target.clone()))
+                                    .map(|r| r.state.as_str());
+                                if state != Some("canceled") {
+                                    findings.push(at(
+                                        FindingCode::OutcomeDisagreesWithTargets,
+                                        format!(
+                                            "outcome clean but target {target} is {} at the terminal event",
+                                            state.unwrap_or("<absent>")
+                                        ),
+                                    ));
+                                } else if ctx.is_some_and(|c| c.pre_canceled.contains(target)) {
+                                    findings.push(at(
+                                        FindingCode::OutcomeDisagreesWithTargets,
+                                        format!(
+                                            "outcome clean but target {target} was already canceled when the command was created"
+                                        ),
+                                    ));
+                                }
+                            }
                         }
+                        Some(_) => {}
                     }
                 } else if outcome.is_some() {
                     findings.push(at(
@@ -359,33 +406,6 @@ pub fn check_stream(events: &[EventEnvelope]) -> Vec<Finding> {
                         version: event.aggregate_version,
                     },
                 );
-            }
-        }
-
-        if event.aggregate_type == "attempt"
-            && let Some(state) = replay.get(&agg_key)
-        {
-            attempt_final.insert(event.aggregate_id.0.clone(), state.state.clone());
-        }
-    }
-
-    // Outcome ⇔ targets agreement, judged at stream end: `clean` claims every
-    // targeted attempt was verified stopped — replay must agree.
-    for (event_id, targets, outcome) in command_outcomes {
-        if outcome == "clean" {
-            for target in targets {
-                let final_state = attempt_final.get(&target).map(String::as_str);
-                if final_state != Some("canceled") {
-                    findings.push(Finding {
-                        code: FindingCode::OutcomeDisagreesWithTargets,
-                        seq: None,
-                        event_id: Some(event_id.clone()),
-                        message: format!(
-                            "outcome clean but target {target} ended {}",
-                            final_state.unwrap_or("<absent>")
-                        ),
-                    });
-                }
             }
         }
     }
