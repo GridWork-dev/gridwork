@@ -240,12 +240,15 @@ CREATE TABLE gwk.lease (
 -- a stale (lower) fence must be rejected downstream. A fence that could rewind
 -- would re-arm a deposed writer, so it is monotonic non-decreasing here and,
 -- once set, never cleared; and,
--- as on the FSM tables, every UPDATE advances version by exactly 1 (CAS).
--- The lease is NOT one of the four public FSMs (fsm.rs: expiry is time-driven,
--- release holder-driven), so it gets no edge guard. Lease state/row-lifecycle
--- integrity BEYOND fence monotonicity — which held/released/expired edges are
--- legal, expiry vs release semantics — is a backend concern, deliberately not
--- modeled in this contract.
+-- as on the FSM tables, every UPDATE is a versioned CAS: version advances by
+-- exactly 1. This binds ALL lease writes — a heartbeat touch or a time-driven
+-- expiry write bumps version too. It is a write-discipline invariant (optimistic
+-- concurrency), NOT a state-transition rule, so it does not contradict the next
+-- line: the lease is NOT one of the four public FSMs (fsm.rs: expiry is
+-- time-driven, release holder-driven), so it gets no edge guard, and which
+-- held/released/expired edges are legal — expiry vs release semantics — is a
+-- backend concern deliberately not modeled here. This contract enforces exactly
+-- two things on the lease: fence monotonicity (above) and the version CAS.
 CREATE FUNCTION gwk.assert_lease_guard() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
