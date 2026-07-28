@@ -68,9 +68,21 @@ CREATE TABLE gwk.event (
   UNIQUE (aggregate_type, aggregate_id, aggregate_version)
 );
 
--- retry-stable appends: the same keyed write cannot land twice per aggregate
+-- retry-stable appends: the same keyed write cannot land twice per aggregate.
+-- This is the index the REPLAY lookup reads — a retry of the same command on
+-- the same aggregate is answered from here with the original events.
 CREATE UNIQUE INDEX event_idempotency
   ON gwk.event (aggregate_type, aggregate_id, idempotency_key)
+  WHERE idempotency_key IS NOT NULL;
+
+-- Idempotency is GLOBAL per (project_id, idempotency_key), not per aggregate:
+-- one key names one request, and reusing it for a different one is a caller bug
+-- that must be refused rather than silently landed twice. The per-aggregate
+-- index above cannot see that case — the two writes differ in aggregate_id, so
+-- it admits both. This is the guard; the kernel's own pre-check turns the
+-- violation into a typed `idempotency_conflict` before it reaches the index.
+CREATE UNIQUE INDEX event_idempotency_project
+  ON gwk.event (project_id, idempotency_key)
   WHERE idempotency_key IS NOT NULL;
 
 -- Append-only is a CONTRACT property, so it is enforced here as a trigger any
@@ -550,16 +562,23 @@ CREATE TABLE gwk.attention_item (
   resolved_at timestamptz
 );
 
+-- `released_at`/`disposition` are what make a released worktree distinguishable
+-- from a live one in the projection. Without them the release is recoverable
+-- only by replaying the log, and `projection get worktree <id>` — a first-class
+-- read in the CLI surface — could not answer "is anyone still in this tree?".
+-- The lease beside it carries the same pair for the same reason.
 CREATE TABLE gwk.worktree (
-  id         text PRIMARY KEY,
-  repo       text NOT NULL,
-  path       text NOT NULL,
-  branch     text NOT NULL,
-  base_sha   text,
-  lease_id   text REFERENCES gwk.lease(id),
-  dirty      boolean NOT NULL DEFAULT false,
-  unpushed   boolean NOT NULL DEFAULT false,
-  created_at timestamptz NOT NULL DEFAULT now()
+  id          text PRIMARY KEY,
+  repo        text NOT NULL,
+  path        text NOT NULL,
+  branch      text NOT NULL,
+  base_sha    text,
+  lease_id    text REFERENCES gwk.lease(id),
+  dirty       boolean NOT NULL DEFAULT false,
+  unpushed    boolean NOT NULL DEFAULT false,
+  released_at timestamptz,
+  disposition text,
+  created_at  timestamptz NOT NULL DEFAULT now()
 );
 
 -- A dispatch node is bookkeeping over the spawn tree, NOT one of the four
@@ -654,4 +673,4 @@ COMMIT;
 // unwrapped 64-hex line lands past 100 columns — the generator and
 // rustfmt would then fight, showing up as permanent contract drift.
 pub const CONTRACT_SQL_SHA256: &str =
-    "2827d946ec50c3da7548cd597886f42ea0eaaf640ec30873d2bf2dfa33c92857";
+    "e07ee1f533f73137baecb9a8ed0cfacb3ece66b4a025ac0ff94fc0db6c15d743";

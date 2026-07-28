@@ -344,6 +344,14 @@ pub struct Worktree {
     pub lease_id: Option<LeaseId>,
     pub dirty: bool,
     pub unpushed: bool,
+    // Set together when the tree is handed back. Absent means still held: a
+    // worktree with no release stamp is one somebody may still be working in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub released_at: Option<Timestamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub disposition: Option<String>,
     pub created_at: Timestamp,
 }
 

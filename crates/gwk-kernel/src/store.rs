@@ -24,8 +24,8 @@ use gwk_domain::ids::{
 use gwk_domain::port::{AppendError, EventStore, MAX_READ_LIMIT, StorageError};
 use secrecy::{ExposeSecret, SecretString};
 use sqlx::postgres::PgPoolOptions;
-use sqlx::{Executor, PgPool, Row, postgres::PgRow};
-use tokio::sync::Semaphore;
+use sqlx::{Executor, PgConnection, PgPool, Row, postgres::PgRow};
+use tokio::sync::{Semaphore, SemaphorePermit};
 
 // Aliased, not imported bare: this module's signatures are the port's, whose
 // error types are AppendError/StorageError, so a `Result<T>` in scope that
@@ -130,6 +130,298 @@ impl PgEventStore {
     pub fn pool(&self) -> &PgPool {
         &self.pool
     }
+
+    /// Take one admission permit, or refuse.
+    ///
+    /// `try_acquire` rather than `acquire`: under load the right answer is a
+    /// refusal the caller can act on, not a queue.
+    pub(crate) fn admit(&self) -> Result<SemaphorePermit<'_>, AppendError> {
+        self.admission.try_acquire().map_err(|_| {
+            AppendError::Storage(format!(
+                "append queue is full ({MAX_INFLIGHT_APPENDS} in flight)"
+            ))
+        })
+    }
+
+    /// Lock the writer row for the rest of this transaction and prove this
+    /// process still holds write authority.
+    ///
+    /// ONE locked read: the epoch to compare, the fence to check, the sequence
+    /// to allocate. The lock is held to commit, which is what makes allocation
+    /// order equal commit order — so a caller that will DECIDE something from a
+    /// read (the command path reading an aggregate's current version) must take
+    /// this lock BEFORE that read, or its decision races the writer it is about
+    /// to become.
+    pub(crate) async fn lock_writer(
+        &self,
+        tx: &mut PgConnection,
+    ) -> Result<WriterState, AppendError> {
+        let writer = sqlx::query(
+            "SELECT epoch, fence_token::text AS fence_text, next_seq::text AS next_seq_text \
+             FROM gwk_internal.writer WHERE id = 1 FOR UPDATE",
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| append_storage("lock writer row", e))?
+        .ok_or_else(|| {
+            AppendError::Storage(
+                "gwk_internal.writer has no singleton row: database not initialized".to_owned(),
+            )
+        })?;
+
+        let epoch: i64 = writer
+            .try_get("epoch")
+            .map_err(|e| append_storage("column epoch", e))?;
+        if epoch != self.boot_epoch {
+            // Terminal, not retryable: only a restart can claim a fresh epoch.
+            // The writer-lock probe cancels the server on the same event; this
+            // is the guard for work already in flight when that happened.
+            return Err(AppendError::Storage(format!(
+                "writer epoch {} was superseded by {epoch}: another kernel took write authority",
+                self.boot_epoch
+            )));
+        }
+
+        let current_fence: Option<u64> = writer
+            .try_get::<Option<String>, _>("fence_text")
+            .map_err(|e| append_storage("column fence_token", e))?
+            .map(|text| from_numeric_text(&text))
+            .transpose()
+            .map_err(|e| append_storage("column fence_token", e))?;
+        let next_seq = from_numeric_text(
+            &writer
+                .try_get::<String, _>("next_seq_text")
+                .map_err(|e| append_storage("column next_seq", e))?,
+        )
+        .map_err(|e| append_storage("column next_seq", e))?;
+
+        Ok(WriterState {
+            next_seq,
+            current_fence,
+        })
+    }
+
+    /// Append one aggregate's batch inside a transaction that already holds the
+    /// writer row lock, WITHOUT committing.
+    ///
+    /// Split out so the command path can write its projections into the same
+    /// transaction: the plan requires events and projections to land together,
+    /// and duplicating this fence/idempotency/CAS/allocate sequence to get that
+    /// is how the two would drift.
+    pub(crate) async fn append_locked(
+        &self,
+        tx: &mut PgConnection,
+        writer: &WriterState,
+        expected_version: u32,
+        fence: Option<FenceToken>,
+        events: &[EventEnvelope],
+    ) -> Result<Appended, AppendError> {
+        validate_batch(expected_version, events)?;
+        let first = &events[0];
+        let aggregate_type = first.aggregate_type.clone();
+        let aggregate_id = first.aggregate_id.as_str().to_owned();
+
+        // Before the first grant any token is accepted, including none. After
+        // it, the current token is mandatory — omitting one must not be a way
+        // around the check.
+        if let Some(current) = writer.current_fence {
+            let presented = fence.map(|f| f.value()).unwrap_or(NO_FENCE_PRESENTED);
+            if presented != current {
+                return Err(AppendError::Fenced {
+                    presented: FenceToken::new(presented),
+                    current: FenceToken::new(current),
+                });
+            }
+        }
+
+        // Idempotency BEFORE the CAS. A retry presents the SAME
+        // `expected_version` it did the first time, which the CAS would now
+        // reject as a conflict — so a replay has to be recognized before the
+        // version check ever runs, or retry-stability is unreachable.
+        let keys: Vec<String> = events
+            .iter()
+            .filter_map(|e| e.idempotency_key.as_ref())
+            .map(|k| k.as_str().to_owned())
+            .collect();
+        if !keys.is_empty() {
+            let stored = sqlx::query(concat!(
+                "SELECT ",
+                event_columns!(),
+                " FROM gwk.event \
+                 WHERE aggregate_type = $1 AND aggregate_id = $2 AND idempotency_key = ANY($3) \
+                 ORDER BY seq"
+            ))
+            .bind(&aggregate_type)
+            .bind(&aggregate_id)
+            .bind(&keys)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| append_storage("idempotency lookup", e))?;
+
+            if !stored.is_empty() {
+                if stored.len() == events.len() && keys.len() == events.len() {
+                    // Every event in this batch already landed under its key:
+                    // the original result, replayed.
+                    return stored
+                        .iter()
+                        .map(row_to_envelope)
+                        .collect::<Result<Vec<_>, _>>()
+                        .map(|events| Appended {
+                            events,
+                            replayed: true,
+                        })
+                        .map_err(|e| AppendError::Storage(e.0));
+                }
+                return Err(AppendError::MalformedBatch(format!(
+                    "{} of {} idempotency keys already landed for {aggregate_type}/{aggregate_id}: \
+                     a retry must present the identical batch",
+                    stored.len(),
+                    events.len()
+                )));
+            }
+        }
+
+        // CAS against the aggregate's current version.
+        let actual = current_aggregate_version(&mut *tx, &aggregate_type, &aggregate_id)
+            .await
+            .map_err(|e| AppendError::Storage(e.0))?;
+        if actual != expected_version {
+            return Err(AppendError::VersionConflict {
+                actual,
+                expected: expected_version,
+            });
+        }
+
+        let mut appended = Vec::with_capacity(events.len());
+        for (offset, event) in events.iter().enumerate() {
+            let seq = writer
+                .next_seq
+                .checked_add(offset as u64)
+                .ok_or_else(|| AppendError::Storage("global sequence exhausted".to_owned()))?;
+            // `now()` is transaction time, so every event in one commit shares
+            // an `appended_at` — which is the truth: they landed together.
+            let row = sqlx::query(concat!(
+                "INSERT INTO gwk.event ( \
+                   seq, event_id, project_id, aggregate_type, aggregate_id, aggregate_version, \
+                   event_type, schema_version, occurred_at, appended_at, actor, origin, \
+                   causation_id, correlation_id, idempotency_key, payload, payload_ref) \
+                 VALUES ($1::numeric, $2, $3, $4, $5, $6, $7, $8, $9::timestamptz, now(), \
+                   $10, $11, $12, $13, $14, $15, $16) \
+                 RETURNING ",
+                event_columns!()
+            ))
+            .bind(to_numeric_text(seq))
+            .bind(event.event_id.as_str())
+            .bind(event.project_id.as_str())
+            .bind(&event.aggregate_type)
+            .bind(event.aggregate_id.as_str())
+            .bind(i64::from(event.aggregate_version))
+            .bind(&event.event_type)
+            .bind(i64::from(event.schema_version))
+            .bind(event.occurred_at.as_str())
+            .bind(serde_json::to_value(&event.actor).map_err(|e| append_storage("actor", e))?)
+            .bind(serde_json::to_value(&event.origin).map_err(|e| append_storage("origin", e))?)
+            .bind(event.causation_id.as_ref().map(|v| v.as_str()))
+            .bind(event.correlation_id.as_ref().map(|v| v.as_str()))
+            .bind(event.idempotency_key.as_ref().map(|v| v.as_str()))
+            .bind(&event.payload)
+            .bind(
+                event
+                    .payload_ref
+                    .as_ref()
+                    .map(serde_json::to_value)
+                    .transpose()
+                    .map_err(|e| append_storage("payload_ref", e))?,
+            )
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| append_storage("insert event", e))?;
+            appended.push(row_to_envelope(&row).map_err(|e| AppendError::Storage(e.0))?);
+        }
+
+        let advanced = writer
+            .next_seq
+            .checked_add(events.len() as u64)
+            .ok_or_else(|| AppendError::Storage("global sequence exhausted".to_owned()))?;
+        sqlx::query("UPDATE gwk_internal.writer SET next_seq = $1::numeric WHERE id = 1")
+            .bind(to_numeric_text(advanced))
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| append_storage("advance sequence", e))?;
+
+        // Queued inside the transaction, delivered by PostgreSQL only if it
+        // commits — so a wake-up never announces an append that rolled back.
+        sqlx::query("SELECT pg_notify($1, $2)")
+            .bind(EVENT_CHANNEL)
+            .bind(to_numeric_text(advanced - 1))
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| append_storage("notify", e))?;
+
+        Ok(Appended {
+            events: appended,
+            replayed: false,
+        })
+    }
+}
+
+/// The writer row as read under its lock: what an append needs to allocate a
+/// sequence and prove it is still the writer.
+pub(crate) struct WriterState {
+    pub(crate) next_seq: u64,
+    pub(crate) current_fence: Option<u64>,
+}
+
+/// What an append produced, and whether it was a keyed retry.
+///
+/// `replayed` matters to a caller writing side rows in the same transaction:
+/// a replay's projections were written by the original append, and re-applying
+/// them would advance a CAS version the events do not account for.
+pub(crate) struct Appended {
+    pub(crate) events: Vec<EventEnvelope>,
+    pub(crate) replayed: bool,
+}
+
+/// Every event in a project that landed under one idempotency key.
+///
+/// Project-wide, not per-aggregate: one key names one request, so this is the
+/// lookup that tells a retry (same key, same target, same body) from a reuse
+/// (same key, anything else). The per-aggregate index answers the narrower
+/// question the append path asks; this one answers the contract's.
+pub(crate) async fn events_for_key(
+    conn: &mut PgConnection,
+    project_id: &str,
+    key: &str,
+) -> Result<Vec<EventEnvelope>, StorageError> {
+    let rows = sqlx::query(concat!(
+        "SELECT ",
+        event_columns!(),
+        " FROM gwk.event WHERE project_id = $1 AND idempotency_key = $2 ORDER BY seq"
+    ))
+    .bind(project_id)
+    .bind(key)
+    .fetch_all(conn)
+    .await
+    .map_err(|e| storage("idempotency lookup", e))?;
+    rows.iter().map(row_to_envelope).collect()
+}
+
+/// The highest version an aggregate has reached, `0` when it has no events.
+pub(crate) async fn current_aggregate_version(
+    conn: &mut PgConnection,
+    aggregate_type: &str,
+    aggregate_id: &str,
+) -> Result<u32, StorageError> {
+    let actual: Option<i64> = sqlx::query_scalar(
+        "SELECT max(aggregate_version) FROM gwk.event \
+         WHERE aggregate_type = $1 AND aggregate_id = $2",
+    )
+    .bind(aggregate_type)
+    .bind(aggregate_id)
+    .fetch_one(conn)
+    .await
+    .map_err(|e| storage("read aggregate version", e))?;
+    u32::try_from(actual.unwrap_or(0)).map_err(|e| storage("aggregate_version out of range", e))
 }
 
 /// What a batch must be before it reaches the database.
@@ -165,17 +457,16 @@ pub fn validate_batch(expected_version: u32, events: &[EventEnvelope]) -> Result
                 event.aggregate_version
             ));
         }
-        // The column is a signed `integer`, so the top half of the envelope's
-        // u32 does not fit. Refused rather than narrowed: the store may assign
-        // `global_sequence` and `appended_at` and nothing else, so handing back
-        // a schema_version the caller never submitted would be the store
-        // inventing contract — permanently, in an append-only log, on the one
-        // field a future decoder dispatches on.
-        if event.schema_version > i32::MAX as u32 {
+        // The column holds the envelope's full u32 range (bigint, CHECK-bounded
+        // to [1, 2^32-1]) — the only value left to refuse is the one below it.
+        // Caught here so a caller gets a named field instead of a CHECK
+        // violation, and refused rather than defaulted: the store may assign
+        // `global_sequence` and `appended_at` and nothing else, so inventing a
+        // schema_version would be the store inventing contract — permanently,
+        // in an append-only log, on the one field a decoder dispatches on.
+        if event.schema_version == 0 {
             return malformed(format!(
-                "schema_version {} at offset {offset} exceeds {}",
-                event.schema_version,
-                i32::MAX
+                "schema_version 0 at offset {offset} is not a version"
             ));
         }
         // The log carries bounded metadata; anything larger belongs in a blob.
@@ -233,7 +524,10 @@ fn row_to_envelope(row: &PgRow) -> Result<EventEnvelope, StorageError> {
     let aggregate_version: i64 = row
         .try_get("aggregate_version")
         .map_err(|e| storage("column aggregate_version", e))?;
-    let schema_version: i32 = row
+    // i64, not i32: the column is bigint so it can hold the envelope's whole u32
+    // range. Reading it narrow is not a silent truncation — the driver refuses
+    // the decode outright — but it does make every read of a valid log fail.
+    let schema_version: i64 = row
         .try_get("schema_version")
         .map_err(|e| storage("column schema_version", e))?;
     let payload_ref: Option<serde_json::Value> = row
@@ -278,210 +572,20 @@ impl EventStore for PgEventStore {
         fence: Option<FenceToken>,
         events: Vec<EventEnvelope>,
     ) -> Result<Vec<EventEnvelope>, AppendError> {
-        // Bounded admission. `try_acquire` rather than `acquire`: under load the
-        // right answer is a refusal the caller can act on, not a queue.
-        let _permit = self.admission.try_acquire().map_err(|_| {
-            AppendError::Storage(format!(
-                "append queue is full ({MAX_INFLIGHT_APPENDS} in flight)"
-            ))
-        })?;
-        validate_batch(expected_version, &events)?;
-        let first = &events[0];
-        let aggregate_type = first.aggregate_type.clone();
-        let aggregate_id = first.aggregate_id.as_str().to_owned();
-
+        let _permit = self.admit()?;
         let mut tx = self
             .pool
             .begin()
             .await
             .map_err(|e| append_storage("begin", e))?;
-
-        // ONE locked read: epoch to compare, fence to check, sequence to
-        // allocate. The lock is held to commit, which is what makes allocation
-        // order equal commit order.
-        let writer = sqlx::query(
-            "SELECT epoch, fence_token::text AS fence_text, next_seq::text AS next_seq_text \
-             FROM gwk_internal.writer WHERE id = 1 FOR UPDATE",
-        )
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| append_storage("lock writer row", e))?
-        .ok_or_else(|| {
-            AppendError::Storage(
-                "gwk_internal.writer has no singleton row: database not initialized".to_owned(),
-            )
-        })?;
-
-        let epoch: i64 = writer
-            .try_get("epoch")
-            .map_err(|e| append_storage("column epoch", e))?;
-        if epoch != self.boot_epoch {
-            // Terminal, not retryable: only a restart can claim a fresh epoch.
-            // The writer-lock probe cancels the server on the same event; this
-            // is the guard for work already in flight when that happened.
-            return Err(AppendError::Storage(format!(
-                "writer epoch {} was superseded by {epoch}: another kernel took write authority",
-                self.boot_epoch
-            )));
-        }
-
-        let current_fence: Option<u64> = writer
-            .try_get::<Option<String>, _>("fence_text")
-            .map_err(|e| append_storage("column fence_token", e))?
-            .map(|text| from_numeric_text(&text))
-            .transpose()
-            .map_err(|e| append_storage("column fence_token", e))?;
-        // Before the first grant any token is accepted, including none. After
-        // it, the current token is mandatory — omitting one must not be a way
-        // around the check.
-        if let Some(current) = current_fence {
-            let presented = fence.map(|f| f.value()).unwrap_or(NO_FENCE_PRESENTED);
-            if presented != current {
-                return Err(AppendError::Fenced {
-                    presented: FenceToken::new(presented),
-                    current: FenceToken::new(current),
-                });
-            }
-        }
-
-        // Idempotency BEFORE the CAS. A retry presents the SAME
-        // `expected_version` it did the first time, which the CAS would now
-        // reject as a conflict — so a replay has to be recognized before the
-        // version check ever runs, or retry-stability is unreachable.
-        let keys: Vec<String> = events
-            .iter()
-            .filter_map(|e| e.idempotency_key.as_ref())
-            .map(|k| k.as_str().to_owned())
-            .collect();
-        if !keys.is_empty() {
-            let stored = sqlx::query(concat!(
-                "SELECT ",
-                event_columns!(),
-                " FROM gwk.event \
-                 WHERE aggregate_type = $1 AND aggregate_id = $2 AND idempotency_key = ANY($3) \
-                 ORDER BY seq"
-            ))
-            .bind(&aggregate_type)
-            .bind(&aggregate_id)
-            .bind(&keys)
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(|e| append_storage("idempotency lookup", e))?;
-
-            if !stored.is_empty() {
-                if stored.len() == events.len() && keys.len() == events.len() {
-                    // Every event in this batch already landed under its key:
-                    // the original result, replayed.
-                    return stored
-                        .iter()
-                        .map(row_to_envelope)
-                        .collect::<Result<Vec<_>, _>>()
-                        .map_err(|e| AppendError::Storage(e.0));
-                }
-                return Err(AppendError::MalformedBatch(format!(
-                    "{} of {} idempotency keys already landed for {aggregate_type}/{aggregate_id}: \
-                     a retry must present the identical batch",
-                    stored.len(),
-                    events.len()
-                )));
-            }
-        }
-
-        // CAS against the aggregate's current version.
-        let actual: Option<i64> = sqlx::query_scalar(
-            "SELECT max(aggregate_version) FROM gwk.event \
-             WHERE aggregate_type = $1 AND aggregate_id = $2",
-        )
-        .bind(&aggregate_type)
-        .bind(&aggregate_id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|e| append_storage("read aggregate version", e))?;
-        let actual = u32::try_from(actual.unwrap_or(0))
-            .map_err(|e| append_storage("aggregate_version out of range", e))?;
-        if actual != expected_version {
-            return Err(AppendError::VersionConflict {
-                actual,
-                expected: expected_version,
-            });
-        }
-
-        let next_seq = from_numeric_text(
-            &writer
-                .try_get::<String, _>("next_seq_text")
-                .map_err(|e| append_storage("column next_seq", e))?,
-        )
-        .map_err(|e| append_storage("column next_seq", e))?;
-
-        let mut appended = Vec::with_capacity(events.len());
-        for (offset, event) in events.iter().enumerate() {
-            let seq = next_seq
-                .checked_add(offset as u64)
-                .ok_or_else(|| AppendError::Storage("global sequence exhausted".to_owned()))?;
-            // `now()` is transaction time, so every event in one commit shares
-            // an `appended_at` — which is the truth: they landed together.
-            let row = sqlx::query(concat!(
-                "INSERT INTO gwk.event ( \
-                   seq, event_id, project_id, aggregate_type, aggregate_id, aggregate_version, \
-                   event_type, schema_version, occurred_at, appended_at, actor, origin, \
-                   causation_id, correlation_id, idempotency_key, payload, payload_ref) \
-                 VALUES ($1::numeric, $2, $3, $4, $5, $6, $7, $8, $9::timestamptz, now(), \
-                   $10, $11, $12, $13, $14, $15, $16) \
-                 RETURNING ",
-                event_columns!()
-            ))
-            .bind(to_numeric_text(seq))
-            .bind(event.event_id.as_str())
-            .bind(event.project_id.as_str())
-            .bind(&event.aggregate_type)
-            .bind(event.aggregate_id.as_str())
-            .bind(i64::from(event.aggregate_version))
-            .bind(&event.event_type)
-            .bind(
-                i32::try_from(event.schema_version)
-                    .map_err(|e| append_storage("schema_version out of range", e))?,
-            )
-            .bind(event.occurred_at.as_str())
-            .bind(serde_json::to_value(&event.actor).map_err(|e| append_storage("actor", e))?)
-            .bind(serde_json::to_value(&event.origin).map_err(|e| append_storage("origin", e))?)
-            .bind(event.causation_id.as_ref().map(|v| v.as_str()))
-            .bind(event.correlation_id.as_ref().map(|v| v.as_str()))
-            .bind(event.idempotency_key.as_ref().map(|v| v.as_str()))
-            .bind(&event.payload)
-            .bind(
-                event
-                    .payload_ref
-                    .as_ref()
-                    .map(serde_json::to_value)
-                    .transpose()
-                    .map_err(|e| append_storage("payload_ref", e))?,
-            )
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|e| append_storage("insert event", e))?;
-            appended.push(row_to_envelope(&row).map_err(|e| AppendError::Storage(e.0))?);
-        }
-
-        let advanced = next_seq
-            .checked_add(events.len() as u64)
-            .ok_or_else(|| AppendError::Storage("global sequence exhausted".to_owned()))?;
-        sqlx::query("UPDATE gwk_internal.writer SET next_seq = $1::numeric WHERE id = 1")
-            .bind(to_numeric_text(advanced))
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| append_storage("advance sequence", e))?;
-
-        // Queued inside the transaction, delivered by PostgreSQL only if it
-        // commits — so a wake-up never announces an append that rolled back.
-        sqlx::query("SELECT pg_notify($1, $2)")
-            .bind(EVENT_CHANNEL)
-            .bind(to_numeric_text(advanced - 1))
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| append_storage("notify", e))?;
-
+        let writer = self.lock_writer(&mut tx).await?;
+        let appended = self
+            .append_locked(&mut tx, &writer, expected_version, fence, &events)
+            .await?;
+        // Committed even on a replay: nothing was written, so this only
+        // releases the writer lock the replay lookup was read under.
         tx.commit().await.map_err(|e| append_storage("commit", e))?;
-        Ok(appended)
+        Ok(appended.events)
     }
 
     async fn read_from(
@@ -615,18 +719,23 @@ mod tests {
     }
 
     #[test]
-    fn a_schema_version_the_column_cannot_hold_is_refused_not_narrowed() {
-        let mut past = event("a", 1);
-        past.schema_version = i32::MAX as u32 + 1;
-        let err = validate_batch(0, &[past]).expect_err("past the column's range");
+    fn the_column_carries_every_schema_version_the_envelope_can_declare() {
+        // The column was `integer` and silently could not hold the top half of
+        // the envelope's u32 (3-prime NB-3). It is bigint now, so the whole
+        // declared range must round-trip through validation untouched.
+        for version in [1, i32::MAX as u32, i32::MAX as u32 + 1, u32::MAX] {
+            let mut e = event("a", 1);
+            e.schema_version = version;
+            validate_batch(0, &[e]).unwrap_or_else(|err| panic!("schema_version {version}: {err}"));
+        }
+
+        let mut zero = event("a", 1);
+        zero.schema_version = 0;
+        let err = validate_batch(0, &[zero]).expect_err("0 is not a version");
         let AppendError::MalformedBatch(reason) = err else {
             panic!("expected MalformedBatch");
         };
         assert!(reason.contains("schema_version"), "{reason}");
-
-        let mut edge = event("a", 1);
-        edge.schema_version = i32::MAX as u32;
-        validate_batch(0, &[edge]).expect("the largest value the column holds is legal");
     }
 
     #[test]

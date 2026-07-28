@@ -162,6 +162,7 @@ async fn init_applies_the_contract_is_idempotent_and_refuses_a_stranger() {
             "gate",
             "lease",
             "message",
+            "orchestrator_checkpoint",
             "task",
             "worktree",
         ];
@@ -179,7 +180,7 @@ async fn init_applies_the_contract_is_idempotent_and_refuses_a_stranger() {
         .fetch_all(&mut conn)
         .await
         .expect("query the grant matrix");
-        assert_eq!(rows.len(), 15, "the contract schema changed shape");
+        assert_eq!(rows.len(), 16, "the contract schema changed shape");
         for row in &rows {
             let table: String = row.try_get("relname").expect("relname");
             let get = |col| -> bool { row.try_get(col).expect("bool") };

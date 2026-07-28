@@ -7,106 +7,20 @@
 //! `numeric(20,0)` column, epoch supersession, the advisory lock, the wake-up
 //! channel, and the admission bound.
 //!
-//! `#[ignore]` because it needs a server:
-//!
-//! ```text
-//! docker run --rm -d -p 55432:5432 -e POSTGRES_HOST_AUTH_METHOD=trust \
-//!   --name gwk-pg postgres:16
-//! GWK_TEST_ADMIN_DATABASE_URL=postgres://postgres@localhost:55432/postgres \
-//!   cargo test -p gwk-kernel --test event_store -- --ignored
-//! ```
+//! `#[ignore]` because it needs a server — see `tests/common/mod.rs` for the
+//! one-line `docker run` that provides one.
+
+mod common;
 
 use std::time::Duration;
 
+use common::{drop_database, fresh_store, maintenance_pool, secret, url_for};
 use gwk_cert::conformance;
 use gwk_domain::port::{AppendError, EventStore};
-use gwk_kernel::admin::{self, InitOutcome};
-use gwk_kernel::config::{ADMIN_DATABASE_URL_ENV, AdminConfig, RUNTIME_ROLE_ENV};
 use gwk_kernel::numeric::{from_numeric_text, to_numeric_text};
 use gwk_kernel::store::{PgEventStore, connect_pool};
 use gwk_kernel::writer::WriterLock;
-use secrecy::SecretString;
-use sqlx::PgPool;
 use sqlx::postgres::PgListener;
-
-const ADMIN_URL_ENV: &str = "GWK_TEST_ADMIN_DATABASE_URL";
-const RUNTIME_ROLE: &str = "gwk_test_runtime";
-
-fn maintenance_url() -> String {
-    std::env::var(ADMIN_URL_ENV)
-        .unwrap_or_else(|_| panic!("{ADMIN_URL_ENV} must point at a PostgreSQL superuser DSN"))
-}
-
-fn url_for(database: &str) -> String {
-    let base = maintenance_url();
-    let (prefix, _) = base.rsplit_once('/').expect("a /database suffix");
-    format!("{prefix}/{database}")
-}
-
-fn secret(database: &str) -> SecretString {
-    SecretString::from(url_for(database))
-}
-
-/// A freshly initialized database plus a store bound to it.
-///
-/// Every case gets its own: the log is append-only by contract, so there is no
-/// truncate-and-reuse path, and sharing one would make cases order-dependent.
-async fn fresh_store(maintenance: &PgPool, tag: &str, inflight: usize) -> (String, PgEventStore) {
-    let name = format!("gwk_store_{}_{tag}", std::process::id());
-    drop_database(maintenance, &name).await;
-    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name};")))
-        .execute(maintenance)
-        .await
-        .expect("create test database");
-
-    let pool = connect_pool(&secret(&name), 8).await.expect("connect");
-    let config = AdminConfig::from_lookup({
-        let url = url_for(&name);
-        move |key| match key {
-            ADMIN_DATABASE_URL_ENV => Some(url.clone()),
-            RUNTIME_ROLE_ENV => Some(RUNTIME_ROLE.to_owned()),
-            _ => None,
-        }
-    })
-    .expect("admin config");
-    assert_eq!(
-        admin::init(&pool, &config).await.expect("init"),
-        InitOutcome::Initialized
-    );
-    let store = PgEventStore::with_capacity(pool, inflight)
-        .await
-        .expect("open store");
-    (name, store)
-}
-
-async fn drop_database(maintenance: &PgPool, name: &str) {
-    let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
-        "DROP DATABASE IF EXISTS {name} WITH (FORCE);"
-    )))
-    .execute(maintenance)
-    .await;
-}
-
-async fn maintenance_pool() -> PgPool {
-    let pool = PgPool::connect(&maintenance_url())
-        .await
-        .expect("connect to the maintenance database");
-    let exists: bool =
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)")
-            .bind(RUNTIME_ROLE)
-            .fetch_one(&pool)
-            .await
-            .expect("query pg_roles");
-    if !exists {
-        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
-            "CREATE ROLE {RUNTIME_ROLE} NOLOGIN;"
-        )))
-        .execute(&pool)
-        .await
-        .expect("create the runtime role");
-    }
-    pool
-}
 
 #[tokio::test]
 #[ignore = "needs a PostgreSQL; see the module docs"]

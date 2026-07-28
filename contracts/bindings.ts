@@ -1585,6 +1585,8 @@ export type Worktree_Deserialize = {
 	lease_id?: LeaseId | null,
 	dirty: boolean,
 	unpushed: boolean,
+	released_at?: Timestamp | null,
+	disposition?: string | null,
 	created_at: Timestamp,
 };
 
@@ -1598,5 +1600,7 @@ export type Worktree_Serialize = {
 	lease_id?: LeaseId | null,
 	dirty: boolean,
 	unpushed: boolean,
+	released_at?: Timestamp | null,
+	disposition?: string | null,
 	created_at: Timestamp,
 };

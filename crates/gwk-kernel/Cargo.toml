@@ -14,6 +14,10 @@ publish = false
 [dependencies]
 gwk-domain.workspace = true
 secrecy.workspace = true
+# Traits only (Serialize/DeserializeOwned): the projection layer takes contract
+# types generically so the stored `state` column and the JSON one come from the
+# same serializer and cannot drift. No derives are used in this crate.
+serde.workspace = true
 serde_json.workspace = true
 sqlx = { workspace = true, features = ["json"] }
 thiserror.workspace = true

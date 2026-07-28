@@ -1170,6 +1170,8 @@ mod tests {
                     lease_id: None,
                     dirty: false,
                     unpushed: false,
+                    released_at: None,
+                    disposition: None,
                     created_at: ts(),
                 },
             },
