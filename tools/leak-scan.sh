@@ -42,6 +42,18 @@ if [[ "${1:-}" == "--stdin" ]]; then
   esac
 fi
 
+if [[ "${1:-}" == "--history" ]]; then
+  # Local opt-in: scan the CONTENT of commits through the same engine as --stdin, so
+  # a leak that lived only in an intermediate commit — gone from the current tree and
+  # net-zero across a range diff — is still provable. Default is ALL history; an
+  # optional range (or any git-log revision args) narrows it: `--history main..HEAD`.
+  # The DEFAULT no-arg tracked-tree scan below is unchanged and stays green.
+  shift
+  status=0
+  git log -p "$@" | "$here/$(basename "$0")" --stdin || status=$?
+  exit "$status"
+fi
+
 cd "$here/.."
 
 # A grep/file/xargs diagnostic during a scan must fail the gate CLOSED. Both scans
