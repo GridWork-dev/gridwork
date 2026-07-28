@@ -77,6 +77,18 @@ jobs:
             echo 'TRUNCATE gwk.command succeeded — the state-table truncate guard is missing' >&2
             exit 1
           fi
+      # A lease fence, once set, must never be cleared or lowered — a
+      # 100 -> NULL -> 50 launder would otherwise rewind it past the "< OLD"
+      # check and re-arm a deposed writer. Seed a fence, then the clear MUST
+      # fail; a passing clear means the fence no-clear/monotonic guard regressed.
+      - name: Clearing a set lease fence must error
+        run: |
+          PGURL="postgresql://postgres:ci@localhost:5432/postgres"
+          psql "$PGURL" -v ON_ERROR_STOP=1 -c "INSERT INTO gwk.lease (id, version, fence_token) VALUES ('ci-fence', 1, 100);"
+          if psql "$PGURL" -v ON_ERROR_STOP=1 -c "UPDATE gwk.lease SET version=2, fence_token=NULL WHERE id='ci-fence';"; then
+            echo 'clearing a set lease fence_token succeeded — the fence no-clear/monotonic guard regressed' >&2
+            exit 1
+          fi
 
   # The generated TypeScript contract, goldens, and theme must match the Rust
   # source exactly (xtask --check), decode at runtime under bun, typecheck

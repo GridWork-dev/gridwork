@@ -238,7 +238,8 @@ CREATE TABLE gwk.lease (
 -- gwk.lease carries the fence token — the deposed-writer defense: a lease taken
 -- over hands the new holder a strictly higher fence, and any write stamped with
 -- a stale (lower) fence must be rejected downstream. A fence that could rewind
--- would re-arm a deposed writer, so it is monotonic non-decreasing here; and,
+-- would re-arm a deposed writer, so it is monotonic non-decreasing here and,
+-- once set, never cleared; and,
 -- as on the FSM tables, every UPDATE advances version by exactly 1 (CAS).
 -- The lease is NOT one of the four public FSMs (fsm.rs: expiry is time-driven,
 -- release holder-driven), so it gets no edge guard. Lease state/row-lifecycle
@@ -252,9 +253,14 @@ BEGIN
     RAISE EXCEPTION 'lease version must advance by exactly 1 (got % -> %)',
       OLD.version, NEW.version;
   END IF;
-  IF NEW.fence_token IS NOT NULL AND OLD.fence_token IS NOT NULL
-     AND NEW.fence_token < OLD.fence_token THEN
-    RAISE EXCEPTION 'lease fence_token must not decrease (got % -> %)',
+  -- A fence, once set, is monotonic non-decreasing AND may never be cleared.
+  -- Guarding only `NEW < OLD` left a two-step launder: 100 -> NULL (NEW null,
+  -- skips the check) then NULL -> 50 (OLD null, skips it) rewinds the fence and
+  -- re-arms a deposed writer. Refuse clearing or lowering a set fence; a fresh
+  -- fence (OLD null -> NEW value) is still allowed.
+  IF OLD.fence_token IS NOT NULL
+     AND (NEW.fence_token IS NULL OR NEW.fence_token < OLD.fence_token) THEN
+    RAISE EXCEPTION 'lease fence_token must not decrease or be cleared (got % -> %)',
       OLD.fence_token, NEW.fence_token;
   END IF;
   RETURN NEW;
