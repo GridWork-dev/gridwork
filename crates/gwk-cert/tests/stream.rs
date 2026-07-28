@@ -350,6 +350,27 @@ fn mutant_outcome_on_non_terminal() {
 }
 
 #[test]
+fn terminal_without_targets_falls_back_to_the_created_ones() {
+    let mut events = valid_stream();
+    // The terminal event drops its `targets`; the ones named at creation
+    // still bind the agreement check, and the golden stop stays clean.
+    events[15].payload = serde_json::json!({
+        "from": "signaled", "to": "verification_complete", "outcome": "clean"
+    });
+    assert_eq!(check_stream(&events), vec![]);
+}
+
+#[test]
+fn mutant_clean_outcome_with_no_targets_anywhere() {
+    let mut events = valid_stream();
+    events[9].payload = serde_json::json!({ "kind": "stop_attempt" });
+    events[15].payload = serde_json::json!({
+        "from": "signaled", "to": "verification_complete", "outcome": "clean"
+    });
+    assert!(codes(&events).contains(&FindingCode::OutcomeDisagreesWithTargets));
+}
+
+#[test]
 fn mutant_clean_outcome_with_unstopped_target() {
     let mut events = valid_stream();
     // The attempt ends `unknown` instead of `canceled`; `clean` now lies.

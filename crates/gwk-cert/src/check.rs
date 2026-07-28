@@ -69,6 +69,19 @@ fn payload_str<'a>(event: &'a EventEnvelope, key: &str) -> Option<&'a str> {
     event.payload.get(key).and_then(|v| v.as_str())
 }
 
+/// The `targets` array of a command payload, if present and an array.
+fn payload_targets(event: &EventEnvelope) -> Option<Vec<String>> {
+    event
+        .payload
+        .get("targets")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|t| t.as_str().map(String::from))
+                .collect()
+        })
+}
+
 /// Edge legality + terminality for one of the four public FSMs, by wire name.
 /// Returns None when `aggregate_type` is not FSM-governed (open world).
 fn fsm_check(aggregate_type: &str, from: &str, to: &str) -> Option<(bool, bool)> {
@@ -97,6 +110,8 @@ pub fn check_stream(events: &[EventEnvelope]) -> Vec<Finding> {
     let mut last_seq: Option<u64> = None;
     let mut replay: HashMap<(String, String), ReplayState> = HashMap::new();
     let mut seen_keys: HashMap<(String, String, String), ()> = HashMap::new();
+    // command aggregate id -> stop targets named at creation
+    let mut command_targets: HashMap<String, Vec<String>> = HashMap::new();
     // command aggregate id -> (targets, outcome)
     let mut command_outcomes: Vec<(EventId, Vec<String>, String)> = Vec::new();
     let mut attempt_final: HashMap<String, String> = HashMap::new();
@@ -195,6 +210,11 @@ pub fn check_stream(events: &[EventEnvelope]) -> Vec<Finding> {
                     version: event.aggregate_version,
                 },
             );
+            if event.aggregate_type == "command"
+                && let Some(targets) = payload_targets(event)
+            {
+                command_targets.insert(event.aggregate_id.0.clone(), targets);
+            }
         } else if event.event_type.ends_with("_state_changed") {
             let (Some(from), Some(to)) = (payload_str(event, "from"), payload_str(event, "to"))
             else {
@@ -263,16 +283,18 @@ pub fn check_stream(events: &[EventEnvelope]) -> Vec<Finding> {
                                 .to_string(),
                         )),
                         Some(o) => {
-                            let targets: Vec<String> = event
-                                .payload
-                                .get("targets")
-                                .and_then(|v| v.as_array())
-                                .map(|a| {
-                                    a.iter()
-                                        .filter_map(|t| t.as_str().map(String::from))
-                                        .collect()
-                                })
+                            // Prefer the terminal event's own targets, else
+                            // the ones carried from the command's creation.
+                            let targets = payload_targets(event)
+                                .or_else(|| command_targets.get(&event.aggregate_id.0).cloned())
                                 .unwrap_or_default();
+                            if o == "clean" && targets.is_empty() {
+                                findings.push(at(
+                                    FindingCode::OutcomeDisagreesWithTargets,
+                                    "outcome clean but the command names no targets to agree with"
+                                        .to_string(),
+                                ));
+                            }
                             command_outcomes.push((event.event_id.clone(), targets, o.to_string()));
                         }
                     }
