@@ -8,8 +8,11 @@
 //!
 //! **Replay convention** (contract): a state change is an event whose
 //! `event_type` ends in `_state_changed` with payload `{"from": s, "to": s}`;
-//! creation is `_created` at `aggregate_version` 1. Aggregate types outside
-//! the four public FSMs get envelope-level checks only (open world).
+//! creation is `_created` at `aggregate_version` 1. A stop command carries
+//! `targets: [aggregate_id]` on its `_created` payload (and may restate it on
+//! the terminal event); that creation set is the FLOOR a `clean` outcome must
+//! have verifiably stopped. Aggregate types outside the four public FSMs get
+//! envelope-level checks only (open world).
 //!
 //! **Explicit non-claim:** this checker cannot detect historical tampering
 //! from stream input alone — a coherent forged stream passes. Tamper evidence
