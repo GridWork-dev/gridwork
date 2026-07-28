@@ -108,8 +108,11 @@ impl TransitionGuard for AttemptState {
 /// Decide one transition. Check order:
 ///
 /// 1. **Idempotent retry** — a request whose key equals the last APPLIED key
-///    returns the current cursor unchanged (stable even after the version
-///    advanced; the transition already happened).
+///    AND whose target state the cursor already holds returns the current
+///    cursor unchanged (stable even after the version advanced; the
+///    transition already happened). A matching key requesting any OTHER
+///    state falls through to its honest refusal — a replayed key never
+///    converts a wrong request into an apply.
 /// 2. **Edge legality** against [`StateMachine::EDGES`].
 /// 3. **CAS version** — `expected_version` must equal the cursor's version.
 /// 4. **Actor guard** ([`TransitionGuard::guard`], e.g. the D5 flip rule).
@@ -120,6 +123,7 @@ pub fn apply<S: TransitionGuard>(
     if let (Some(key), Some(applied)) =
         (req.idempotency_key, cursor.applied_idempotency_key.as_ref())
         && key == applied
+        && cursor.state == req.to
     {
         return TransitionResult::Applied {
             state: cursor.state,
@@ -376,6 +380,60 @@ mod tests {
             TransitionResult::StaleVersion {
                 actual: 2,
                 expected: 1
+            }
+        );
+    }
+
+    #[test]
+    fn replayed_key_with_a_different_target_state_falls_through_to_refusal() {
+        // A key replay only claims Applied when the cursor already holds the
+        // requested state. The same key aimed anywhere else — here combined
+        // with a wrong actor and a stale expected_version — must reach its
+        // honest refusal, never Applied.
+        let engine = Actor {
+            kind: "engine".into(),
+            id: Some("e-1".into()),
+        };
+        let key = IdempotencyKey::new("flip-once");
+        let cur = Cursor {
+            state: AttemptState::Running,
+            version: 5,
+            applied_idempotency_key: Some(key.clone()),
+        };
+        // Legal edge, stale version: the CAS refusal wins.
+        let result = apply(
+            &cur,
+            &TransitionRequest {
+                to: AttemptState::Succeeded,
+                expected_version: 999,
+                actor: &engine,
+                idempotency_key: Some(&key),
+                receipt_id: None,
+            },
+        );
+        assert_eq!(
+            result,
+            TransitionResult::StaleVersion {
+                actual: 5,
+                expected: 999
+            }
+        );
+        // An edge not in the table at all: the edge refusal wins.
+        let result = apply(
+            &cur,
+            &TransitionRequest {
+                to: AttemptState::Leased,
+                expected_version: 999,
+                actor: &engine,
+                idempotency_key: Some(&key),
+                receipt_id: None,
+            },
+        );
+        assert_eq!(
+            result,
+            TransitionResult::IllegalEdge {
+                from: AttemptState::Running,
+                to: AttemptState::Leased
             }
         );
     }
