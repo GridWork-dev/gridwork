@@ -1,0 +1,378 @@
+-- 0001_contract.sql — the gwk contract schema, greenfield.
+--
+-- This file is CONTRACT: shapes, state sets, legal edges, and invariants any
+-- conforming storage backend must uphold. Engine-specific mechanics (queues,
+-- notification channels, lock strategies, privilege hardening) belong to the
+-- backend/deployment layer and are deliberately absent here.
+--
+-- Conventions:
+--   * every identifier snake_case; ids are opaque text
+--   * state values are exactly the wire strings of gwk-domain's FSM enums
+--   * 64-bit counters are native bigint IN STORAGE; the decimal-string rule
+--     is a WIRE-format rule (JSON), not a storage rule
+--   * timestamps are timestamptz
+
+BEGIN;
+
+CREATE SCHEMA IF NOT EXISTS gwk;
+
+-- ============================================================
+-- The event log
+-- ============================================================
+
+-- seq is ASSIGNED BY THE KERNEL APPEND ACTOR, in COMMIT order, and is the
+-- global read/replay cursor: unique, strictly increasing, NOT gapless.
+--
+-- Deliberately NOT BIGSERIAL/IDENTITY: sequence numbers allocate at INSERT
+-- time but transactions COMMIT in a different order, so an allocation-ordered
+-- column is not proof of commit order — a reader paging by it can observe
+-- seq N+1 before an uncommitted seq N exists, then never see N. A single
+-- append actor assigning seq at commit closes that hole by construction.
+CREATE TABLE gwk.event (
+  seq               bigint PRIMARY KEY,
+  event_id          text NOT NULL UNIQUE,
+  project_id        text NOT NULL,
+  aggregate_type    text NOT NULL,
+  aggregate_id      text NOT NULL,
+  aggregate_version integer NOT NULL CHECK (aggregate_version >= 1),
+  event_type        text NOT NULL,
+  schema_version    integer NOT NULL CHECK (schema_version >= 1),
+  occurred_at       timestamptz NOT NULL,
+  appended_at       timestamptz NOT NULL,
+  actor             jsonb NOT NULL,
+  origin            jsonb NOT NULL,
+  causation_id      text,
+  correlation_id    text,
+  idempotency_key   text,
+  payload           jsonb NOT NULL,
+  payload_ref       jsonb,
+  -- one event per aggregate version: the contiguity + CAS anchor
+  UNIQUE (aggregate_type, aggregate_id, aggregate_version)
+);
+
+-- retry-stable appends: the same keyed write cannot land twice per aggregate
+CREATE UNIQUE INDEX event_idempotency
+  ON gwk.event (aggregate_type, aggregate_id, idempotency_key)
+  WHERE idempotency_key IS NOT NULL;
+
+-- Append-only is a CONTRACT property, so it is enforced here as a trigger any
+-- backend inherits. Privilege-level enforcement (revoking UPDATE/DELETE from
+-- runtime roles) is a deployment MECHANISM layered on top by the kernel's
+-- provisioning, not part of the contract.
+CREATE FUNCTION gwk.forbid_event_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'gwk.event is append-only (% refused)', TG_OP;
+END $$;
+
+CREATE TRIGGER event_append_only
+  BEFORE UPDATE OR DELETE ON gwk.event
+  FOR EACH ROW EXECUTE FUNCTION gwk.forbid_event_mutation();
+
+-- ============================================================
+-- FSM edge data + the transition guard
+-- ============================================================
+
+CREATE TABLE gwk.transition (
+  entity     text NOT NULL,
+  from_state text NOT NULL,
+  to_state   text NOT NULL,
+  PRIMARY KEY (entity, from_state, to_state)
+);
+
+INSERT INTO gwk.transition (entity, from_state, to_state) VALUES
+  ('task', 'submitted', 'working'),
+  ('task', 'submitted', 'canceled'),
+  ('task', 'working', 'input_required'),
+  ('task', 'working', 'completed'),
+  ('task', 'working', 'failed'),
+  ('task', 'working', 'canceled'),
+  ('task', 'input_required', 'working'),
+  ('task', 'input_required', 'canceled'),
+
+  ('attempt', 'queued', 'leased'),
+  ('attempt', 'queued', 'canceled'),
+  ('attempt', 'leased', 'starting'),
+  ('attempt', 'leased', 'canceled'),
+  ('attempt', 'starting', 'running'),
+  ('attempt', 'starting', 'failed'),
+  ('attempt', 'starting', 'unknown'),
+  ('attempt', 'starting', 'canceling'),
+  ('attempt', 'running', 'blocked'),
+  ('attempt', 'running', 'canceling'),
+  ('attempt', 'running', 'failed'),
+  ('attempt', 'running', 'unknown'),
+  ('attempt', 'running', 'succeeded'),
+  ('attempt', 'blocked', 'running'),
+  ('attempt', 'blocked', 'canceling'),
+  ('attempt', 'blocked', 'failed'),
+  ('attempt', 'blocked', 'unknown'),
+  ('attempt', 'canceling', 'canceled'),
+  ('attempt', 'canceling', 'unknown'),
+
+  ('message', 'accepted', 'delivered'),
+  ('message', 'accepted', 'dead_letter'),
+  ('message', 'delivered', 'acknowledged'),
+  ('message', 'delivered', 'dead_letter'),
+  ('message', 'acknowledged', 'applied'),
+  ('message', 'acknowledged', 'rejected'),
+  ('message', 'acknowledged', 'dead_letter'),
+
+  ('command', 'issued', 'targeted'),
+  ('command', 'targeted', 'signaled'),
+  ('command', 'signaled', 'verification_complete');
+
+-- The row-level guard behind every FSM table: edge legality against
+-- gwk.transition, and CAS discipline — EVERY update advances version by
+-- exactly 1 (terminal immutability follows from terminals having no edges).
+CREATE FUNCTION gwk.assert_transition() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.state IS DISTINCT FROM OLD.state
+     AND NOT EXISTS (
+       SELECT 1 FROM gwk.transition t
+       WHERE t.entity = TG_ARGV[0]
+         AND t.from_state = OLD.state
+         AND t.to_state = NEW.state
+     ) THEN
+    RAISE EXCEPTION 'illegal % transition: % -> %', TG_ARGV[0], OLD.state, NEW.state;
+  END IF;
+  IF NEW.version IS DISTINCT FROM OLD.version + 1 THEN
+    RAISE EXCEPTION '% version must advance by exactly 1 (got % -> %)',
+      TG_ARGV[0], OLD.version, NEW.version;
+  END IF;
+  RETURN NEW;
+END $$;
+
+-- ============================================================
+-- Vertical-slice entity tables
+-- ============================================================
+
+CREATE TABLE gwk.lease (
+  id           text PRIMARY KEY,
+  version      integer NOT NULL DEFAULT 1 CHECK (version >= 1),
+  state        text NOT NULL DEFAULT 'held'
+                 CHECK (state IN ('held', 'released', 'expired')),
+  mode         text NOT NULL DEFAULT 'exclusive'
+                 CHECK (mode IN ('exclusive', 'shared')),
+  holder       text,
+  scope        text,
+  repo         text,
+  path         text,
+  branch       text,
+  base_sha     text,
+  fence_token  bigint,
+  heartbeat_at timestamptz,
+  expires_at   timestamptz,
+  dirty        boolean NOT NULL DEFAULT false,
+  unpushed     boolean NOT NULL DEFAULT false,
+  disposition  text,
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  updated_at   timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE gwk.task (
+  id          text PRIMARY KEY,
+  version     integer NOT NULL DEFAULT 1 CHECK (version >= 1),
+  state       text NOT NULL DEFAULT 'submitted'
+                CHECK (state IN ('submitted', 'working', 'input_required',
+                                 'completed', 'failed', 'canceled')),
+  kind        text,
+  title       text,
+  spec_ref    text,
+  project     text,
+  priority    integer,
+  tracker_ref text,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  updated_at  timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TRIGGER task_transition
+  BEFORE UPDATE ON gwk.task
+  FOR EACH ROW EXECUTE FUNCTION gwk.assert_transition('task');
+
+CREATE TABLE gwk.attempt (
+  id                      text PRIMARY KEY,
+  version                 integer NOT NULL DEFAULT 1 CHECK (version >= 1),
+  state                   text NOT NULL DEFAULT 'queued'
+                            CHECK (state IN ('queued', 'leased', 'starting',
+                                             'running', 'blocked', 'canceling',
+                                             'canceled', 'failed', 'unknown',
+                                             'succeeded')),
+  task_id                 text NOT NULL REFERENCES gwk.task(id),
+  engine                  text NOT NULL,
+  capability              text,
+  role                    text,
+  model_lane              text,
+  permission_profile      text,
+  worktree_lease_id       text REFERENCES gwk.lease(id),
+  base_sha                text,
+  budget                  jsonb,
+  result_schema_ref       text,
+  provider_session_ref    text,
+  runtime_ref             text,
+  runtime_started_at      timestamptz,
+  exit_code               integer,
+  provider_terminal_event text,
+  result_valid            boolean,
+  evidence_manifest_ref   text,
+  gate_result             text,
+  created_at              timestamptz NOT NULL DEFAULT now(),
+  updated_at              timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TRIGGER attempt_transition
+  BEFORE UPDATE ON gwk.attempt
+  FOR EACH ROW EXECUTE FUNCTION gwk.assert_transition('attempt');
+
+CREATE TABLE gwk.engine_session (
+  id                   text PRIMARY KEY,
+  attempt_id           text NOT NULL REFERENCES gwk.attempt(id),
+  engine               text NOT NULL,
+  provider_session_ref text,
+  started_at           timestamptz NOT NULL,
+  ended_at             timestamptz
+);
+
+CREATE TABLE gwk.message (
+  id                 text PRIMARY KEY,
+  version            integer NOT NULL DEFAULT 1 CHECK (version >= 1),
+  state              text NOT NULL DEFAULT 'accepted'
+                       CHECK (state IN ('accepted', 'delivered', 'acknowledged',
+                                        'applied', 'rejected', 'dead_letter')),
+  idempotency_key    text NOT NULL UNIQUE,
+  correlation_id     text,
+  reply_to           text REFERENCES gwk.message(id),
+  sender             text,
+  recipient          text,
+  channel            text,
+  kind               text,
+  payload            jsonb,
+  deadline           timestamptz,
+  delivery_attempts  integer NOT NULL DEFAULT 0 CHECK (delivery_attempts >= 0),
+  dead_letter_reason text,
+  -- channel name -> opaque per-channel delivery reference
+  delivery_refs      jsonb,
+  created_at         timestamptz NOT NULL DEFAULT now(),
+  updated_at         timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TRIGGER message_transition
+  BEFORE UPDATE ON gwk.message
+  FOR EACH ROW EXECUTE FUNCTION gwk.assert_transition('message');
+
+CREATE TABLE gwk.command (
+  id              text PRIMARY KEY,
+  version         integer NOT NULL DEFAULT 1 CHECK (version >= 1),
+  state           text NOT NULL DEFAULT 'issued'
+                    CHECK (state IN ('issued', 'targeted', 'signaled',
+                                     'verification_complete')),
+  kind            text NOT NULL,
+  target          text,
+  actor           jsonb,
+  idempotency_key text UNIQUE,
+  -- The verified RESULT, distinct from the progress spine: present exactly
+  -- when the command is verification_complete, written in the same
+  -- transaction as that terminal transition — this CHECK is what makes a
+  -- split write unrepresentable.
+  outcome         text CHECK (outcome IN ('clean', 'partial', 'unknown')),
+  created_at      timestamptz NOT NULL DEFAULT now(),
+  updated_at      timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT outcome_iff_verification_complete
+    CHECK ((state = 'verification_complete') = (outcome IS NOT NULL))
+);
+
+CREATE TRIGGER command_transition
+  BEFORE UPDATE ON gwk.command
+  FOR EACH ROW EXECUTE FUNCTION gwk.assert_transition('command');
+
+CREATE TABLE gwk.gate (
+  id           text PRIMARY KEY,
+  version      integer NOT NULL DEFAULT 1 CHECK (version >= 1),
+  attempt_id   text REFERENCES gwk.attempt(id),
+  phase_ref    text,
+  -- OPEN kind (verify/review/security/eval/cert/...): new gate kinds are
+  -- additive, never a schema change
+  kind         text,
+  verdict      text NOT NULL DEFAULT 'pending'
+                 CHECK (verdict IN ('pending', 'pass', 'fail', 'partial')),
+  evidence_ref text,
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  updated_at   timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE gwk.authority_grant (
+  id           text PRIMARY KEY,
+  grantee      jsonb NOT NULL,
+  action_class text NOT NULL,
+  scope        text,
+  granted_at   timestamptz NOT NULL DEFAULT now(),
+  expires_at   timestamptz,
+  receipt_id   text
+);
+
+-- Append-only attestation ledger (no version/updated_at: receipts are facts).
+CREATE TABLE gwk.receipt (
+  id             text PRIMARY KEY,
+  actor          jsonb NOT NULL,
+  action         text NOT NULL,
+  subject_type   text NOT NULL,
+  subject_id     text NOT NULL,
+  from_state     text,
+  to_state       text,
+  observed_basis text,
+  ts             timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE FUNCTION gwk.forbid_receipt_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'gwk.receipt is append-only (% refused)', TG_OP;
+END $$;
+
+CREATE TRIGGER receipt_append_only
+  BEFORE UPDATE OR DELETE ON gwk.receipt
+  FOR EACH ROW EXECUTE FUNCTION gwk.forbid_receipt_mutation();
+
+CREATE TABLE gwk.evidence (
+  id         text PRIMARY KEY,
+  -- OPEN kind (transcript/diff/log/...); no format column
+  kind       text NOT NULL,
+  ref        text NOT NULL,
+  digest     text,
+  byte_size  bigint CHECK (byte_size >= 0),
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE gwk.attention_item (
+  id          text PRIMARY KEY,
+  kind        text NOT NULL,
+  summary     text NOT NULL,
+  subject_ref text,
+  raised_by   jsonb,
+  raised_at   timestamptz NOT NULL DEFAULT now(),
+  resolved_at timestamptz
+);
+
+CREATE TABLE gwk.worktree (
+  id         text PRIMARY KEY,
+  repo       text NOT NULL,
+  path       text NOT NULL,
+  branch     text NOT NULL,
+  base_sha   text,
+  lease_id   text REFERENCES gwk.lease(id),
+  dirty      boolean NOT NULL DEFAULT false,
+  unpushed   boolean NOT NULL DEFAULT false,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE gwk.dispatch_node (
+  id         text PRIMARY KEY,
+  parent_id  text REFERENCES gwk.dispatch_node(id),
+  attempt_id text REFERENCES gwk.attempt(id),
+  kind       text NOT NULL,
+  label      text,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+COMMIT;
