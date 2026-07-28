@@ -26,8 +26,8 @@ pub use checkpoint::{
 };
 pub use command::{CommandDecodeError, KernelCommand};
 pub use entity::{
-    Attempt, AttentionItem, AuthorityGrant, Budget, Command, DispatchNode, EngineSession, Evidence,
-    Gate, Lease, Message, Receipt, Task, Worktree,
+    Attempt, AttentionItem, AuthorityGrant, Budget, Command, DISPATCH_NODE_INITIAL_STATE,
+    DispatchNode, EngineSession, Evidence, Gate, Lease, Message, Receipt, Task, Worktree,
 };
 pub use envelope::{
     Actor, CommandEnvelope, ENVELOPE_SCHEMA_VERSION, EventEnvelope, INLINE_PAYLOAD_MAX_BYTES,

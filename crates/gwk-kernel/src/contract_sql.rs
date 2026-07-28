@@ -50,7 +50,11 @@ CREATE TABLE gwk.event (
   aggregate_id      text NOT NULL,
   aggregate_version bigint NOT NULL CHECK (aggregate_version BETWEEN 1 AND 4294967295),
   event_type        text NOT NULL,
-  schema_version    integer NOT NULL CHECK (schema_version >= 1),
+  -- bigint, not integer: the envelope declares `schema_version: u32`, and a
+  -- signed integer tops out at 2^31-1 — half that range. The narrow column made
+  -- the contract claim a width the storage could not hold, on the one field a
+  -- future decoder dispatches on. Same treatment as aggregate_version above.
+  schema_version    bigint NOT NULL CHECK (schema_version BETWEEN 1 AND 4294967295),
   occurred_at       timestamptz NOT NULL,
   appended_at       timestamptz NOT NULL,
   actor             jsonb NOT NULL,
@@ -558,14 +562,87 @@ CREATE TABLE gwk.worktree (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
+-- A dispatch node is bookkeeping over the spawn tree, NOT one of the four
+-- public state machines: `state` is an OPEN bounded lifecycle label with no
+-- seeded edge set, so `assert_transition` (which trusts gwk.transition) does
+-- not apply. What DOES apply is the CAS discipline every versioned row owes,
+-- because concurrent writers race the same node.
 CREATE TABLE gwk.dispatch_node (
   id         text PRIMARY KEY,
+  version    bigint NOT NULL DEFAULT 1 CHECK (version BETWEEN 1 AND 4294967295),
   parent_id  text REFERENCES gwk.dispatch_node(id),
   attempt_id text REFERENCES gwk.attempt(id),
   kind       text NOT NULL,
+  state      text NOT NULL DEFAULT 'registered',
   label      text,
-  created_at timestamptz NOT NULL DEFAULT now()
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
 );
+
+-- Version CAS without edge legality — the guard an open-lifecycle versioned
+-- table needs. Deliberately NOT gwk.assert_transition: that one refuses any
+-- state change lacking a gwk.transition row, and dispatch_node has no seeded
+-- edges by design, so every transition would be refused.
+CREATE FUNCTION gwk.assert_version_cas() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.version IS DISTINCT FROM OLD.version + 1 THEN
+    RAISE EXCEPTION '% version must advance by exactly 1 (got % -> %)',
+      TG_ARGV[0], OLD.version, NEW.version;
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE TRIGGER dispatch_node_cas
+  BEFORE UPDATE ON gwk.dispatch_node
+  FOR EACH ROW EXECUTE FUNCTION gwk.assert_version_cas('dispatch_node');
+CREATE TRIGGER dispatch_node_no_delete
+  BEFORE DELETE ON gwk.dispatch_node
+  FOR EACH ROW EXECUTE FUNCTION gwk.forbid_state_row_delete('dispatch_node');
+
+ALTER TABLE gwk.dispatch_node ENABLE ALWAYS TRIGGER dispatch_node_cas;
+ALTER TABLE gwk.dispatch_node ENABLE ALWAYS TRIGGER dispatch_node_no_delete;
+
+-- The orchestrator's crash-recovery snapshot, latest-per-orchestrator.
+--
+-- Distinct from `gwk-domain::checkpoint::Checkpoint`, which is the kernel's own
+-- projection-hash checkpoint: this one is the orchestrator's impression of its
+-- own in-flight work at crash time. Recovery re-reads the live rows; this is
+-- the crash-time impression, not truth.
+--
+-- `seq` is the monotonic per-orchestrator counter and is guarded below. It is a
+-- resume cursor, so a rewind would let recovery restart from state that has
+-- already been superseded.
+CREATE TABLE gwk.orchestrator_checkpoint (
+  orchestrator_id    text PRIMARY KEY,
+  seq                numeric(20,0) NOT NULL
+                       CHECK (seq >= 0 AND seq <= 18446744073709551615),
+  native_session_ref text,
+  active_goal        text,
+  active_step_ref    text,
+  latest_command_ref text,
+  open_attempts      jsonb,
+  leases             jsonb,
+  pending_approvals  jsonb,
+  budget_cursor      jsonb,
+  updated_at         timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE FUNCTION gwk.assert_checkpoint_seq_advances() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.seq <= OLD.seq THEN
+    RAISE EXCEPTION 'orchestrator_checkpoint seq must advance (got % -> %)',
+      OLD.seq, NEW.seq;
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE TRIGGER orchestrator_checkpoint_seq
+  BEFORE UPDATE ON gwk.orchestrator_checkpoint
+  FOR EACH ROW EXECUTE FUNCTION gwk.assert_checkpoint_seq_advances();
+
+ALTER TABLE gwk.orchestrator_checkpoint ENABLE ALWAYS TRIGGER orchestrator_checkpoint_seq;
 
 COMMIT;
 "#;
@@ -577,4 +654,4 @@ COMMIT;
 // unwrapped 64-hex line lands past 100 columns — the generator and
 // rustfmt would then fight, showing up as permanent contract drift.
 pub const CONTRACT_SQL_SHA256: &str =
-    "972ba007d29fd8511b6d8c1ac49d3fc2a36580911121cf5a22918c4713326c18";
+    "2827d946ec50c3da7548cd597886f42ea0eaaf640ec30873d2bf2dfa33c92857";

@@ -1198,11 +1198,14 @@ mod tests {
             ProjectionRecord::DispatchNode {
                 dispatch_node: DispatchNode {
                     id: DispatchNodeId::new("node-1"),
+                    version: 1,
                     parent_id: None,
                     attempt_id: None,
                     kind: "orchestrator".into(),
+                    state: crate::entity::DISPATCH_NODE_INITIAL_STATE.into(),
                     label: None,
                     created_at: ts(),
+                    updated_at: ts(),
                 },
             },
             ProjectionRecord::OrchestratorCheckpoint {

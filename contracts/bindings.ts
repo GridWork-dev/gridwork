@@ -445,11 +445,14 @@ export type DispatchNodeId = string;
  */
 export type DispatchNode_Deserialize = {
 	id: DispatchNodeId,
+	version: number,
 	parent_id?: DispatchNodeId | null,
 	attempt_id?: AttemptId | null,
 	kind: string,
+	state: string,
 	label?: string | null,
 	created_at: Timestamp,
+	updated_at: Timestamp,
 };
 
 /**
@@ -458,11 +461,14 @@ export type DispatchNode_Deserialize = {
  */
 export type DispatchNode_Serialize = {
 	id: DispatchNodeId,
+	version: number,
 	parent_id?: DispatchNodeId | null,
 	attempt_id?: AttemptId | null,
 	kind: string,
+	state: string,
 	label?: string | null,
 	created_at: Timestamp,
+	updated_at: Timestamp,
 };
 
 /**

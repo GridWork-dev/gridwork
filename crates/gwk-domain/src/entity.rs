@@ -399,6 +399,7 @@ pub struct Lease {
 #[serde(deny_unknown_fields)]
 pub struct DispatchNode {
     pub id: DispatchNodeId,
+    pub version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[specta(optional)]
     pub parent_id: Option<DispatchNodeId>,
@@ -406,11 +407,19 @@ pub struct DispatchNode {
     #[specta(optional)]
     pub attempt_id: Option<AttemptId>,
     pub kind: String,
+    // OPEN bounded lifecycle label, NOT an FSM state: the spawn tree has no
+    // seeded edge set, so storage guards the version CAS and nothing else.
+    // Plain `//` — a doc attribute here would flow into the bindings.ts golden.
+    pub state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[specta(optional)]
     pub label: Option<String>,
     pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
+
+/// The state a dispatch node is born in — the spawn tree's only fixed label.
+pub const DISPATCH_NODE_INITIAL_STATE: &str = "registered";
 
 #[cfg(test)]
 mod tests {
