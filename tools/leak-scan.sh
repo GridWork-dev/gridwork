@@ -16,6 +16,18 @@ if [[ -f "$here/leak-scan.local" ]]; then
   patterns="$patterns|$(grep -Ev '^[[:space:]]*(#|$)' "$here/leak-scan.local" | paste -sd'|' -)"
 fi
 
+# Validate the assembled pattern set once, before any scan — a malformed ERE (most
+# likely a bad line in the untracked leak-scan.local, exactly where estate patterns
+# live) makes every grep below exit 2 with empty stdout, which would read as "clean"
+# and fail the gate OPEN. An empty stream never matches, so a VALID pattern yields
+# status 1 here; only status >= 2 (grep's own diagnostic) is the malformed signal.
+pat_status=0
+grep -Eq "$patterns" </dev/null 2>/dev/null || pat_status=$?
+if [[ "$pat_status" -ge 2 ]]; then
+  echo 'leak-scan: invalid pattern set (check tools/leak-scan.local) — refusing to pass' >&2
+  exit 2
+fi
+
 if [[ "${1:-}" == "--stdin" ]]; then
   # Branch on grep's status explicitly: 0 = match (leak), 1 = clean. Anything else
   # (bad pattern, read error) must be a hard error — a negated grep would turn
@@ -31,6 +43,15 @@ if [[ "${1:-}" == "--stdin" ]]; then
 fi
 
 cd "$here/.."
+
+# A grep/file/xargs diagnostic during a scan must fail the gate CLOSED. Both scans
+# below end in `|| true` (needed because xargs/grep return nonzero on the normal
+# no-match path), which also swallows a real error (bad ERE, unreadable file) that
+# writes to stderr and leaves stdout empty — that would read as "clean". Capture
+# each scan's stderr and treat any diagnostic as a hard error.
+scan_err="$(mktemp)"
+trap 'rm -f "$scan_err"' EXIT
+
 # Defence-in-depth: flag binary-looking tracked files early with a clear message.
 # file(1) classifies from the head of a file, so this guard alone is bypassable by
 # bytes placed past its window — the pattern scan below therefore uses grep -a
@@ -40,9 +61,14 @@ cd "$here/.."
 # Empty files report encoding "binary" but are trivially safe.
 # One reviewed binary asset is exempt: site/og.png (the share card — tool-generated
 # from public copy + the public palette, never hand-edited).
-binaries=$(git ls-files -z ':!site/og.png' | xargs -0 -r file --mime-encoding \
+binaries=$( { git ls-files -z ':!site/og.png' | xargs -0 -r file --mime-encoding \
   | grep -Ev ': *(us-ascii|utf-8|ascii)$' \
-  | while IFS=: read -r f _; do [[ -s "$f" ]] && echo "$f: non-text encoding"; done || true)
+  | while IFS=: read -r f _; do [[ -s "$f" ]] && echo "$f: non-text encoding"; done; } 2>"$scan_err" || true)
+if [[ -s "$scan_err" ]]; then
+  echo 'leak-scan: encoding scan emitted diagnostics — refusing to pass:' >&2
+  cat "$scan_err" >&2
+  exit 2
+fi
 if [[ -n "$binaries" ]]; then
   echo "$binaries"
   echo 'leak-scan: binary tracked files are unscannable — use text-safe encodings' >&2
@@ -59,7 +85,12 @@ fi
 # grep -a, never -I: -I's binary sniff runs over the whole stream, so a NUL past
 # file(1)'s window would silently skip the file. Noisy matches from binary bytes
 # are the correct failure direction for a publication gate.
-matches=$(git ls-files -z ':!tools/leak-scan.sh' | xargs -0 -r grep -Ean "$patterns" || true)
+matches=$( { git ls-files -z ':!tools/leak-scan.sh' | xargs -0 -r grep -Ean "$patterns"; } 2>"$scan_err" || true)
+if [[ -s "$scan_err" ]]; then
+  echo 'leak-scan: content scan emitted diagnostics — refusing to pass:' >&2
+  cat "$scan_err" >&2
+  exit 2
+fi
 if [[ -n "$matches" ]]; then
   echo "$matches"
   echo 'leak-scan: private identifiers found' >&2
