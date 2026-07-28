@@ -202,6 +202,10 @@ pub struct Command {
     pub state: CommandState,
     /// OPEN bounded string (e.g. `stop_attempt`).
     pub kind: String,
+    // The PRIMARY target of this command: the command event payload carries a
+    // `targets` array (a stop may name several attempts); this projection keeps
+    // the single primary. Plain `//`, not a `///` doc: a doc attribute here
+    // would flow into the generated bindings.ts golden.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[specta(optional)]
     pub target: Option<String>,

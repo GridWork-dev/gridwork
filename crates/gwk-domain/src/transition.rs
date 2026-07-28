@@ -122,24 +122,35 @@ impl TransitionGuard for AttemptState {
 /// Decide one transition. Check order:
 ///
 /// 1. **Actor guard** ([`TransitionGuard::guard`], e.g. the liveness-producer
-///    flip rule) — FIRST, before every other check, so a caller the guard
-///    refuses gets the guard's refusal and learns nothing about the
-///    aggregate's current state or version (`IllegalEdge` carries `from`,
-///    `StaleVersion` carries `actual` — neither may reach an unauthorized
-///    actor). Ahead of the idempotency short-circuit deliberately: a
-///    replayed key from an unauthorized actor on a guarded edge must be
-///    refused, not answered, or the short-circuit becomes a state probe. A
-///    legitimate retry resends the same complete request (same actor, same
-///    receipt), so it passes the guard again and stays stable. Unguarded
-///    edges are untouched.
-/// 2. **Idempotent retry** — a request whose key equals the last APPLIED key
-///    AND whose target state the cursor already holds returns the current
-///    cursor unchanged (stable even after the version advanced; the
-///    transition already happened). A matching key requesting any OTHER
-///    state falls through to its honest refusal — a replayed key never
-///    converts a wrong request into an apply.
+///    flip rule) — FIRST, ahead of the idempotency short-circuit. Guard-first
+///    RE-AUTHORIZES a guarded edge on EVERY request, replay included: an
+///    unauthorized replay of a guarded flip is refused, not answered, so the
+///    short-circuit can never become a probe of a guarded edge. A legitimate
+///    retry resends the same complete request (same actor, same receipt),
+///    passes the guard again, and stays stable. Unguarded edges are untouched
+///    by the guard.
+/// 2. **Idempotent retry** — a request whose key equals the last APPLIED key,
+///    whose target state the cursor already holds, AND whose actor equals the
+///    one that recorded that transition (`applied_by`) returns the current
+///    cursor unchanged (stable even after the version advanced). A matching
+///    key from a DIFFERENT actor, or aimed at any OTHER state, falls through to
+///    the honest refusal below — a harvested key never converts a wrong or
+///    unauthorized request into an apply.
 /// 3. **Edge legality** against [`StateMachine::EDGES`].
-/// 4. **CAS version** — `expected_version` must equal the cursor's version.
+/// 4. **CAS version** — `expected_version` must equal the cursor's version;
+///    the applied result is `version + 1`, and a transition at the u32 ceiling
+///    is refused (as `StaleVersion`) rather than overflowed.
+///
+/// This order is NOT a blanket non-disclosure claim. On an UNGUARDED edge the
+/// refusals deliberately carry state and version: `IllegalEdge { from }`
+/// discloses the current state and `StaleVersion { actual }` the current
+/// version, because `actual` is load-bearing for a legitimate CAS retrier — it
+/// must learn the true version to retry, so it cannot be withheld. That
+/// disclosure is inherent to the CAS-retry contract and acceptable here because
+/// the event log is world-readable in this deployment. What guard-first buys is
+/// narrower and real: a GUARDED edge is re-authorized on every request, so an
+/// unauthorized replay of a guarded flip never reaches the state/version-bearing
+/// arms at all.
 pub fn apply<S: TransitionGuard>(
     cursor: &Cursor<S>,
     req: &TransitionRequest<'_, S>,
