@@ -17,7 +17,7 @@ fail=0
 # crate -> site
 while IFS='|' read -r name value; do
   kebab=${name//_/-}
-  if ! grep -qi -- "--${kebab}:${value}" "$site"; then
+  if ! grep -Eqi -- "--${kebab}:[[:space:]]*${value}" "$site"; then
     echo "theme-sync: crate token '${name}' (${value}) missing or different in ${site} (expected --${kebab}:${value})" >&2
     fail=1
   fi
@@ -32,8 +32,8 @@ while IFS='|' read -r kebab value; do
     echo "theme-sync: site property --${kebab}:${value} has no crate token '${snake}'" >&2
     fail=1
   fi
-done < <(grep -o -- '--[a-z0-9-]*:#[0-9A-Fa-f]\{6\}' "$site" \
-  | sed 's/--\([a-z0-9-]*\):\(#[0-9A-Fa-f]*\)/\1|\2/')
+done < <(grep -Eo -- '--[a-z0-9-]*:[[:space:]]*#[0-9A-Fa-f]{3,6}' "$site" \
+  | sed 's/--\([a-z0-9-]*\):[[:space:]]*\(#[0-9A-Fa-f]*\)/\1|\2/')
 
 if [ "$fail" -ne 0 ]; then
   echo "theme-sync: FAIL" >&2
