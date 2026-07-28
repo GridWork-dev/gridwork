@@ -110,7 +110,9 @@ pub async fn check_concurrent_writers<S: EventStore>(store: &S) {
         .expect("writer B wins after re-reading the actual version");
 }
 
-/// Fencing: after a re-grant, the old token is refused everywhere.
+/// Fencing: after a re-grant, the old token is refused everywhere — and so
+/// is an append that presents no token at all. Once the store has granted a
+/// fence, the token is mandatory; omission must not bypass the check.
 pub async fn check_fencing<S: EventStore>(store: &S) {
     let old = store.grant_fence().await.expect("first grant");
     store
@@ -123,6 +125,11 @@ pub async fn check_fencing<S: EventStore>(store: &S) {
         .append(1, Some(old), vec![fixture_event("agg", 2)])
         .await
         .expect_err("stale fence must be refused");
+    assert!(matches!(err, AppendError::Fenced { .. }), "got {err:?}");
+    let err = store
+        .append(1, None, vec![fixture_event("agg", 2)])
+        .await
+        .expect_err("omitted fence must be refused once one is granted");
     assert!(matches!(err, AppendError::Fenced { .. }), "got {err:?}");
     store
         .append(1, Some(new), vec![fixture_event("agg", 2)])
@@ -265,11 +272,13 @@ pub mod memory {
                 .inner
                 .lock()
                 .map_err(|e| AppendError::Storage(e.to_string()))?;
-            if let Some(token) = fence
-                && token.value() != inner.fence
-            {
+            // Once a fence has been granted, presenting the current token is
+            // mandatory — omission is refused, not skipped, or a deposed
+            // writer could keep writing by simply dropping its token.
+            let presented = fence.unwrap_or(FenceToken::new(0));
+            if presented.value() != inner.fence {
                 return Err(AppendError::Fenced {
-                    presented: token,
+                    presented,
                     current: FenceToken::new(inner.fence),
                 });
             }
