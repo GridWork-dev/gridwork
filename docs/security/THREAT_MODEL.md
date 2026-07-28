@@ -85,11 +85,16 @@ internal consistency of a stream — it cannot detect a coherent FORGERY from
 stream input alone. Tamper *evidence* is a storage/provenance property
 (append-only enforcement, host controls), not a stream-inspection property.
 
-**Status: partial.** The append-only database triggers are in force —
-including TRUNCATE coverage, guards on the insert and delete paths, and
-enforcement that survives replica-mode sessions. Fencing exists as a contract
-type and a column, not yet as enforced behavior; no projections exist yet to
-rebuild. The `gwk-cert` non-claim describes the shipped certifier exactly.
+**Status: partial.** The database triggers are in force — and now cover the
+four FSM state tables (task, attempt, message, command) as well as the
+append-only event log and receipt ledger. On the append-only tables, UPDATE
+and DELETE are refused; on the state tables, rows are born at their initial
+state, deletes are refused, and every transition follows a legal edge. Across
+all of them, TRUNCATE is refused at the statement level and each guard is set
+`ENABLE ALWAYS`, so a replica-mode session cannot switch them off. Fencing
+exists as a contract type and a column, not yet as enforced behavior; no
+projections exist yet to rebuild. The `gwk-cert` non-claim describes the
+shipped certifier exactly.
 
 ### 5. Path traversal and symlink games
 
@@ -108,12 +113,15 @@ Agents and tools print environment values; transcripts become blobs; the log
 is long-lived.
 **Stance:** inline payloads are bounded metadata — bulk output goes to blobs
 with retention classes and crypto-shred deletion; a redaction pass gates
-transcript capture; the public repository's history is leak-scanned in CI
-with seeded proof the gate can fail. Secrets never appear in contract types.
+transcript capture; CI leak-scans the public repository — the tracked tree
+plus the commit content across each pushed and pull-request range — with a
+seeded violation proving the gate can fail. Secrets never appear in contract
+types.
 
-**Status: partial.** The CI leak scan (with its seeded proof of failure) and
-the inline payload byte bound — a contract constant the certifier checks — are
-in force. The blob store, retention classes, crypto-shred deletion, and the
+**Status: partial.** The CI leak scan — the tracked tree plus commit content
+across each pushed and PR range, with its seeded proof of failure — and the
+inline payload byte bound (a contract constant the certifier checks) are in
+force. The blob store, retention classes, crypto-shred deletion, and the
 redaction pass are designed, not yet built.
 
 ### 7. Resource exhaustion

@@ -89,7 +89,7 @@ outcome cannot be established terminate as `unknown`, never a fabricated
 The Rust crate `gwk-domain` is canonical. Two derived surfaces are checked,
 not trusted: the generated TypeScript (`contracts/bindings.ts`, with golden
 round-trip fixtures decoded at runtime in CI) and the SQL DDL
-(`schema/0001_contract.sql`, applied and guard-tested against the pinned
+(`schema/0001_contract.sql`, applied clean against the pinned
 PostgreSQL major in CI). `gwk-cert` certifies event streams against the same
 tables the types are built from. Naming rules: `docs/contract/NAMING.md`.
 
