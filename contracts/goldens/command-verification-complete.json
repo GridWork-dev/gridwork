@@ -1,0 +1,15 @@
+{
+  "id": "cmd-0001",
+  "version": 4,
+  "state": "verification_complete",
+  "kind": "stop_attempt",
+  "target": "att-0001",
+  "actor": {
+    "kind": "operator",
+    "id": "op-1"
+  },
+  "idempotency_key": "cancel-once",
+  "outcome": "clean",
+  "created_at": "2026-07-27T12:05:00Z",
+  "updated_at": "2026-07-27T12:06:00Z"
+}

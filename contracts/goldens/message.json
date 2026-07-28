@@ -1,0 +1,21 @@
+{
+  "id": "msg-0001",
+  "version": 4,
+  "state": "applied",
+  "idempotency_key": "send-once",
+  "correlation_id": "corr-7",
+  "sender": "orchestrator",
+  "recipient": "operator",
+  "channel": "chat",
+  "kind": "status_update",
+  "payload": {
+    "text": "verify passed"
+  },
+  "delivery_attempts": 1,
+  "delivery_refs": {
+    "chat": "chat-msg-77",
+    "inbox": "inbox-3"
+  },
+  "created_at": "2026-07-27T12:00:00Z",
+  "updated_at": "2026-07-27T12:01:00Z"
+}

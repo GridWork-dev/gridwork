@@ -1,0 +1,19 @@
+{
+  "orchestrator_id": "orch-1",
+  "seq": "42",
+  "active_goal": "contract phase",
+  "active_step_ref": "step://execute",
+  "open_attempts": [],
+  "pending_approvals": [
+    {
+      "kind": "design_fork",
+      "question": "which storage layout?",
+      "subject_ref": "task-0001",
+      "raised_at": "2026-07-27T12:00:00Z"
+    }
+  ],
+  "budget_cursor": {
+    "spent_tokens": 120000,
+    "spent_tool_calls": 14
+  }
+}

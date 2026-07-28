@@ -1,0 +1,19 @@
+{
+  "event_id": "evt-0002",
+  "project_id": "proj-alpha",
+  "aggregate_type": "task",
+  "aggregate_id": "task-0001",
+  "aggregate_version": 1,
+  "event_type": "task_created",
+  "schema_version": 1,
+  "global_sequence": "1",
+  "occurred_at": "2026-07-27T12:00:00Z",
+  "appended_at": "2026-07-27T12:00:00Z",
+  "actor": {
+    "kind": "operator"
+  },
+  "origin": {
+    "system": "cli"
+  },
+  "payload": {}
+}

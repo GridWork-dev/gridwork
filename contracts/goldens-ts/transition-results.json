@@ -1,0 +1,1 @@
+[{"kind":"applied","state":"working","version":2},{"kind":"illegal_edge","from":"completed","to":"working"},{"kind":"stale_version","actual":3,"expected":2},{"kind":"unauthorized_actor","reason":"edge requires actor kind liveness_producer"}]

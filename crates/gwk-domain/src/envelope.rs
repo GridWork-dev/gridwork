@@ -20,6 +20,22 @@ pub const ENVELOPE_SCHEMA_VERSION: u32 = 1;
 /// append and re-checked by `gwk-cert`.
 pub const INLINE_PAYLOAD_MAX_BYTES: usize = 64 * 1024;
 
+/// The EXPORT-side shape of JSON metadata payloads. At runtime payloads are
+/// `serde_json::Value` (exact round-trips, arbitrary integer precision); this
+/// type exists so the generated TypeScript says "JSON tree", not `any` — and
+/// it encodes the discipline that a payload NUMBER is IEEE-754 double
+/// territory: anything 64-bit crosses the wire as a decimal string.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, specta::Type)]
+#[serde(untagged)]
+pub enum JsonValue {
+    Null(()),
+    Bool(bool),
+    Number(f64),
+    String(String),
+    Array(Vec<JsonValue>),
+    Object(std::collections::BTreeMap<String, JsonValue>),
+}
+
 /// Who caused an event or issued a command. `kind` is an OPEN bounded string
 /// (e.g. `operator`, `kernel`, `engine`, `liveness_producer`).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
@@ -92,6 +108,7 @@ pub struct EventEnvelope {
     #[specta(optional)]
     pub idempotency_key: Option<IdempotencyKey>,
     /// Bounded inline JSON metadata (≤ [`INLINE_PAYLOAD_MAX_BYTES`] serialized).
+    #[specta(type = JsonValue)]
     pub payload: serde_json::Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[specta(optional)]
@@ -128,6 +145,7 @@ pub struct CommandEnvelope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[specta(optional)]
     pub correlation_id: Option<CorrelationId>,
+    #[specta(type = JsonValue)]
     pub payload: serde_json::Value,
 }
 

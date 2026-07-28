@@ -175,7 +175,7 @@ pub struct Message {
     #[specta(optional)]
     pub kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[specta(optional)]
+    #[specta(optional, type = Option<crate::envelope::JsonValue>)]
     pub payload: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[specta(optional)]

@@ -5,3 +5,4 @@
 /.playwright-mcp/
 /tools/leak-scan.local
 /docs/session-logs/
+/contracts/node_modules/

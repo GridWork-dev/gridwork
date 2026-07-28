@@ -1,0 +1,62 @@
+[
+  {
+    "name": "bg",
+    "value": "#070B10",
+    "role": "canvas background"
+  },
+  {
+    "name": "surface",
+    "value": "#0D141D",
+    "role": "raised surface"
+  },
+  {
+    "name": "surface_2",
+    "value": "#121B26",
+    "role": "second elevation"
+  },
+  {
+    "name": "hue",
+    "value": "#6BDBFF",
+    "role": "accent"
+  },
+  {
+    "name": "hue_dim",
+    "value": "#3FA8CC",
+    "role": "accent, dimmed"
+  },
+  {
+    "name": "hue_bright",
+    "value": "#9AE8FF",
+    "role": "accent, bright"
+  },
+  {
+    "name": "fg",
+    "value": "#CBD7E2",
+    "role": "foreground text"
+  },
+  {
+    "name": "faint",
+    "value": "#526274",
+    "role": "faint structure"
+  },
+  {
+    "name": "muted",
+    "value": "#909AA3",
+    "role": "muted text"
+  },
+  {
+    "name": "warn",
+    "value": "#F2C14E",
+    "role": "warning"
+  },
+  {
+    "name": "fail",
+    "value": "#FF6E6E",
+    "role": "failure"
+  },
+  {
+    "name": "ok",
+    "value": "#6EE7A8",
+    "role": "success"
+  }
+]
