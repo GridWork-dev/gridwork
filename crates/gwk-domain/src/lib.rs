@@ -9,6 +9,7 @@ pub mod envelope;
 pub mod fsm;
 pub mod ids;
 pub mod inherited;
+pub mod port;
 pub mod transition;
 
 pub use entity::{
