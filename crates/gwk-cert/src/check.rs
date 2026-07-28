@@ -17,7 +17,9 @@
 
 use std::collections::HashMap;
 
-use gwk_domain::envelope::{EventEnvelope, INLINE_PAYLOAD_MAX_BYTES, accept_schema_version};
+use gwk_domain::envelope::{
+    ENVELOPE_SCHEMA_VERSION, EventEnvelope, INLINE_PAYLOAD_MAX_BYTES, accept_schema_version,
+};
 use gwk_domain::fsm::{AttemptState, CommandState, MessageState, StateMachine, TaskState};
 use gwk_domain::ids::{EventId, Seq};
 use gwk_domain::transition::LIVENESS_PRODUCER_KIND;
@@ -139,7 +141,8 @@ pub fn check_stream(events: &[EventEnvelope]) -> Vec<Finding> {
         };
 
         // -- envelope-level checks --
-        if let Err(err) = accept_schema_version(event.schema_version, 1, &[]) {
+        if let Err(err) = accept_schema_version(event.schema_version, ENVELOPE_SCHEMA_VERSION, &[])
+        {
             findings.push(at(FindingCode::SchemaVersionUnknown, err.to_string()));
         }
         let seq = event.global_sequence.value();
