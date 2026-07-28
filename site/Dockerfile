@@ -11,3 +11,10 @@ COPY site/index.html /usr/share/caddy/index.html
 COPY site/og.png /usr/share/caddy/og.png
 
 RUN caddy validate --config /etc/caddy/Caddyfile
+
+# The platform injects PORT above 1024 and TLS terminates at the edge, so root
+# buys nothing. Fixed unprivileged uid:gid (no passwd entry needed); caddy's
+# config/data homes point at /tmp (1777) so the non-root user can write them.
+ENV XDG_CONFIG_HOME=/tmp/caddy-config \
+    XDG_DATA_HOME=/tmp/caddy-data
+USER 10001:10001
