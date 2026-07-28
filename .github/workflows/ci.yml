@@ -73,8 +73,13 @@ jobs:
         with:
           fetch-depth: 0
       - name: scan PR commit messages
+        # explicit bash = -o pipefail, so a git-log failure fails the gate
+        # instead of feeding the scan empty stdin (fail-open otherwise).
+        shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          git log --format=%B "origin/${{ github.base_ref }}..HEAD" | ./tools/leak-scan.sh --stdin
+          git log --format=%B "origin/${BASE_REF}..HEAD" | ./tools/leak-scan.sh --stdin
       - name: prove the gate can fail (seeded violation)
         run: |
           seed=$(printf 'session log at /home/g%s/lab' 'w')
