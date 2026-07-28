@@ -36,6 +36,18 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
+/// The generated TypeScript contract.
+///
+/// This is a MANUAL registry: every `specta::Type`-deriving public type meant
+/// to reach `contracts/bindings.ts` must appear in the `.register()` chain
+/// below — directly, or as a field reachable from a type that is already
+/// there. specta walks reachable fields automatically; it does NOT discover
+/// new roots on its own, and nothing else in this codebase notices when an
+/// editor adds a wire type to gwk-domain or gwk-theme and forgets to list it
+/// here. Adding a new exported type: add its `.register::<T>()` call AND
+/// bump `tests::REGISTERED_ROOT_COUNT` below in the same change — that test
+/// only pins the registry against silent drift, it does not prove
+/// completeness.
 fn bindings() -> String {
     let types = specta::Types::default()
         .register::<EventEnvelope>()
@@ -361,6 +373,31 @@ fn check_file(path: &Path, expected: &str, drift: &mut Vec<String>) {
     }
 }
 
+/// Fail on a `.json` file present in `dir` that isn't one of `expected` — a
+/// golden renamed or dropped in the generator otherwise leaves an orphan on
+/// disk that `check_file` never looks at and no gate notices.
+fn check_orphans(dir: &Path, expected: &[&str], drift: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return; // a missing dir is already reported via check_file on each expected path
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|ext| ext != "json") {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !expected.contains(&name) {
+            drift.push(format!(
+                "{}: orphaned golden — not produced by `cargo run -p xtask -- contract` \
+                 (remove it, or register its type if it should still be generated)",
+                path.display()
+            ));
+        }
+    }
+}
+
 pub fn run(check: bool) {
     let root = repo_root();
     let contracts = root.join("contracts");
@@ -393,9 +430,12 @@ pub fn run(check: bool) {
         &theme_json,
         &mut drift,
     );
+    let golden_names: Vec<&str> = golden_files.iter().map(|(name, _)| *name).collect();
     for (name, content) in &golden_files {
         check_file(&goldens_dir.join(name), content, &mut drift);
     }
+    check_orphans(&goldens_dir, &golden_names, &mut drift);
+    check_orphans(&ts_goldens_dir, &golden_names, &mut drift);
 
     // TS -> Rust half of the round trip (the bun tests re-emit what they
     // decoded; those files are committed and re-read here).
@@ -454,5 +494,74 @@ pub fn run(check: bool) {
             eprintln!("contract drift: {line}");
         }
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pinned count of `.register::<T>()` calls inside `bindings()` — the
+    /// manual root registry described in its doc comment. Update this
+    /// constant AND the `.register()` chain together in the same change;
+    /// a mismatch means one moved without the other.
+    const REGISTERED_ROOT_COUNT: usize = 20;
+
+    #[test]
+    fn bindings_registry_matches_its_pin() {
+        // Scoped to the `bindings()` function BODY (brace-matched), not the
+        // whole file — this doc comment and this very test both say
+        // `.register::<T>()` in prose, and a whole-file scan would count
+        // its own words.
+        let source = include_str!("contract.rs");
+        let sig_at = source
+            .find("fn bindings() -> String {")
+            .expect("bindings() signature present");
+        let body_start = sig_at + source[sig_at..].find('{').expect("opening brace");
+        let mut depth = 0usize;
+        let mut body_end = body_start;
+        for (offset, ch) in source[body_start..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        body_end = body_start + offset;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(body_end > body_start, "no matching closing brace found");
+        let body = &source[body_start..=body_end];
+        let actual = body.matches(".register::<").count();
+        assert_eq!(
+            actual, REGISTERED_ROOT_COUNT,
+            "bindings() now has {actual} `.register::<T>()` calls but \
+             REGISTERED_ROOT_COUNT pins {REGISTERED_ROOT_COUNT} — update BOTH \
+             the registry in bindings() and this constant, and confirm the \
+             type you added or removed actually needed a manual root (see \
+             bindings()'s doc comment)"
+        );
+    }
+
+    #[test]
+    fn check_orphans_flags_an_unexpected_json_file() {
+        let dir = std::env::temp_dir().join(format!("xtask-orphan-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        std::fs::write(dir.join("task.json"), "{}").expect("write expected golden");
+        std::fs::write(dir.join("renamed-task.json"), "{}").expect("write orphan golden");
+
+        let mut drift = Vec::new();
+        check_orphans(&dir, &["task.json"], &mut drift);
+
+        std::fs::remove_dir_all(&dir).expect("cleanup temp dir");
+        assert_eq!(
+            drift.len(),
+            1,
+            "expected exactly one orphan finding: {drift:?}"
+        );
+        assert!(drift[0].contains("renamed-task.json"));
     }
 }
