@@ -13,6 +13,9 @@
 --     alone admits ±(10^20-1), overshooting u64 in both directions. A signed
 --     bigint tops out at 2^63-1, half the u64 wire range; the decimal-string
 --     rule is a WIRE-format rule (JSON), not a storage rule
+--   * u32 version counters (aggregate_version, each state row's version) are
+--     bigint IN STORAGE, CHECK-bounded to [1, 2^32-1] (4294967295) — a signed
+--     integer tops out at 2^31-1, half the u32 wire range
 --   * timestamps are timestamptz
 
 BEGIN;
@@ -38,7 +41,7 @@ CREATE TABLE gwk.event (
   project_id        text NOT NULL,
   aggregate_type    text NOT NULL,
   aggregate_id      text NOT NULL,
-  aggregate_version integer NOT NULL CHECK (aggregate_version >= 1),
+  aggregate_version bigint NOT NULL CHECK (aggregate_version BETWEEN 1 AND 4294967295),
   event_type        text NOT NULL,
   schema_version    integer NOT NULL CHECK (schema_version >= 1),
   occurred_at       timestamptz NOT NULL,
@@ -210,7 +213,7 @@ END $$;
 
 CREATE TABLE gwk.lease (
   id           text PRIMARY KEY,
-  version      integer NOT NULL DEFAULT 1 CHECK (version >= 1),
+  version      bigint NOT NULL DEFAULT 1 CHECK (version BETWEEN 1 AND 4294967295),
   state        text NOT NULL DEFAULT 'held'
                  CHECK (state IN ('held', 'released', 'expired')),
   mode         text NOT NULL DEFAULT 'exclusive'
@@ -234,7 +237,7 @@ CREATE TABLE gwk.lease (
 
 CREATE TABLE gwk.task (
   id          text PRIMARY KEY,
-  version     integer NOT NULL DEFAULT 1 CHECK (version >= 1),
+  version     bigint NOT NULL DEFAULT 1 CHECK (version BETWEEN 1 AND 4294967295),
   state       text NOT NULL DEFAULT 'submitted'
                 CHECK (state IN ('submitted', 'working', 'input_required',
                                  'completed', 'failed', 'canceled')),
@@ -275,7 +278,7 @@ ALTER TABLE gwk.task ENABLE ALWAYS TRIGGER task_no_truncate;
 
 CREATE TABLE gwk.attempt (
   id                      text PRIMARY KEY,
-  version                 integer NOT NULL DEFAULT 1 CHECK (version >= 1),
+  version                 bigint NOT NULL DEFAULT 1 CHECK (version BETWEEN 1 AND 4294967295),
   state                   text NOT NULL DEFAULT 'queued'
                             CHECK (state IN ('queued', 'leased', 'starting',
                                              'running', 'blocked', 'canceling',
@@ -335,7 +338,7 @@ CREATE TABLE gwk.engine_session (
 
 CREATE TABLE gwk.message (
   id                 text PRIMARY KEY,
-  version            integer NOT NULL DEFAULT 1 CHECK (version >= 1),
+  version            bigint NOT NULL DEFAULT 1 CHECK (version BETWEEN 1 AND 4294967295),
   state              text NOT NULL DEFAULT 'accepted'
                        CHECK (state IN ('accepted', 'delivered', 'acknowledged',
                                         'applied', 'rejected', 'dead_letter')),
@@ -379,7 +382,7 @@ ALTER TABLE gwk.message ENABLE ALWAYS TRIGGER message_no_truncate;
 
 CREATE TABLE gwk.command (
   id              text PRIMARY KEY,
-  version         integer NOT NULL DEFAULT 1 CHECK (version >= 1),
+  version         bigint NOT NULL DEFAULT 1 CHECK (version BETWEEN 1 AND 4294967295),
   state           text NOT NULL DEFAULT 'issued'
                     CHECK (state IN ('issued', 'targeted', 'signaled',
                                      'verification_complete')),
@@ -421,7 +424,7 @@ ALTER TABLE gwk.command ENABLE ALWAYS TRIGGER command_no_truncate;
 
 CREATE TABLE gwk.gate (
   id           text PRIMARY KEY,
-  version      integer NOT NULL DEFAULT 1 CHECK (version >= 1),
+  version      bigint NOT NULL DEFAULT 1 CHECK (version BETWEEN 1 AND 4294967295),
   attempt_id   text REFERENCES gwk.attempt(id),
   phase_ref    text,
   -- OPEN kind (verify/review/security/eval/cert/...): new gate kinds are
