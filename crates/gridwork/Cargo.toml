@@ -1,0 +1,14 @@
+[package]
+name = "gridwork"
+version = "0.0.1"
+description = "GridWork — an agent operating system for the terminal. Placeholder for the gw binary; the contract surface currently lives in the gwk-* crates."
+homepage = "https://gridwork.dev"
+keywords = ["agent", "terminal", "orchestration", "tui"]
+categories = ["command-line-utilities", "development-tools"]
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
