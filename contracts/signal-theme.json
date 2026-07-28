@@ -6,12 +6,12 @@
   },
   {
     "name": "surface",
-    "value": "#0D141D",
+    "value": "#121A24",
     "role": "raised surface"
   },
   {
     "name": "surface_2",
-    "value": "#121B26",
+    "value": "#1F2B3A",
     "role": "second elevation"
   },
   {
@@ -31,17 +31,17 @@
   },
   {
     "name": "fg",
-    "value": "#CBD7E2",
+    "value": "#E4EDF5",
     "role": "foreground text"
   },
   {
     "name": "faint",
     "value": "#526274",
-    "role": "faint structure"
+    "role": "faint structure (decorative/hairline only — never text or essential UI)"
   },
   {
     "name": "muted",
-    "value": "#909AA3",
+    "value": "#9AA5AF",
     "role": "muted text"
   },
   {

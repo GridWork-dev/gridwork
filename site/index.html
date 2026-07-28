@@ -24,25 +24,24 @@
 <style>
 /* ============================================================
    Signal — GridWork's visual system.
-   Brand tokens are exact. Two values are DERIVED and marked:
-   --muted (fg 70% over bg, 6.8:1 AA) exists because --faint
-   is 3.1:1 and is therefore restricted to hairlines, dividers
-   and decorative texture — never to text.
+   Brand tokens are exact. --faint is 3.1:1 only on bg and
+   falls below 3:1 on raised surfaces; it is restricted to
+   decorative hairlines/texture — never text or essential UI.
    ============================================================ */
 :root {
   --bg:#070B10;
-  --surface:#0D141D;
+  --surface:#121A24;
   --hue:#6BDBFF;
   --hue-dim:#3FA8CC;
   --hue-bright:#9AE8FF;
-  --fg:#CBD7E2;
+  --fg:#E4EDF5;
   --faint:#526274;
   --warn:#F2C14E;
   --fail:#FF6E6E;
   --ok:#6EE7A8;
 
-  --surface-2:#121B26;                  /* derived: nested surface step */
-  --muted:#909AA3;                      /* derived: fg 70% over bg — 6.8:1 */
+  --surface-2:#1F2B3A;                  /* second elevation */
+  --muted:#9AA5AF;                      /* muted text — 7.9:1 on bg */
   --line:rgba(82,98,116,.34);
   --line-hi:rgba(82,98,116,.58);
   --lift:inset 0 1px 0 rgba(154,232,255,.055);
@@ -79,7 +78,7 @@ h1 {
   font-size:clamp(1.85rem,1.05rem + 3.4vw,3.25rem);
   line-height:1.06;
   letter-spacing:-.035em;
-  color:#E4EDF5;
+  color:var(--fg);
 }
 h2 {
   font-size:clamp(1.2rem,1.02rem + .85vw,1.6rem);
@@ -287,7 +286,7 @@ ul.rows li:last-child { margin-bottom:0 }
 }
 .cmd code { display:block; white-space:pre; color:var(--fg) }
 .cmd code::before { content:"$ "; color:var(--hue-dim) }
-.cmd code i { font-style:normal; color:var(--muted) }   /* --faint would be 2.8:1 here */
+.cmd code i { font-style:normal; color:var(--muted) }   /* --faint would be 2.3:1 here */
 .cmd .note { display:block; margin-top:var(--s3); color:var(--muted); font-size:.6875rem; letter-spacing:.04em }
 .cmd .note code { display:inline; color:var(--hue-bright) }
 .cmd .note code::before { content:none }
