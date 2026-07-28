@@ -5,14 +5,24 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           components: rustfmt, clippy
@@ -24,8 +34,11 @@ jobs:
 
   msrv:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
           toolchain: "1.88"
@@ -36,42 +49,58 @@ jobs:
   # newly published advisory can't redden an unchanged PR.
   deny:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
           command: check bans licenses sources
 
   advisories:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     continue-on-error: true
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
           command: check advisories
 
+  # Hosted CI enforces the GENERIC pattern set only — the estate-specific extension
+  # (tools/leak-scan.local) is untracked by design and exists solely on operator
+  # machines as a local pre-commit/pre-push control. Seeds below therefore trip the
+  # generic patterns, and are split so this file never contains a matching literal.
   leak-scan:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - run: ./tools/leak-scan.sh
       - name: prove the gate can fail (seeded violation)
         run: |
-          seed=$(printf 'config lives at ~/.grid%s/env' 'work')
+          seed=$(printf 'creds at /ho%s/example/data' 'me')
           if echo "$seed" | ./tools/leak-scan.sh --stdin; then
             echo 'leak-scan accepted a seeded violation — the gate is broken' >&2
             exit 1
           fi
 
-  # Commit messages publish too. Same pattern set, same seeded proof.
+  # Commit messages and every line added or deleted inside the PR range publish
+  # too — the final tracked tree is not the whole exposure. Same seeded proof.
   commit-messages:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: scan PR commit messages
         # explicit bash = -o pipefail, so a git-log failure fails the gate
         # instead of feeding the scan empty stdin (fail-open otherwise).
@@ -80,9 +109,15 @@ jobs:
           BASE_REF: ${{ github.base_ref }}
         run: |
           git log --format=%B "origin/${BASE_REF}..HEAD" | ./tools/leak-scan.sh --stdin
+      - name: scan PR diff range (added and deleted lines)
+        shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git diff --unified=0 "origin/${BASE_REF}...HEAD" | ./tools/leak-scan.sh --stdin
       - name: prove the gate can fail (seeded violation)
         run: |
-          seed=$(printf 'session log at /home/g%s/lab' 'w')
+          seed=$(printf 'see claude.ai/code/ses%s_EXAMPLE' 'sion')
           if echo "$seed" | ./tools/leak-scan.sh --stdin; then
             echo 'commit-message scan accepted a seeded violation — the gate is broken' >&2
             exit 1

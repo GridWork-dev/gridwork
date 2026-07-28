@@ -3,3 +3,5 @@
 /outputs/
 /graphify-out/
 /.playwright-mcp/
+/tools/leak-scan.local
+/docs/session-logs/
