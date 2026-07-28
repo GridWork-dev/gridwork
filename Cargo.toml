@@ -11,6 +11,7 @@ repository = "https://github.com/GridWork-dev/gridwork"
 # Every public dependency is pinned here once. A crate that names its own
 # version is a second place for the same number to drift.
 [workspace.dependencies]
+gwk-cert = { path = "crates/gwk-cert", version = "0.0.1" }
 gwk-domain = { path = "crates/gwk-domain", version = "0.0.1" }
 secrecy = "0.10.3"
 serde = { version = "1", features = ["derive"] }

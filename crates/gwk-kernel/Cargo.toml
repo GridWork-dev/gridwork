@@ -12,11 +12,15 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+gwk-domain.workspace = true
 secrecy.workspace = true
-sqlx.workspace = true
+serde_json.workspace = true
+sqlx = { workspace = true, features = ["json"] }
 thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
 
 [dev-dependencies]
+gwk-cert.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]

@@ -22,14 +22,17 @@ use crate::config::AdminConfig;
 use crate::contract_sql::{CONTRACT_SQL, CONTRACT_SQL_SHA256};
 use crate::error::{KernelError, Result};
 
-/// The PostgreSQL mechanics applied beside the contract.
-const BACKEND_MIGRATION: &str = include_str!("../migrations/0001_kernel_internal.sql");
+/// The PostgreSQL mechanics applied beside the contract, in order.
+const BACKEND_MIGRATIONS: &[&str] = &[
+    include_str!("../migrations/0001_kernel_internal.sql"),
+    include_str!("../migrations/0002_writer.sql"),
+];
 
-// ponytail: one migration, so `include_str!` is the whole migration runner.
-// The moment a second one lands (the writer-epoch table is next), swap this
-// for `sqlx::migrate!` — ordering and applied-version tracking are its job,
-// not this constant's. Free to do then: every database is still created by
-// this command, so there is nothing deployed to retrofit.
+// ponytail: still no migration runner, and now for a better reason than "there
+// is only one file". `init` is all-or-nothing against an EMPTY database, so
+// there is no version ladder to walk — these are applied in order, once, in one
+// transaction, or not at all. A real migrator earns its keep the first time an
+// EXISTING database has to be upgraded in place; nothing before 1.0 does.
 
 /// What a candidate target database already contains.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -252,8 +255,9 @@ pub async fn runtime_privileges<'e>(
 /// append-only and lose UPDATE. `transition` is the FSM seed the contract ships
 /// — the kernel only ever reads it, so it loses every write.
 pub fn backend_script(role: &str, contract_sha256: &str) -> String {
+    let migrations = BACKEND_MIGRATIONS.join("\n");
     format!(
-        "{BACKEND_MIGRATION}\n\
+        "{migrations}\n\
          INSERT INTO gwk_internal.schema_fingerprint (id, contract_sha256) \
          VALUES (1, '{contract_sha256}');\n\
          GRANT USAGE ON SCHEMA gwk TO {role};\n\
@@ -261,7 +265,8 @@ pub fn backend_script(role: &str, contract_sha256: &str) -> String {
          GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA gwk TO {role};\n\
          REVOKE UPDATE ON gwk.event, gwk.receipt FROM {role};\n\
          REVOKE INSERT, UPDATE ON gwk.transition FROM {role};\n\
-         GRANT SELECT ON gwk_internal.schema_fingerprint TO {role};\n"
+         GRANT SELECT ON gwk_internal.schema_fingerprint TO {role};\n\
+         GRANT SELECT, UPDATE ON gwk_internal.writer TO {role};\n"
     )
 }
 

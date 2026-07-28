@@ -21,6 +21,10 @@ pub enum KernelError {
     #[error("privilege: {0}")]
     Privilege(String),
 
+    /// This process does not hold write authority for the store.
+    #[error("writer: {0}")]
+    Writer(String),
+
     #[error("database: {0}")]
     Database(#[from] sqlx::Error),
 }
