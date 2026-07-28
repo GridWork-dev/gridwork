@@ -10,8 +10,8 @@ use crate::envelope::Actor;
 use crate::fsm::{AttemptState, CommandState, MessageState, StateMachine, TaskState};
 use crate::ids::{IdempotencyKey, ReceiptId};
 
-/// The actor `kind` of the ONE legal writer of the `running` ⇄ `blocked` flip
-/// (D5: the liveness producer). Every flip also requires a receipt.
+/// The actor `kind` of the ONE legal writer of the `running` ⇄ `blocked`
+/// flip — the liveness-producer flip rule. Every flip also requires a receipt.
 pub const LIVENESS_PRODUCER_KIND: &str = "liveness_producer";
 
 /// An aggregate's current position: state, CAS version, and the idempotency
@@ -32,7 +32,7 @@ pub struct TransitionRequest<'a, S> {
     pub expected_version: u32,
     pub actor: &'a Actor,
     pub idempotency_key: Option<&'a IdempotencyKey>,
-    /// The receipt accompanying guarded edges (D5 blocked flips REQUIRE one).
+    /// The receipt accompanying guarded edges (the blocked-flip rule REQUIRES one).
     pub receipt_id: Option<&'a ReceiptId>,
 }
 
@@ -83,9 +83,10 @@ impl TransitionGuard for MessageState {}
 impl TransitionGuard for CommandState {}
 
 impl TransitionGuard for AttemptState {
-    /// D5: `running` ⇄ `blocked` has exactly one legal writer — the liveness
-    /// producer — and every flip is receipted. All other edges are unguarded
-    /// here (authority beyond the flip is the kernel's policy layer).
+    /// The liveness-producer flip rule: `running` ⇄ `blocked` has exactly one
+    /// legal writer — the liveness producer — and every flip is receipted.
+    /// All other edges are unguarded here (authority beyond the flip is the
+    /// kernel's policy layer).
     fn guard(from: Self, to: Self, ctx: &GuardCtx<'_>) -> Result<(), GuardViolation> {
         let is_flip = matches!(
             (from, to),
@@ -107,16 +108,17 @@ impl TransitionGuard for AttemptState {
 
 /// Decide one transition. Check order:
 ///
-/// 1. **Actor guard** ([`TransitionGuard::guard`], e.g. the D5 flip rule) —
-///    FIRST, before every other check, so a caller the guard refuses gets the
-///    guard's refusal and learns nothing about the aggregate's current state
-///    or version (`IllegalEdge` carries `from`, `StaleVersion` carries
-///    `actual` — neither may reach an unauthorized actor). Ahead of the
-///    idempotency short-circuit deliberately: a replayed key from an
-///    unauthorized actor on a guarded edge must be refused, not answered,
-///    or the short-circuit becomes a state probe. A legitimate retry resends
-///    the same complete request (same actor, same receipt), so it passes the
-///    guard again and stays stable. Unguarded edges are untouched.
+/// 1. **Actor guard** ([`TransitionGuard::guard`], e.g. the liveness-producer
+///    flip rule) — FIRST, before every other check, so a caller the guard
+///    refuses gets the guard's refusal and learns nothing about the
+///    aggregate's current state or version (`IllegalEdge` carries `from`,
+///    `StaleVersion` carries `actual` — neither may reach an unauthorized
+///    actor). Ahead of the idempotency short-circuit deliberately: a
+///    replayed key from an unauthorized actor on a guarded edge must be
+///    refused, not answered, or the short-circuit becomes a state probe. A
+///    legitimate retry resends the same complete request (same actor, same
+///    receipt), so it passes the guard again and stays stable. Unguarded
+///    edges are untouched.
 /// 2. **Idempotent retry** — a request whose key equals the last APPLIED key
 ///    AND whose target state the cursor already holds returns the current
 ///    cursor unchanged (stable even after the version advanced; the

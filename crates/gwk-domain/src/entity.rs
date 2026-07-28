@@ -263,9 +263,10 @@ pub struct AuthorityGrant {
 }
 
 /// An attestation that an actor performed an action — the audit row every
-/// auto-answer, state flip, and side effect leaves behind. The D5 blocked-flip
-/// receipt uses `subject_type = "attempt"`, `from`/`to` as the flip edge, and
-/// `observed_basis` naming the liveness evidence.
+/// auto-answer, state flip, and side effect leaves behind. The
+/// liveness-producer flip rule's receipt uses `subject_type = "attempt"`,
+/// `from`/`to` as the flip edge, and `observed_basis` naming the liveness
+/// evidence.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
 #[serde(deny_unknown_fields)]
 pub struct Receipt {

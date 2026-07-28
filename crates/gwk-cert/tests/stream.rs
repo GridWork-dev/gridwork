@@ -1,7 +1,7 @@
-//! The certifier against the synthetic golden stream — the 3′ vertical slice:
-//! a full task/attempt/command story the checker certifies clean, and a
-//! mutant battery where every single-field, single-edge, single-order, and
-//! single-version corruption MUST be caught.
+//! The certifier against the synthetic golden stream — the Contract-stage
+//! vertical slice: a full task/attempt/command story the checker certifies
+//! clean, and a mutant battery where every single-field, single-edge,
+//! single-order, and single-version corruption MUST be caught.
 
 use gwk_cert::check::{FindingCode, check_stream, parse_stream};
 use gwk_domain::envelope::{Actor, EventEnvelope, Origin};

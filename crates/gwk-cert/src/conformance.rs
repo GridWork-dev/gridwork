@@ -5,8 +5,8 @@
 //! run them under their own async runtime; [`memory::InMemoryStore`] is the
 //! reference implementation this crate certifies itself against.
 //!
-//! Skeleton scope (3′): append/CAS/ordering, fencing, cursor recovery,
-//! deterministic rebuild, watermark. Named-but-backend-level cases —
+//! Skeleton scope (the Contract stage): append/CAS/ordering, fencing, cursor
+//! recovery, deterministic rebuild, watermark. Named-but-backend-level cases —
 //! retention tombstones and kill-9 crash recovery — land with the first real
 //! backend (they need a process boundary an in-memory store cannot fake).
 

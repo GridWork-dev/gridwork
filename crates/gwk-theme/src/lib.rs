@@ -3,7 +3,7 @@
 //!
 //! One source of truth consumed three ways: the site's CSS custom properties
 //! (checked by `tools/check-theme-sync.sh` — token `name` maps to
-//! `--kebab-case`), the TUI theme (6′), and the generated TypeScript contract.
+//! `--kebab-case`), the TUI theme, and the generated TypeScript contract.
 //!
 //! These values are pre-ratification carriers: the design taste-gate ratifies
 //! or adjusts them, and a change here is a design decision, never drift.

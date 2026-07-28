@@ -1,8 +1,8 @@
 # Contract naming policy
 
-Frozen at the 3′ Contract phase. These rules bind every identifier the contract
-exports — Rust, generated TypeScript, SQL, and wire JSON. A rename after this
-freeze is a breaking contract change, not a style edit.
+Frozen at the Contract stage (stage 1 of 5). These rules bind every identifier
+the contract exports — Rust, generated TypeScript, SQL, and wire JSON. A
+rename after this freeze is a breaking contract change, not a style edit.
 
 ## One casing rule
 

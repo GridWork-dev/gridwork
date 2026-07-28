@@ -2,8 +2,9 @@
 //!
 //! Verifies envelope structure, sequence monotonicity, aggregate contiguity,
 //! full FSM replay (edge legality, version discipline, terminal immutability,
-//! the D5 flip actor + receipt rule), the command outcome⇔target agreement,
-//! and payload bounds. Findings are typed and stable — CI parses them.
+//! the liveness-producer flip actor + receipt rule), the command
+//! outcome⇔target agreement, and payload bounds. Findings are typed and
+//! stable — CI parses them.
 //!
 //! **Replay convention** (contract): a state change is an event whose
 //! `event_type` ends in `_state_changed` with payload `{"from": s, "to": s}`;
@@ -313,7 +314,7 @@ pub fn check_stream(events: &[EventEnvelope]) -> Vec<Finding> {
                 }
                 _ => {}
             }
-            // D5: the blocked flip demands the liveness producer and a receipt.
+            // The blocked-flip rule: this flip demands the liveness producer and a receipt.
             if event.aggregate_type == "attempt"
                 && ((from == "running" && to == "blocked")
                     || (from == "blocked" && to == "running"))
