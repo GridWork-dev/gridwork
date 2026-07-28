@@ -90,9 +90,12 @@ pub async fn check_expected_version_conflict<S: EventStore>(store: &S) {
     );
 }
 
-/// Two writers race one aggregate: exactly one wins each round; the loser
-/// recovers by re-reading the actual version, never by blind retry.
-pub async fn check_concurrent_writers<S: EventStore>(store: &S) {
+/// CAS refusal and recovery, sequentially: a second writer appending at a
+/// stale `expected_version` is refused with the actual version, and recovers
+/// by re-reading that version — never by blind retry. A genuinely concurrent
+/// race (simultaneous appends under a real runtime) is a backend-side test;
+/// this check pins the refusal/recovery contract, not the race itself.
+pub async fn check_cas_refusal_and_recovery<S: EventStore>(store: &S) {
     store
         .append(0, None, vec![fixture_event("agg", 1)])
         .await
@@ -224,7 +227,7 @@ async fn read_all<S: EventStore>(store: &S) -> Vec<(String, u32, u64)> {
 pub async fn run_all<S: EventStore, F: Fn() -> S>(fresh: F) {
     check_append_assigns_commit_order(&fresh()).await;
     check_expected_version_conflict(&fresh()).await;
-    check_concurrent_writers(&fresh()).await;
+    check_cas_refusal_and_recovery(&fresh()).await;
     check_fencing(&fresh()).await;
     check_cursor_recovery(&fresh()).await;
     check_deterministic_rebuild(&fresh()).await;
