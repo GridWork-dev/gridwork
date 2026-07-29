@@ -11,6 +11,10 @@ repository = "https://github.com/GridWork-dev/gridwork"
 # Every public dependency is pinned here once. A crate that names its own
 # version is a second place for the same number to drift.
 [workspace.dependencies]
+aead = "0.6.1"
+aead-stream = "0.6.0"
+base64 = "0.23.0"
+chacha20poly1305 = "0.11.0"
 gwk-cert = { path = "crates/gwk-cert", version = "0.0.1" }
 gwk-domain = { path = "crates/gwk-domain", version = "0.0.1" }
 secrecy = "0.10.3"
@@ -25,6 +29,7 @@ sqlx = { version = "0.9.0", default-features = false, features = [
 ] }
 thiserror = "2.0.19"
 tokio = { version = "1.53.1", default-features = false }
+zeroize = "1.9.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
