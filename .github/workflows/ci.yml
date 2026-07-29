@@ -68,6 +68,10 @@ jobs:
             exit 1
           fi
       - run: cargo test -p gwk-kernel --locked -- --ignored
+      # The CLI's live case stands a real daemon up on a temp socket and drives
+      # the built binary against it. Same service, separate step, so a failure
+      # names which half broke.
+      - run: cargo test -p gridwork --locked -- --ignored
 
   msrv:
     runs-on: ubuntu-latest

@@ -487,6 +487,17 @@ dependencies = [
 [[package]]
 name = "gridwork"
 version = "0.0.1"
+dependencies = [
+ "base64 0.23.0",
+ "gwk-domain",
+ "gwk-kernel",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "sqlx",
+ "tokio",
+]
 
 [[package]]
 name = "gwk"
