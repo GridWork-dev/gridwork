@@ -13,7 +13,9 @@
 
 mod common;
 
+use base64::prelude::{BASE64_STANDARD, Engine as _};
 use common::*;
+use gwk_domain::blob::BLOB_CHUNK_BYTES;
 use gwk_domain::ids::Seq;
 use gwk_domain::protocol::{
     CONNECTION_EGRESS_BYTES_PER_WINDOW, CONNECTION_INGRESS_BYTES_PER_WINDOW, CONTRACT_VERSION,
@@ -39,8 +41,15 @@ fn runtime_dir(tag: &str) -> PathBuf {
     dir
 }
 
-fn daemon_for(store: PgEventStore) -> Daemon {
-    Daemon::new(store, TEST_REVISION.to_owned()).expect("daemon")
+/// A daemon over `store`, with the blob store a serving one is required to have.
+///
+/// The root comes back so the caller can take it away again: these live under
+/// the temp directory, one per case, and a case that left its own behind would
+/// hand the next run a directory it did not write.
+async fn daemon_for(store: PgEventStore, tag: &str) -> (Daemon, PathBuf) {
+    let (root, blobs) = blob_store(&store, &format!("wire-{tag}")).await;
+    let daemon = Daemon::new(store.with_blobs(blobs), TEST_REVISION.to_owned()).expect("daemon");
+    (daemon, root)
 }
 
 /// A client that speaks the wire: handshake, then one request per call.
@@ -109,6 +118,7 @@ impl Client {
 struct Served {
     client: Client,
     dir: PathBuf,
+    blobs: PathBuf,
     serving: tokio::task::JoinHandle<()>,
 }
 
@@ -117,7 +127,8 @@ impl Served {
         let dir = runtime_dir(tag);
         let path = dir.join("gwk.sock");
         let listener = Listener::bind(&path).await.expect("bind");
-        let daemon = Arc::new(daemon_for(store));
+        let (daemon, blobs) = daemon_for(store, tag).await;
+        let daemon = Arc::new(daemon);
         let serving = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept");
             let _ = serve_stream(&daemon, stream).await;
@@ -127,6 +138,7 @@ impl Served {
         Self {
             client,
             dir,
+            blobs,
             serving,
         }
     }
@@ -136,6 +148,7 @@ impl Served {
         drop(self.client);
         self.serving.await.expect("join");
         let _ = std::fs::remove_dir_all(&self.dir);
+        let _ = std::fs::remove_dir_all(&self.blobs);
     }
 }
 
@@ -149,6 +162,7 @@ impl Served {
 struct Running {
     dir: PathBuf,
     path: PathBuf,
+    blobs: PathBuf,
     stop: tokio::sync::oneshot::Sender<()>,
     serving: tokio::task::JoinHandle<()>,
 }
@@ -158,7 +172,8 @@ impl Running {
         let dir = runtime_dir(tag);
         let path = dir.join("gwk.sock");
         let listener = Listener::bind(&path).await.expect("bind");
-        let daemon = Arc::new(daemon_for(store));
+        let (daemon, blobs) = daemon_for(store, tag).await;
+        let daemon = Arc::new(daemon);
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let serving = tokio::spawn(async move {
             let _ = gwk_kernel::wire::serve::run(listener, daemon, async move {
@@ -169,6 +184,7 @@ impl Running {
         Self {
             dir,
             path,
+            blobs,
             stop,
             serving,
         }
@@ -184,6 +200,7 @@ impl Running {
         let _ = self.stop.send(());
         self.serving.await.expect("join");
         let _ = std::fs::remove_dir_all(&self.dir);
+        let _ = std::fs::remove_dir_all(&self.blobs);
     }
 }
 
@@ -212,7 +229,8 @@ async fn a_sealed_daemon_answers_the_whole_surface_it_promises() {
     let dir = runtime_dir("sealed");
     let path = dir.join("gwk.sock");
     let listener = Listener::bind(&path).await.expect("bind");
-    let daemon = Arc::new(daemon_for(store));
+    let (daemon, blobs) = daemon_for(store, "sealed").await;
+    let daemon = Arc::new(daemon);
 
     let serving = tokio::spawn({
         let daemon = Arc::clone(&daemon);
@@ -292,6 +310,7 @@ async fn a_sealed_daemon_answers_the_whole_surface_it_promises() {
     drop(client);
     serving.await.expect("join");
     let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&blobs);
     drop_database(&maintenance, &name).await;
 }
 
@@ -742,15 +761,371 @@ async fn a_connection_may_not_hold_more_subscriptions_than_its_cap() {
     drop_database(&maintenance, &name).await;
 }
 
+/// Begin an upload of `plaintext` and return the id the store minted.
+async fn begin_upload(client: &mut Client, id: &str, plaintext: &[u8]) -> String {
+    match client
+        .ask(
+            id,
+            &format!(
+                r#"{{"type":"blob_begin","media_type":"application/octet-stream","byte_size":"{}"}}"#,
+                plaintext.len()
+            ),
+        )
+        .await
+    {
+        KernelResult::BlobBegun { upload_id } => upload_id.as_str().to_owned(),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// One `blob_chunk` request, base64 as the wire carries it.
+fn chunk_request(upload_id: &str, sequence: u32, chunk: &[u8]) -> String {
+    format!(
+        r#"{{"type":"blob_chunk","upload_id":"{upload_id}","sequence":{sequence},"data_base64":"{}"}}"#,
+        BASE64_STANDARD.encode(chunk)
+    )
+}
+
+/// Read a blob whole over the wire, one clamped range at a time.
+async fn read_blob(client: &mut Client, address: &str, size: usize) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::with_capacity(size);
+    while out.len() < size {
+        let request = format!(
+            r#"{{"type":"blob_read","address":"{address}","offset":"{}","length":"{}"}}"#,
+            out.len(),
+            size - out.len()
+        );
+        match client.ask(&format!("r-read{}", out.len()), &request).await {
+            KernelResult::BlobBytes {
+                offset,
+                data_base64,
+                ..
+            } => {
+                // The echoed offset is what this range began at, so a client
+                // never has to trust its own arithmetic.
+                assert_eq!(offset.value(), out.len() as u64);
+                let part = BASE64_STANDARD.decode(&data_base64).expect("base64");
+                assert!(!part.is_empty(), "the read stalled at {}", out.len());
+                out.extend_from_slice(&part);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    out
+}
+
 #[tokio::test]
 #[ignore = "requires PostgreSQL"]
-async fn a_request_this_layer_does_not_serve_is_refused_by_name() {
+async fn a_blob_goes_up_in_chunks_and_comes_back_byte_for_byte() {
     let maintenance = maintenance_pool().await;
-    let (name, store) = fresh_sealed_store(&maintenance, "wire_unserved", 8).await;
-    let dir = runtime_dir("unserved");
+    let (name, store) = fresh_store(&maintenance, "wire_blob", 8).await;
+    let mut served = Served::open(store, "blob").await;
+
+    // Not a round number, and not compressible into a pattern a wrong offset
+    // would still satisfy.
+    let plaintext: Vec<u8> = (0..9_001u32).map(|i| (i % 251) as u8).collect();
+    let address = address_of(&plaintext);
+
+    let upload = begin_upload(&mut served.client, "r-begin", &plaintext).await;
+    // Deliberately uneven chunks: `commit` re-chunks the staged plaintext into
+    // the container itself, so how a client splits its upload is its own
+    // business and not the format's.
+    for (sequence, chunk) in [&plaintext[..1], &plaintext[1..5_000], &plaintext[5_000..]]
+        .into_iter()
+        .enumerate()
+    {
+        let sequence = sequence as u32;
+        match served
+            .client
+            .ask(
+                &format!("r-chunk{sequence}"),
+                &chunk_request(&upload, sequence, chunk),
+            )
+            .await
+        {
+            KernelResult::BlobChunkAccepted {
+                upload_id,
+                sequence: acked,
+            } => {
+                assert_eq!(upload_id.as_str(), upload);
+                // Acknowledged by sequence, so a client can tell which chunk it
+                // is being told about.
+                assert_eq!(acked, sequence);
+            }
+            other => panic!("chunk {sequence}: {other:?}"),
+        }
+    }
+
+    let descriptor = match served
+        .client
+        .ask(
+            "r-commit",
+            &format!(
+                r#"{{"type":"blob_commit","upload_id":"{upload}","address":"{}"}}"#,
+                address.as_str()
+            ),
+        )
+        .await
+    {
+        KernelResult::BlobCommitted {
+            descriptor,
+            deduplicated,
+        } => {
+            assert!(!deduplicated, "nothing was there to deduplicate against");
+            assert_eq!(descriptor.address, address);
+            assert_eq!(descriptor.byte_size.value(), plaintext.len() as u64);
+            assert!(!descriptor.tombstoned);
+            descriptor
+        }
+        other => panic!("{other:?}"),
+    };
+
+    match served
+        .client
+        .ask(
+            "r-stat",
+            &format!(r#"{{"type":"blob_stat","address":"{}"}}"#, address.as_str()),
+        )
+        .await
+    {
+        // The same descriptor the commit reported: a stat is a re-read, not a
+        // second opinion.
+        KernelResult::BlobStat { descriptor: stat } => assert_eq!(stat, descriptor),
+        other => panic!("{other:?}"),
+    }
+
+    // Byte for byte through encryption, chunking, and base64 both ways. Nothing
+    // short of the real bytes passes this.
+    let back = read_blob(&mut served.client, address.as_str(), plaintext.len()).await;
+    assert_eq!(back, plaintext, "the blob did not come back as it went in");
+
+    served.close().await;
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn the_same_bytes_uploaded_twice_are_stored_once() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "wire_blob_dedup", 8).await;
+    let mut served = Served::open(store, "blobdedup").await;
+
+    let plaintext = b"the same bytes, twice".to_vec();
+    let address = address_of(&plaintext);
+    let commit = format!(
+        r#"{{"type":"blob_commit","upload_id":"{{upload}}","address":"{}"}}"#,
+        address.as_str()
+    );
+
+    for round in 0..2 {
+        let upload = begin_upload(&mut served.client, &format!("r-begin{round}"), &plaintext).await;
+        match served
+            .client
+            .ask(
+                &format!("r-chunk{round}"),
+                &chunk_request(&upload, 0, &plaintext),
+            )
+            .await
+        {
+            KernelResult::BlobChunkAccepted { .. } => {}
+            other => panic!("{other:?}"),
+        }
+        match served
+            .client
+            .ask(
+                &format!("r-commit{round}"),
+                &commit.replace("{upload}", &upload),
+            )
+            .await
+        {
+            KernelResult::BlobCommitted { deduplicated, .. } => assert_eq!(
+                deduplicated,
+                round == 1,
+                "round {round} reported the wrong dedup verdict"
+            ),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    served.close().await;
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn an_upload_that_does_not_add_up_is_refused_and_can_be_abandoned() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "wire_blob_bad", 8).await;
+    let mut served = Served::open(store, "blobbad").await;
+
+    let plaintext = b"eleven bytes".to_vec();
+    let upload = begin_upload(&mut served.client, "r-begin", &plaintext).await;
+
+    // Not base64. Refused as the CLIENT's mistake — the upload is untouched and
+    // still expects chunk 0.
+    match served
+        .client
+        .ask(
+            "r-garbage",
+            &format!(
+                r#"{{"type":"blob_chunk","upload_id":"{upload}","sequence":0,"data_base64":"not base64 at all!"}}"#
+            ),
+        )
+        .await
+    {
+        KernelResult::Error { code, .. } => assert_eq!(code, KernelErrorCode::Validation),
+        other => panic!("{other:?}"),
+    }
+
+    // Out of order. Refused as an INTEGRITY failure rather than reordered: the
+    // staged file is a stream and a gap in it cannot be filled in later.
+    match served
+        .client
+        .ask("r-gap", &chunk_request(&upload, 3, &plaintext))
+        .await
+    {
+        KernelResult::Error { code, .. } => assert_eq!(code, KernelErrorCode::BlobIntegrity),
+        other => panic!("{other:?}"),
+    }
+
+    // A chunk over the contract's size, refused before it is staged.
+    match served
+        .client
+        .ask(
+            "r-oversized",
+            &chunk_request(&upload, 0, &vec![0u8; BLOB_CHUNK_BYTES + 1]),
+        )
+        .await
+    {
+        KernelResult::Error { code, message, .. } => {
+            assert_eq!(code, KernelErrorCode::Validation);
+            assert!(message.contains("chunk"), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // The right bytes, then a commit claiming somebody else's digest.
+    match served
+        .client
+        .ask("r-chunk", &chunk_request(&upload, 0, &plaintext))
+        .await
+    {
+        KernelResult::BlobChunkAccepted { .. } => {}
+        other => panic!("{other:?}"),
+    }
+    let wrong = address_of(b"different bytes entirely");
+    match served
+        .client
+        .ask(
+            "r-liar",
+            &format!(
+                r#"{{"type":"blob_commit","upload_id":"{upload}","address":"{}"}}"#,
+                wrong.as_str()
+            ),
+        )
+        .await
+    {
+        // The kernel hashes what it staged; the claim is checked, not trusted.
+        KernelResult::Error { code, .. } => assert_eq!(code, KernelErrorCode::BlobIntegrity),
+        other => panic!("{other:?}"),
+    }
+
+    match served
+        .client
+        .ask(
+            "r-abort",
+            &format!(r#"{{"type":"blob_abort","upload_id":"{upload}"}}"#),
+        )
+        .await
+    {
+        KernelResult::BlobAborted { upload_id } => assert_eq!(upload_id.as_str(), upload),
+        other => panic!("{other:?}"),
+    }
+    // And it is gone: a second chunk has nowhere to land.
+    match served
+        .client
+        .ask("r-after-abort", &chunk_request(&upload, 1, &plaintext))
+        .await
+    {
+        KernelResult::Error { code, .. } => assert_eq!(code, KernelErrorCode::NotFound),
+        other => panic!("{other:?}"),
+    }
+
+    served.close().await;
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn a_read_larger_than_a_frame_is_clamped_rather_than_refused() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "wire_blob_clamp", 8).await;
+    let mut served = Served::open(store, "blobclamp").await;
+
+    let plaintext = b"a few bytes".to_vec();
+    let address = address_of(&plaintext);
+    let upload = begin_upload(&mut served.client, "r-begin", &plaintext).await;
+    match served
+        .client
+        .ask("r-chunk", &chunk_request(&upload, 0, &plaintext))
+        .await
+    {
+        KernelResult::BlobChunkAccepted { .. } => {}
+        other => panic!("{other:?}"),
+    }
+    match served
+        .client
+        .ask(
+            "r-commit",
+            &format!(
+                r#"{{"type":"blob_commit","upload_id":"{upload}","address":"{}"}}"#,
+                address.as_str()
+            ),
+        )
+        .await
+    {
+        KernelResult::BlobCommitted { .. } => {}
+        other => panic!("{other:?}"),
+    }
+
+    // A length no frame could ever carry. Clamped, so the answer is bytes and an
+    // offset rather than a refusal the client has to special-case — the same
+    // rule the log and the projections follow.
+    match served
+        .client
+        .ask(
+            "r-huge",
+            &format!(
+                r#"{{"type":"blob_read","address":"{}","offset":"0","length":"{}"}}"#,
+                address.as_str(),
+                u64::from(u32::MAX)
+            ),
+        )
+        .await
+    {
+        KernelResult::BlobBytes { data_base64, .. } => {
+            let bytes = BASE64_STANDARD.decode(&data_base64).expect("base64");
+            assert_eq!(bytes, plaintext);
+        }
+        other => panic!("{other:?}"),
+    }
+
+    served.close().await;
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn a_blob_that_was_never_written_is_absent_rather_than_an_error() {
+    let maintenance = maintenance_pool().await;
+    // Sealed on purpose. Sealing gates COMMANDS; the blob spine is open before
+    // cutover, which is what lets an operator stage evidence at all.
+    let (name, store) = fresh_sealed_store(&maintenance, "wire_unwritten", 8).await;
+    let dir = runtime_dir("unwritten");
     let path = dir.join("gwk.sock");
     let listener = Listener::bind(&path).await.expect("bind");
-    let daemon = Arc::new(daemon_for(store));
+    let (daemon, blob_root) = daemon_for(store, "unwritten").await;
+    let daemon = Arc::new(daemon);
 
     let serving = tokio::spawn({
         let daemon = Arc::clone(&daemon);
@@ -762,23 +1137,18 @@ async fn a_request_this_layer_does_not_serve_is_refused_by_name() {
     });
 
     let (mut client, _) = Client::connect(&path).await;
-    // A legal address for a blob that does not exist — the refusal happens
-    // before anything is looked up, which is the point: the request is not
-    // served, rather than served and found wanting.
+    // A legal address nothing was ever written at.
     let address = format!("sha256:{}", "0".repeat(64));
     match client
         .ask(
-            "r-blob",
+            "r-stat",
             &format!(r#"{{"type":"blob_stat","address":"{address}"}}"#),
         )
         .await
     {
-        KernelResult::Error { code, message, .. } => {
-            assert_eq!(code, KernelErrorCode::Validation);
-            // By name: a client learns which request it was, and the refusal
-            // does not read as "your request was malformed".
-            assert!(message.contains("blob_stat"), "{message}");
-        }
+        // Absent, not tombstoned: the two are different facts and a retention
+        // audit reads them differently.
+        KernelResult::Error { code, .. } => assert_eq!(code, KernelErrorCode::NotFound),
         other => panic!("{other:?}"),
     }
     // And the connection is still usable afterwards — a refusal is a value.
@@ -790,6 +1160,7 @@ async fn a_request_this_layer_does_not_serve_is_refused_by_name() {
     drop(client);
     serving.await.expect("join");
     let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&blob_root);
     drop_database(&maintenance, &name).await;
 }
 
@@ -801,7 +1172,8 @@ async fn the_accept_loop_stops_taking_work_and_takes_its_socket_with_it() {
     let dir = runtime_dir("drain");
     let path = dir.join("gwk.sock");
     let listener = Listener::bind(&path).await.expect("bind");
-    let daemon = Arc::new(daemon_for(store));
+    let (daemon, blob_root) = daemon_for(store, "drain").await;
+    let daemon = Arc::new(daemon);
 
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let running = tokio::spawn(gwk_kernel::wire::serve::run(listener, daemon, async move {
@@ -829,5 +1201,6 @@ async fn the_accept_loop_stops_taking_work_and_takes_its_socket_with_it() {
     assert!(UnixStream::connect(&path).await.is_err());
 
     let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&blob_root);
     drop_database(&maintenance, &name).await;
 }

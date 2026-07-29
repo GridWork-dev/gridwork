@@ -14,19 +14,23 @@
 //! admits one, bounds how many a connection may hold, and writes what they
 //! produce.
 //!
-//! Blob transfer is still absent, and its requests are still refused by name.
+//! Blob transfer is here too, and it is thinner than it looks: the port already
+//! owns staging, digest verification, dedup, and encryption, so what this layer
+//! adds is the wire's own concerns — base64 in and out, a bound on a chunk, and
+//! a clamp on a read.
 //!
 //! Pages are cut by BYTES, not rows. The frame limit is the real bound and a row
 //! count cannot respect it — see [`PAGE_BYTE_BUDGET`].
 //!
-//! The requests this layer does not answer are matched BY NAME and refused, not
-//! swept up by a wildcard: the compiler has to notice when the protocol grows a
-//! request, and a reader has to be able to see which ones are still missing.
+//! No wildcard arm anywhere: every request is matched by name, so the compiler
+//! has to notice when the protocol grows one.
 
 use std::sync::Arc;
 
-use gwk_domain::ids::{EventCount, EventId, RequestId, Seq, WriterEpoch};
-use gwk_domain::port::{EventStore, MAX_READ_LIMIT};
+use base64::prelude::{BASE64_STANDARD, Engine as _};
+use gwk_domain::blob::BLOB_CHUNK_BYTES;
+use gwk_domain::ids::{ByteCount, EventCount, EventId, RequestId, Seq, WriterEpoch};
+use gwk_domain::port::{BlobError, BlobStore, EventStore, MAX_READ_LIMIT};
 use gwk_domain::protocol::{
     CONNECTION_EGRESS_BYTES_PER_WINDOW, CONNECTION_INGRESS_BYTES_PER_WINDOW, CONTRACT_VERSION,
     FRAME_BODY_MAX_BYTES, FrameKind, KernelErrorCode, KernelRequest, KernelResult,
@@ -41,6 +45,7 @@ use super::frame::{Budget, Incoming, read_frame, write_frame};
 use super::hello::{self, Readiness};
 use super::listen::Listener;
 use super::{WireError, strict, subscribe};
+use crate::blob::store::PgBlobStore;
 use crate::epoch::{
     GENESIS_EVENT_TYPE, KERNEL_AGGREGATE, KERNEL_SINGLETON, epoch_of, is_public_revision,
 };
@@ -147,11 +152,24 @@ impl Daemon {
     /// second claim is not a second opinion about the epoch: it supersedes the
     /// first, so the store this daemon is about to serve from would be fenced
     /// out of its own log by the daemon in front of it.
+    /// A blob store is likewise required rather than optional. A store without
+    /// one is a real state — `admin init` and the certifier drive the log with no
+    /// filesystem at all — but a SERVING kernel in that state would answer every
+    /// blob request with a refusal that says nothing about the request, and the
+    /// operator would find out from a client rather than from a start-up that
+    /// failed.
     pub fn new(store: PgEventStore, public_revision: String) -> Result<Self> {
         if !is_public_revision(&public_revision) {
             return Err(KernelError::Config(format!(
                 "public revision {public_revision:?} is not a full 40-hex revision"
             )));
+        }
+        if store.blobs().is_none() {
+            return Err(KernelError::Config(
+                "a serving daemon needs a blob store: every payload too large to inline lives \
+                 there, and half a protocol is not a kernel"
+                    .to_owned(),
+            ));
         }
         let writer_epoch = WriterEpoch::new(store.boot_epoch().max(0) as u64);
         // The initial receiver is dropped on purpose. A watch with no receivers
@@ -179,6 +197,13 @@ impl Daemon {
             self.store.pool().clone(),
             Arc::clone(&self.wake),
         ));
+    }
+
+    /// The blob store, whose presence [`Daemon::new`] has already established.
+    fn blobs(&self) -> &PgBlobStore {
+        self.store
+            .blobs()
+            .expect("a daemon cannot be constructed without a blob store")
     }
 
     /// Sealed state and watermark, as the `HelloAck` reports them.
@@ -337,24 +362,125 @@ impl Daemon {
             // [`Subscriptions::admit`] for why the two are separate steps.
             KernelRequest::SubscribeEvents { cursor } => subs.admit(request_id, *cursor),
 
-            // Named one by one so the protocol cannot grow a request this
-            // layer silently drops. The blob half of task 19 fills these in;
-            // until it does the refusal says which request it was, not
-            // "unsupported".
-            KernelRequest::BlobBegin { .. }
-            | KernelRequest::BlobChunk { .. }
-            | KernelRequest::BlobCommit { .. }
-            | KernelRequest::BlobAbort { .. }
-            | KernelRequest::BlobRead { .. }
-            | KernelRequest::BlobStat { .. } => KernelResult::Error {
-                code: KernelErrorCode::Validation,
-                message: format!(
-                    "{} is not served by this daemon's request layer yet",
-                    request_name(request)
-                ),
-                detail: None,
+            // The blob half. Staging, ordering, the declared-size budget, digest
+            // verification, dedup, and encryption are all the port's; what is
+            // added here is base64, one bound, and one clamp.
+            KernelRequest::BlobBegin {
+                media_type,
+                byte_size,
+            } => match self.blobs().begin(media_type.clone(), *byte_size).await {
+                Ok(upload_id) => KernelResult::BlobBegun { upload_id },
+                Err(e) => blob_refusal(&e),
+            },
+
+            KernelRequest::BlobChunk {
+                upload_id,
+                sequence,
+                data_base64,
+            } => self.blob_chunk(upload_id, *sequence, data_base64).await,
+
+            KernelRequest::BlobCommit { upload_id, address } => {
+                match self
+                    .blobs()
+                    .commit(upload_id.clone(), address.clone())
+                    .await
+                {
+                    Ok((descriptor, deduplicated)) => KernelResult::BlobCommitted {
+                        descriptor,
+                        deduplicated,
+                    },
+                    Err(e) => blob_refusal(&e),
+                }
+            }
+
+            KernelRequest::BlobAbort { upload_id } => {
+                match self.blobs().abort(upload_id.clone()).await {
+                    Ok(()) => KernelResult::BlobAborted {
+                        upload_id: upload_id.clone(),
+                    },
+                    Err(e) => blob_refusal(&e),
+                }
+            }
+
+            KernelRequest::BlobRead {
+                address,
+                offset,
+                length,
+            } => {
+                // Clamped, not refused — the same rule the log and the
+                // projections follow. One chunk is the unit whose base64
+                // expansion is guaranteed to fit a frame, and a client that
+                // asked for a whole blob gets its head plus the offset to
+                // continue from rather than a rejection to special-case.
+                let length = ByteCount::new(length.value().min(BLOB_CHUNK_BYTES as u64));
+                match self.blobs().read(address, *offset, length).await {
+                    Ok(bytes) => KernelResult::BlobBytes {
+                        address: address.clone(),
+                        // Echoed, so a client reading a blob in pieces never has
+                        // to trust its own arithmetic about where this one began.
+                        offset: *offset,
+                        data_base64: BASE64_STANDARD.encode(&bytes),
+                    },
+                    Err(e) => blob_refusal(&e),
+                }
+            }
+
+            KernelRequest::BlobStat { address } => match self.blobs().stat(address).await {
+                Ok(Some(descriptor)) => KernelResult::BlobStat { descriptor },
+                // Absent is an ANSWER, exactly as it is for a projection. A
+                // blob that was SHREDDED is not this case — the port answers
+                // that as tombstoned, which is a different fact.
+                Ok(None) => KernelResult::Error {
+                    code: KernelErrorCode::NotFound,
+                    message: format!("no blob at {address}"),
+                    detail: None,
+                },
+                Err(e) => blob_refusal(&e),
             },
         })
+    }
+
+    /// One staged chunk, decoded off the wire.
+    async fn blob_chunk(
+        &self,
+        upload_id: &gwk_domain::ids::BlobUploadId,
+        sequence: u32,
+        data_base64: &str,
+    ) -> KernelResult {
+        // Decoded here rather than deeper in: base64 is a WIRE encoding and the
+        // port takes bytes. A bad encoding is the client's mistake, not the
+        // upload's, so it refuses this request and leaves the upload usable.
+        let chunk = match BASE64_STANDARD.decode(data_base64) {
+            Ok(chunk) => chunk,
+            Err(e) => {
+                return KernelResult::Error {
+                    code: KernelErrorCode::Validation,
+                    message: format!("chunk {sequence} is not valid base64: {e}"),
+                    detail: None,
+                };
+            }
+        };
+        // The frame limit already bounds this to something a few times larger.
+        // Held to the contract's chunk size anyway, so the memory a single
+        // request can make the kernel hold is the number the contract states
+        // rather than whatever the framing happens to allow.
+        if chunk.len() > BLOB_CHUNK_BYTES {
+            return KernelResult::Error {
+                code: KernelErrorCode::Validation,
+                message: format!(
+                    "chunk {sequence} carries {} bytes, over the {BLOB_CHUNK_BYTES}-byte chunk",
+                    chunk.len()
+                ),
+                detail: None,
+            };
+        }
+        match self.blobs().write_chunk(upload_id, sequence, &chunk).await {
+            Ok(()) => KernelResult::BlobChunkAccepted {
+                upload_id: upload_id.clone(),
+                sequence,
+            },
+            Err(e) => blob_refusal(&e),
+        }
     }
 
     /// One page of a projection, as the checkpoint would have canonicalized it.
@@ -524,24 +650,30 @@ impl<'a> Subscriptions<'a> {
     }
 }
 
-/// The wire name of a request, for a message a human reads.
-fn request_name(request: &KernelRequest) -> &'static str {
-    match request {
-        KernelRequest::Health {} => "health",
-        KernelRequest::Status {} => "status",
-        KernelRequest::Watermark {} => "watermark",
-        KernelRequest::VerifySealed {} => "verify_sealed",
-        KernelRequest::SubmitCommand { .. } => "submit_command",
-        KernelRequest::GetProjection { .. } => "get_projection",
-        KernelRequest::ListProjection { .. } => "list_projection",
-        KernelRequest::ReadEvents { .. } => "read_events",
-        KernelRequest::SubscribeEvents { .. } => "subscribe_events",
-        KernelRequest::BlobBegin { .. } => "blob_begin",
-        KernelRequest::BlobChunk { .. } => "blob_chunk",
-        KernelRequest::BlobCommit { .. } => "blob_commit",
-        KernelRequest::BlobAbort { .. } => "blob_abort",
-        KernelRequest::BlobRead { .. } => "blob_read",
-        KernelRequest::BlobStat { .. } => "blob_stat",
+/// A blob failure as a refusal the client can branch on.
+fn blob_refusal(error: &BlobError) -> KernelResult {
+    let code = match error {
+        BlobError::NotFound => KernelErrorCode::NotFound,
+        // Permanent, and answered even while ciphertext cleanup is still
+        // pending: a shredded blob never becomes readable again.
+        BlobError::Tombstoned => KernelErrorCode::BlobTombstoned,
+        // One code for both, because they are the same claim from two sides:
+        // the bytes are not the bytes they were said to be.
+        BlobError::DigestMismatch { .. } | BlobError::Integrity(_) => {
+            KernelErrorCode::BlobIntegrity
+        }
+        // No request on this wire removes a blob, so a pin cannot block one
+        // here. Mapped rather than dismissed, so the match stays exhaustive over
+        // the port's errors and a later request that CAN reach it gets a code.
+        BlobError::Pinned => KernelErrorCode::Validation,
+        BlobError::Storage(_) => KernelErrorCode::Storage,
+    };
+    KernelResult::Error {
+        code,
+        // The port's own wording, which already names the address, the sequence,
+        // or the two digests. Rephrasing it here would only lose that.
+        message: error.to_string(),
+        detail: None,
     }
 }
 
@@ -737,17 +869,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_request_has_a_name_and_the_compiler_holds_that_true() {
-        // The list exists so a refusal can say WHICH request it refused. It is
-        // exhaustive by construction — `request_name` has no wildcard — so this
-        // case is really asserting that the four served names are the four the
-        // sealed surface promises.
-        assert_eq!(request_name(&KernelRequest::Health {}), "health");
-        assert_eq!(request_name(&KernelRequest::Status {}), "status");
-        assert_eq!(request_name(&KernelRequest::Watermark {}), "watermark");
-        assert_eq!(
-            request_name(&KernelRequest::VerifySealed {}),
-            "verify_sealed"
+    fn a_page_is_cut_by_bytes_and_never_to_nothing() {
+        // Enough half-kilobyte items to pass the budget several times over.
+        let items: Vec<String> = (0..8_000).map(|i| format!("{i:0>512}")).collect();
+        let (kept, cut) = fit_page(items).expect("measure");
+        assert!(cut, "a page far past the budget was not cut");
+        let bytes: usize = kept
+            .iter()
+            .map(|s| serde_json::to_vec(s).expect("serialize").len())
+            .sum();
+        // The item that pushed the running total over is not kept, so what
+        // survives is inside the budget rather than one item past it.
+        assert!(bytes <= PAGE_BYTE_BUDGET, "the kept page is over budget");
+        assert!(bytes > PAGE_BYTE_BUDGET / 2, "the cut threw away too much");
+
+        // The first item survives even alone over the budget: a page that
+        // returned nothing would leave the cursor standing still and the client
+        // asking the same question forever.
+        let (kept, cut) = fit_page(vec!["x".repeat(PAGE_BYTE_BUDGET * 2)]).expect("measure");
+        assert_eq!(kept.len(), 1);
+        assert!(
+            !cut,
+            "one item is not a cut page — there is nothing behind it"
         );
     }
 }
