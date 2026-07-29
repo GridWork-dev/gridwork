@@ -28,6 +28,7 @@ pub mod project;
 pub mod recover;
 pub mod store;
 pub mod submit;
+pub mod wire;
 pub mod writer;
 
 pub use admin::{InitOutcome, RoleAttributes, RuntimePrivileges, TargetState};
@@ -39,4 +40,6 @@ pub use error::{KernelError, Result};
 pub use project::Refusal;
 pub use recover::{RebuildReport, RecoveryReport, Verdict};
 pub use store::{EVENT_CHANNEL, MAX_INFLIGHT_APPENDS, PgEventStore, connect_pool};
+pub use wire::WireError;
+pub use wire::hello::{OFFERED_CAPABILITIES, Readiness, Session};
 pub use writer::{WRITER_LOCK_KEY, WriterLock, claim_epoch};

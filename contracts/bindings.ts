@@ -959,10 +959,30 @@ export type KernelErrorCode =
 /**  The blob was crypto-shredded; its reads fail permanently. */
 "blob_tombstoned";
 
-/**  What a client asks for. Tagged by `type`. */
+/**
+ *  What a client asks for. Tagged by `type`.
+ * 
+ *  The four field-less requests are written `{}` rather than as unit variants,
+ *  and the difference is not cosmetic: serde applies `deny_unknown_fields` to
+ *  an internally tagged enum's STRUCT variants only, so as unit variants they
+ *  would accept `{"type": "health", "limit": 500}` and answer as though the
+ *  caller had said nothing extra. An empty struct variant serializes to the
+ *  identical `{"type": "health"}` — the wire does not change, the strictness
+ *  does.
+ */
 export type KernelRequest = KernelRequest_Serialize | KernelRequest_Deserialize;
 
-/**  What a client asks for. Tagged by `type`. */
+/**
+ *  What a client asks for. Tagged by `type`.
+ * 
+ *  The four field-less requests are written `{}` rather than as unit variants,
+ *  and the difference is not cosmetic: serde applies `deny_unknown_fields` to
+ *  an internally tagged enum's STRUCT variants only, so as unit variants they
+ *  would accept `{"type": "health", "limit": 500}` and answer as though the
+ *  caller had said nothing extra. An empty struct variant serializes to the
+ *  identical `{"type": "health"}` — the wire does not change, the strictness
+ *  does.
+ */
 export type KernelRequest_Deserialize = 
 /**  Liveness only. Served sealed and active. */
 ({ type: "health" }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; upload_id?: never } | 
@@ -1003,7 +1023,17 @@ sequence: number; data_base64: string }) & { address?: never; byte_size?: never;
  */
 ({ type: "blob_commit"; upload_id: BlobUploadId; address: string }) & { byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never } | ({ type: "blob_abort"; upload_id: BlobUploadId }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never } | ({ type: "blob_read"; address: string; offset: string; length: string }) & { byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; limit?: never; media_type?: never; projection?: never; sequence?: never; upload_id?: never } | ({ type: "blob_stat"; address: string }) & { byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; upload_id?: never };
 
-/**  What a client asks for. Tagged by `type`. */
+/**
+ *  What a client asks for. Tagged by `type`.
+ * 
+ *  The four field-less requests are written `{}` rather than as unit variants,
+ *  and the difference is not cosmetic: serde applies `deny_unknown_fields` to
+ *  an internally tagged enum's STRUCT variants only, so as unit variants they
+ *  would accept `{"type": "health", "limit": 500}` and answer as though the
+ *  caller had said nothing extra. An empty struct variant serializes to the
+ *  identical `{"type": "health"}` — the wire does not change, the strictness
+ *  does.
+ */
 export type KernelRequest_Serialize = 
 /**  Liveness only. Served sealed and active. */
 ({ type: "health" }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; upload_id?: never } | 

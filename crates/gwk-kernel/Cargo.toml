@@ -34,7 +34,9 @@ zeroize.workspace = true
 
 [dev-dependencies]
 gwk-cert.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# `test-util` is what lets the hello deadline be tested without spending five
+# real seconds per run — the case pauses the clock and advances it.
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 
 [lints]
 workspace = true

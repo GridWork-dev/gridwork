@@ -452,7 +452,11 @@ impl ProjectionKind {
 /// enforces it.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, specta::Type)]
-#[serde(tag = "projection_type", rename_all = "snake_case")]
+#[serde(
+    tag = "projection_type",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum ProjectionRecord {
     Task {
         task: Task,
@@ -530,19 +534,27 @@ impl ProjectionRecord {
 // ============================================================
 
 /// What a client asks for. Tagged by `type`.
+///
+/// The four field-less requests are written `{}` rather than as unit variants,
+/// and the difference is not cosmetic: serde applies `deny_unknown_fields` to
+/// an internally tagged enum's STRUCT variants only, so as unit variants they
+/// would accept `{"type": "health", "limit": 500}` and answer as though the
+/// caller had said nothing extra. An empty struct variant serializes to the
+/// identical `{"type": "health"}` — the wire does not change, the strictness
+/// does.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, specta::Type)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum KernelRequest {
     /// Liveness only. Served sealed and active.
-    Health,
+    Health {},
     /// Full readiness detail. Served sealed and active.
-    Status,
+    Status {},
     /// How far the log goes, without a subscription. Served sealed and active.
-    Watermark,
+    Watermark {},
     /// Prove the fresh epoch: exactly one genesis event, zero business rows.
     /// Served sealed and active.
-    VerifySealed,
+    VerifySealed {},
     /// The only mutation path. Sealed kernels admit `activate_kernel` alone.
     SubmitCommand {
         envelope: CommandEnvelope,
@@ -617,7 +629,7 @@ pub enum KernelRequest {
 /// is an ordinary variant: a refusal is a value, not an out-of-band condition.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, specta::Type)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum KernelResult {
     Health {
         ready: bool,
@@ -727,7 +739,7 @@ pub enum KernelResult {
 /// Everything a client may send on kind `0x01`.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, specta::Type)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientControl {
     /// The mandatory first frame. Nothing else is decoded before it succeeds.
     Hello {
@@ -750,7 +762,7 @@ pub enum ClientControl {
 /// Everything the kernel may send on kind `0x01`.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, specta::Type)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ServerControl {
     HelloAck {
         protocol_major: ProtocolVersion,
@@ -989,10 +1001,10 @@ mod tests {
     #[test]
     fn unit_requests_carry_only_their_tag() {
         for (request, tag) in [
-            (KernelRequest::Health, "health"),
-            (KernelRequest::Status, "status"),
-            (KernelRequest::Watermark, "watermark"),
-            (KernelRequest::VerifySealed, "verify_sealed"),
+            (KernelRequest::Health {}, "health"),
+            (KernelRequest::Status {}, "status"),
+            (KernelRequest::Watermark {}, "watermark"),
+            (KernelRequest::VerifySealed {}, "verify_sealed"),
         ] {
             let json = serde_json::to_value(&request).expect("serialize");
             assert_eq!(json, serde_json::json!({ "type": tag }));

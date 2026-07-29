@@ -378,7 +378,7 @@ fn golden_client_control() -> Vec<ClientControl> {
         },
         ClientControl::Request {
             request_id: RequestId::new("req-1"),
-            request: KernelRequest::VerifySealed,
+            request: KernelRequest::VerifySealed {},
         },
         ClientControl::Request {
             request_id: RequestId::new("req-2"),

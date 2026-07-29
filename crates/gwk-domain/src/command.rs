@@ -35,7 +35,7 @@ use crate::inherited::{FindingAction, OrchestratorCheckpoint, RoundFindingSummar
 // micro-optimization on a type the kernel handles one of at a time.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, specta::Type)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum KernelCommand {
     // ---- epoch ----
     /// The irreversible cutover boundary. Appended once, at aggregate version
