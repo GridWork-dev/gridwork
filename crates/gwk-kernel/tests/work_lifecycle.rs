@@ -9,16 +9,16 @@
 
 mod common;
 
-use common::{drop_database, fresh_store, maintenance_pool};
+use common::{
+    PROJECT, actor, apply, drop_database, envelope, envelope_as, envelope_in, event_count,
+    fresh_store, maintenance_pool, refuse, state_row,
+};
 use gwk_domain::command::KernelCommand;
 use gwk_domain::entity::Budget;
-use gwk_domain::envelope::{
-    Actor, CommandEnvelope, ENVELOPE_SCHEMA_VERSION, EventEnvelope, Origin,
-};
 use gwk_domain::fsm::{AttemptState, LeaseMode, TaskState};
 use gwk_domain::ids::{
-    AggregateId, AttemptId, CommandId, DispatchNodeId, EngineId, EngineSessionId, IdempotencyKey,
-    LeaseId, ProjectId, ReceiptId, Seq, TaskId, Timestamp, WorktreeId,
+    AggregateId, AttemptId, DispatchNodeId, EngineId, EngineSessionId, LeaseId, ReceiptId, Seq,
+    TaskId, Timestamp, WorktreeId,
 };
 use gwk_domain::inherited::{FindingAction, OrchestratorCheckpoint, RoundFindingSummary};
 use gwk_domain::protocol::{KernelErrorCode, KernelResult};
@@ -26,94 +26,23 @@ use gwk_domain::transition::LIVENESS_PRODUCER_KIND;
 use gwk_kernel::store::PgEventStore;
 use sqlx::Row;
 
-const PROJECT: &str = "p";
-
-fn actor(kind: &str) -> Actor {
-    Actor {
-        kind: kind.to_owned(),
-        id: None,
-    }
-}
-
-/// One command envelope. The key is the caller's, so every case names its own —
-/// idempotency is project-wide, and reusing one is exactly what this kernel is
-/// supposed to refuse.
-fn envelope_as(key: &str, actor: Actor, command: &KernelCommand) -> CommandEnvelope {
-    envelope_in(PROJECT, key, actor, command)
-}
-
-/// The same, in a named project. Most cases share one, but idempotency is
-/// scoped per project while the aggregate namespace is global, so the cases
-/// that cross that line have to be able to say which project they are.
-fn envelope_in(project: &str, key: &str, actor: Actor, command: &KernelCommand) -> CommandEnvelope {
-    CommandEnvelope {
-        command_id: CommandId::new(format!("cmd-{project}-{key}")),
-        project_id: ProjectId::new(project),
-        command_type: command.command_type().to_owned(),
-        schema_version: ENVELOPE_SCHEMA_VERSION,
-        issued_at: Timestamp::new("2026-07-28T00:00:00Z"),
-        actor,
-        origin: Origin {
-            system: "gw".into(),
-            r#ref: None,
-        },
-        target_aggregate_type: None,
-        target_aggregate_id: None,
-        expected_version: None,
-        idempotency_key: IdempotencyKey::new(key),
-        causation_id: None,
-        correlation_id: None,
-        payload: serde_json::to_value(command).expect("serialize command"),
-    }
-}
-
-fn envelope(key: &str, command: &KernelCommand) -> CommandEnvelope {
-    envelope_as(key, actor("kernel"), command)
-}
-
-async fn apply(store: &PgEventStore, key: &str, command: KernelCommand) -> Vec<EventEnvelope> {
-    let result = store.submit(&envelope(key, &command)).await;
-    match result {
-        KernelResult::CommandApplied { events, .. } => events,
-        other => panic!("{key}: expected CommandApplied, got {other:?}"),
-    }
-}
-
-async fn refuse(
-    store: &PgEventStore,
-    key: &str,
-    command: KernelCommand,
-) -> (KernelErrorCode, String) {
-    match store.submit(&envelope(key, &command)).await {
-        KernelResult::Error { code, message, .. } => (code, message),
-        other => panic!("{key}: expected a refusal, got {other:?}"),
-    }
-}
-
 /// The projection's own view of a row's state and version.
 async fn task_row(store: &PgEventStore, id: &str) -> (String, i64) {
-    let row = sqlx::query("SELECT state, version FROM gwk.task WHERE id = $1")
-        .bind(id)
-        .fetch_one(store.pool())
-        .await
-        .expect("task row");
-    (row.get("state"), row.get("version"))
+    state_row(
+        store,
+        "SELECT state, version FROM gwk.task WHERE id = $1",
+        id,
+    )
+    .await
 }
 
 async fn attempt_row(store: &PgEventStore, id: &str) -> (String, i64) {
-    let row = sqlx::query("SELECT state, version FROM gwk.attempt WHERE id = $1")
-        .bind(id)
-        .fetch_one(store.pool())
-        .await
-        .expect("attempt row");
-    (row.get("state"), row.get("version"))
-}
-
-async fn event_count(store: &PgEventStore) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM gwk.event")
-        .fetch_one(store.pool())
-        .await
-        .expect("count events")
+    state_row(
+        store,
+        "SELECT state, version FROM gwk.attempt WHERE id = $1",
+        id,
+    )
+    .await
 }
 
 fn task(id: &str) -> KernelCommand {
@@ -792,16 +721,17 @@ async fn the_refusals_are_typed_values_not_database_exceptions() {
     let (code, message) = refuse(
         &store,
         "future",
-        KernelCommand::OpenGate {
-            gate_id: gwk_domain::ids::GateId::new("g-1"),
-            attempt_id: None,
-            phase_ref: None,
-            kind: None,
+        KernelCommand::GrantAuthority {
+            authority_grant_id: gwk_domain::ids::AuthorityGrantId::new("ag-1"),
+            grantee: actor("operator"),
+            action_class: "deploy".into(),
+            scope: None,
+            expires_at: None,
         },
     )
     .await;
     assert_eq!(code, KernelErrorCode::Validation);
-    assert!(message.contains("open_gate"), "{message}");
+    assert!(message.contains("grant_authority"), "{message}");
 
     // Every refusal above rolled back; only the create survived.
     assert_eq!(event_count(&store).await, 1);

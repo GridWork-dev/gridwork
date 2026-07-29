@@ -16,16 +16,17 @@
 //!    projections to land together; splitting them would let a crash leave a
 //!    log the projections do not reflect.
 //!
-//! Scope is the work lifecycle: task, attempt, engine session, lease, worktree,
-//! dispatch node, budget, checkpoint, round, finding. Messaging, gates,
-//! evidence, authority, attention, and ingestion are refused by name here until
-//! the phases that own them land — an unrecognized command is never a no-op.
+//! Scope is the work lifecycle plus messaging and gates: task, attempt, engine
+//! session, lease, worktree, dispatch node, budget, checkpoint, round, finding,
+//! message, execution command, gate, and evidence. Authority, attention, and
+//! ingestion are refused by name here until the phases that own them land — an
+//! unrecognized command is never a no-op.
 
 use gwk_domain::command::KernelCommand;
 use gwk_domain::envelope::{
     CommandEnvelope, ENVELOPE_SCHEMA_VERSION, EventEnvelope, accept_schema_version,
 };
-use gwk_domain::fsm::{AttemptState, TaskState};
+use gwk_domain::fsm::{AttemptState, CommandState, MessageState, TaskState};
 use gwk_domain::ids::{AggregateId, EventId, ReceiptId, Seq};
 use gwk_domain::port::EventStore;
 use gwk_domain::protocol::{KernelErrorCode, KernelResult};
@@ -48,6 +49,9 @@ const DISPATCH_NODE_VERSION: &str = "SELECT version FROM gwk.dispatch_node WHERE
 const AGGREGATE_OWNER: &str = "SELECT project_id FROM gwk.event \
      WHERE aggregate_type = $1 AND aggregate_id = $2 \
      ORDER BY aggregate_version LIMIT 1";
+const MESSAGE_CURSOR: &str = "SELECT state, version FROM gwk.message WHERE id = $1";
+const COMMAND_CURSOR: &str = "SELECT state, version FROM gwk.command WHERE id = $1";
+const GATE_VERSION: &str = "SELECT version FROM gwk.gate WHERE id = $1";
 const CHECKPOINT_SEQ: &str =
     "SELECT seq::text AS seq_text FROM gwk.orchestrator_checkpoint WHERE orchestrator_id = $1";
 
@@ -266,6 +270,38 @@ fn route_of(command: &KernelCommand) -> Result<Route, Refusal> {
             "dispatch_node_transitioned",
         ),
 
+        C::SendMessage { message_id, .. } => {
+            ("message", message_id.as_str().to_owned(), "message_sent")
+        }
+        C::TransitionMessage { message_id, .. } => (
+            "message",
+            message_id.as_str().to_owned(),
+            "message_transitioned",
+        ),
+
+        C::IssueCommand { command_id, .. } => {
+            ("command", command_id.as_str().to_owned(), "command_issued")
+        }
+        C::TransitionCommand { command_id, .. } => (
+            "command",
+            command_id.as_str().to_owned(),
+            "command_transitioned",
+        ),
+        C::RecordCommandOutcome { command_id, .. } => (
+            "command",
+            command_id.as_str().to_owned(),
+            "command_outcome_recorded",
+        ),
+
+        C::OpenGate { gate_id, .. } => ("gate", gate_id.as_str().to_owned(), "gate_opened"),
+        C::DecideGate { gate_id, .. } => ("gate", gate_id.as_str().to_owned(), "gate_decided"),
+
+        C::RecordEvidence { evidence_id, .. } => (
+            "evidence",
+            evidence_id.as_str().to_owned(),
+            "evidence_recorded",
+        ),
+
         C::WriteOrchestratorCheckpoint { checkpoint } => (
             "orchestrator_checkpoint",
             // The store is keyed on it, so an unnamed checkpoint has no row to
@@ -482,7 +518,11 @@ async fn decide(
         | C::OpenEngineSession { .. }
         | C::AcquireLease { .. }
         | C::RegisterWorktree { .. }
-        | C::RegisterDispatchNode { .. } => 0,
+        | C::RegisterDispatchNode { .. }
+        | C::SendMessage { .. }
+        | C::IssueCommand { .. }
+        | C::OpenGate { .. }
+        | C::RecordEvidence { .. } => 0,
 
         C::TransitionTask {
             to,
@@ -508,6 +548,68 @@ async fn decide(
                 envelope,
                 receipt_id.as_ref(),
             )?
+        }
+
+        C::TransitionMessage {
+            to,
+            expected_version,
+            ..
+        } => {
+            let cursor: Cursor<MessageState> =
+                fsm_cursor(conn, MESSAGE_CURSOR, &route.aggregate_id, "message").await?;
+            decide_transition(&cursor, *to, *expected_version, envelope, None)?
+        }
+        C::TransitionCommand {
+            to,
+            expected_version,
+            ..
+        } => {
+            // `verification_complete` is reachable only through
+            // `RecordCommandOutcome`: the row's CHECK ties that state to an
+            // outcome column this command has no value for, so allowing it
+            // here would trade a typed refusal for a constraint violation
+            // raised from inside the projection.
+            if *to == CommandState::VerificationComplete {
+                return Err(Refusal::validation(
+                    "a command reaches verification_complete by recording its outcome, \
+                     which is the same write",
+                ));
+            }
+            let cursor: Cursor<CommandState> =
+                fsm_cursor(conn, COMMAND_CURSOR, &route.aggregate_id, "command").await?;
+            decide_transition(&cursor, *to, *expected_version, envelope, None)?
+        }
+        C::RecordCommandOutcome {
+            expected_version, ..
+        } => {
+            // Checked as the edge it is — signaled -> verification_complete —
+            // so a command that has not been signaled yet is refused with
+            // `illegal_edge` rather than silently completing.
+            let cursor: Cursor<CommandState> =
+                fsm_cursor(conn, COMMAND_CURSOR, &route.aggregate_id, "command").await?;
+            decide_transition(
+                &cursor,
+                CommandState::VerificationComplete,
+                *expected_version,
+                envelope,
+                None,
+            )?
+        }
+
+        C::DecideGate {
+            expected_version, ..
+        } => {
+            // A verdict is a value, not an edge: `gwk.gate` has a CHECK on the
+            // four verdicts and no transition table, so the contract admits
+            // re-deciding one. The version CAS is the whole guard.
+            decide_cas(
+                conn,
+                GATE_VERSION,
+                &route.aggregate_id,
+                "gate",
+                *expected_version,
+            )
+            .await?
         }
 
         C::UpdateBudget {
@@ -832,6 +934,22 @@ mod tests {
             (route.aggregate_type, route.aggregate_id.as_str()),
             ("attempt", "a-1")
         );
+
+        // Evidence is its own aggregate even though its row has no version
+        // column: what the log counts and what the projection stores are
+        // separate questions.
+        let evidence = KernelCommand::RecordEvidence {
+            evidence_id: gwk_domain::ids::EvidenceId::new("ev-1"),
+            kind: "diff".to_owned(),
+            r#ref: "blob://d".to_owned(),
+            digest: None,
+            byte_size: None,
+        };
+        let route = route_of(&evidence).expect("routes");
+        assert_eq!(
+            (route.aggregate_type, route.event_type),
+            ("evidence", "evidence_recorded")
+        );
     }
 
     #[test]
@@ -839,15 +957,19 @@ mod tests {
         // Not a silent no-op and not a wildcard "unknown command": the caller
         // is told which command was refused, and the kernel never writes an
         // event it has no projection for.
-        let gate = KernelCommand::OpenGate {
-            gate_id: gwk_domain::ids::GateId::new("g-1"),
-            attempt_id: None,
-            phase_ref: None,
-            kind: None,
+        let grant = KernelCommand::GrantAuthority {
+            authority_grant_id: gwk_domain::ids::AuthorityGrantId::new("ag-1"),
+            grantee: gwk_domain::envelope::Actor {
+                kind: "operator".to_owned(),
+                id: None,
+            },
+            action_class: "deploy".to_owned(),
+            scope: None,
+            expires_at: None,
         };
-        let refusal = route_of(&gate).expect_err("out of scope");
+        let refusal = route_of(&grant).expect_err("out of scope");
         assert_eq!(refusal.code, KernelErrorCode::Validation);
-        assert!(refusal.message.contains("open_gate"), "{refusal}");
+        assert!(refusal.message.contains("grant_authority"), "{refusal}");
     }
 
     #[test]

@@ -16,6 +16,12 @@
 // the one that uses a subset would otherwise fail `-D warnings` on the rest.
 #![allow(dead_code)]
 
+use gwk_domain::command::KernelCommand;
+use gwk_domain::envelope::{
+    Actor, CommandEnvelope, ENVELOPE_SCHEMA_VERSION, EventEnvelope, Origin,
+};
+use gwk_domain::ids::{CommandId, IdempotencyKey, ProjectId, Timestamp};
+use gwk_domain::protocol::{KernelErrorCode, KernelResult};
 use gwk_kernel::admin::{self, InitOutcome};
 use gwk_kernel::config::{ADMIN_DATABASE_URL_ENV, AdminConfig, RUNTIME_ROLE_ENV};
 use gwk_kernel::store::{PgEventStore, connect_pool};
@@ -24,6 +30,94 @@ use sqlx::PgPool;
 
 pub const ADMIN_URL_ENV: &str = "GWK_TEST_ADMIN_DATABASE_URL";
 pub const RUNTIME_ROLE: &str = "gwk_test_runtime";
+
+/// The project every case shares unless it is specifically about crossing one.
+pub const PROJECT: &str = "p";
+
+pub fn actor(kind: &str) -> Actor {
+    Actor {
+        kind: kind.to_owned(),
+        id: None,
+    }
+}
+
+/// One command envelope, in a named project. Idempotency is scoped per project
+/// while the aggregate namespace is global, so a case that crosses that line
+/// has to be able to say which project it is.
+pub fn envelope_in(
+    project: &str,
+    key: &str,
+    actor: Actor,
+    command: &KernelCommand,
+) -> CommandEnvelope {
+    CommandEnvelope {
+        command_id: CommandId::new(format!("cmd-{project}-{key}")),
+        project_id: ProjectId::new(project),
+        command_type: command.command_type().to_owned(),
+        schema_version: ENVELOPE_SCHEMA_VERSION,
+        issued_at: Timestamp::new("2026-07-28T00:00:00Z"),
+        actor,
+        origin: Origin {
+            system: "gw".into(),
+            r#ref: None,
+        },
+        target_aggregate_type: None,
+        target_aggregate_id: None,
+        expected_version: None,
+        idempotency_key: IdempotencyKey::new(key),
+        causation_id: None,
+        correlation_id: None,
+        payload: serde_json::to_value(command).expect("serialize command"),
+    }
+}
+
+pub fn envelope_as(key: &str, actor: Actor, command: &KernelCommand) -> CommandEnvelope {
+    envelope_in(PROJECT, key, actor, command)
+}
+
+pub fn envelope(key: &str, command: &KernelCommand) -> CommandEnvelope {
+    envelope_as(key, actor("kernel"), command)
+}
+
+/// Submit and require success. The key is the caller's, so every case names its
+/// own — reusing one is exactly what this kernel is supposed to refuse.
+pub async fn apply(store: &PgEventStore, key: &str, command: KernelCommand) -> Vec<EventEnvelope> {
+    match store.submit(&envelope(key, &command)).await {
+        KernelResult::CommandApplied { events, .. } => events,
+        other => panic!("{key}: expected CommandApplied, got {other:?}"),
+    }
+}
+
+/// Submit and require a refusal, returning the code and message to assert on.
+pub async fn refuse(
+    store: &PgEventStore,
+    key: &str,
+    command: KernelCommand,
+) -> (KernelErrorCode, String) {
+    match store.submit(&envelope(key, &command)).await {
+        KernelResult::Error { code, message, .. } => (code, message),
+        other => panic!("{key}: expected a refusal, got {other:?}"),
+    }
+}
+
+pub async fn event_count(store: &PgEventStore) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM gwk.event")
+        .fetch_one(store.pool())
+        .await
+        .expect("count events")
+}
+
+/// A state row's own view of where it is and what version it carries — the
+/// number that must stay equal to its aggregate's version in the log.
+pub async fn state_row(store: &PgEventStore, select: &'static str, id: &str) -> (String, i64) {
+    use sqlx::Row;
+    let row = sqlx::query(select)
+        .bind(id)
+        .fetch_one(store.pool())
+        .await
+        .expect("state row");
+    (row.get(0), row.get(1))
+}
 
 pub fn maintenance_url() -> String {
     std::env::var(ADMIN_URL_ENV)

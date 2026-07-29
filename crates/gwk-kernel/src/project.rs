@@ -615,6 +615,215 @@ pub(crate) async fn apply_event(
             .map_err(|e| db("write orchestrator checkpoint", e))?;
         }
 
+        // ---- message ----
+        KernelCommand::SendMessage {
+            message_id,
+            correlation_id,
+            reply_to,
+            sender,
+            recipient,
+            channel,
+            kind,
+            payload,
+            deadline,
+        } => {
+            // `gwk.message.idempotency_key` is NOT NULL, and the message body
+            // carries none — the key that names this send is the ENVELOPE's,
+            // which the event preserves. Taking it from there rather than
+            // minting one keeps the row's uniqueness the same uniqueness the
+            // log already enforced, instead of a second, weaker one.
+            let key = event.idempotency_key.as_ref().ok_or_else(|| {
+                Refusal::validation("a message needs the idempotency key that sent it")
+            })?;
+            sqlx::query(
+                "INSERT INTO gwk.message \
+                   (id, version, state, idempotency_key, correlation_id, reply_to, sender, \
+                    recipient, channel, kind, payload, deadline, created_at, updated_at) \
+                 VALUES ($1, $2, 'accepted', $3, $4, $5, $6, $7, $8, $9, $10, \
+                    $11::timestamptz, $12::timestamptz, $12::timestamptz)",
+            )
+            .bind(message_id.as_str())
+            .bind(version)
+            .bind(key.as_str())
+            .bind(correlation_id.as_ref().map(|c| c.as_str()))
+            .bind(reply_to.as_ref().map(|m| m.as_str()))
+            .bind(sender.as_deref())
+            .bind(recipient.as_deref())
+            .bind(channel.as_deref())
+            .bind(kind.as_deref())
+            .bind(json_opt(payload.as_ref())?)
+            .bind(deadline.as_ref().map(|d| d.as_str()))
+            .bind(at)
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| db("insert message", e))?;
+        }
+        KernelCommand::TransitionMessage {
+            message_id,
+            to,
+            dead_letter_reason,
+            ..
+        } => {
+            // COALESCE, not a plain assignment: a reason is written once, by
+            // the transition that carries it, and a later edge with no reason
+            // of its own must not erase why the message died.
+            let done = sqlx::query(
+                "UPDATE gwk.message \
+                 SET state = $2, version = $3, updated_at = $4::timestamptz, \
+                     dead_letter_reason = COALESCE($5, dead_letter_reason) \
+                 WHERE id = $1",
+            )
+            .bind(message_id.as_str())
+            .bind(wire_str(to)?)
+            .bind(version)
+            .bind(at)
+            .bind(dead_letter_reason.as_deref())
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| db("transition message", e))?;
+            require_one(done, "message", message_id.as_str())?;
+        }
+
+        // ---- execution command ----
+        KernelCommand::IssueCommand {
+            command_id,
+            kind,
+            targets,
+            actor,
+        } => {
+            sqlx::query(
+                "INSERT INTO gwk.command \
+                   (id, version, state, kind, target, actor, idempotency_key, \
+                    created_at, updated_at) \
+                 VALUES ($1, $2, 'issued', $3, $4, $5, $6, $7::timestamptz, $7::timestamptz)",
+            )
+            .bind(command_id.as_str())
+            .bind(version)
+            .bind(kind)
+            // The contract says the projection keeps the FIRST target as its
+            // primary; the full list stays in the event, which is where a
+            // multi-target stop is reconstructed from.
+            .bind(targets.first())
+            .bind(json_opt(actor.as_ref())?)
+            .bind(event.idempotency_key.as_ref().map(|k| k.as_str()))
+            .bind(at)
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| db("insert command", e))?;
+        }
+        KernelCommand::TransitionCommand { command_id, to, .. } => {
+            let done = sqlx::query(
+                "UPDATE gwk.command SET state = $2, version = $3, updated_at = $4::timestamptz \
+                 WHERE id = $1",
+            )
+            .bind(command_id.as_str())
+            .bind(wire_str(to)?)
+            .bind(version)
+            .bind(at)
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| db("transition command", e))?;
+            require_one(done, "command", command_id.as_str())?;
+        }
+        KernelCommand::RecordCommandOutcome {
+            command_id,
+            outcome,
+            ..
+        } => {
+            // ONE statement writing both, because `outcome_iff_verification_complete`
+            // makes any other order unrepresentable: the outcome column may
+            // hold a value only while the state is `verification_complete`, and
+            // that state may exist only with one. So this command IS the
+            // terminal transition, not a follow-up to it — which is also why
+            // `TransitionCommand` refuses to name that state itself.
+            let done = sqlx::query(
+                "UPDATE gwk.command \
+                 SET state = 'verification_complete', outcome = $2, version = $3, \
+                     updated_at = $4::timestamptz \
+                 WHERE id = $1",
+            )
+            .bind(command_id.as_str())
+            .bind(wire_str(outcome)?)
+            .bind(version)
+            .bind(at)
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| db("record command outcome", e))?;
+            require_one(done, "command", command_id.as_str())?;
+        }
+
+        // ---- gate ----
+        KernelCommand::OpenGate {
+            gate_id,
+            attempt_id,
+            phase_ref,
+            kind,
+        } => {
+            sqlx::query(
+                "INSERT INTO gwk.gate \
+                   (id, version, attempt_id, phase_ref, kind, verdict, created_at, updated_at) \
+                 VALUES ($1, $2, $3, $4, $5, 'pending', $6::timestamptz, $6::timestamptz)",
+            )
+            .bind(gate_id.as_str())
+            .bind(version)
+            .bind(attempt_id.as_ref().map(|a| a.as_str()))
+            .bind(phase_ref.as_deref())
+            .bind(kind.as_deref())
+            .bind(at)
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| db("insert gate", e))?;
+        }
+        KernelCommand::DecideGate {
+            gate_id,
+            verdict,
+            evidence_ref,
+            ..
+        } => {
+            let done = sqlx::query(
+                "UPDATE gwk.gate \
+                 SET verdict = $2, version = $3, updated_at = $4::timestamptz, \
+                     evidence_ref = COALESCE($5, evidence_ref) \
+                 WHERE id = $1",
+            )
+            .bind(gate_id.as_str())
+            .bind(wire_str(verdict)?)
+            .bind(version)
+            .bind(at)
+            .bind(evidence_ref.as_deref())
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| db("decide gate", e))?;
+            require_one(done, "gate", gate_id.as_str())?;
+        }
+
+        // ---- evidence ----
+        KernelCommand::RecordEvidence {
+            evidence_id,
+            kind,
+            r#ref,
+            digest,
+            byte_size,
+        } => {
+            // No version column and no updated_at: a piece of evidence is a
+            // fact about something that already happened, so the row is
+            // written once and never moves. Its event still advances the
+            // aggregate version — the log's count is not the row's business.
+            sqlx::query(
+                "INSERT INTO gwk.evidence (id, kind, ref, digest, byte_size, created_at) \
+                 VALUES ($1, $2, $3, $4, $5::numeric, $6::timestamptz)",
+            )
+            .bind(evidence_id.as_str())
+            .bind(kind)
+            .bind(r#ref)
+            .bind(digest.as_deref())
+            .bind(byte_size.map(|b| to_numeric_text(b.value())))
+            .bind(at)
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| db("insert evidence", e))?;
+        }
+
         // The epoch boundary is the log itself — there is no row behind it.
         KernelCommand::ActivateKernel { .. } => {}
 
@@ -622,15 +831,7 @@ pub(crate) async fn apply_event(
         // phase decide about every one of these rather than let it fall into a
         // silent no-op. The submit path refuses them at the boundary, so a log
         // written by THIS kernel can never contain one.
-        KernelCommand::SendMessage { .. }
-        | KernelCommand::TransitionMessage { .. }
-        | KernelCommand::IssueCommand { .. }
-        | KernelCommand::TransitionCommand { .. }
-        | KernelCommand::RecordCommandOutcome { .. }
-        | KernelCommand::OpenGate { .. }
-        | KernelCommand::DecideGate { .. }
-        | KernelCommand::RecordEvidence { .. }
-        | KernelCommand::GrantAuthority { .. }
+        KernelCommand::GrantAuthority { .. }
         | KernelCommand::RevokeAuthority { .. }
         | KernelCommand::RaiseAttention { .. }
         | KernelCommand::ResolveAttention { .. }
