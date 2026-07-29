@@ -58,6 +58,15 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Assert ignored kernel tests exist
+        shell: bash
+        run: |
+          tests="$(cargo test -p gwk-kernel --locked -- --ignored --list)"
+          printf '%s\n' "$tests"
+          if ! grep -Eq ': test$' <<<"$tests"; then
+            echo 'no ignored gwk-kernel tests were discovered' >&2
+            exit 1
+          fi
       - run: cargo test -p gwk-kernel --locked -- --ignored
 
   msrv:
