@@ -117,12 +117,18 @@ async fn event_count(store: &PgEventStore) -> i64 {
 }
 
 fn task(id: &str) -> KernelCommand {
+    task_in(PROJECT, id)
+}
+
+/// The body's own `project` has to track the envelope's, so a case that
+/// submits in another project builds its command there too.
+fn task_in(project: &str, id: &str) -> KernelCommand {
     KernelCommand::CreateTask {
         task_id: TaskId::new(id),
         kind: Some("execution".into()),
         title: Some("ship the kernel".into()),
         spec_ref: None,
-        project: Some(PROJECT.into()),
+        project: Some(project.into()),
         priority: Some(2),
         tracker_ref: None,
     }
@@ -399,7 +405,12 @@ async fn a_key_taken_on_this_aggregate_by_another_project_is_a_conflict_not_a_re
     // row and answers beta with it: a command that never ran, reported applied,
     // carrying another project's payload and actor.
     let created = store
-        .submit(&envelope_in("alpha", "k", actor("kernel"), &task("t-1")))
+        .submit(&envelope_in(
+            "alpha",
+            "k",
+            actor("kernel"),
+            &task_in("alpha", "t-1"),
+        ))
         .await;
     assert!(
         matches!(created, KernelResult::CommandApplied { .. }),
@@ -432,10 +443,15 @@ async fn a_key_taken_on_this_aggregate_by_another_project_is_a_conflict_not_a_re
     assert_eq!(task_row(&store, "t-1").await, ("submitted".to_owned(), 1));
     assert_eq!(event_count(&store).await, 1);
 
-    // An identical BODY from another project is a conflict too — it is a
+    // The SAME create from another project is a conflict too — it is a
     // different request because it belongs to a different project's log.
     let twin = store
-        .submit(&envelope_in("beta", "k", actor("kernel"), &task("t-1")))
+        .submit(&envelope_in(
+            "beta",
+            "k",
+            actor("kernel"),
+            &task_in("beta", "t-1"),
+        ))
         .await;
     assert!(
         matches!(
@@ -448,8 +464,9 @@ async fn a_key_taken_on_this_aggregate_by_another_project_is_a_conflict_not_a_re
         "{twin:?}"
     );
 
-    // A fresh key in beta is unaffected: the conflict is about the key, not
-    // about beta.
+    // A FRESH key in beta gets past every idempotency check — and is still
+    // refused, because the key was never the thing standing between beta and
+    // alpha's task. t-1's first event says alpha, so alpha owns it.
     let fresh = store
         .submit(&envelope_in(
             "beta",
@@ -462,9 +479,82 @@ async fn a_key_taken_on_this_aggregate_by_another_project_is_a_conflict_not_a_re
             },
         ))
         .await;
+    match &fresh {
+        KernelResult::Error { code, message, .. } => {
+            assert_eq!(*code, KernelErrorCode::Validation, "{fresh:?}");
+            assert!(message.contains("alpha"), "{message}");
+        }
+        other => panic!("beta moved a task it does not own: {other:?}"),
+    }
+    // Still alpha's, still where alpha left it.
+    assert_eq!(task_row(&store, "t-1").await, ("submitted".to_owned(), 1));
+    assert_eq!(event_count(&store).await, 1);
+
+    // Beta is not locked out of the kernel — only out of alpha's aggregate.
+    let own = store
+        .submit(&envelope_in(
+            "beta",
+            "k2",
+            actor("kernel"),
+            &task_in("beta", "t-2"),
+        ))
+        .await;
     assert!(
-        matches!(fresh, KernelResult::CommandApplied { .. }),
-        "{fresh:?}"
+        matches!(own, KernelResult::CommandApplied { .. }),
+        "{own:?}"
+    );
+
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
+async fn a_create_whose_body_names_another_project_is_refused() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "bodyproject", 64).await;
+
+    // Two fields describe the same task's project and they disagree. Landing
+    // it would write a row saying one thing over a log saying the other.
+    let split = store
+        .submit(&envelope_in(
+            "alpha",
+            "k",
+            actor("kernel"),
+            &task_in("beta", "t-1"),
+        ))
+        .await;
+    match &split {
+        KernelResult::Error { code, message, .. } => {
+            assert_eq!(*code, KernelErrorCode::Validation, "{split:?}");
+            assert!(
+                message.contains("beta") && message.contains("alpha"),
+                "{message}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(event_count(&store).await, 0);
+
+    // A body with no project of its own is not a disagreement.
+    let quiet = store
+        .submit(&envelope_in(
+            "alpha",
+            "k2",
+            actor("kernel"),
+            &KernelCommand::CreateTask {
+                task_id: TaskId::new("t-2"),
+                kind: None,
+                title: None,
+                spec_ref: None,
+                project: None,
+                priority: None,
+                tracker_ref: None,
+            },
+        ))
+        .await;
+    assert!(
+        matches!(quiet, KernelResult::CommandApplied { .. }),
+        "{quiet:?}"
     );
 
     drop_database(&maintenance, &name).await;

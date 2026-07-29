@@ -45,6 +45,9 @@ const ATTEMPT_CURSOR: &str = "SELECT state, version FROM gwk.attempt WHERE id = 
 const ATTEMPT_VERSION: &str = "SELECT version FROM gwk.attempt WHERE id = $1";
 const LEASE_VERSION: &str = "SELECT version FROM gwk.lease WHERE id = $1";
 const DISPATCH_NODE_VERSION: &str = "SELECT version FROM gwk.dispatch_node WHERE id = $1";
+const AGGREGATE_OWNER: &str = "SELECT project_id FROM gwk.event \
+     WHERE aggregate_type = $1 AND aggregate_id = $2 \
+     ORDER BY aggregate_version LIMIT 1";
 const CHECKPOINT_SEQ: &str =
     "SELECT seq::text AS seq_text FROM gwk.orchestrator_checkpoint WHERE orchestrator_id = $1";
 
@@ -94,6 +97,7 @@ impl PgEventStore {
             .map_err(|e| Refusal::validation(e.to_string()))?;
         let route = route_of(&command)?;
         check_routing(envelope, &route)?;
+        check_body_project(envelope, &command)?;
         let payload = serde_json::to_value(&command)
             .map_err(|e| Refusal::storage(format!("serialize command body: {e}")))?;
 
@@ -121,7 +125,14 @@ impl PgEventStore {
             Prior::Conflict(reason) => {
                 return Err(Refusal::new(KernelErrorCode::IdempotencyConflict, reason));
             }
-            Prior::Unused => decide(&mut tx, envelope, &command, &route).await?,
+            Prior::Unused => {
+                // After the key check, not before it: a reused key is a
+                // conflict whoever sends it, and reporting the key is the
+                // answer a retrier can act on. Ownership is the question that
+                // only arises once the request is genuinely new.
+                check_aggregate_owner(&mut tx, envelope, &route).await?;
+                decide(&mut tx, envelope, &command, &route).await?
+            }
         };
         check_expected_version(envelope, expected_version)?;
 
@@ -313,6 +324,66 @@ fn check_routing(envelope: &CommandEnvelope, route: &Route) -> Result<(), Refusa
         return Err(mismatch("target_aggregate_id", declared.as_str()));
     }
     Ok(())
+}
+
+/// A create that names its own project must name the one the envelope routes to.
+///
+/// `CreateTask` carries a `project` field and the envelope carries
+/// `project_id`; both end up describing the same task, so two different values
+/// is a caller mistake with no correct reading — the row would say one thing
+/// and its log another. Same treatment as the target fields above: refuse
+/// rather than silently pick a winner. An absent body field stays absent.
+fn check_body_project(envelope: &CommandEnvelope, command: &KernelCommand) -> Result<(), Refusal> {
+    let KernelCommand::CreateTask {
+        project: Some(project),
+        ..
+    } = command
+    else {
+        return Ok(());
+    };
+    if project != envelope.project_id.as_str() {
+        return Err(Refusal::validation(format!(
+            "body project {project:?} does not name the envelope's project {:?}",
+            envelope.project_id.as_str()
+        )));
+    }
+    Ok(())
+}
+
+/// The project that created an aggregate is the only one that may write to it.
+///
+/// `ProjectId` is documented as the project an aggregate belongs to, but the
+/// aggregate id space is global and no projection row carries a project — so
+/// without this, a second project can transition another's task simply by
+/// using a key of its own, and the aggregate ends up with a log whose events
+/// disagree about who owns it. Any per-project read of that log then returns a
+/// partial history of the aggregate and nothing says so.
+///
+/// The owner is not stored anywhere new: the log already records who created
+/// what, so it is the project on the aggregate's first event. An aggregate
+/// with no events yet is unowned, which is exactly the create case.
+async fn check_aggregate_owner(
+    conn: &mut PgConnection,
+    envelope: &CommandEnvelope,
+    route: &Route,
+) -> Result<(), Refusal> {
+    // Served by the UNIQUE (aggregate_type, aggregate_id, aggregate_version)
+    // index the CAS already needs — no new index, no new column.
+    let owner: Option<String> = sqlx::query_scalar(AGGREGATE_OWNER)
+        .bind(route.aggregate_type)
+        .bind(&route.aggregate_id)
+        .fetch_optional(conn)
+        .await
+        .map_err(|e| Refusal::storage(format!("read aggregate owner: {e}")))?;
+    match owner {
+        Some(owner) if owner != envelope.project_id.as_str() => Err(Refusal::validation(format!(
+            "{}/{} belongs to project {owner:?}, not {:?}",
+            route.aggregate_type,
+            route.aggregate_id,
+            envelope.project_id.as_str()
+        ))),
+        _ => Ok(()),
+    }
 }
 
 /// The envelope's `expected_version`, when present, must agree with the version
