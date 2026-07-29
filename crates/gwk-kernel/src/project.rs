@@ -9,7 +9,7 @@
 //! through here rather than writing its own SQL: one applier means replay
 //! cannot disagree with the write that it is replaying.
 //!
-//! It is the only projection writer for twelve of the fourteen tables, and the
+//! It is the only projection writer for thirteen of the fifteen tables, and the
 //! exception is worth stating plainly rather than leaving to be discovered by a
 //! rebuild that will not agree. [`write_receipt`] and [`page_attention`] are
 //! called by [`crate::submit`] directly, and on the PAGED path they run for a
@@ -926,15 +926,32 @@ pub(crate) async fn apply_event(
         // The epoch boundary is the log itself — there is no row behind it.
         KernelCommand::ActivateKernel { .. } => {}
 
-        // Named, not caught by a wildcard: the compiler must make the next
-        // phase decide about every one of these rather than let it fall into a
-        // silent no-op. The submit path refuses them at the boundary, so a log
-        // written by THIS kernel can never contain one.
-        KernelCommand::IngestRecord { .. } => {
-            return Err(Refusal::storage(format!(
-                "{} has no projection in this kernel yet",
-                command.command_type()
-            )));
+        // ---- ingestion ----
+        KernelCommand::IngestRecord {
+            kind,
+            payload,
+            payload_ref,
+        } => {
+            // The id is the event's aggregate id, which `route_of` derived from
+            // the envelope's project and idempotency key. Re-deriving it here
+            // would need the envelope, which a replay does not have — and the
+            // event already carries the answer, which is the rule this whole
+            // module follows: every column comes off the EVENT.
+            sqlx::query(
+                "INSERT INTO gwk.ingested_record \
+                   (id, kind, payload, payload_ref, ingested_by, event_seq, ingested_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6::numeric, $7::timestamptz)",
+            )
+            .bind(event.aggregate_id.as_str())
+            .bind(kind.as_str())
+            .bind(payload.clone())
+            .bind(json_opt(payload_ref.as_ref())?)
+            .bind(json_opt(Some(&event.actor))?)
+            .bind(to_numeric_text(event.global_sequence.value()))
+            .bind(at)
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| db("insert ingested record", e))?;
         }
     }
     Ok(())
@@ -1076,5 +1093,38 @@ mod tests {
             json_opt(Some(&present)),
             Ok(Some(serde_json::json!({ "max_tokens": 5 })))
         );
+    }
+
+    #[test]
+    fn the_closed_ingestion_set_is_the_same_one_in_the_ddl_and_the_contract() {
+        // `gwk.ingested_record.kind` is the one CLOSED classification column in
+        // the schema, and the reason is ADR 0026: the absence of an import path
+        // has to be a property of the DATABASE, not a convention the writing
+        // process happens to honor. That only holds while the CHECK and
+        // `IngestionKind` name the same twelve values, and nothing else here
+        // compares them.
+        let ddl = crate::contract_sql::CONTRACT_SQL;
+        let check = ddl
+            .split_once("CREATE TABLE gwk.ingested_record")
+            .and_then(|(_, rest)| rest.split_once("kind IN ("))
+            .and_then(|(_, rest)| rest.split_once("))"))
+            .map(|(list, _)| list)
+            .expect("the ingested_record kind CHECK");
+        let listed: Vec<&str> = check
+            .split(',')
+            .map(|value| value.trim().trim_matches('\''))
+            .collect();
+        let contract: Vec<&str> = gwk_domain::ingestion::IngestionKind::ALL
+            .iter()
+            .map(|kind| kind.as_str())
+            .collect();
+        assert_eq!(listed, contract);
+
+        // The door ADR 0026 closes, checked against the DDL rather than only
+        // against the enum: a CHECK that admits it would let the row in even
+        // though the contract type cannot name it.
+        for forbidden in ["import", "migrate", "backfill", "legacy"] {
+            assert!(!listed.contains(&forbidden), "the DDL admits {forbidden}");
+        }
     }
 }

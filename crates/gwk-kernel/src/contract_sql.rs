@@ -683,6 +683,57 @@ CREATE TRIGGER orchestrator_checkpoint_seq
 
 ALTER TABLE gwk.orchestrator_checkpoint ENABLE ALWAYS TRIGGER orchestrator_checkpoint_seq;
 
+-- Records that entered the log through ingestion rather than through an
+-- aggregate's lifecycle: memory, knowledge, graph snapshots, eval verdicts,
+-- insights, cost, health, session, config, checkpoints, rounds, findings.
+--
+-- `kind` is the one CLOSED classification column in this file. Everywhere else
+-- an open bounded string is preferred so a new label is additive; here the
+-- closed set IS the property — ADR 0026 makes the absence of an import path
+-- load-bearing, and an open column would let `import` in as data. The CHECK
+-- lists the twelve accepted kinds so the refusal happens in the database and
+-- not only in the process that wrote the row.
+--
+-- No version, no state, no updated_at: an ingested record is a fact that
+-- arrived, like gwk.receipt. `event_seq` points back at the log entry that
+-- produced it, which is the only thing that can prove the row — ingestion
+-- writes no gwk.transition.
+CREATE TABLE gwk.ingested_record (
+  id          text PRIMARY KEY,
+  kind        text NOT NULL
+                CHECK (kind IN ('memory', 'knowledge', 'graph_snapshot',
+                                'eval_verdict', 'insight', 'cost', 'health',
+                                'session', 'config', 'checkpoint', 'round',
+                                'finding')),
+  -- Bounded inline content, or a descriptor of the blob beside it. The 64 KiB
+  -- bound belongs to the append path (it bounds the whole event payload); a
+  -- column CHECK here would be a second, drifting copy of it.
+  payload     jsonb NOT NULL,
+  payload_ref jsonb,
+  ingested_by jsonb,
+  event_seq   numeric(20,0) NOT NULL
+                CHECK (event_seq >= 0 AND event_seq <= 18446744073709551615),
+  ingested_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE FUNCTION gwk.forbid_ingested_record_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'gwk.ingested_record is append-only (% refused)', TG_OP;
+END $$;
+
+CREATE TRIGGER ingested_record_append_only
+  BEFORE UPDATE OR DELETE ON gwk.ingested_record
+  FOR EACH ROW EXECUTE FUNCTION gwk.forbid_ingested_record_mutation();
+
+-- Statement-level TRUNCATE cover, as on gwk.event and gwk.receipt.
+CREATE TRIGGER ingested_record_no_truncate
+  BEFORE TRUNCATE ON gwk.ingested_record
+  FOR EACH STATEMENT EXECUTE FUNCTION gwk.forbid_ingested_record_mutation();
+
+ALTER TABLE gwk.ingested_record ENABLE ALWAYS TRIGGER ingested_record_append_only;
+ALTER TABLE gwk.ingested_record ENABLE ALWAYS TRIGGER ingested_record_no_truncate;
+
 COMMIT;
 "#;
 
@@ -693,4 +744,4 @@ COMMIT;
 // unwrapped 64-hex line lands past 100 columns — the generator and
 // rustfmt would then fight, showing up as permanent contract drift.
 pub const CONTRACT_SQL_SHA256: &str =
-    "70e34895a08d93bf5793ec4f44f9ae4c07cd733a0c8e5d684582e6d9abc6f9f0";
+    "d7e3facd59c94162f7068f2d859da1a8885e3a20c4c5cebd9f0aa50b6544a424";

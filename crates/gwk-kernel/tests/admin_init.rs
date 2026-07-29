@@ -180,7 +180,7 @@ async fn init_applies_the_contract_is_idempotent_and_refuses_a_stranger() {
         .fetch_all(&mut conn)
         .await
         .expect("query the grant matrix");
-        assert_eq!(rows.len(), 16, "the contract schema changed shape");
+        assert_eq!(rows.len(), 17, "the contract schema changed shape");
         for row in &rows {
             let table: String = row.try_get("relname").expect("relname");
             let get = |col| -> bool { row.try_get(col).expect("bool") };
@@ -189,7 +189,10 @@ async fn init_applies_the_contract_is_idempotent_and_refuses_a_stranger() {
             assert!(!get("trunc"), "{table}: TRUNCATE is granted nowhere");
             match table.as_str() {
                 // Append-only history: writable forward, never rewritable.
-                "event" | "receipt" => {
+                // `ingested_record` sits here rather than with the projections
+                // because a replay rebuilds it by INSERT alone — it has no
+                // version to move and no state to advance.
+                "event" | "receipt" | "ingested_record" => {
                     assert!(get("ins"), "{table}: history must be appendable");
                     assert!(!get("upd"), "{table}: history must not be rewritable");
                 }

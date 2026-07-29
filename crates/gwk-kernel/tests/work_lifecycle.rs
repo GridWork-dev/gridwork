@@ -15,6 +15,7 @@ use common::{
 };
 use gwk_domain::command::KernelCommand;
 use gwk_domain::entity::Budget;
+use gwk_domain::envelope::INLINE_PAYLOAD_MAX_BYTES;
 use gwk_domain::fsm::{AttemptState, LeaseMode, TaskState};
 use gwk_domain::ids::{
     AggregateId, AttemptId, DispatchNodeId, EngineId, EngineSessionId, LeaseId, ReceiptId, Seq,
@@ -716,20 +717,21 @@ async fn the_refusals_are_typed_values_not_database_exceptions() {
     .await;
     assert_eq!(code, KernelErrorCode::NotFound);
 
-    // A command this kernel does not project yet is refused by name, never
-    // written as an event nobody can replay.
+    // A bound the DATABASE would otherwise raise on: refused as a value, before
+    // the log. This entry used to be "a command this kernel does not project
+    // yet"; ingestion was the last one, and there is no such command now.
     let (code, message) = refuse(
         &store,
-        "future",
+        "oversized",
         KernelCommand::IngestRecord {
             kind: gwk_domain::ingestion::IngestionKind::Memory,
-            payload: serde_json::json!({}),
+            payload: serde_json::json!({ "blob": "x".repeat(INLINE_PAYLOAD_MAX_BYTES) }),
             payload_ref: None,
         },
     )
     .await;
     assert_eq!(code, KernelErrorCode::Validation);
-    assert!(message.contains("ingest_record"), "{message}");
+    assert!(message.contains("payload_ref"), "{message}");
 
     // Every refusal above rolled back; only the create survived.
     assert_eq!(event_count(&store).await, 1);

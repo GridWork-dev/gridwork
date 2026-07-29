@@ -25,7 +25,7 @@
 use crate::blob::{BlobAddress, BlobDescriptor};
 use crate::entity::{
     Attempt, AttentionItem, AuthorityGrant, Command, DispatchNode, EngineSession, Evidence, Gate,
-    Lease, Message, Receipt, Task, Worktree,
+    IngestedRecord, Lease, Message, Receipt, Task, Worktree,
 };
 use crate::envelope::{CommandEnvelope, EventEnvelope, JsonValue};
 use crate::ids::{
@@ -418,6 +418,7 @@ pub enum ProjectionKind {
     Lease,
     DispatchNode,
     OrchestratorCheckpoint,
+    IngestedRecord,
 }
 
 impl ProjectionKind {
@@ -437,6 +438,7 @@ impl ProjectionKind {
         Self::Lease,
         Self::DispatchNode,
         Self::OrchestratorCheckpoint,
+        Self::IngestedRecord,
     ];
 }
 
@@ -494,6 +496,9 @@ pub enum ProjectionRecord {
     OrchestratorCheckpoint {
         orchestrator_checkpoint: OrchestratorCheckpoint,
     },
+    IngestedRecord {
+        ingested_record: IngestedRecord,
+    },
 }
 
 impl ProjectionRecord {
@@ -515,6 +520,7 @@ impl ProjectionRecord {
             Self::Lease { .. } => ProjectionKind::Lease,
             Self::DispatchNode { .. } => ProjectionKind::DispatchNode,
             Self::OrchestratorCheckpoint { .. } => ProjectionKind::OrchestratorCheckpoint,
+            Self::IngestedRecord { .. } => ProjectionKind::IngestedRecord,
         }
     }
 }
@@ -1005,8 +1011,8 @@ mod tests {
         };
         use crate::ids::{
             AttemptId, AttentionItemId, AuthorityGrantId, DispatchNodeId, EngineId,
-            EngineSessionId, EvidenceId, GateId, IdempotencyKey, LeaseId, MessageId, ReceiptId,
-            TaskId, Timestamp, WorktreeId,
+            EngineSessionId, EvidenceId, GateId, IdempotencyKey, IngestedRecordId, LeaseId,
+            MessageId, ReceiptId, TaskId, Timestamp, WorktreeId,
         };
 
         let ts = || Timestamp::new("2026-07-28T00:00:00Z");
@@ -1225,6 +1231,17 @@ mod tests {
                     leases: None,
                     pending_approvals: None,
                     budget_cursor: None,
+                },
+            },
+            ProjectionRecord::IngestedRecord {
+                ingested_record: IngestedRecord {
+                    id: IngestedRecordId::new("ingest:proj-1:key-1"),
+                    kind: crate::ingestion::IngestionKind::Memory,
+                    payload: serde_json::json!({ "text": "recalled" }),
+                    payload_ref: None,
+                    ingested_by: None,
+                    event_seq: Seq::new(7),
+                    ingested_at: ts(),
                 },
             },
         ]

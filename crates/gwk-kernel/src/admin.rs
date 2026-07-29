@@ -254,9 +254,11 @@ pub async fn runtime_privileges<'e>(
 /// The privilege list grants exactly what the daemon does: read everything,
 /// append history, and update the projections it rebuilds. Nothing in the
 /// CONTRACT schema is deletable or truncatable, so the log never shrinks.
-/// `event` and `receipt` are append-only and lose UPDATE. `transition` is the
-/// FSM seed the contract ships — the kernel only ever reads it, so it loses
-/// every write.
+/// `event`, `receipt`, and `ingested_record` are append-only and lose UPDATE —
+/// the last of those is a projection the kernel DOES rebuild, but only ever by
+/// inserting, so granting it UPDATE would widen the role for a write no code
+/// path makes. `transition` is the FSM seed the contract ships — the kernel
+/// only ever reads it, so it loses every write.
 ///
 /// The blob tables are the one place DELETE is granted, and only inside
 /// `gwk_internal`: sweep reclaims unreferenced blobs, evidence pins are
@@ -272,7 +274,7 @@ pub fn backend_script(role: &str, contract_sha256: &str) -> String {
          GRANT USAGE ON SCHEMA gwk TO {role};\n\
          GRANT USAGE ON SCHEMA gwk_internal TO {role};\n\
          GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA gwk TO {role};\n\
-         REVOKE UPDATE ON gwk.event, gwk.receipt FROM {role};\n\
+         REVOKE UPDATE ON gwk.event, gwk.receipt, gwk.ingested_record FROM {role};\n\
          REVOKE INSERT, UPDATE ON gwk.transition FROM {role};\n\
          GRANT SELECT ON gwk_internal.schema_fingerprint TO {role};\n\
          GRANT SELECT, UPDATE ON gwk_internal.writer TO {role};\n\

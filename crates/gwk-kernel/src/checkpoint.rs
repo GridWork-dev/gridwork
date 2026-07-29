@@ -55,7 +55,7 @@ pub const RECORDS_MEDIA_TYPE: &str = "application/x-ndjson";
 /// Alphabetical, and spelled out one query at a time. Two kinds of adjustment
 /// appear, and both are deliberate rather than convenient:
 ///
-/// * **A `::text` cast on three columns.** `to_jsonb` renders a `numeric` as a
+/// * **A `::text` cast on four columns.** `to_jsonb` renders a `numeric` as a
 ///   JSON NUMBER, while the contract carries 64-bit counters as decimal
 ///   STRINGS. The difference is invisible until the value passes 2^53, at which
 ///   point the number silently comes back as a different one — so the cast goes
@@ -82,7 +82,7 @@ pub const RECORDS_MEDIA_TYPE: &str = "application/x-ndjson";
 /// A hash over those tables could never be reproduced by a replay, so a
 /// checkpoint carrying them would fail every scratch rebuild forever and the
 /// failure would say nothing. They stay in the canonical dump — that is where
-/// the DDL-to-contract parity check happens, and it must cover all fourteen —
+/// the DDL-to-contract parity check happens, and it must cover all fifteen —
 /// and stay OUT of the digest. What guards them instead is what always did:
 /// `receipt_append_only` and the delete guards, which no privilege can bypass.
 struct Projection {
@@ -149,6 +149,12 @@ const PROJECTIONS: &[Projection] = &[
         "gate",
         "SELECT jsonb_build_object('projection_type', 'gate', 'gate', to_jsonb(t))::text \
          FROM gwk.gate t ORDER BY t.id",
+    ),
+    derived(
+        "ingested_record",
+        "SELECT jsonb_build_object('projection_type', 'ingested_record', 'ingested_record', \
+           to_jsonb(t) || jsonb_build_object('event_seq', t.event_seq::text))::text \
+         FROM gwk.ingested_record t ORDER BY t.id",
     ),
     derived(
         "lease",

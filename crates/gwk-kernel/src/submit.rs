@@ -27,11 +27,12 @@
 //! rows behind, and deliberately so — a page whose evidence rolls back cannot
 //! be told apart from a command nobody sent.
 //!
-//! Scope is everything except ingestion: task, attempt, engine session, lease,
-//! worktree, dispatch node, budget, checkpoint, round, finding, message,
-//! execution command, gate, evidence, authority grant, and attention item.
-//! `IngestRecord` is refused by name here until task 17 lands it — an
-//! unrecognized command is never a no-op.
+//! Scope is every command in the contract: task, attempt, engine session,
+//! lease, worktree, dispatch node, budget, checkpoint, round, finding, message,
+//! execution command, gate, evidence, authority grant, attention item, and
+//! ingestion. [`route_of`] matches them all WITHOUT a wildcard arm, so a
+//! command added to the contract fails to compile here rather than falling into
+//! a silent no-op.
 
 use gwk_domain::command::KernelCommand;
 use gwk_domain::envelope::{
@@ -115,7 +116,7 @@ impl PgEventStore {
             .map_err(|e| Refusal::new(KernelErrorCode::Schema, e.to_string()))?;
         let command = KernelCommand::from_envelope(envelope)
             .map_err(|e| Refusal::validation(e.to_string()))?;
-        let route = route_of(&command)?;
+        let route = route_of(envelope, &command)?;
         check_routing(envelope, &route)?;
         check_body_project(envelope, &command)?;
         check_activation(envelope, &command)?;
@@ -300,7 +301,7 @@ impl PgEventStore {
 ///
 /// One match rather than two: an aggregate without an event name (or the
 /// reverse) would be a routing bug that only shows up in the log.
-fn route_of(command: &KernelCommand) -> Result<Route, Refusal> {
+fn route_of(envelope: &CommandEnvelope, command: &KernelCommand) -> Result<Route, Refusal> {
     use KernelCommand as C;
     let (aggregate_type, aggregate_id, event_type) = match command {
         // The kernel's own lifecycle is an aggregate like any other, which is
@@ -467,12 +468,23 @@ fn route_of(command: &KernelCommand) -> Result<Route, Refusal> {
             "orchestrator_checkpoint_written",
         ),
 
-        other => {
-            return Err(Refusal::validation(format!(
-                "{} is not accepted by this kernel yet",
-                other.command_type()
-            )));
-        }
+        // The one command whose aggregate id the caller does not supply — an
+        // ingested record has no name of its own, and `gw ingest submit --kind
+        // <kind> --file <path|->` offers nowhere to put one. Deriving it from
+        // the `(project_id, idempotency_key)` pair the envelope already had to
+        // carry is what `receipt_for` does for the same reason, and it is what
+        // makes a retried ingest resolve to the SAME record rather than a
+        // second copy of the same reading: the retry presents the same key, so
+        // it lands on the same aggregate and the log answers it as a replay.
+        C::IngestRecord { .. } => (
+            "ingested_record",
+            format!(
+                "ingest:{}:{}",
+                envelope.project_id.as_str(),
+                envelope.idempotency_key.as_str()
+            ),
+            "record_ingested",
+        ),
     };
     if aggregate_id.is_empty() {
         return Err(Refusal::validation(format!(
@@ -1014,11 +1026,14 @@ async fn decide(
             current_aggregate_version(conn, route.aggregate_type, &route.aggregate_id).await?
         }
 
-        other => {
-            return Err(Refusal::validation(format!(
-                "{} is not accepted by this kernel yet",
-                other.command_type()
-            )));
+        // An ingested record's aggregate holds exactly one event, always: its id
+        // is derived from the idempotency key, so a second command bearing that
+        // key was already answered above as a replay or refused as a conflict
+        // and never reaches here. Reading the version anyway — rather than
+        // hard-coding the 0 that must be true — keeps the one place that decides
+        // what a version means the same for every command.
+        C::IngestRecord { .. } => {
+            current_aggregate_version(conn, route.aggregate_type, &route.aggregate_id).await?
         }
     })
 }
@@ -1233,7 +1248,7 @@ mod tests {
             priority: None,
             tracker_ref: None,
         };
-        let route = route_of(&create).expect("routes");
+        let route = route_of(&envelope(&create), &create).expect("routes");
         assert_eq!(route.aggregate_type, "task");
         assert_eq!(route.aggregate_id, "t-1");
         assert_eq!(route.event_type, "task_created");
@@ -1250,7 +1265,7 @@ mod tests {
                 no_op: 0,
             },
         };
-        let route = route_of(&round).expect("routes");
+        let route = route_of(&envelope(&round), &round).expect("routes");
         assert_eq!(
             (route.aggregate_type, route.aggregate_id.as_str()),
             ("attempt", "a-1")
@@ -1266,7 +1281,7 @@ mod tests {
             digest: None,
             byte_size: None,
         };
-        let route = route_of(&evidence).expect("routes");
+        let route = route_of(&envelope(&evidence), &evidence).expect("routes");
         assert_eq!(
             (route.aggregate_type, route.event_type),
             ("evidence", "evidence_recorded")
@@ -1274,21 +1289,31 @@ mod tests {
     }
 
     #[test]
-    fn a_command_from_a_later_phase_is_refused_by_name() {
-        // Not a silent no-op and not a wildcard "unknown command": the caller
-        // is told which command was refused, and the kernel never writes an
-        // event it has no projection for.
-        // `ingest_record` is now the LAST command this kernel does not project.
-        // When task 17 lands it there is no out-of-scope command left, and this
-        // case should be deleted rather than pointed at something else.
+    fn an_ingested_record_is_named_by_the_envelope_that_carried_it() {
+        // The only command whose aggregate id the caller does not supply. Two
+        // submissions differing ONLY in idempotency key are two records; the
+        // same key twice is one, which is what makes a retried ingest safe.
         let ingest = KernelCommand::IngestRecord {
             kind: gwk_domain::ingestion::IngestionKind::Memory,
-            payload: serde_json::json!({}),
+            payload: serde_json::json!({ "text": "recalled" }),
             payload_ref: None,
         };
-        let refusal = route_of(&ingest).expect_err("out of scope");
-        assert_eq!(refusal.code, KernelErrorCode::Validation);
-        assert!(refusal.message.contains("ingest_record"), "{refusal}");
+        let route = route_of(&envelope(&ingest), &ingest).expect("routes");
+        assert_eq!(
+            (
+                route.aggregate_type,
+                route.aggregate_id.as_str(),
+                route.event_type
+            ),
+            ("ingested_record", "ingest:p:k-1", "record_ingested")
+        );
+
+        let mut second = envelope(&ingest);
+        second.idempotency_key = gwk_domain::ids::IdempotencyKey::new("k-2");
+        assert_eq!(
+            route_of(&second, &ingest).expect("routes").aggregate_id,
+            "ingest:p:k-2"
+        );
     }
 
     #[test]
@@ -1307,7 +1332,7 @@ mod tests {
                 budget_cursor: None,
             },
         };
-        let refusal = route_of(&anonymous).expect_err("no identity");
+        let refusal = route_of(&envelope(&anonymous), &anonymous).expect_err("no identity");
         assert_eq!(refusal.code, KernelErrorCode::Validation);
     }
 
@@ -1323,7 +1348,9 @@ mod tests {
             tracker_ref: None,
         };
         assert_eq!(
-            route_of(&nameless).expect_err("empty id").code,
+            route_of(&envelope(&nameless), &nameless)
+                .expect_err("empty id")
+                .code,
             KernelErrorCode::Validation
         );
     }
@@ -1335,7 +1362,7 @@ mod tests {
             to: TaskState::Working,
             expected_version: 1,
         };
-        let route = route_of(&command).expect("routes");
+        let route = route_of(&envelope(&command), &command).expect("routes");
         let payload = serde_json::to_value(&command).expect("serialize");
         let event = build_event(&envelope(&command), payload.clone(), &route, 1).expect("built");
         assert_eq!(event.aggregate_version, 2);
@@ -1358,7 +1385,7 @@ mod tests {
             to: TaskState::Working,
             expected_version: u32::MAX,
         };
-        let route = route_of(&command).expect("routes");
+        let route = route_of(&envelope(&command), &command).expect("routes");
         let refusal = build_event(&envelope(&command), serde_json::json!({}), &route, u32::MAX)
             .expect_err("the ceiling");
         assert_eq!(refusal.code, KernelErrorCode::StaleVersion);

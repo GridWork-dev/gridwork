@@ -122,6 +122,13 @@ string_id!(DispatchNodeId);
 string_id!(AttentionItemId);
 string_id!(AuthorityGrantId);
 string_id!(EvidenceId);
+string_id!(
+    /// One ingested record. Kernel-derived rather than caller-named: the
+    /// command carries no id, so the identity is minted from the
+    /// `(project_id, idempotency_key)` pair the envelope already had to
+    /// supply — which is what makes a retried ingest the same record.
+    IngestedRecordId
+);
 string_id!(EngineSessionId);
 string_id!(
     /// Correlates every event/command in one logical flow.

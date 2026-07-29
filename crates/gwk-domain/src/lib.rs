@@ -27,7 +27,8 @@ pub use checkpoint::{
 pub use command::{CommandDecodeError, KernelCommand};
 pub use entity::{
     Attempt, AttentionItem, AuthorityGrant, Budget, Command, DISPATCH_NODE_INITIAL_STATE,
-    DispatchNode, EngineSession, Evidence, Gate, Lease, Message, Receipt, Task, Worktree,
+    DispatchNode, EngineSession, Evidence, Gate, IngestedRecord, Lease, Message, Receipt, Task,
+    Worktree,
 };
 pub use envelope::{
     Actor, CommandEnvelope, ENVELOPE_SCHEMA_VERSION, EventEnvelope, INLINE_PAYLOAD_MAX_BYTES,
@@ -40,8 +41,8 @@ pub use fsm::{
 pub use ids::{
     AggregateId, AttemptId, AttentionItemId, AuthorityGrantId, BlobUploadId, ByteCount, CommandId,
     CorrelationId, CostMicros, DispatchNodeId, EngineId, EngineSessionId, EventCount, EventId,
-    EvidenceId, FenceToken, GateId, IdempotencyKey, LeaseId, MessageId, ProjectId, ReceiptId,
-    RequestId, Seq, TaskId, Timestamp, WorktreeId, WriterEpoch,
+    EvidenceId, FenceToken, GateId, IdempotencyKey, IngestedRecordId, LeaseId, MessageId,
+    ProjectId, ReceiptId, RequestId, Seq, TaskId, Timestamp, WorktreeId, WriterEpoch,
 };
 pub use ingestion::IngestionKind;
 pub use inherited::{

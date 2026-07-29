@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use gwk_domain::blob::{BLOB_CHUNK_BYTES, BlobAddress};
 use gwk_domain::command::KernelCommand;
 use gwk_domain::envelope::{
-    Actor, CommandEnvelope, ENVELOPE_SCHEMA_VERSION, EventEnvelope, Origin,
+    Actor, CommandEnvelope, ENVELOPE_SCHEMA_VERSION, EventEnvelope, Origin, PayloadRef,
 };
 use gwk_domain::fsm::LeaseMode;
 use gwk_domain::ids::{
@@ -29,6 +29,7 @@ use gwk_domain::ids::{
     EngineSessionId, EvidenceId, GateId, IdempotencyKey, LeaseId, MessageId, ProjectId, Seq,
     TaskId, Timestamp, WorktreeId,
 };
+use gwk_domain::ingestion::IngestionKind;
 use gwk_domain::inherited::OrchestratorCheckpoint;
 use gwk_domain::port::BlobStore;
 use gwk_domain::protocol::{KernelErrorCode, KernelResult};
@@ -556,6 +557,26 @@ pub async fn populate(store: &PgEventStore) {
                 pending_approvals: None,
                 budget_cursor: None,
             },
+        },
+    )
+    .await;
+    // The one row whose id nobody supplied: it is `ingest:<project>:<key>`,
+    // derived from this very envelope. `u64::MAX` in `event_seq` for the same
+    // reason evidence carries it in `byte_size` — a JSON number would come back
+    // a different value.
+    apply(
+        store,
+        "ingest",
+        KernelCommand::IngestRecord {
+            kind: IngestionKind::GraphSnapshot,
+            payload: serde_json::json!({ "nodes": 12000, "edges": 48122 }),
+            payload_ref: Some(PayloadRef {
+                digest: "sha256:abc".to_owned(),
+                media_type: "application/json".to_owned(),
+                byte_size: ByteCount::new(u64::MAX),
+                retention_class: None,
+                evidence_pin: None,
+            }),
         },
     )
     .await;

@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::envelope::Actor;
+use crate::envelope::{Actor, PayloadRef};
 use crate::fsm::{
     AttemptState, CommandState, GateVerdict, LeaseMode, LeaseState, MessageState, Outcome,
     TaskState,
@@ -16,8 +16,9 @@ use crate::fsm::{
 use crate::ids::{
     AttemptId, AttentionItemId, AuthorityGrantId, ByteCount, CommandId, CorrelationId, CostMicros,
     DispatchNodeId, EngineId, EngineSessionId, EvidenceId, FenceToken, GateId, IdempotencyKey,
-    LeaseId, MessageId, ReceiptId, TaskId, Timestamp, WorktreeId,
+    IngestedRecordId, LeaseId, MessageId, ReceiptId, Seq, TaskId, Timestamp, WorktreeId,
 };
+use crate::ingestion::IngestionKind;
 
 /// Tracker-visible work item.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, specta::Type)]
@@ -315,6 +316,39 @@ pub struct Evidence {
     #[specta(optional)]
     pub byte_size: Option<ByteCount>,
     pub created_at: Timestamp,
+}
+
+/// One record that entered the log through ingestion rather than through an
+/// aggregate's lifecycle.
+///
+/// Immutable like [`Evidence`] — no `version`, no `state`, written once. Its
+/// `kind` is the CLOSED [`IngestionKind`] set, unlike the open classification
+/// strings elsewhere in this contract: ADR 0026 makes the absence of an import
+/// path load-bearing, and an open string here would be that door.
+///
+/// `payload` and `payload_ref` are not exclusive. The inline half is bounded
+/// (the append path enforces
+/// [`INLINE_PAYLOAD_MAX_BYTES`](crate::envelope::INLINE_PAYLOAD_MAX_BYTES)) and
+/// carries either the whole content or a descriptor of the blob beside it —
+/// a graph snapshot's node and edge counts are worth having in the projection
+/// without fetching ninety megabytes to learn them.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, specta::Type)]
+#[serde(deny_unknown_fields)]
+pub struct IngestedRecord {
+    pub id: IngestedRecordId,
+    pub kind: IngestionKind,
+    #[specta(type = crate::envelope::JsonValue)]
+    pub payload: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub payload_ref: Option<PayloadRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub ingested_by: Option<Actor>,
+    /// Where this record's event sits in the log — the pointer back to the one
+    /// thing that can prove the row, since ingestion writes no transition.
+    pub event_seq: Seq,
+    pub ingested_at: Timestamp,
 }
 
 /// Something the operator should look at. `kind` is OPEN.
