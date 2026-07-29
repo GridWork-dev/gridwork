@@ -10,8 +10,10 @@
 
 use std::path::{Path, PathBuf};
 
-use secrecy::SecretString;
+use base64::prelude::{BASE64_STANDARD, Engine as _};
+use secrecy::{SecretBox, SecretString};
 
+use crate::blob::container::DEK_BYTES;
 use crate::error::{KernelError, Result};
 
 /// The runtime (least-privilege) connection string.
@@ -23,11 +25,22 @@ pub const RUNTIME_ROLE_ENV: &str = "GWK_RUNTIME_ROLE";
 /// Where the daemon binds its Unix domain socket.
 pub const SOCKET_PATH_ENV: &str = "GWK_SOCKET_PATH";
 
+/// Where blob containers are written. Required, absolute, no default.
+pub const BLOB_ROOT_ENV: &str = "GWK_BLOB_ROOT";
+/// The key-encryption key, base64 over exactly [`DEK_BYTES`] bytes.
+pub const BLOB_KEK_ENV: &str = "GWK_BLOB_KEK";
+/// The nonsecret label recorded beside every blob this KEK wraps.
+pub const BLOB_KEK_ID_ENV: &str = "GWK_BLOB_KEK_ID";
+
 /// The default socket path (ADR 0002: UDS only, no network listener).
 pub const DEFAULT_SOCKET_PATH: &str = "/run/gridwork/gwk.sock";
 
 /// Longest legal PostgreSQL identifier — `NAMEDATALEN - 1`.
 pub const MAX_IDENTIFIER_BYTES: usize = 63;
+
+/// Longest legal KEK label. It is copied into every container header, so it is
+/// kept short on purpose — this is a name, not a place to stash material.
+pub const MAX_KEK_ID_BYTES: usize = 64;
 
 /// The daemon's configuration.
 ///
@@ -109,6 +122,121 @@ impl AdminConfig {
     pub fn runtime_role(&self) -> &str {
         &self.runtime_role
     }
+}
+
+/// The blob spine's configuration.
+///
+/// All three variables are required and none has a default. A default root
+/// would put ciphertext somewhere nobody chose, and a default KEK would be a
+/// key everyone shares — the failure mode being avoided is a deployment that
+/// starts successfully while storing blobs it cannot protect.
+///
+/// `Debug` is safe to log: the KEK is a [`SecretBox`], which redacts itself.
+/// The label beside it is deliberately NOT secret, because it has to travel in
+/// the clear inside every container header.
+#[derive(Debug)]
+pub struct BlobConfig {
+    root: PathBuf,
+    kek: SecretBox<[u8; DEK_BYTES]>,
+    kek_id: String,
+}
+
+impl BlobConfig {
+    pub fn from_env() -> Result<Self> {
+        Self::from_lookup(env_lookup)
+    }
+
+    pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Self> {
+        let raw_root = get(BLOB_ROOT_ENV)
+            .ok_or_else(|| KernelError::Config(format!("{BLOB_ROOT_ENV} is not set")))?;
+        let root = PathBuf::from(raw_root.trim());
+        if root.as_os_str().is_empty() {
+            return Err(KernelError::Config(format!("{BLOB_ROOT_ENV} is empty")));
+        }
+        // Absolute only. A relative root resolves against whatever directory
+        // the process happened to start in, so the same unit file would store
+        // blobs in two places and find them in neither.
+        if !root.is_absolute() {
+            return Err(KernelError::Config(format!(
+                "{BLOB_ROOT_ENV} must be an absolute path, got {root:?}"
+            )));
+        }
+
+        let encoded = get(BLOB_KEK_ENV)
+            .ok_or_else(|| KernelError::Config(format!("{BLOB_KEK_ENV} is not set")))?;
+        let decoded = BASE64_STANDARD
+            .decode(encoded.trim())
+            // The error is not included: it reports positions and lengths of
+            // the value being parsed, and that value is a key.
+            .map_err(|_| KernelError::Config(format!("{BLOB_KEK_ENV} is not valid base64")))?;
+        let mut kek = Box::new([0u8; DEK_BYTES]);
+        if decoded.len() != DEK_BYTES {
+            return Err(KernelError::Config(format!(
+                "{BLOB_KEK_ENV} decodes to {} bytes, expected exactly {DEK_BYTES}",
+                decoded.len()
+            )));
+        }
+        kek.copy_from_slice(&decoded);
+
+        let kek_id = get(BLOB_KEK_ID_ENV)
+            .ok_or_else(|| KernelError::Config(format!("{BLOB_KEK_ID_ENV} is not set")))?;
+        validate_kek_id(&kek_id)?;
+
+        Ok(Self {
+            root,
+            kek: SecretBox::new(kek),
+            kek_id,
+        })
+    }
+
+    /// Build a config directly, for tests and for a caller that already holds
+    /// the key material.
+    pub fn new(root: PathBuf, kek: [u8; DEK_BYTES], kek_id: String) -> Result<Self> {
+        validate_kek_id(&kek_id)?;
+        Ok(Self {
+            root,
+            kek: SecretBox::new(Box::new(kek)),
+            kek_id,
+        })
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn kek(&self) -> &SecretBox<[u8; DEK_BYTES]> {
+        &self.kek
+    }
+
+    pub fn kek_id(&self) -> &str {
+        &self.kek_id
+    }
+}
+
+/// The label is written into every container header and is what a rotation
+/// matches on, so it stays a plain short name: no separators to confuse a
+/// parser, nothing that could carry material, nothing that changes meaning
+/// under a different locale.
+pub fn validate_kek_id(kek_id: &str) -> Result<()> {
+    let invalid = |why: &str| {
+        Err(KernelError::Config(format!(
+            "{BLOB_KEK_ID_ENV} {why}: expected 1..={MAX_KEK_ID_BYTES} bytes matching \
+             [A-Za-z0-9._-], got {kek_id:?}"
+        )))
+    };
+    if kek_id.is_empty() {
+        return invalid("is empty");
+    }
+    if kek_id.len() > MAX_KEK_ID_BYTES {
+        return invalid("is too long");
+    }
+    if !kek_id
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
+    {
+        return invalid("contains a character outside [A-Za-z0-9._-]");
+    }
+    Ok(())
 }
 
 fn env_lookup(key: &str) -> Option<String> {
@@ -238,6 +366,114 @@ mod tests {
         .expect("config");
         assert_eq!(cfg.runtime_role(), "gwk_runtime");
         assert_eq!(cfg.admin_database_url().expose_secret(), ADMIN_DSN);
+    }
+
+    /// A legal KEK: 32 bytes, base64. Not a real one — it is `[7; 32]`, which
+    /// no deployment would ever hold.
+    fn kek_b64() -> String {
+        BASE64_STANDARD.encode([7u8; DEK_BYTES])
+    }
+
+    #[test]
+    fn the_blob_spine_refuses_to_start_without_a_root_a_key_and_a_label() {
+        let full = |root: &str| {
+            vec![
+                (BLOB_ROOT_ENV, root.to_owned()),
+                (BLOB_KEK_ENV, kek_b64()),
+                (BLOB_KEK_ID_ENV, "kek-2026-07".to_owned()),
+            ]
+        };
+        let lookup_owned = |pairs: Vec<(&str, String)>| {
+            let owned: Vec<(String, String)> =
+                pairs.into_iter().map(|(k, v)| (k.to_owned(), v)).collect();
+            move |key: &str| {
+                owned
+                    .iter()
+                    .find(|(k, _)| k == key)
+                    .map(|(_, v)| v.to_owned())
+            }
+        };
+
+        let cfg =
+            BlobConfig::from_lookup(lookup_owned(full("/var/lib/gridwork/blobs"))).expect("config");
+        assert_eq!(cfg.root(), Path::new("/var/lib/gridwork/blobs"));
+        assert_eq!(cfg.kek_id(), "kek-2026-07");
+        assert_eq!(cfg.kek().expose_secret(), &[7u8; DEK_BYTES]);
+
+        // Each variable is required on its own: a deployment missing one must
+        // be told which, not handed a default that silently stores blobs it
+        // cannot protect or cannot find again.
+        for missing in [BLOB_ROOT_ENV, BLOB_KEK_ENV, BLOB_KEK_ID_ENV] {
+            let pairs: Vec<_> = full("/var/lib/gridwork/blobs")
+                .into_iter()
+                .filter(|(k, _)| *k != missing)
+                .collect();
+            let err = BlobConfig::from_lookup(lookup_owned(pairs))
+                .expect_err(&format!("{missing} must be required"));
+            assert!(err.to_string().contains(missing), "{err}");
+        }
+
+        // A relative root resolves against whatever directory the process
+        // started in, which is not a place anybody chose.
+        for bad_root in ["", "   ", "blobs", "./blobs", "../blobs"] {
+            BlobConfig::from_lookup(lookup_owned(full(bad_root)))
+                .expect_err(&format!("{bad_root:?} must be refused"));
+        }
+    }
+
+    #[test]
+    fn the_kek_must_decode_to_exactly_one_key() {
+        let with_kek = |value: &str| {
+            let owned = value.to_owned();
+            move |key: &str| match key {
+                BLOB_ROOT_ENV => Some("/var/lib/gridwork/blobs".to_owned()),
+                BLOB_KEK_ENV => Some(owned.clone()),
+                BLOB_KEK_ID_ENV => Some("kek-2026-07".to_owned()),
+                _ => None,
+            }
+        };
+        BlobConfig::from_lookup(with_kek(&kek_b64())).expect("32 bytes");
+        // Whitespace around a value pasted out of a secret manager.
+        BlobConfig::from_lookup(with_kek(&format!(" {}\n", kek_b64()))).expect("trimmed");
+
+        for (why, value) in [
+            ("not base64", "not base64 at all!".to_owned()),
+            ("too short", BASE64_STANDARD.encode([7u8; DEK_BYTES - 1])),
+            ("too long", BASE64_STANDARD.encode([7u8; DEK_BYTES + 1])),
+            ("empty", String::new()),
+        ] {
+            let err = BlobConfig::from_lookup(with_kek(&value))
+                .expect_err(&format!("{why} must be refused"));
+            let message = err.to_string();
+            assert!(message.contains(BLOB_KEK_ENV), "{why}: {message}");
+            // The variable is named; its VALUE never is. A base64 error reports
+            // offsets and lengths of the thing being decoded, and that thing is
+            // a key.
+            assert!(
+                !message.contains(&value) || value.is_empty(),
+                "{why}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_kek_label_stays_a_plain_short_name() {
+        for good in ["k", "kek-2026-07", "prod.blob_kek", &"a".repeat(64)] {
+            validate_kek_id(good).unwrap_or_else(|e| panic!("{good:?} should be legal: {e}"));
+        }
+        // Every rejection below would be copied verbatim into the header of
+        // every container this key wraps.
+        for bad in [
+            "",
+            "with space",
+            "with/slash",
+            "with\0null",
+            "with\nnewline",
+            "émoji",
+            &"a".repeat(65),
+        ] {
+            validate_kek_id(bad).expect_err(&format!("{bad:?} must be refused"));
+        }
     }
 
     #[test]

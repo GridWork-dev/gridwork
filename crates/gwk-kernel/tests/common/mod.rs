@@ -16,16 +16,22 @@
 // the one that uses a subset would otherwise fail `-D warnings` on the rest.
 #![allow(dead_code)]
 
+use std::path::{Path, PathBuf};
+
+use gwk_domain::blob::{BLOB_CHUNK_BYTES, BlobAddress};
 use gwk_domain::command::KernelCommand;
 use gwk_domain::envelope::{
     Actor, CommandEnvelope, ENVELOPE_SCHEMA_VERSION, EventEnvelope, Origin,
 };
-use gwk_domain::ids::{CommandId, IdempotencyKey, ProjectId, Timestamp};
+use gwk_domain::ids::{ByteCount, CommandId, IdempotencyKey, ProjectId, Timestamp};
+use gwk_domain::port::BlobStore;
 use gwk_domain::protocol::{KernelErrorCode, KernelResult};
 use gwk_kernel::admin::{self, InitOutcome};
-use gwk_kernel::config::{ADMIN_DATABASE_URL_ENV, AdminConfig, RUNTIME_ROLE_ENV};
+use gwk_kernel::blob::store::PgBlobStore;
+use gwk_kernel::config::{ADMIN_DATABASE_URL_ENV, AdminConfig, BlobConfig, RUNTIME_ROLE_ENV};
 use gwk_kernel::store::{PgEventStore, connect_pool};
 use secrecy::SecretString;
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 
 pub const ADMIN_URL_ENV: &str = "GWK_TEST_ADMIN_DATABASE_URL";
@@ -154,6 +160,98 @@ pub async fn state_row(store: &PgEventStore, select: &'static str, id: &str) -> 
         .await
         .expect("state row");
     (row.get(0), row.get(1))
+}
+
+/// The KEK every blob case wraps under. A constant so a case can assert on
+/// exact ciphertext behaviour; no deployment would ever hold this value.
+pub const TEST_KEK: [u8; 32] = [0x5a; 32];
+/// The label recorded beside it, in every container header.
+pub const TEST_KEK_ID: &str = "kek-test";
+
+/// A blob store with its OWN root directory, beside `store`'s database.
+///
+/// Its own root, not a shared one: the store's paths are derived from content
+/// digests, so two cases uploading the same bytes would otherwise share a file
+/// and one case's sweep would delete the other's blob.
+pub async fn blob_store(store: &PgEventStore, tag: &str) -> (PathBuf, PgBlobStore) {
+    let root = std::env::temp_dir().join(format!("gwk-blob-{}-{tag}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let blobs = blob_store_with(store, &root, TEST_KEK).await;
+    (root, blobs)
+}
+
+/// A second store over the SAME root and database under a different KEK — what
+/// a deployment looks like after a key rotation.
+pub async fn blob_store_with(store: &PgEventStore, root: &Path, kek: [u8; 32]) -> PgBlobStore {
+    let config =
+        BlobConfig::new(root.to_path_buf(), kek, TEST_KEK_ID.to_owned()).expect("blob config");
+    PgBlobStore::open(store.pool().clone(), config)
+        .await
+        .expect("open blob store")
+}
+
+/// Upload `plaintext` in one chunk and commit it at its own address.
+pub async fn put(blobs: &PgBlobStore, plaintext: &[u8], media_type: &str) -> BlobAddress {
+    let (address, _) = put_dedup(blobs, plaintext, media_type).await;
+    address
+}
+
+/// The same, keeping the dedup flag the commit reported.
+pub async fn put_dedup(
+    blobs: &PgBlobStore,
+    plaintext: &[u8],
+    media_type: &str,
+) -> (BlobAddress, bool) {
+    let address = address_of(plaintext);
+    let upload = blobs
+        .begin(
+            media_type.to_owned(),
+            ByteCount::new(plaintext.len() as u64),
+        )
+        .await
+        .expect("begin");
+    // One call per BLOB_CHUNK_BYTES, so a case that wants several container
+    // chunks does not also have to drive the wire's chunking by hand.
+    for (sequence, chunk) in plaintext.chunks(BLOB_CHUNK_BYTES.max(1)).enumerate() {
+        blobs
+            .write_chunk(&upload, sequence as u32, chunk)
+            .await
+            .unwrap_or_else(|e| panic!("chunk {sequence}: {e}"));
+    }
+    if plaintext.is_empty() {
+        blobs
+            .write_chunk(&upload, 0, &[])
+            .await
+            .expect("empty chunk");
+    }
+    let (descriptor, deduped) = blobs.commit(upload, address.clone()).await.expect("commit");
+    assert_eq!(descriptor.address, address);
+    (address, deduped)
+}
+
+/// What `plaintext` will be addressed as.
+pub fn address_of(plaintext: &[u8]) -> BlobAddress {
+    let digest: [u8; 32] = Sha256::digest(plaintext).into();
+    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    BlobAddress::from_digest(&hex).expect("digest")
+}
+
+/// Read a blob whole, one clamped range at a time.
+pub async fn read_all(blobs: &PgBlobStore, address: &BlobAddress, size: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(size as usize);
+    while (out.len() as u64) < size {
+        let part = blobs
+            .read(
+                address,
+                ByteCount::new(out.len() as u64),
+                ByteCount::new(size - out.len() as u64),
+            )
+            .await
+            .expect("read");
+        assert!(!part.is_empty(), "read stalled at {}", out.len());
+        out.extend_from_slice(&part);
+    }
+    out
 }
 
 pub fn maintenance_url() -> String {

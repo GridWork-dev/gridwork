@@ -26,6 +26,7 @@ use crate::error::{KernelError, Result};
 const BACKEND_MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0001_kernel_internal.sql"),
     include_str!("../migrations/0002_writer.sql"),
+    include_str!("../migrations/0003_blob.sql"),
 ];
 
 // ponytail: still no migration runner, and now for a better reason than "there
@@ -250,10 +251,17 @@ pub async fn runtime_privileges<'e>(
 /// carry a separator, a quote, or a comment.
 ///
 /// The privilege list grants exactly what the daemon does: read everything,
-/// append history, and update the projections it rebuilds. DELETE and TRUNCATE
-/// are granted nowhere, so the log never shrinks. `event` and `receipt` are
-/// append-only and lose UPDATE. `transition` is the FSM seed the contract ships
-/// — the kernel only ever reads it, so it loses every write.
+/// append history, and update the projections it rebuilds. Nothing in the
+/// CONTRACT schema is deletable or truncatable, so the log never shrinks.
+/// `event` and `receipt` are append-only and lose UPDATE. `transition` is the
+/// FSM seed the contract ships — the kernel only ever reads it, so it loses
+/// every write.
+///
+/// The blob tables are the one place DELETE is granted, and only inside
+/// `gwk_internal`: sweep reclaims unreferenced blobs, evidence pins are
+/// released, and uploads expire. None of that is history — the events that
+/// REFERENCE a blob stay in the log after its bytes are gone, which is what
+/// makes a swept or shredded blob auditable at all.
 pub fn backend_script(role: &str, contract_sha256: &str) -> String {
     let migrations = BACKEND_MIGRATIONS.join("\n");
     format!(
@@ -266,7 +274,9 @@ pub fn backend_script(role: &str, contract_sha256: &str) -> String {
          REVOKE UPDATE ON gwk.event, gwk.receipt FROM {role};\n\
          REVOKE INSERT, UPDATE ON gwk.transition FROM {role};\n\
          GRANT SELECT ON gwk_internal.schema_fingerprint TO {role};\n\
-         GRANT SELECT, UPDATE ON gwk_internal.writer TO {role};\n"
+         GRANT SELECT, UPDATE ON gwk_internal.writer TO {role};\n\
+         GRANT SELECT, INSERT, UPDATE, DELETE ON \
+           gwk_internal.blob, gwk_internal.blob_pin, gwk_internal.blob_upload TO {role};\n"
     )
 }
 
@@ -412,8 +422,20 @@ mod tests {
         assert!(script.contains("GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA gwk"));
         assert!(script.contains("REVOKE UPDATE ON gwk.event, gwk.receipt"));
         assert!(script.contains("REVOKE INSERT, UPDATE ON gwk.transition"));
-        // Nothing in this script may hand out row removal — the log never shrinks.
-        assert!(!script.contains("DELETE"), "{script}");
         assert!(!script.contains("TRUNCATE"), "{script}");
+
+        // Deletion is granted on the blob tables and NOWHERE else. The check is
+        // spelled as "every granted object is one of these three" rather than
+        // "the blob grant is present", because the second passes just as
+        // happily while a fourth line hands out DELETE on the log.
+        let granted: Vec<&str> = script
+            .lines()
+            .filter(|line| line.starts_with("GRANT") && line.contains("DELETE"))
+            .collect();
+        assert_eq!(granted.len(), 1, "{script}");
+        for object in ["gwk_internal.blob", "gwk_internal.blob_pin"] {
+            assert!(granted[0].contains(object), "{}", granted[0]);
+        }
+        assert!(!granted[0].contains(" gwk."), "{}", granted[0]);
     }
 }

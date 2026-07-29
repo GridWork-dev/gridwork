@@ -29,7 +29,7 @@ serde.workspace = true
 serde_json.workspace = true
 sqlx = { workspace = true, features = ["json"] }
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tokio = { workspace = true, features = ["fs", "io-util", "rt", "sync", "time"] }
 zeroize.workspace = true
 
 [dev-dependencies]

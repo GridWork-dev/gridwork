@@ -33,7 +33,7 @@
 use aead::array::Array;
 use aead::consts::{U19, U24, U32};
 use aead::{Aead, Generate, KeyInit, Payload};
-use aead_stream::{DecryptorBE32, EncryptorBE32, StreamBE32};
+use aead_stream::{DecryptorBE32, EncryptorBE32, NewStream, StreamBE32, StreamPrimitive};
 use chacha20poly1305::XChaCha20Poly1305;
 use gwk_domain::blob::BLOB_CHUNK_BYTES;
 use gwk_domain::port::BlobError;
@@ -52,14 +52,48 @@ pub const FORMAT_VERSION: u16 = 1;
 pub const DEK_BYTES: usize = 32;
 /// XChaCha20-Poly1305 nonce width, used whole for the DEK wrap.
 pub const WRAP_NONCE_BYTES: usize = 24;
+/// Poly1305 tag width, appended to every sealed thing.
+pub const TAG_BYTES: usize = 16;
 /// A wrapped DEK is the key plus the Poly1305 tag.
-pub const WRAPPED_DEK_BYTES: usize = DEK_BYTES + 16;
+pub const WRAPPED_DEK_BYTES: usize = DEK_BYTES + TAG_BYTES;
 /// `StreamBE32` spends 5 of the 24 nonce bytes on its counter and last-block
 /// flag, so the caller supplies the other 19.
 pub const STREAM_NONCE_BYTES: usize = WRAP_NONCE_BYTES - 5;
+/// Width of a chunk's length prefix.
+pub const CHUNK_LEN_BYTES: usize = 4;
+/// The largest a single chunk's ciphertext can legally be.
+pub const MAX_CIPHERTEXT_CHUNK_BYTES: usize = BLOB_CHUNK_BYTES + TAG_BYTES;
+/// Bytes one FULL chunk occupies on disk. Every chunk but the last is exactly
+/// this wide, which is what lets a ranged read compute where chunk N starts
+/// instead of walking the length prefixes to find out.
+pub const FRAMED_CHUNK_BYTES: u64 = (CHUNK_LEN_BYTES + MAX_CIPHERTEXT_CHUNK_BYTES) as u64;
 
 const DIGEST_BYTES: usize = 32;
 const FIXED_HEADER_BYTES: usize = MAGIC.len() + 2 + DIGEST_BYTES + 8 + STREAM_NONCE_BYTES + 2 + 2;
+
+/// How many bytes a header holding these two strings occupies.
+///
+/// A reader already knows both — they are columns on the blob's row — so it
+/// reads exactly this much rather than the 128 KiB a maximal header could
+/// reach. [`Header::decode`] still re-derives the length from the FILE's own
+/// `u16` fields, so a row that disagreed with its container is caught rather
+/// than believed.
+pub fn header_len(media_type: &str, kek_id: &str) -> usize {
+    FIXED_HEADER_BYTES + media_type.len() + kek_id.len()
+}
+
+/// How many chunks a blob of `byte_size` plaintext bytes was sealed into.
+///
+/// Never zero: an empty blob still gets one sealed chunk, or an empty container
+/// and a truncated one would be the same bytes on disk.
+pub fn chunk_count(byte_size: u64) -> u64 {
+    byte_size.div_ceil(BLOB_CHUNK_BYTES as u64).max(1)
+}
+
+/// Where chunk `index` begins, counted from the start of the container.
+pub fn chunk_offset(header_len: usize, index: u64) -> u64 {
+    header_len as u64 + index * FRAMED_CHUNK_BYTES
+}
 
 type Stream = StreamBE32<XChaCha20Poly1305>;
 type StreamNonce = aead_stream::Nonce<XChaCha20Poly1305, Stream>;
@@ -375,7 +409,39 @@ pub fn rewrap(
     rewrapped
 }
 
-fn wrap_dek(
+/// Decrypt ONE chunk, without touching the ones before it.
+///
+/// This is what makes a ranged read cost the chunks it asked for rather than
+/// every chunk preceding them. `StreamBE32` is a stateless primitive keyed by
+/// position — the sequential [`open`] path is a convenience over exactly this
+/// operation, not a different construction — so chunk N authenticates alone.
+///
+/// `last` is bound into the tag, so it is not a hint: passing `false` for the
+/// real final chunk fails, and so does passing `true` for a middle one. That is
+/// the property that catches a truncated container, and it only holds if the
+/// caller derives `last` from the header's declared size rather than from where
+/// the file happens to end.
+pub fn open_chunk(
+    aad: &[u8],
+    dek: &[u8; DEK_BYTES],
+    stream_nonce: &[u8; STREAM_NONCE_BYTES],
+    position: u32,
+    last: bool,
+    ciphertext: &[u8],
+) -> Result<Vec<u8>, BlobError> {
+    Stream::new(&Array(*dek), &StreamNonce::from(*stream_nonce))
+        .decrypt(
+            position,
+            last,
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
+        .map_err(|_| integrity("chunk failed authentication: tampered or truncated"))
+}
+
+pub(crate) fn wrap_dek(
     dek: &[u8; DEK_BYTES],
     kek: &[u8; DEK_BYTES],
     nonce: &[u8; WRAP_NONCE_BYTES],
@@ -389,7 +455,7 @@ fn wrap_dek(
         .map_err(|_| integrity("wrapped key is the wrong length"))
 }
 
-fn unwrap_dek(
+pub(crate) fn unwrap_dek(
     wrapped: &[u8; WRAPPED_DEK_BYTES],
     kek: &[u8; DEK_BYTES],
     nonce: &[u8; WRAP_NONCE_BYTES],
@@ -441,12 +507,12 @@ fn read_chunk(container: &[u8], at: usize) -> Result<(&[u8], usize), BlobError> 
 ///
 /// A failure here is a Storage error rather than an integrity one: the machine
 /// could not produce randomness, which says nothing about any blob.
-fn generate<N: aead::array::ArraySize>() -> Result<Array<u8, N>, BlobError> {
+pub(crate) fn generate<N: aead::array::ArraySize>() -> Result<Array<u8, N>, BlobError> {
     Array::try_generate()
         .map_err(|e| BlobError::Storage(format!("system randomness unavailable: {e}")))
 }
 
-fn hex_lower(bytes: &[u8]) -> String {
+pub(crate) fn hex_lower(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
         out.push_str(&format!("{byte:02x}"));
@@ -655,6 +721,59 @@ mod tests {
         assert_ne!(a.wrap_nonce, b.wrap_nonce);
         let (_, opened) = open(&a.container, &KEK, &a.wrap_nonce, &a.wrapped_dek).expect("open");
         assert_eq!(opened, b"same bytes");
+    }
+
+    #[test]
+    fn a_chunk_can_be_opened_where_it_lies_without_reading_the_ones_before_it() {
+        // Three chunks, the last one short — the shape a ranged read has to
+        // navigate. If the computed offsets or the last-block flag were wrong
+        // for any position, that chunk would fail to authenticate.
+        let plaintext: Vec<u8> = (0..BLOB_CHUNK_BYTES * 2 + 7)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let sealed = seal_fixture(&plaintext);
+        let (header, header_len) = Header::decode(&sealed.container).expect("header");
+        let aad = &sealed.container[..header_len];
+        let dek = unwrap_dek(&sealed.wrapped_dek, &KEK, &sealed.wrap_nonce, aad).expect("unwrap");
+
+        let count = chunk_count(header.byte_size);
+        assert_eq!(count, 3);
+        let mut reassembled = Vec::new();
+        for index in 0..count {
+            let at = chunk_offset(header_len, index) as usize;
+            let (chunk, _) = read_chunk(&sealed.container, at).expect("frame");
+            let part = open_chunk(
+                aad,
+                &dek,
+                &header.stream_nonce,
+                index as u32,
+                index == count - 1,
+                chunk,
+            )
+            .expect("chunk opens on its own");
+            reassembled.extend_from_slice(&part);
+        }
+        assert_eq!(reassembled, plaintext);
+
+        // The last-block flag is authenticated, not advisory: a reader that
+        // guessed it from where the file ends would accept a truncation.
+        let (middle, _) =
+            read_chunk(&sealed.container, chunk_offset(header_len, 0) as usize).expect("frame");
+        assert!(
+            open_chunk(aad, &dek, &header.stream_nonce, 0, true, middle).is_err(),
+            "chunk 0 must not open as the final chunk"
+        );
+        let (final_chunk, _) =
+            read_chunk(&sealed.container, chunk_offset(header_len, 2) as usize).expect("frame");
+        assert!(
+            open_chunk(aad, &dek, &header.stream_nonce, 2, false, final_chunk).is_err(),
+            "the final chunk must not open as a middle one"
+        );
+        // Nor at someone else's position.
+        assert!(
+            open_chunk(aad, &dek, &header.stream_nonce, 1, false, middle).is_err(),
+            "chunk 0 must not open at position 1"
+        );
     }
 
     #[test]

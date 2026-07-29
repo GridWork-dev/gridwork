@@ -9,9 +9,10 @@
 //!
 //! What is here so far: configuration, the embedded contract DDL and its
 //! fingerprint, the one-shot initializer, the fenced append store, the epoch
-//! that seals a fresh log until it is activated, and the work lifecycle's
-//! command path and projections. The blob spine and wire server land on top of
-//! them.
+//! that seals a fresh log until it is activated, the work lifecycle's command
+//! path and projections, and the blob spine — the encrypted container format
+//! and the store that dedups, pins, sweeps, rotates and shreds it. The wire
+//! server lands on top of them.
 
 pub mod admin;
 pub mod authority;
@@ -27,7 +28,8 @@ pub mod submit;
 pub mod writer;
 
 pub use admin::{InitOutcome, RoleAttributes, RuntimePrivileges, TargetState};
-pub use config::{AdminConfig, DEFAULT_SOCKET_PATH, KernelConfig};
+pub use blob::store::{PgBlobStore, UPLOAD_EXPIRY_SECS};
+pub use config::{AdminConfig, BlobConfig, DEFAULT_SOCKET_PATH, KernelConfig};
 pub use contract_sql::{CONTRACT_SQL, CONTRACT_SQL_SHA256};
 pub use epoch::{GENESIS_KEY, KERNEL_AGGREGATE, KERNEL_SINGLETON, SYSTEM_PROJECT};
 pub use error::{KernelError, Result};
