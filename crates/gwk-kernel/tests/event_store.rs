@@ -189,6 +189,29 @@ async fn a_replayed_keyed_batch_returns_the_original_events() {
         "expected MalformedBatch, got {err:?}"
     );
 
+    // A batch of the right SIZE under a key that already landed is still not a
+    // replay unless it is the same request. Counting rows and calling it one
+    // answers a different command with the original's events and reports it
+    // applied — and this port has no pre-check in front of it to notice.
+    let mut different = conformance::fixture_event("agg", 2);
+    different.idempotency_key = Some(gwk_domain::ids::IdempotencyKey::new("retry-me"));
+    different.event_type = "something-else".into();
+    let err = store
+        .append(1, None, vec![different])
+        .await
+        .expect_err("a different request under a used key must not replay");
+    let AppendError::MalformedBatch(reason) = err else {
+        panic!("expected MalformedBatch, got {err:?}");
+    };
+    assert!(reason.contains("identical batch"), "{reason}");
+
+    // And the genuine retry still replays after all that.
+    let again = store
+        .append(0, None, vec![event])
+        .await
+        .expect("the original retry is still stable");
+    assert_eq!(first, again);
+
     drop_database(&maintenance, &name).await;
 }
 

@@ -39,9 +39,16 @@ fn actor(kind: &str) -> Actor {
 /// idempotency is project-wide, and reusing one is exactly what this kernel is
 /// supposed to refuse.
 fn envelope_as(key: &str, actor: Actor, command: &KernelCommand) -> CommandEnvelope {
+    envelope_in(PROJECT, key, actor, command)
+}
+
+/// The same, in a named project. Most cases share one, but idempotency is
+/// scoped per project while the aggregate namespace is global, so the cases
+/// that cross that line have to be able to say which project they are.
+fn envelope_in(project: &str, key: &str, actor: Actor, command: &KernelCommand) -> CommandEnvelope {
     CommandEnvelope {
-        command_id: CommandId::new(format!("cmd-{key}")),
-        project_id: ProjectId::new(PROJECT),
+        command_id: CommandId::new(format!("cmd-{project}-{key}")),
+        project_id: ProjectId::new(project),
         command_type: command.command_type().to_owned(),
         schema_version: ENVELOPE_SCHEMA_VERSION,
         issued_at: Timestamp::new("2026-07-28T00:00:00Z"),
@@ -373,6 +380,145 @@ async fn a_retried_command_answers_from_the_log_and_a_reused_key_is_refused() {
     )
     .await;
     assert_eq!(code, KernelErrorCode::IdempotencyConflict);
+
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
+async fn a_key_taken_on_this_aggregate_by_another_project_is_a_conflict_not_a_replay() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "crossproject", 64).await;
+
+    // Idempotency is scoped per project, but the aggregate namespace is global
+    // and `event_idempotency` is keyed on the aggregate with no project column.
+    // So key "k" is genuinely FREE in project beta and simultaneously FATAL on
+    // task t-1 — the two unique indexes disagree, and neither contains the
+    // other. A pre-check that reads only the project-scoped one calls this
+    // unused, and the append path's aggregate-scoped lookup then finds alpha's
+    // row and answers beta with it: a command that never ran, reported applied,
+    // carrying another project's payload and actor.
+    let created = store
+        .submit(&envelope_in("alpha", "k", actor("kernel"), &task("t-1")))
+        .await;
+    assert!(
+        matches!(created, KernelResult::CommandApplied { .. }),
+        "{created:?}"
+    );
+
+    let hijack = store
+        .submit(&envelope_in(
+            "beta",
+            "k",
+            actor("kernel"),
+            &KernelCommand::TransitionTask {
+                task_id: TaskId::new("t-1"),
+                to: TaskState::Working,
+                expected_version: 1,
+            },
+        ))
+        .await;
+    match &hijack {
+        KernelResult::Error { code, .. } => {
+            assert_eq!(*code, KernelErrorCode::IdempotencyConflict);
+        }
+        KernelResult::CommandApplied { events, .. } => panic!(
+            "beta was answered with project {:?}'s event {:?}",
+            events[0].project_id, events[0].event_id
+        ),
+        other => panic!("{other:?}"),
+    }
+    // Nothing moved, and beta was never handed alpha's log.
+    assert_eq!(task_row(&store, "t-1").await, ("submitted".to_owned(), 1));
+    assert_eq!(event_count(&store).await, 1);
+
+    // An identical BODY from another project is a conflict too — it is a
+    // different request because it belongs to a different project's log.
+    let twin = store
+        .submit(&envelope_in("beta", "k", actor("kernel"), &task("t-1")))
+        .await;
+    assert!(
+        matches!(
+            twin,
+            KernelResult::Error {
+                code: KernelErrorCode::IdempotencyConflict,
+                ..
+            }
+        ),
+        "{twin:?}"
+    );
+
+    // A fresh key in beta is unaffected: the conflict is about the key, not
+    // about beta.
+    let fresh = store
+        .submit(&envelope_in(
+            "beta",
+            "k2",
+            actor("kernel"),
+            &KernelCommand::TransitionTask {
+                task_id: TaskId::new("t-1"),
+                to: TaskState::Working,
+                expected_version: 1,
+            },
+        ))
+        .await;
+    assert!(
+        matches!(fresh, KernelResult::CommandApplied { .. }),
+        "{fresh:?}"
+    );
+
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
+async fn a_replayed_key_from_a_different_actor_does_not_answer_a_guarded_flip() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "replayguard", 64).await;
+
+    apply(&store, "task", task("t-1")).await;
+    apply(&store, "attempt", attempt("a-1", "t-1")).await;
+    run_attempt(&store, "a-1", "run").await;
+
+    let flip = KernelCommand::TransitionAttempt {
+        attempt_id: AttemptId::new("a-1"),
+        to: AttemptState::Blocked,
+        expected_version: 4,
+        receipt_id: Some(ReceiptId::new("r-1")),
+    };
+    let applied = store
+        .submit(&envelope_as("flip", actor(LIVENESS_PRODUCER_KIND), &flip))
+        .await;
+    assert!(
+        matches!(applied, KernelResult::CommandApplied { .. }),
+        "{applied:?}"
+    );
+
+    // The replay short-circuit answers BEFORE transition::apply runs, and apply
+    // is the only place the liveness-producer rule lives. So replaying the key
+    // and the body under a different actor must not be answered as that actor's
+    // own success — `gwk_domain::transition` says in as many words that an
+    // unauthorized replay of a guarded flip is refused, not answered.
+    let harvested = store
+        .submit(&envelope_as("flip", actor("engine"), &flip))
+        .await;
+    match &harvested {
+        KernelResult::Error { code, .. } => {
+            assert_eq!(*code, KernelErrorCode::IdempotencyConflict);
+        }
+        other => panic!("a harvested key answered a guarded flip: {other:?}"),
+    }
+
+    // The producer's own retry is still stable — that is the whole point of the
+    // key, and tightening the identity must not cost it.
+    let retry = store
+        .submit(&envelope_as("flip", actor(LIVENESS_PRODUCER_KIND), &flip))
+        .await;
+    assert!(
+        matches!(retry, KernelResult::CommandApplied { .. }),
+        "{retry:?}"
+    );
+    assert_eq!(attempt_row(&store, "a-1").await, ("blocked".to_owned(), 5));
 
     drop_database(&maintenance, &name).await;
 }

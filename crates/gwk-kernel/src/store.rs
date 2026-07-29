@@ -260,17 +260,43 @@ impl PgEventStore {
 
             if !stored.is_empty() {
                 if stored.len() == events.len() && keys.len() == events.len() {
-                    // Every event in this batch already landed under its key:
-                    // the original result, replayed.
-                    return stored
+                    let stored = stored
                         .iter()
                         .map(row_to_envelope)
                         .collect::<Result<Vec<_>, _>>()
-                        .map(|events| Appended {
-                            events,
-                            replayed: true,
-                        })
-                        .map_err(|e| AppendError::Storage(e.0));
+                        .map_err(|e| AppendError::Storage(e.0))?;
+                    // A count match is NOT a replay. This lookup is scoped to
+                    // the aggregate — the scope of the index it guards — so the
+                    // rows it found may belong to a different request entirely:
+                    // another project's, or the same project's under a reused
+                    // key. Answering those as a replay would hand the caller
+                    // someone else's events and report a command that never ran
+                    // as applied. The batch has to BE the stored one.
+                    if let Some((stored, presented)) = stored
+                        .iter()
+                        .zip(events)
+                        .find(|(stored, presented)| !is_replay_of(stored, presented))
+                    {
+                        return Err(AppendError::MalformedBatch(format!(
+                            "idempotency key {:?} already named {}/{} version {} in project {}: \
+                             a retry must present the identical batch",
+                            presented
+                                .idempotency_key
+                                .as_ref()
+                                .map(|k| k.as_str())
+                                .unwrap_or_default(),
+                            stored.aggregate_type,
+                            stored.aggregate_id,
+                            stored.aggregate_version,
+                            stored.project_id,
+                        )));
+                    }
+                    // Every event in this batch already landed under its key:
+                    // the original result, replayed.
+                    return Ok(Appended {
+                        events: stored,
+                        replayed: true,
+                    });
                 }
                 return Err(AppendError::MalformedBatch(format!(
                     "{} of {} idempotency keys already landed for {aggregate_type}/{aggregate_id}: \
@@ -386,19 +412,34 @@ pub(crate) struct Appended {
 ///
 /// Project-wide, not per-aggregate: one key names one request, so this is the
 /// lookup that tells a retry (same key, same target, same body) from a reuse
-/// (same key, anything else). The per-aggregate index answers the narrower
-/// question the append path asks; this one answers the contract's.
+/// (same key, anything else).
+///
+/// It spans BOTH unique indexes, because either one taking the key is enough to
+/// make the write impossible: `event_idempotency_project` on
+/// `(project_id, idempotency_key)`, and `event_idempotency` on
+/// `(aggregate_type, aggregate_id, idempotency_key)`. Neither contains the
+/// other — a key used on this same aggregate by a DIFFERENT project is invisible
+/// to the first and fatal to the second — so reading only one leaves the caller
+/// to discover the collision as a constraint violation instead of a typed
+/// refusal.
 pub(crate) async fn events_for_key(
     conn: &mut PgConnection,
     project_id: &str,
+    aggregate_type: &str,
+    aggregate_id: &str,
     key: &str,
 ) -> Result<Vec<EventEnvelope>, StorageError> {
     let rows = sqlx::query(concat!(
         "SELECT ",
         event_columns!(),
-        " FROM gwk.event WHERE project_id = $1 AND idempotency_key = $2 ORDER BY seq"
+        " FROM gwk.event \
+         WHERE idempotency_key = $4 \
+           AND (project_id = $1 OR (aggregate_type = $2 AND aggregate_id = $3)) \
+         ORDER BY seq"
     ))
     .bind(project_id)
+    .bind(aggregate_type)
+    .bind(aggregate_id)
     .bind(key)
     .fetch_all(conn)
     .await
@@ -563,6 +604,26 @@ fn row_to_envelope(row: &PgRow) -> Result<EventEnvelope, StorageError> {
             .transpose()
             .map_err(|e| storage("column payload_ref", e))?,
     })
+}
+
+/// Is `stored` the event that `presented` is re-presenting?
+///
+/// Compares the WHOLE envelope with the fields the caller does not control
+/// normalized away, rather than a hand-listed subset of the ones it does: a
+/// field added to [`EventEnvelope`] later joins this comparison automatically,
+/// where a list would quietly stop covering it and start passing a differing
+/// request off as a retry.
+///
+/// Three fields are excluded. `global_sequence` and `appended_at` are assigned
+/// by the store. `occurred_at` is normalized by the column: it goes in as
+/// whatever RFC 3339 spelling the caller used and comes back in PostgreSQL's,
+/// so `Z` becomes `+00:00` and an identical retry would otherwise never match.
+fn is_replay_of(stored: &EventEnvelope, presented: &EventEnvelope) -> bool {
+    let mut normalized = presented.clone();
+    normalized.global_sequence = stored.global_sequence;
+    normalized.appended_at = stored.appended_at.clone();
+    normalized.occurred_at = stored.occurred_at.clone();
+    normalized == *stored
 }
 
 impl EventStore for PgEventStore {

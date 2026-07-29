@@ -284,7 +284,7 @@ fn route_of(command: &KernelCommand) -> Result<Route, Refusal> {
     })
 }
 
-/// What this command's key already means in this project.
+/// What this command's key already means.
 async fn prior_for_key(
     conn: &mut PgConnection,
     envelope: &CommandEnvelope,
@@ -294,27 +294,46 @@ async fn prior_for_key(
     let stored = events_for_key(
         conn,
         envelope.project_id.as_str(),
+        route.aggregate_type,
+        &route.aggregate_id,
         envelope.idempotency_key.as_str(),
     )
     .await?;
     let Some(first) = stored.first() else {
         return Ok(Prior::Unused);
     };
-    // A replay must be the SAME request: same target, same body. Comparing the
-    // stored payload is exact because the payload IS the canonical command body
-    // — there is no second encoding of it to disagree with.
+    // A replay must be the SAME request. Target and body are the obvious half;
+    // the other two are not.
+    //
+    // `project_id`, because the aggregate namespace is global while idempotency
+    // is per-project: a key can be free in this project and already taken on
+    // this aggregate by another, and answering that as a replay hands the caller
+    // another project's events for a command that never ran.
+    //
+    // `actor`, because a replay is answered BEFORE `transition::apply` runs, and
+    // `apply` is the only thing that enforces the liveness-producer flip rule.
+    // Without this the short-circuit becomes what `gwk_domain::transition`
+    // documents it must never be: a way to get a guarded edge answered without
+    // being authorized for it.
+    //
+    // Comparing the stored payload is exact because the payload IS the
+    // canonical command body — there is no second encoding of it to disagree
+    // with.
     let same_request = stored.len() == 1
+        && first.project_id == envelope.project_id
         && first.aggregate_type == route.aggregate_type
         && first.aggregate_id.as_str() == route.aggregate_id
+        && first.actor == envelope.actor
         && &first.payload == payload;
     if same_request {
         return Ok(Prior::Replay(stored));
     }
     Ok(Prior::Conflict(format!(
-        "idempotency key {:?} already names a different request on {}/{}",
+        "idempotency key {:?} already names a different request on {}/{} in project {}",
         envelope.idempotency_key.as_str(),
         first.aggregate_type,
-        first.aggregate_id
+        first.aggregate_id,
+        first.project_id
     )))
 }
 
