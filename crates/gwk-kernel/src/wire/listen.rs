@@ -140,18 +140,27 @@ impl Listener {
 fn authorized(stream: &UnixStream) -> Result<Peer> {
     let cred = stream
         .peer_cred()
+        // Fails closed: "the OS would not say" is not evidence of anything.
         .map_err(|e| KernelError::Privilege(format!("peer credentials unavailable: {e}")))?;
-    let ours = daemon_uid();
-    if cred.uid() != ours {
+    admits(cred.uid(), cred.pid(), daemon_uid())
+}
+
+/// The decision, given credentials somebody else read.
+///
+/// Split from [`authorized`] so it can be certified. A test cannot become a
+/// second user to connect as one, and running the suite as root to try would
+/// change what every other case in this module is measuring — so what is proved
+/// here is that a uid which is not ours is REFUSED, and the socket layer's own
+/// job is to hand this function the uid the kernel reported rather than one the
+/// peer claimed. `peer_cred` is that boundary and it takes no input from the
+/// client at all.
+fn admits(uid: u32, pid: Option<i32>, ours: u32) -> Result<Peer> {
+    if uid != ours {
         return Err(KernelError::Privilege(format!(
-            "peer uid {} is not the daemon's {ours}",
-            cred.uid()
+            "peer uid {uid} is not the daemon's {ours}"
         )));
     }
-    Ok(Peer {
-        uid: cred.uid(),
-        pid: cred.pid(),
-    })
+    Ok(Peer { uid, pid })
 }
 
 /// This process's EFFECTIVE uid — the one the contract names.
@@ -470,6 +479,38 @@ mod tests {
         drop(client);
         listener.remove();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_peer_that_is_not_this_uid_is_refused_and_the_refusal_names_both() {
+        let ours = daemon_uid();
+        // Neighbouring uids on either side, because an off-by-one comparison
+        // would let exactly one of them through.
+        for uid in [ours.wrapping_add(1), ours.wrapping_sub(1), 0] {
+            if uid == ours {
+                // Running as uid 0 makes the third case the accepted one; the
+                // other two still carry the assertion.
+                continue;
+            }
+            let refused = admits(uid, Some(4242), ours).expect_err("a foreign uid must be refused");
+            let KernelError::Privilege(message) = refused else {
+                panic!("a foreign peer must be a Privilege refusal, got {refused:?}");
+            };
+            // Both numbers, because a refusal that named only one leaves an
+            // operator guessing which side is misconfigured.
+            assert!(message.contains(&uid.to_string()), "{message}");
+            assert!(message.contains(&ours.to_string()), "{message}");
+        }
+        // And the accepting branch carries the pid through untouched — the one
+        // field this function does not judge.
+        let peer = admits(ours, Some(4242), ours).expect("our own uid is admitted");
+        assert_eq!(
+            peer,
+            Peer {
+                uid: ours,
+                pid: Some(4242)
+            }
+        );
     }
 
     #[test]

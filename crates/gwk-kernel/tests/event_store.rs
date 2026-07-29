@@ -20,7 +20,7 @@ mod common;
 
 use std::time::Duration;
 
-use common::{drop_database, maintenance_pool, raw_store, secret, url_for};
+use common::{drop_database, maintenance_pool, raw_store, secret, seed_events, url_for};
 use gwk_cert::conformance;
 use gwk_domain::port::{AppendError, EventStore};
 use gwk_kernel::numeric::{from_numeric_text, to_numeric_text};
@@ -121,6 +121,173 @@ async fn sequences_are_allocated_in_commit_order_under_concurrency() {
             .map(|s| s.value()),
         assigned.last().copied()
     );
+
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see the module docs"]
+async fn two_writers_racing_one_aggregate_produce_one_winner_and_honest_losers() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = raw_store(&maintenance, "casrace", 64).await;
+    let store = std::sync::Arc::new(store);
+
+    // The SAME aggregate at the same expected version, genuinely simultaneously.
+    // The conformance suite pins the refusal contract sequentially and says so;
+    // what only a real runtime against a real row lock can show is that the race
+    // has exactly one winner and that every loser is told the truth.
+    let mut tasks = tokio::task::JoinSet::new();
+    for _ in 0..16 {
+        let store = store.clone();
+        tasks.spawn(async move {
+            store
+                .append(0, None, vec![conformance::fixture_event("agg", 1)])
+                .await
+        });
+    }
+    let mut winners = 0;
+    let mut losers = 0;
+    while let Some(result) = tasks.join_next().await {
+        match result.expect("task") {
+            Ok(events) => {
+                winners += 1;
+                assert_eq!(events.len(), 1);
+            }
+            Err(AppendError::VersionConflict { actual, expected }) => {
+                losers += 1;
+                // The version the loser must re-read from — not a bare "try
+                // again", which is how a retry loop becomes an infinite one.
+                assert_eq!(actual, 1, "the refusal reported a version that never was");
+                assert_eq!(expected, 0);
+            }
+            Err(other) => panic!("a CAS race must not produce {other:?}"),
+        }
+    }
+    assert_eq!(winners, 1, "the CAS admitted more than one writer");
+    assert_eq!(losers, 15);
+
+    // And the log holds exactly the winner's event: no loser left a row behind on
+    // its way to being refused.
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM gwk.event")
+        .fetch_one(store.pool())
+        .await
+        .expect("count");
+    assert_eq!(count, 1);
+
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see the module docs"]
+async fn a_writer_killed_mid_append_leaves_no_row_no_lock_and_no_burnt_sequence() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = raw_store(&maintenance, "kill9", 8).await;
+    let store = std::sync::Arc::new(store);
+    store
+        .append(0, None, vec![conformance::fixture_event("agg", 1)])
+        .await
+        .expect("the incumbent writes");
+    let watermark = store.watermark().await.expect("watermark");
+
+    // A writer that gets exactly as far as a real append does and then dies: the
+    // writer row locked, its event inserted, nothing committed. Raw SQL because
+    // the port has no "stop here" — and what is under test is the state the
+    // DATABASE is left in when a client disappears, which is identical whether
+    // that client was SIGKILLed, unplugged, or panicked.
+    let doomed = connect_pool(&secret(&name), 1).await.expect("connect");
+    let mut dying = doomed.begin().await.expect("begin");
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *dying)
+        .await
+        .expect("pid");
+    let claimed: String =
+        sqlx::query_scalar("SELECT next_seq::text FROM gwk_internal.writer FOR UPDATE")
+            .fetch_one(&mut *dying)
+            .await
+            .expect("lock the writer row");
+    let claimed: u64 = claimed.parse().expect("a number");
+    sqlx::query(
+        "INSERT INTO gwk.event (seq, event_id, project_id, aggregate_type, aggregate_id, \
+            aggregate_version, event_type, schema_version, occurred_at, appended_at, \
+            actor, origin, payload) \
+         VALUES ($1::numeric, 'evt-doomed', 'p', 'task', 'agg', 2, 'doomed_tick', 1, \
+            now(), now(), '{}'::jsonb, '{}'::jsonb, '{}'::jsonb)",
+    )
+    .bind(claimed.to_string())
+    .execute(&mut *dying)
+    .await
+    .expect("the doomed writer inserts");
+    sqlx::query("UPDATE gwk_internal.writer SET next_seq = $1::numeric")
+        .bind((claimed + 1).to_string())
+        .execute(&mut *dying)
+        .await
+        .expect("the doomed writer allocates");
+
+    // A real append, which can only be waiting on the row lock the corpse holds.
+    let successor = tokio::spawn({
+        let store = store.clone();
+        async move {
+            store
+                .append(1, None, vec![conformance::fixture_event("agg", 2)])
+                .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !successor.is_finished(),
+        "the successor did not wait for the lock, so this proved nothing"
+    );
+
+    let killed: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+        .bind(pid)
+        .fetch_one(store.pool())
+        .await
+        .expect("terminate the doomed writer");
+    assert!(killed, "the doomed backend was already gone");
+
+    let appended = successor
+        .await
+        .expect("join")
+        .expect("the successor appends once the corpse lets go");
+
+    // The number the corpse had taken. A rolled-back append gives its sequence
+    // back, which is the claim `store.rs` makes about allocation and the reason
+    // the column is not a BIGSERIAL — a burnt number here would be a permanent
+    // hole in the log a reader has to be told to expect.
+    assert_eq!(
+        appended[0].global_sequence.value(),
+        claimed,
+        "the dead writer's sequence was burnt rather than returned"
+    );
+    // Its row is gone with it, and the successor's took the version it claimed.
+    let doomed_rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM gwk.event WHERE event_id = 'evt-doomed'")
+            .fetch_one(store.pool())
+            .await
+            .expect("count");
+    assert_eq!(doomed_rows, 0, "an uncommitted append survived a crash");
+    assert!(store.watermark().await.expect("watermark") > watermark);
+
+    drop(dying);
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see the module docs"]
+async fn a_log_longer_than_a_page_still_reads_back_as_one_page() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = raw_store(&maintenance, "ceiling", 8).await;
+
+    // A page and one. The check refuses to pass on fewer, because a shorter log
+    // proves nothing about a ceiling.
+    seed_events(store.pool(), gwk_domain::port::MAX_READ_LIMIT as u64 + 1).await;
+    conformance::check_read_limit_ceiling(&store).await;
+
+    // The clamp is the STORE's, not the caller's: this asks for everything and
+    // the SQL is what says no. A `LIMIT` built from the request would return
+    // 65,537 rows and, at this row width, a response no frame could carry.
+    let asked_for_everything = store.read_from(None, usize::MAX).await.expect("read");
+    assert_eq!(asked_for_everything.len(), gwk_domain::port::MAX_READ_LIMIT);
 
     drop_database(&maintenance, &name).await;
 }

@@ -493,6 +493,123 @@ async fn the_admin_door_initializes_a_database_and_the_daemon_serves_it() {
     assert_eq!(answer["public_revision"], revision);
     assert_eq!(answer["sealed"], true);
 
+    // Retention, through the admin door rather than the socket — which is the
+    // whole reason these four verbs live there. Uploading goes over the wire; pin,
+    // unpin, sweep, and shred need a credential, and none of them has a wire
+    // request to reach through.
+    let payload = dir.join("hold.bin");
+    std::fs::write(&payload, b"a blob nothing in the log points at").expect("write a payload");
+    let put = gw(
+        &socket,
+        &format!(
+            "blob put --file {} --media-type text/plain",
+            payload.display()
+        ),
+    );
+    assert_eq!(code(&put), 0, "{}", String::from_utf8_lossy(&put.stdout));
+    let held = json(&put)["descriptor"]["address"]
+        .as_str()
+        .expect("an address")
+        .to_owned();
+
+    let pinned = gw_env(&format!("admin blob pin {held} evidence-1"), &admin_env);
+    assert_eq!(
+        code(&pinned),
+        0,
+        "{}",
+        String::from_utf8_lossy(&pinned.stdout)
+    );
+    assert_eq!(json(&pinned)["type"], "blob_pinned");
+
+    // Nothing in this log references the blob, so the only thing standing between
+    // it and the sweep is the pin.
+    let swept = gw_env("admin blob sweep", &admin_env);
+    assert_eq!(
+        code(&swept),
+        0,
+        "{}",
+        String::from_utf8_lossy(&swept.stdout)
+    );
+    let removed = json(&swept);
+    assert!(
+        !removed["removed"]
+            .as_array()
+            .expect("an array")
+            .iter()
+            .any(|address| address == &serde_json::Value::String(held.clone())),
+        "a pinned blob was swept: {removed}"
+    );
+    assert_eq!(code(&gw(&socket, &format!("blob stat {held}"))), 0);
+
+    // Released, and the same sweep reclaims it. Absent afterwards, not
+    // tombstoned: a sweep is reclamation of something nothing pointed at, and it
+    // leaves no claim behind.
+    let unpinned = gw_env(&format!("admin blob unpin {held} evidence-1"), &admin_env);
+    assert_eq!(
+        code(&unpinned),
+        0,
+        "{}",
+        String::from_utf8_lossy(&unpinned.stdout)
+    );
+    let swept = gw_env("admin blob sweep", &admin_env);
+    assert_eq!(code(&swept), 0);
+    assert!(
+        json(&swept)["removed"]
+            .as_array()
+            .expect("an array")
+            .iter()
+            .any(|address| address == &serde_json::Value::String(held.clone())),
+        "the unpinned blob survived a sweep: {}",
+        String::from_utf8_lossy(&swept.stdout)
+    );
+    let gone = gw(&socket, &format!("blob stat {held}"));
+    assert_eq!(code(&gone), 4, "{}", String::from_utf8_lossy(&gone.stdout));
+    assert_eq!(json(&gone)["code"], "not_found");
+
+    // Shred is the other half and it is the opposite answer: permanent, and
+    // REFUSED rather than absent, because a shredded address is a claim the
+    // kernel keeps making. The container may still be on disk; the key is gone.
+    let doomed = dir.join("shred.bin");
+    std::fs::write(&doomed, b"a blob that will be cryptographically erased").expect("write");
+    let put = gw(
+        &socket,
+        &format!(
+            "blob put --file {} --media-type text/plain",
+            doomed.display()
+        ),
+    );
+    assert_eq!(code(&put), 0);
+    let erased = json(&put)["descriptor"]["address"]
+        .as_str()
+        .expect("an address")
+        .to_owned();
+    let shredded = gw_env(&format!("admin blob shred {erased}"), &admin_env);
+    assert_eq!(
+        code(&shredded),
+        0,
+        "{}",
+        String::from_utf8_lossy(&shredded.stdout)
+    );
+    assert_eq!(json(&shredded)["type"], "blob_shredded");
+    let refused = gw(
+        &socket,
+        &format!(
+            "blob get {erased} --output {}",
+            dir.join("never.bin").display()
+        ),
+    );
+    assert_eq!(
+        code(&refused),
+        6,
+        "{}",
+        String::from_utf8_lossy(&refused.stdout)
+    );
+    assert_eq!(json(&refused)["code"], "blob_tombstoned");
+    assert!(
+        !dir.join("never.bin").exists(),
+        "a refused read still wrote a file"
+    );
+
     // A second daemon on the same database must refuse rather than race: one
     // writer per store, enforced by an advisory lock that is never waited on.
     let second = gw_env(
@@ -517,14 +634,87 @@ async fn the_admin_door_initializes_a_database_and_the_daemon_serves_it() {
     );
     assert_eq!(json(&second)["code"], "fenced");
 
-    // SIGTERM is how a service manager asks. The socket goes with it, or the
-    // next start would take the stale-takeover path for no reason.
-    let pid = serving.id();
+    // SIGKILL: the crash the daemon gets no say in. Not SIGTERM — the point is
+    // that no shutdown code runs at all, so nothing releases the writer lock and
+    // nothing removes the socket. Everything after this is what the NEXT daemon
+    // has to cope with, and it is the only path in this suite that produces a
+    // genuinely stale socket beside a genuinely abandoned lock.
     Command::new("kill")
-        .args(["-TERM", &pid.to_string()])
+        .args(["-KILL", &serving.id().to_string()])
         .status()
         .expect("signal the daemon");
-    let stopped = serving.wait().expect("wait");
+    let died = serving.wait().expect("wait");
+    assert!(!died.success(), "SIGKILL is not a clean exit: {died:?}");
+    assert!(
+        socket.exists(),
+        "a killed daemon cannot have cleaned up after itself"
+    );
+
+    // Its connections die with it, and the advisory lock goes when the backend
+    // does — which the server learns from a closed socket rather than from the
+    // signal, so it is prompt but not synchronous. Waiting for the backends to
+    // disappear is the precondition, not a retry loop dressed up as one.
+    let mut released = false;
+    for _ in 0..100 {
+        let live_backends: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity WHERE datname = $1 AND usename = $2",
+        )
+        .bind(&live)
+        .bind(DAEMON_ROLE)
+        .fetch_one(&maintenance)
+        .await
+        .expect("count the daemon's backends");
+        if live_backends == 0 {
+            released = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(released, "the killed daemon's backends outlived it");
+
+    // A replacement starts on the same socket path and the same database. Three
+    // things have to be true at once for this to work: the abandoned advisory
+    // lock is takeable (`acquire` never waits, so a lock a corpse still held
+    // would exit 3), the stale socket is probed and replaced rather than refused,
+    // and recovery reaches a verdict on a log nobody checkpointed on the way out.
+    let mut restarted = Command::new(env!("CARGO_BIN_EXE_gw"))
+        .arg("daemon")
+        .env("GWK_DATABASE_URL", &runtime_dsn)
+        .env("GWK_SOCKET_PATH", &socket)
+        .env("GWK_BLOB_ROOT", &blob_root)
+        .env("GWK_BLOB_KEK", &kek)
+        .env("GWK_BLOB_KEK_ID", "kek-test")
+        .env("GWK_PUBLIC_REVISION", &revision)
+        .spawn()
+        .expect("spawn the replacement");
+
+    let mut recovered = None;
+    for _ in 0..100 {
+        let out = gw(&socket, "kernel health");
+        if code(&out) == 0 {
+            recovered = Some(out);
+            break;
+        }
+        if let Some(exited) = restarted.try_wait().expect("wait") {
+            panic!("the replacement refused to start after a crash: {exited:?}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let recovered = recovered.expect("the replacement never answered health");
+    assert_eq!(json(&recovered)["ready"], true);
+    // And it is serving the same log, not a fresh one: the epoch it reports is
+    // past the crashed daemon's, because claiming write authority bumps it.
+    let status = gw(&socket, "kernel status");
+    assert_eq!(code(&status), 0);
+    assert_eq!(json(&status)["public_revision"], revision);
+
+    // SIGTERM is how a service manager asks. The socket goes with it, or the
+    // next start would take the stale-takeover path for no reason.
+    Command::new("kill")
+        .args(["-TERM", &restarted.id().to_string()])
+        .status()
+        .expect("signal the daemon");
+    let stopped = restarted.wait().expect("wait");
     assert!(stopped.success(), "the daemon exited {stopped:?}");
     assert!(!socket.exists(), "shutdown left the socket behind");
 

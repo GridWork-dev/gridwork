@@ -227,16 +227,63 @@ pub async fn check_read_limit_is_clamped<S: EventStore>(store: &S) {
         3,
         "read_from must honour a limit below the page size"
     );
-    // An enormous `limit` must not error and must clamp to MAX_READ_LIMIT — with
-    // 8 stored events that means all 8 come back, never more.
+    // An enormous `limit` must not error, and returns everything there is.
+    //
+    // What it does NOT show is the clamp. With 8 events in the log,
+    // `len() <= MAX_READ_LIMIT` is true of a store that never clamps at all —
+    // the assertion that used to stand here was `8 <= 65536`, and a store doing
+    // a bare `.take(limit)` passed it. Proving the ceiling needs a log longer
+    // than a page: [`check_read_limit_ceiling`].
     let huge = store
         .read_from(None, usize::MAX)
         .await
         .expect("a huge limit must not error");
     assert_eq!(huge.len(), 8, "a huge limit returns all available events");
+}
+
+/// The ceiling itself: a log longer than one page still hands back one page.
+///
+/// Separate from [`check_read_limit_is_clamped`] and not in [`run_all`], because
+/// it is the one check with a precondition a generic suite cannot meet on its
+/// own. Seeding `MAX_READ_LIMIT + 1` events through `append` would be tens of
+/// thousands of locked round trips against a real backend — so the CALLER seeds,
+/// by whatever bulk path it has, and this asserts what a conforming read does
+/// with the result.
+///
+/// # Panics
+///
+/// Requires more than [`MAX_READ_LIMIT`] events already in `store`, contiguous
+/// from the start of the log. A caller that seeds fewer gets a failure that says
+/// so rather than a vacuous pass.
+pub async fn check_read_limit_ceiling<S: EventStore>(store: &S) {
+    let page = store
+        .read_from(None, usize::MAX)
+        .await
+        .expect("an unbounded read must be clamped, not refused");
+    assert_eq!(
+        page.len(),
+        MAX_READ_LIMIT,
+        "a log longer than a page must read back as exactly one page"
+    );
+    // A prefix, not a sample: the clamp takes the FIRST MAX_READ_LIMIT events in
+    // sequence order, so the page a caller pages onward from is contiguous.
+    let sequences: Vec<u64> = page.iter().map(|e| e.global_sequence.value()).collect();
+    let mut ascending = sequences.clone();
+    ascending.sort_unstable();
+    ascending.dedup();
+    assert_eq!(
+        sequences, ascending,
+        "a clamped page is not in sequence order"
+    );
+    // And the page ends before the log does, or the seed was too small to have
+    // tested anything.
+    let after = store
+        .read_from(page.last().map(|e| e.global_sequence), MAX_READ_LIMIT)
+        .await
+        .expect("read past the first page");
     assert!(
-        huge.len() <= MAX_READ_LIMIT,
-        "read_from must clamp to MAX_READ_LIMIT"
+        !after.is_empty(),
+        "the log is not longer than one page: this check proved nothing"
     );
 }
 
@@ -295,6 +342,29 @@ pub mod memory {
     impl InMemoryStore {
         pub fn new() -> Self {
             Self::default()
+        }
+
+        /// Put `count` events in the log without going through `append`.
+        ///
+        /// The bulk path [`check_read_limit_ceiling`](super::check_read_limit_ceiling)
+        /// asks its caller for. `append` re-scans the log for the aggregate's
+        /// current version, so seeding a page-and-one through it is quadratic —
+        /// and the check is about reading, not about appending.
+        ///
+        /// # Panics
+        ///
+        /// If the store's lock is poisoned, which for a fresh fixture means a
+        /// prior panic already failed the test.
+        pub fn seed(&self, count: usize) {
+            let mut inner = self.inner.lock().expect("seed a store nothing else holds");
+            for _ in 0..count {
+                inner.next_seq += 1;
+                let seq = inner.next_seq;
+                let mut event = super::fixture_event(&format!("agg-seed-{seq}"), 1);
+                event.global_sequence = Seq::new(seq);
+                event.appended_at = Timestamp::new(format!("seq:{seq}"));
+                inner.events.push(event);
+            }
         }
     }
 
@@ -409,5 +479,18 @@ mod tests {
     #[test]
     fn reference_store_passes_the_full_suite() {
         block_on(super::run_all(InMemoryStore::new));
+    }
+
+    /// The ceiling check, against the reference store and a real page-and-one.
+    ///
+    /// Cheap here — a `Vec` push per event — and it is what makes the check
+    /// non-vacuous rather than merely present: with `MAX_READ_LIMIT + 1` events
+    /// in the log, a store that took `limit` at face value would hand back
+    /// 65,537 and fail the equality.
+    #[test]
+    fn the_reference_store_clamps_a_log_longer_than_a_page() {
+        let store = InMemoryStore::new();
+        store.seed(gwk_domain::port::MAX_READ_LIMIT + 1);
+        block_on(super::check_read_limit_ceiling(&store));
     }
 }

@@ -24,7 +24,7 @@ use gwk_domain::protocol::{
     MAX_SUBSCRIPTIONS_PER_CONNECTION, ProjectionKind, ProjectionRecord, ProtocolVersion,
     SLOW_CONSUMER_TIMEOUT_SECS, SUBSCRIPTION_POLL_SECS, ServerControl,
 };
-use gwk_kernel::store::PgEventStore;
+use gwk_kernel::store::{PgEventStore, connect_pool};
 use gwk_kernel::wire::frame::{Budget, Incoming, read_frame, write_frame};
 use gwk_kernel::wire::listen::Listener;
 use gwk_kernel::wire::serve::{Daemon, serve_stream};
@@ -722,6 +722,169 @@ async fn a_subscription_that_never_hears_a_notification_still_catches_up() {
         other => panic!("{other:?}"),
     }
 
+    served.close().await;
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn a_frame_the_codec_refuses_takes_down_its_own_connection_and_no_other() {
+    use tokio::io::AsyncWriteExt as _;
+
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "wire_strict", 8).await;
+    let served = Running::open(store, "strict").await;
+
+    // The codec's refusals are certified in isolation by the unit suite. What
+    // only the accept loop can answer is what a refusal COSTS: the daemon serves
+    // every connection in its own task and the comment there claims a malformed
+    // frame from one client must not take down the others. That is this case.
+    let mut bystander = served.client().await;
+    assert!(matches!(
+        bystander.ask("r-before", r#"{"type":"health"}"#).await,
+        KernelResult::Health { .. }
+    ));
+
+    // A length prefix past the frame bound, and nothing else — refused from the
+    // five header bytes, before a body is read or allocated. Written raw because
+    // `write_frame` would not produce it.
+    let mut liar = UnixStream::connect(&served.path).await.expect("connect");
+    liar.write_all(&(FRAME_BODY_MAX_BYTES + 1).to_be_bytes())
+        .await
+        .expect("write a length");
+    liar.write_all(&[1u8]).await.expect("write a kind");
+    // A refusal comes back before the hangup, and that is deliberate: a client
+    // that got the framing wrong must be able to tell that from a socket nobody
+    // was listening on. It is the LAST thing this connection gets.
+    let mut budget = Budget::new(
+        CONNECTION_INGRESS_BYTES_PER_WINDOW,
+        CONNECTION_EGRESS_BYTES_PER_WINDOW,
+    );
+    match read_frame(&mut liar, FRAME_BODY_MAX_BYTES, &mut budget)
+        .await
+        .expect("read the refusal")
+    {
+        Incoming::Frame(frame) => {
+            match serde_json::from_slice(&frame.body).expect("decode the refusal") {
+                ServerControl::HelloRefusal { code, .. } => {
+                    assert_eq!(code, KernelErrorCode::FrameSize)
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        Incoming::Closed => panic!("the daemon hung up without saying why"),
+    }
+    match read_frame(&mut liar, FRAME_BODY_MAX_BYTES, &mut budget).await {
+        Ok(Incoming::Closed) => {}
+        // A reset rather than a clean EOF, and correctly so: the refusal was
+        // decided from the four length bytes, so the kind byte after them was
+        // never consumed and the daemon closed with data still queued. Both
+        // outcomes say the same thing — the connection is gone.
+        Err(error) => assert!(
+            error.fatal,
+            "a non-fatal error on a dead connection: {error}"
+        ),
+        Ok(Incoming::Frame(frame)) => {
+            panic!("the connection outlived the frame that broke it: {frame:?}")
+        }
+    }
+
+    // A well-framed lie: through the handshake, then a known request carrying a
+    // field the contract does not have. Strict decoding closes the connection
+    // rather than ignoring the field, because a field that was ignored is a
+    // client believing something it was never told.
+    let (mut sneak, _) = Client::connect(&served.path).await;
+    sneak
+        .send(r#"{"type":"request","request_id":"r-x","request":{"type":"health","extra":1}}"#)
+        .await;
+    assert!(
+        sneak.recv().await.is_none(),
+        "an unknown field was tolerated"
+    );
+
+    // Both liars are gone; the bystander never noticed either of them.
+    assert!(matches!(
+        bystander.ask("r-after", r#"{"type":"health"}"#).await,
+        KernelResult::Health { .. }
+    ));
+
+    drop(bystander);
+    drop(sneak);
+    served.close().await;
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn a_stream_survives_losing_the_listener_it_was_being_notified_through() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "wire_deaf", 8).await;
+    let admin = connect_pool(&secret(&name), 2).await.expect("connect");
+    let served = Running::open(store, "deaf").await;
+
+    let mut watcher = served.client().await;
+    let watermark = watermark_of(&mut watcher, "r-wm").await;
+    match watcher.ask("r-sub", &subscribe_from(watermark)).await {
+        KernelResult::Subscribed { .. } => {}
+        other => panic!("{other:?}"),
+    }
+
+    // A committed append that notifies NOBODY, under a listener that is perfectly
+    // healthy. This is the case the poll exists for and the only way to produce
+    // it deterministically — the append path queues its `pg_notify` inside the
+    // transaction, so nothing that goes through the kernel can lose one on
+    // purpose. `Running` started the listener, so it is not absent; it simply was
+    // never told, exactly as it would not be after a dropped connection.
+    let first = seed_events(&admin, 3).await;
+    let batch = tokio::time::timeout(
+        std::time::Duration::from_secs(SUBSCRIPTION_POLL_SECS + 5),
+        watcher.recv(),
+    )
+    .await
+    .expect("only the poll could have delivered this, and it had to")
+    .expect("the connection stayed open");
+    match batch {
+        ServerControl::EventBatch { events, cursor, .. } => {
+            assert!(events.iter().all(|e| e.global_sequence > watermark));
+            assert_eq!(cursor, first, "the batch did not reach the seeded tail");
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // Now take the channel away entirely, mid-stream: `Running`'s listener is a
+    // live backend and it goes away under a subscription that is using it. What
+    // PostgreSQL will not do is redeliver anything sent while it was gone.
+    let killed: Vec<bool> = sqlx::query_scalar(
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+         WHERE datname = current_database() AND pid <> pg_backend_pid() \
+           AND query LIKE 'LISTEN %'",
+    )
+    .fetch_all(&admin)
+    .await
+    .expect("terminate the listener");
+    assert!(
+        killed.iter().any(|ok| *ok),
+        "no LISTEN backend was found to kill: this half proved nothing"
+    );
+
+    // Still bounded, and still without a notification. The stream did not merely
+    // survive one gap and then stall on a dead channel.
+    let second = seed_events(&admin, 3).await;
+    let batch = tokio::time::timeout(
+        std::time::Duration::from_secs(SUBSCRIPTION_POLL_SECS + 5),
+        watcher.recv(),
+    )
+    .await
+    .expect("a stream whose listener died still delivers")
+    .expect("the connection stayed open");
+    match batch {
+        ServerControl::EventBatch { cursor, .. } => {
+            assert_eq!(cursor, second, "the stream stalled at the break")
+        }
+        other => panic!("{other:?}"),
+    }
+
+    drop(watcher);
     served.close().await;
     drop_database(&maintenance, &name).await;
 }
