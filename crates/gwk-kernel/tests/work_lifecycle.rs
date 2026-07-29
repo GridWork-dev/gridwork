@@ -721,17 +721,15 @@ async fn the_refusals_are_typed_values_not_database_exceptions() {
     let (code, message) = refuse(
         &store,
         "future",
-        KernelCommand::GrantAuthority {
-            authority_grant_id: gwk_domain::ids::AuthorityGrantId::new("ag-1"),
-            grantee: actor("operator"),
-            action_class: "deploy".into(),
-            scope: None,
-            expires_at: None,
+        KernelCommand::IngestRecord {
+            kind: gwk_domain::ingestion::IngestionKind::Memory,
+            payload: serde_json::json!({}),
+            payload_ref: None,
         },
     )
     .await;
     assert_eq!(code, KernelErrorCode::Validation);
-    assert!(message.contains("grant_authority"), "{message}");
+    assert!(message.contains("ingest_record"), "{message}");
 
     // Every refusal above rolled back; only the create survived.
     assert_eq!(event_count(&store).await, 1);

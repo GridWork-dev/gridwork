@@ -16,10 +16,16 @@
 //!    projections to land together; splitting them would let a crash leave a
 //!    log the projections do not reflect.
 //!
-//! Scope is the work lifecycle plus messaging and gates: task, attempt, engine
-//! session, lease, worktree, dispatch node, budget, checkpoint, round, finding,
-//! message, execution command, gate, and evidence. Authority, attention, and
-//! ingestion are refused by name here until the phases that own them land — an
+//! Between ownership and the decision sits **authority**: a gated command is
+//! evaluated against the grants on record, and a page commits its receipt and
+//! attention item before refusing. That is the one refusal here that leaves
+//! rows behind, and deliberately so — a page whose evidence rolls back cannot
+//! be told apart from a command nobody sent.
+//!
+//! Scope is everything except ingestion: task, attempt, engine session, lease,
+//! worktree, dispatch node, budget, checkpoint, round, finding, message,
+//! execution command, gate, evidence, authority grant, and attention item.
+//! `IngestRecord` is refused by name here until task 17 lands it — an
 //! unrecognized command is never a no-op.
 
 use gwk_domain::command::KernelCommand;
@@ -34,8 +40,12 @@ use gwk_domain::transition::{self, Cursor, TransitionRequest, TransitionResult};
 use serde::de::DeserializeOwned;
 use sqlx::{PgConnection, Row};
 
+use crate::authority;
 use crate::numeric::from_numeric_text;
-use crate::project::{Refusal, apply_event, from_wire_str, wire_str};
+use crate::project::{
+    Refusal, apply_event, from_wire_str, page_attention, unresolved_attention, wire_str,
+    write_receipt,
+};
 use crate::store::{MAX_INFLIGHT_APPENDS, PgEventStore, current_aggregate_version, events_for_key};
 
 // One literal per read: sqlx 0.9 refuses a runtime-built query string, and a
@@ -135,6 +145,33 @@ impl PgEventStore {
                 // answer a retrier can act on. Ownership is the question that
                 // only arises once the request is genuinely new.
                 check_aggregate_owner(&mut tx, envelope, &route).await?;
+                let decision = authority::evaluate(
+                    &mut tx,
+                    envelope,
+                    &envelope.command_type,
+                    &route.aggregate_id,
+                )
+                .await?;
+                if let authority::Decision::Page { action_class } = decision {
+                    // A page does NOT mutate the target, so this returns before
+                    // `decide` — but it still commits, because the receipt and
+                    // the attention item are the whole point of paging. This is
+                    // the one refusal in the kernel that leaves rows behind.
+                    return self.paged(tx, envelope, &route, action_class).await;
+                }
+                if let Some(action_class) = decision.action_class() {
+                    write_receipt(
+                        &mut tx,
+                        &receipt_for(
+                            envelope,
+                            &route,
+                            action_class,
+                            "matching unexpired scoped grant",
+                        ),
+                    )
+                    .await?;
+                }
+                check_attention_dedup(&mut tx, &command).await?;
                 decide(&mut tx, envelope, &command, &route).await?
             }
         };
@@ -160,6 +197,60 @@ impl PgEventStore {
             .map_err(|e| Refusal::storage(format!("commit: {e}")))?;
 
         self.applied(envelope, appended.events).await
+    }
+
+    /// The paged answer: a refusal that commits its own trail.
+    ///
+    /// The receipt and the attention item are written and COMMITTED even though
+    /// the command is refused, because a page whose evidence rolls back is
+    /// indistinguishable from a command that was never sent — and the operator
+    /// finding out is the entire mechanism.
+    async fn paged(
+        &self,
+        mut tx: sqlx::Transaction<'_, sqlx::Postgres>,
+        envelope: &CommandEnvelope,
+        route: &Route,
+        action_class: &'static str,
+    ) -> Result<KernelResult, Refusal> {
+        let actor = actor_json(envelope)?;
+        let at = envelope.issued_at.as_str();
+        let subject = format!("{}/{}", route.aggregate_type, route.aggregate_id);
+        write_receipt(
+            &mut tx,
+            &receipt_for(
+                envelope,
+                route,
+                action_class,
+                "no matching unexpired scoped grant",
+            ),
+        )
+        .await?;
+        page_attention(
+            &mut tx,
+            // Derived from what the dedup key already is, so a retry lands on
+            // the same id the first page created rather than minting a rival
+            // the index then refuses.
+            &format!("page:{action_class}:{subject}"),
+            &format!(
+                "{} requires an unexpired {action_class} grant",
+                envelope.command_type
+            ),
+            &subject,
+            &actor,
+            at,
+        )
+        .await?;
+        tx.commit()
+            .await
+            .map_err(|e| Refusal::storage(format!("commit: {e}")))?;
+        Err(Refusal::new(
+            KernelErrorCode::Authority,
+            format!(
+                "{} on {subject} requires an unexpired {action_class} grant; attention raised",
+                envelope.command_type
+            ),
+        )
+        .with_detail(serde_json::json!({ "action_class": action_class, "subject": subject })))
     }
 
     /// The success answer, with the watermark read after the commit that
@@ -302,6 +393,36 @@ fn route_of(command: &KernelCommand) -> Result<Route, Refusal> {
             "evidence_recorded",
         ),
 
+        C::GrantAuthority {
+            authority_grant_id, ..
+        } => (
+            "authority_grant",
+            authority_grant_id.as_str().to_owned(),
+            "authority_granted",
+        ),
+        C::RevokeAuthority {
+            authority_grant_id, ..
+        } => (
+            "authority_grant",
+            authority_grant_id.as_str().to_owned(),
+            "authority_revoked",
+        ),
+
+        C::RaiseAttention {
+            attention_item_id, ..
+        } => (
+            "attention_item",
+            attention_item_id.as_str().to_owned(),
+            "attention_raised",
+        ),
+        C::ResolveAttention {
+            attention_item_id, ..
+        } => (
+            "attention_item",
+            attention_item_id.as_str().to_owned(),
+            "attention_resolved",
+        ),
+
         C::WriteOrchestratorCheckpoint { checkpoint } => (
             "orchestrator_checkpoint",
             // The store is keyed on it, so an unnamed checkpoint has no row to
@@ -358,6 +479,76 @@ fn check_routing(envelope: &CommandEnvelope, route: &Route) -> Result<(), Refusa
         && declared.as_str() != route.aggregate_id
     {
         return Err(mismatch("target_aggregate_id", declared.as_str()));
+    }
+    Ok(())
+}
+
+/// The receipt id for one command's authority result.
+///
+/// `(project_id, idempotency_key)` is already globally unique by
+/// `event_idempotency_project`, which makes this collision-free and stable
+/// across a retry — a denied or paged command writes no event, so the retry
+/// has to derive the same id or the ledger grows a duplicate per attempt.
+//
+// ponytail: `:`-joined like `event_id` elsewhere in this path. Two keys that
+// differ only in where a `:` falls would collide; the house already accepts
+// that for event ids, and the alternative is a length-prefixed encoding no
+// human can read in a psql session.
+fn receipt_for(
+    envelope: &CommandEnvelope,
+    route: &Route,
+    action_class: &str,
+    observed_basis: &str,
+) -> gwk_domain::entity::Receipt {
+    gwk_domain::entity::Receipt {
+        id: ReceiptId::new(format!(
+            "receipt:{}:{}",
+            envelope.project_id.as_str(),
+            envelope.idempotency_key.as_str()
+        )),
+        actor: envelope.actor.clone(),
+        action: action_class.to_owned(),
+        subject_type: route.aggregate_type.to_owned(),
+        subject_id: route.aggregate_id.clone(),
+        // No edge: an authority result attests a DECISION about a command, not
+        // a state flip. The flip receipt the liveness rule needs is a different
+        // row with `from`/`to` set, and conflating them would make the ledger
+        // unable to answer which kind of fact it is holding.
+        from: None,
+        to: None,
+        observed_basis: Some(observed_basis.to_owned()),
+        // The command's own time, not the clock: replay must rebuild the same
+        // ledger it built live.
+        ts: envelope.issued_at.clone(),
+    }
+}
+
+fn actor_json(envelope: &CommandEnvelope) -> Result<serde_json::Value, Refusal> {
+    serde_json::to_value(&envelope.actor)
+        .map_err(|e| Refusal::storage(format!("serialize actor: {e}")))
+}
+
+/// An explicit `RaiseAttention` may not open a second item over an open one.
+///
+/// The kernel's own page path silently joins the existing item, because it has
+/// no id of its own to honor. A caller-issued command does: it named an id and
+/// expects a row under it, so a duplicate is refused by name rather than
+/// accepted as a write that quietly did nothing.
+async fn check_attention_dedup(
+    conn: &mut PgConnection,
+    command: &KernelCommand,
+) -> Result<(), Refusal> {
+    let KernelCommand::RaiseAttention {
+        kind, subject_ref, ..
+    } = command
+    else {
+        return Ok(());
+    };
+    if let Some(open) = unresolved_attention(conn, kind, subject_ref.as_deref()).await? {
+        return Err(Refusal::validation(format!(
+            "attention item {open:?} is already open on ({kind:?}, {:?})",
+            subject_ref.as_deref().unwrap_or_default()
+        )));
     }
     Ok(())
 }
@@ -522,7 +713,17 @@ async fn decide(
         | C::SendMessage { .. }
         | C::IssueCommand { .. }
         | C::OpenGate { .. }
-        | C::RecordEvidence { .. } => 0,
+        | C::RecordEvidence { .. }
+        | C::GrantAuthority { .. }
+        | C::RaiseAttention { .. } => 0,
+
+        // Neither row carries a version column, so there is no CAS to express:
+        // a grant is live until revoked and an item is open until resolved,
+        // and both projections refuse the second write themselves — the UPDATE
+        // is predicated on the state it expects to find.
+        C::RevokeAuthority { .. } | C::ResolveAttention { .. } => {
+            current_aggregate_version(conn, route.aggregate_type, &route.aggregate_id).await?
+        }
 
         C::TransitionTask {
             to,
@@ -957,19 +1158,17 @@ mod tests {
         // Not a silent no-op and not a wildcard "unknown command": the caller
         // is told which command was refused, and the kernel never writes an
         // event it has no projection for.
-        let grant = KernelCommand::GrantAuthority {
-            authority_grant_id: gwk_domain::ids::AuthorityGrantId::new("ag-1"),
-            grantee: gwk_domain::envelope::Actor {
-                kind: "operator".to_owned(),
-                id: None,
-            },
-            action_class: "deploy".to_owned(),
-            scope: None,
-            expires_at: None,
+        // `ingest_record` is now the LAST command this kernel does not project.
+        // When task 17 lands it there is no out-of-scope command left, and this
+        // case should be deleted rather than pointed at something else.
+        let ingest = KernelCommand::IngestRecord {
+            kind: gwk_domain::ingestion::IngestionKind::Memory,
+            payload: serde_json::json!({}),
+            payload_ref: None,
         };
-        let refusal = route_of(&grant).expect_err("out of scope");
+        let refusal = route_of(&ingest).expect_err("out of scope");
         assert_eq!(refusal.code, KernelErrorCode::Validation);
-        assert!(refusal.message.contains("grant_authority"), "{refusal}");
+        assert!(refusal.message.contains("ingest_record"), "{refusal}");
     }
 
     #[test]

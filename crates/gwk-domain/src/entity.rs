@@ -261,6 +261,14 @@ pub struct AuthorityGrant {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[specta(optional)]
     pub expires_at: Option<Timestamp>,
+    // Set together when the grant is withdrawn. Absent means live: a grant with
+    // no revocation stamp is one that still matches, subject only to expiry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub revoked_at: Option<Timestamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub revoke_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[specta(optional)]
     pub receipt_id: Option<ReceiptId>,
@@ -323,9 +331,15 @@ pub struct AttentionItem {
     #[specta(optional)]
     pub raised_by: Option<Actor>,
     pub raised_at: Timestamp,
+    // Set together when someone closes the item. While `resolved_at` is absent
+    // the item is what the (kind, subject_ref) dedup counts, so it is also the
+    // field that decides whether the same problem raises a second time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[specta(optional)]
     pub resolved_at: Option<Timestamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub resolution: Option<String>,
 }
 
 /// An isolated working copy a writer attempt runs in.

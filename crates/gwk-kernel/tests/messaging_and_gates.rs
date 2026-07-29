@@ -12,11 +12,12 @@
 mod common;
 
 use common::{
-    apply, drop_database, envelope, event_count, fresh_store, maintenance_pool, refuse, state_row,
+    actor, apply, drop_database, envelope, event_count, fresh_store, maintenance_pool, refuse,
+    state_row,
 };
 use gwk_domain::command::KernelCommand;
 use gwk_domain::fsm::{CommandState, GateVerdict, MessageState, Outcome};
-use gwk_domain::ids::{ByteCount, CommandId, EvidenceId, GateId, MessageId};
+use gwk_domain::ids::{AuthorityGrantId, ByteCount, CommandId, EvidenceId, GateId, MessageId};
 use gwk_domain::protocol::{KernelErrorCode, KernelResult};
 use gwk_kernel::store::PgEventStore;
 use sqlx::Row;
@@ -69,6 +70,24 @@ fn issue(id: &str) -> KernelCommand {
         targets: vec!["a-1".to_owned(), "a-2".to_owned()],
         actor: None,
     }
+}
+
+/// `issue_command` is the one command in the authority risk table, so every
+/// case that issues one has to hold a `stop` grant first. Without this they
+/// page instead of applying — which is the gate working, not a test problem.
+async fn grant_stop(store: &PgEventStore) {
+    apply(
+        store,
+        "grant-stop",
+        KernelCommand::GrantAuthority {
+            authority_grant_id: AuthorityGrantId::new("g-stop"),
+            grantee: actor("kernel"),
+            action_class: "stop".to_owned(),
+            scope: None,
+            expires_at: None,
+        },
+    )
+    .await;
 }
 
 fn move_command(id: &str, to: CommandState, expected_version: u32) -> KernelCommand {
@@ -169,6 +188,7 @@ async fn a_commands_outcome_and_its_terminal_state_are_one_write() {
     let maintenance = maintenance_pool().await;
     let (name, store) = fresh_store(&maintenance, "cmdoutcome", 64).await;
 
+    grant_stop(&store).await;
     apply(&store, "issue", issue("c-1")).await;
     assert_eq!(command_row(&store, "c-1").await, ("issued".to_owned(), 1));
 
@@ -245,6 +265,7 @@ async fn an_outcome_before_the_signal_is_an_illegal_edge_not_a_completion() {
     let maintenance = maintenance_pool().await;
     let (name, store) = fresh_store(&maintenance, "cmdearly", 64).await;
 
+    grant_stop(&store).await;
     apply(&store, "issue", issue("c-1")).await;
     // issued -> verification_complete is not an accepted edge. Without the
     // edge check this would complete a command nobody ever signaled, and the
@@ -262,7 +283,8 @@ async fn an_outcome_before_the_signal_is_an_illegal_edge_not_a_completion() {
     .await;
     assert_eq!(code, KernelErrorCode::IllegalEdge, "{text}");
     assert_eq!(command_row(&store, "c-1").await, ("issued".to_owned(), 1));
-    assert_eq!(event_count(&store).await, 1);
+    // The grant and the issue, and nothing from the refusal.
+    assert_eq!(event_count(&store).await, 2);
 
     drop_database(&maintenance, &name).await;
 }

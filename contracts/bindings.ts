@@ -111,6 +111,7 @@ export type AttentionItem_Deserialize = {
 	raised_by?: Actor_Deserialize | null,
 	raised_at: Timestamp,
 	resolved_at?: Timestamp | null,
+	resolution?: string | null,
 };
 
 /**  Something the operator should look at. `kind` is OPEN. */
@@ -122,6 +123,7 @@ export type AttentionItem_Serialize = {
 	raised_by?: Actor_Serialize | null,
 	raised_at: Timestamp,
 	resolved_at?: Timestamp | null,
+	resolution?: string | null,
 };
 
 /**  A standing authorization: what `grantee` may do without paging the operator. */
@@ -138,6 +140,8 @@ export type AuthorityGrant_Deserialize = {
 	scope?: string | null,
 	granted_at: Timestamp,
 	expires_at?: Timestamp | null,
+	revoked_at?: Timestamp | null,
+	revoke_reason?: string | null,
 	receipt_id?: ReceiptId | null,
 };
 
@@ -150,6 +154,8 @@ export type AuthorityGrant_Serialize = {
 	scope?: string | null,
 	granted_at: Timestamp,
 	expires_at?: Timestamp | null,
+	revoked_at?: Timestamp | null,
+	revoke_reason?: string | null,
 	receipt_id?: ReceiptId | null,
 };
 

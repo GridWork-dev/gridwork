@@ -13,6 +13,7 @@
 //! land on top of them.
 
 pub mod admin;
+pub mod authority;
 pub mod config;
 pub mod contract_sql;
 pub mod error;

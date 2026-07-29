@@ -824,6 +824,98 @@ pub(crate) async fn apply_event(
             .map_err(|e| db("insert evidence", e))?;
         }
 
+        // ---- authority ----
+        KernelCommand::GrantAuthority {
+            authority_grant_id,
+            grantee,
+            action_class,
+            scope,
+            expires_at,
+        } => {
+            sqlx::query(
+                "INSERT INTO gwk.authority_grant \
+                   (id, grantee, action_class, scope, granted_at, expires_at) \
+                 VALUES ($1, $2, $3, $4, $5::timestamptz, $6::timestamptz)",
+            )
+            .bind(authority_grant_id.as_str())
+            .bind(json_opt(Some(grantee))?)
+            .bind(action_class)
+            .bind(scope.as_deref())
+            .bind(at)
+            .bind(expires_at.as_ref().map(|t| t.as_str()))
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| db("insert authority grant", e))?;
+        }
+        KernelCommand::RevokeAuthority {
+            authority_grant_id,
+            reason,
+        } => {
+            // `revoked_at` is set from the EVENT, not `now()`: replay must
+            // reach the same grant table it did live, and a grant's liveness is
+            // read against a command's `issued_at`.
+            let done = sqlx::query(
+                "UPDATE gwk.authority_grant \
+                 SET revoked_at = $2::timestamptz, revoke_reason = COALESCE($3, revoke_reason) \
+                 WHERE id = $1",
+            )
+            .bind(authority_grant_id.as_str())
+            .bind(at)
+            .bind(reason.as_deref())
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| db("revoke authority grant", e))?;
+            require_one(done, "authority_grant", authority_grant_id.as_str())?;
+        }
+
+        // ---- attention ----
+        KernelCommand::RaiseAttention {
+            attention_item_id,
+            kind,
+            summary,
+            subject_ref,
+            raised_by,
+        } => {
+            sqlx::query(
+                "INSERT INTO gwk.attention_item \
+                   (id, kind, summary, subject_ref, raised_by, raised_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6::timestamptz)",
+            )
+            .bind(attention_item_id.as_str())
+            .bind(kind)
+            .bind(summary)
+            .bind(subject_ref.as_deref())
+            .bind(json_opt(raised_by.as_ref())?)
+            .bind(at)
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| db("insert attention item", e))?;
+        }
+        KernelCommand::ResolveAttention {
+            attention_item_id,
+            resolution,
+        } => {
+            // Only an UNRESOLVED item resolves. Resolving twice would move the
+            // stamp and, worse, silently re-open the (kind, subject_ref) dedup
+            // slot's history — `require_one` turns that into a not-found.
+            let done = sqlx::query(
+                "UPDATE gwk.attention_item \
+                 SET resolved_at = $2::timestamptz, resolution = COALESCE($3, resolution) \
+                 WHERE id = $1 AND resolved_at IS NULL",
+            )
+            .bind(attention_item_id.as_str())
+            .bind(at)
+            .bind(resolution.as_deref())
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| db("resolve attention item", e))?;
+            require_one(
+                done,
+                "unresolved attention_item",
+                attention_item_id.as_str(),
+            )?;
+        }
+
         // The epoch boundary is the log itself — there is no row behind it.
         KernelCommand::ActivateKernel { .. } => {}
 
@@ -831,11 +923,7 @@ pub(crate) async fn apply_event(
         // phase decide about every one of these rather than let it fall into a
         // silent no-op. The submit path refuses them at the boundary, so a log
         // written by THIS kernel can never contain one.
-        KernelCommand::GrantAuthority { .. }
-        | KernelCommand::RevokeAuthority { .. }
-        | KernelCommand::RaiseAttention { .. }
-        | KernelCommand::ResolveAttention { .. }
-        | KernelCommand::IngestRecord { .. } => {
+        KernelCommand::IngestRecord { .. } => {
             return Err(Refusal::storage(format!(
                 "{} has no projection in this kernel yet",
                 command.command_type()
@@ -843,6 +931,102 @@ pub(crate) async fn apply_event(
         }
     }
     Ok(())
+}
+
+/// Write the immutable attestation every authority result owes.
+///
+/// `ON CONFLICT DO NOTHING` because a receipt is a fact, not a counter: a
+/// denied or paged command writes no event, so the idempotency pre-check —
+/// which reads the log — cannot see the retry coming, and re-attesting the
+/// identical fact must be a no-op rather than a primary-key exception.
+pub(crate) async fn write_receipt(
+    conn: &mut PgConnection,
+    receipt: &gwk_domain::entity::Receipt,
+) -> Result<(), Refusal> {
+    sqlx::query(
+        "INSERT INTO gwk.receipt \
+           (id, actor, action, subject_type, subject_id, from_state, to_state, \
+            observed_basis, ts) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::timestamptz) \
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(receipt.id.as_str())
+    .bind(json_opt(Some(&receipt.actor))?)
+    .bind(&receipt.action)
+    .bind(&receipt.subject_type)
+    .bind(&receipt.subject_id)
+    .bind(receipt.from.as_deref())
+    .bind(receipt.to.as_deref())
+    .bind(receipt.observed_basis.as_deref())
+    .bind(receipt.ts.as_str())
+    .execute(&mut *conn)
+    .await
+    .map_err(|e| db("write receipt", e))?;
+    Ok(())
+}
+
+/// Raise the deduplicated attention item a page owes.
+///
+/// `ON CONFLICT DO NOTHING` against the unresolved-dedup index: a page fires
+/// once per real problem, so the second command to hit the same
+/// `(kind, subject_ref)` joins the open item instead of stacking a new one.
+/// Deliberately different from the explicit `RaiseAttention` command, which
+/// refuses a duplicate rather than silently doing nothing — there the caller
+/// named an id and expects a row under it.
+pub(crate) async fn page_attention(
+    conn: &mut PgConnection,
+    attention_item_id: &str,
+    summary: &str,
+    subject_ref: &str,
+    raised_by: &serde_json::Value,
+    at: &str,
+) -> Result<(), Refusal> {
+    // One kind, fixed here rather than passed: every item this path raises is
+    // the same thing — the kernel refused a gated command. The caller-facing
+    // `RaiseAttention` is where an open kind belongs.
+    let kind = "authority";
+    sqlx::query(
+        "INSERT INTO gwk.attention_item \
+           (id, kind, summary, subject_ref, raised_by, raised_at) \
+         VALUES ($1, $2, $3, $4, $5, $6::timestamptz) \
+         ON CONFLICT (kind, subject_ref) WHERE resolved_at IS NULL DO NOTHING",
+    )
+    .bind(attention_item_id)
+    .bind(kind)
+    .bind(summary)
+    .bind(subject_ref)
+    .bind(raised_by)
+    .bind(at)
+    .execute(&mut *conn)
+    .await
+    .map_err(|e| db("page attention", e))?;
+    Ok(())
+}
+
+/// Is an unresolved item already covering this `(kind, subject_ref)`?
+///
+/// The pre-check in front of the explicit `RaiseAttention` command, so a
+/// duplicate comes back as a typed refusal naming the open item rather than as
+/// a unique-violation raised from inside the projection.
+pub(crate) async fn unresolved_attention(
+    conn: &mut PgConnection,
+    kind: &str,
+    subject_ref: Option<&str>,
+) -> Result<Option<String>, Refusal> {
+    let Some(subject_ref) = subject_ref else {
+        // NULL subject_ref is distinct in the dedup index, so there is nothing
+        // to collide with and nothing to pre-check.
+        return Ok(None);
+    };
+    sqlx::query_scalar(
+        "SELECT id FROM gwk.attention_item \
+         WHERE kind = $1 AND subject_ref = $2 AND resolved_at IS NULL",
+    )
+    .bind(kind)
+    .bind(subject_ref)
+    .fetch_optional(conn)
+    .await
+    .map_err(|e| db("read unresolved attention", e))
 }
 
 #[cfg(test)]

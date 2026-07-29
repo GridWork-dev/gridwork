@@ -1123,6 +1123,8 @@ mod tests {
                     scope: None,
                     granted_at: ts(),
                     expires_at: None,
+                    revoked_at: None,
+                    revoke_reason: None,
                     receipt_id: None,
                 },
             },
@@ -1158,6 +1160,7 @@ mod tests {
                     raised_by: None,
                     raised_at: ts(),
                     resolved_at: None,
+                    resolution: None,
                 },
             },
             ProjectionRecord::Worktree {

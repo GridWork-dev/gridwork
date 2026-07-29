@@ -500,6 +500,12 @@ CREATE TABLE gwk.authority_grant (
   scope        text,
   granted_at   timestamptz NOT NULL DEFAULT now(),
   expires_at   timestamptz,
+  -- Set together when the grant is withdrawn. Without them a revoke could only
+  -- be expressed by backdating `expires_at`, which makes "revoked for cause"
+  -- and "expired on schedule" the same row — and `gw authority list` reads this
+  -- table as the audit trail, so that difference is the point of it.
+  revoked_at    timestamptz,
+  revoke_reason text,
   receipt_id   text
 );
 
@@ -552,8 +558,22 @@ CREATE TABLE gwk.attention_item (
   subject_ref text,
   raised_by   jsonb,
   raised_at   timestamptz NOT NULL DEFAULT now(),
-  resolved_at timestamptz
+  resolved_at timestamptz,
+  resolution  text
 );
+
+-- Attention deduplicates by (kind, subject_ref) WHILE UNRESOLVED: a page fires
+-- once per real problem, not once per retry of the command that hit it. The
+-- predicate is what makes the same pair raisable again after someone resolves
+-- it — a recurring problem is a new item, not a reopened one.
+--
+-- NULL `subject_ref` stays distinct (the PostgreSQL default): an item about
+-- nothing in particular is not the same item as another about nothing in
+-- particular. The kernel's own page path always names a subject, so this only
+-- affects an explicit RaiseAttention that omits one.
+CREATE UNIQUE INDEX attention_item_unresolved_dedup
+  ON gwk.attention_item (kind, subject_ref)
+  WHERE resolved_at IS NULL;
 
 -- `released_at`/`disposition` are what make a released worktree distinguishable
 -- from a live one in the projection. Without them the release is recoverable
