@@ -251,7 +251,7 @@ export type Budget_Serialize = {
  * 
  *  `projection_hash` is deterministic over the canonical projection records
  *  sorted by table then primary key — that determinism is what lets startup
- *  compare a restored checkpoint against live projections and REFUSE readiness
+ *  compare this recorded hash against the live projections and REFUSE readiness
  *  on disagreement instead of serving a silently divergent state.
  */
 export type Checkpoint = Checkpoint_Serialize | Checkpoint_Deserialize;
@@ -261,7 +261,7 @@ export type Checkpoint = Checkpoint_Serialize | Checkpoint_Deserialize;
  * 
  *  `projection_hash` is deterministic over the canonical projection records
  *  sorted by table then primary key — that determinism is what lets startup
- *  compare a restored checkpoint against live projections and REFUSE readiness
+ *  compare this recorded hash against the live projections and REFUSE readiness
  *  on disagreement instead of serving a silently divergent state.
  */
 export type Checkpoint_Deserialize = {
@@ -283,7 +283,7 @@ export type Checkpoint_Deserialize = {
  * 
  *  `projection_hash` is deterministic over the canonical projection records
  *  sorted by table then primary key — that determinism is what lets startup
- *  compare a restored checkpoint against live projections and REFUSE readiness
+ *  compare this recorded hash against the live projections and REFUSE readiness
  *  on disagreement instead of serving a silently divergent state.
  */
 export type Checkpoint_Serialize = {
