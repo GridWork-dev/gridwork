@@ -26,11 +26,21 @@ fn private_dir(tag: &str) -> PathBuf {
 
 /// Run `gw` with a socket path of the caller's choosing.
 fn gw(socket: &Path, line: &str) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_gw"))
-        .args(line.split_whitespace())
-        .env("GWK_SOCKET_PATH", socket)
-        .output()
-        .expect("run gw")
+    gw_env(line, &[("GWK_SOCKET_PATH", &socket.to_string_lossy())])
+}
+
+/// Run `gw` with exactly the environment given — nothing inherited that matters.
+///
+/// A subprocess is what makes this safe: the credentials and the socket path a
+/// case needs go to the child, rather than into a variable every other case in
+/// this binary would see.
+fn gw_env(line: &str, env: &[(&str, &str)]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_gw"));
+    command.args(line.split_whitespace());
+    for (name, value) in env {
+        command.env(name, value);
+    }
+    command.output().expect("run gw")
 }
 
 fn code(output: &Output) -> i32 {
@@ -308,4 +318,222 @@ async fn the_binary_talks_to_a_real_daemon() {
     )))
     .execute(&maintenance)
     .await;
+}
+
+/// A login-capable, NON-superuser role — the only kind a daemon may run as.
+///
+/// Separate from the role the other live case grants to, which is `NOLOGIN`:
+/// this one has to be able to connect, because the whole point is to prove the
+/// privilege check passes for a credential `admin init` actually granted.
+const DAEMON_ROLE: &str = "gwk_cli_daemon";
+/// The throwaway password for that role on an ephemeral test database. Not a
+/// secret: the superuser DSN this case is handed already carries CI's own.
+const DAEMON_PASSWORD: &str = "ci";
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn the_admin_door_initializes_a_database_and_the_daemon_serves_it() {
+    use base64::prelude::{BASE64_STANDARD, Engine as _};
+    use sqlx::PgPool;
+
+    let admin_url = std::env::var("GWK_TEST_ADMIN_DATABASE_URL")
+        .expect("GWK_TEST_ADMIN_DATABASE_URL must point at a PostgreSQL superuser DSN");
+    let maintenance = PgPool::connect(&admin_url).await.expect("maintenance");
+    // Created if absent, then forced into the shape this case needs. Both are
+    // allowed to fail: the second is what makes a leftover role from an earlier
+    // run usable rather than a reason to stop.
+    for statement in [
+        format!("CREATE ROLE {DAEMON_ROLE} LOGIN PASSWORD '{DAEMON_PASSWORD}';"),
+        format!(
+            "ALTER ROLE {DAEMON_ROLE} LOGIN PASSWORD '{DAEMON_PASSWORD}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;"
+        ),
+    ] {
+        let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(statement))
+            .execute(&maintenance)
+            .await;
+    }
+
+    let live = format!("gwk_daemon_{}", std::process::id());
+    let scratch = format!("gwk_scratch_{}", std::process::id());
+    for name in [&live, &scratch] {
+        let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "DROP DATABASE IF EXISTS {name} WITH (FORCE);"
+        )))
+        .execute(&maintenance)
+        .await;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name};")))
+            .execute(&maintenance)
+            .await
+            .expect("create database");
+    }
+
+    let (prefix, _) = admin_url.rsplit_once('/').expect("a /database suffix");
+    let admin_dsn = format!("{prefix}/{live}");
+    // The runtime credential: the same server and database, as the granted role
+    // rather than as a superuser. A daemon handed a superuser refuses to start,
+    // which is a rule this case would otherwise never reach.
+    let runtime_dsn = {
+        let (scheme, rest) = prefix.split_once("://").expect("a scheme");
+        let host = rest.rsplit_once('@').map_or(rest, |(_, host)| host);
+        format!("{scheme}://{DAEMON_ROLE}:{DAEMON_PASSWORD}@{host}/{live}")
+    };
+
+    let dir = private_dir("daemon");
+    let socket = dir.join("gwk.sock");
+    let blob_root = dir.join("blobs");
+    let revision = "a1b2c3d4e5".repeat(4);
+    let kek = BASE64_STANDARD.encode([0x5a_u8; 32]);
+    let blob_root_text = blob_root.to_string_lossy().into_owned();
+    let admin_env: Vec<(&str, &str)> = vec![
+        ("GWK_ADMIN_DATABASE_URL", &admin_dsn),
+        ("GWK_RUNTIME_ROLE", DAEMON_ROLE),
+        ("GWK_PUBLIC_REVISION", &revision),
+        ("GWK_BLOB_ROOT", &blob_root_text),
+        ("GWK_BLOB_KEK", &kek),
+        ("GWK_BLOB_KEK_ID", "kek-test"),
+    ];
+
+    let init = gw_env("admin init", &admin_env);
+    assert_eq!(code(&init), 0, "{}", String::from_utf8_lossy(&init.stdout));
+    let answer = json(&init);
+    assert_eq!(answer["type"], "admin_initialized");
+    assert_eq!(answer["outcome"], "initialized");
+    assert_eq!(answer["public_revision"], revision);
+
+    // Again, unchanged: the contract is already installed and genesis is
+    // idempotent under its own key, so a second run is a no-op and not a second
+    // epoch.
+    let again = gw_env("admin init", &admin_env);
+    assert_eq!(
+        code(&again),
+        0,
+        "{}",
+        String::from_utf8_lossy(&again.stdout)
+    );
+    assert_eq!(json(&again)["outcome"], "already_initialized");
+
+    let verified = gw_env("admin verify", &admin_env);
+    assert_eq!(
+        code(&verified),
+        0,
+        "{}",
+        String::from_utf8_lossy(&verified.stdout)
+    );
+    let answer = json(&verified);
+    assert_eq!(answer["target"], "initialized");
+    assert_eq!(answer["runtime_role_exists"], true);
+    // The load-bearing assertion of the whole case: the role `admin init`
+    // granted to is one the daemon will accept. If the grants and the refusal
+    // list ever disagree, `gw daemon` can never start, and nothing short of
+    // running both halves finds that.
+    assert_eq!(answer["violations"], serde_json::json!([]));
+    assert_eq!(
+        answer["detail"]["contract_sha256"],
+        answer["expected_contract_sha256"]
+    );
+
+    let rebuilt = gw_env(
+        &format!("admin rebuild-projections --scratch-database {scratch}"),
+        &admin_env,
+    );
+    assert_eq!(
+        code(&rebuilt),
+        0,
+        "{}",
+        String::from_utf8_lossy(&rebuilt.stdout)
+    );
+    let answer = json(&rebuilt);
+    // A replay of the log into an empty scratch agrees with the live
+    // projections. It also proves the reader store did not fence anybody: the
+    // daemon below starts afterwards and appends nothing, but `admin init`
+    // already claimed an epoch, and a rebuild that had claimed another would
+    // have made this database unwritable.
+    assert_eq!(answer["agrees"], true, "{answer}");
+    assert_eq!(answer["live_hash"], answer["rebuilt_hash"]);
+
+    // The service itself, as a service: its own process, its own credential.
+    let mut serving = Command::new(env!("CARGO_BIN_EXE_gw"))
+        .arg("daemon")
+        .env("GWK_DATABASE_URL", &runtime_dsn)
+        .env("GWK_SOCKET_PATH", &socket)
+        .env("GWK_BLOB_ROOT", &blob_root)
+        .env("GWK_BLOB_KEK", &kek)
+        .env("GWK_BLOB_KEK_ID", "kek-test")
+        .env("GWK_PUBLIC_REVISION", &revision)
+        .spawn()
+        .expect("spawn the daemon");
+
+    // Poll rather than sleep once: a fixed wait is either flaky or slow, and
+    // "answers health" is the only definition of started that matters.
+    let mut health = None;
+    for _ in 0..100 {
+        let out = gw(&socket, "kernel health");
+        if code(&out) == 0 {
+            health = Some(out);
+            break;
+        }
+        assert!(
+            serving.try_wait().expect("wait").is_none(),
+            "the daemon exited before it served: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let health = health.expect("the daemon never answered health");
+    assert_eq!(
+        json(&health),
+        serde_json::json!({"type": "health", "ready": true, "sealed": true})
+    );
+
+    let status = gw(&socket, "kernel status");
+    assert_eq!(code(&status), 0);
+    let answer = json(&status);
+    // The revision it was told, reported back — the comparison `build-info` and
+    // genesis exist for.
+    assert_eq!(answer["public_revision"], revision);
+    assert_eq!(answer["sealed"], true);
+
+    // A second daemon on the same database must refuse rather than race: one
+    // writer per store, enforced by an advisory lock that is never waited on.
+    let second = gw_env(
+        "daemon",
+        &[
+            ("GWK_DATABASE_URL", &runtime_dsn),
+            (
+                "GWK_SOCKET_PATH",
+                &dir.join("second.sock").to_string_lossy(),
+            ),
+            ("GWK_BLOB_ROOT", &blob_root.to_string_lossy()),
+            ("GWK_BLOB_KEK", &kek),
+            ("GWK_BLOB_KEK_ID", "kek-test"),
+            ("GWK_PUBLIC_REVISION", &revision),
+        ],
+    );
+    assert_eq!(
+        code(&second),
+        3,
+        "{}",
+        String::from_utf8_lossy(&second.stdout)
+    );
+    assert_eq!(json(&second)["code"], "fenced");
+
+    // SIGTERM is how a service manager asks. The socket goes with it, or the
+    // next start would take the stale-takeover path for no reason.
+    let pid = serving.id();
+    Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .status()
+        .expect("signal the daemon");
+    let stopped = serving.wait().expect("wait");
+    assert!(stopped.success(), "the daemon exited {stopped:?}");
+    assert!(!socket.exists(), "shutdown left the socket behind");
+
+    let _ = std::fs::remove_dir_all(&dir);
+    for name in [&live, &scratch] {
+        let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "DROP DATABASE IF EXISTS {name} WITH (FORCE);"
+        )))
+        .execute(&maintenance)
+        .await;
+    }
 }

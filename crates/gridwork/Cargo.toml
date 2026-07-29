@@ -18,6 +18,9 @@ path = "src/main.rs"
 base64.workspace = true
 gwk-domain.workspace = true
 gwk-kernel.workspace = true
+# `admin` derives the scratch DSN from the admin one, which means holding a
+# secret long enough to change one path segment in it.
+secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 # A blob's address is a digest over its own plaintext, and `commit` refuses one
@@ -30,15 +33,15 @@ tokio = { workspace = true, features = [
   "macros",
   "net",
   "rt",
+  "rt-multi-thread",
+  "signal",
   "time",
 ] }
 
 [dev-dependencies]
 # The live case stands up a real daemon on a temp socket and drives the built
 # binary against it, which needs a database to point the daemon at.
-secrecy.workspace = true
 sqlx = { workspace = true, features = ["json"] }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]
 workspace = true

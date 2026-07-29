@@ -20,6 +20,7 @@ use gwk_domain::ids::Seq;
 use gwk_domain::ingestion::IngestionKind;
 use gwk_domain::protocol::ProjectionKind;
 
+use crate::admin::Retention;
 use crate::exit::Failure;
 
 /// Every flag in the tree that takes a value.
@@ -36,6 +37,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--project",
     "--reason",
     "--resolution",
+    "--scratch-database",
 ];
 
 /// Every flag that is its own answer.
@@ -71,6 +73,17 @@ pub struct Invocation {
 pub enum Verb {
     Help,
     BuildInfo,
+
+    /// The service. The only verb that does not return.
+    Daemon,
+    AdminInit,
+    AdminVerify,
+    AdminRebuildProjections {
+        scratch: String,
+    },
+    AdminBlob {
+        what: crate::admin::Retention,
+    },
 
     Health,
     Status,
@@ -140,6 +153,14 @@ pub const HELP: &str = "\
 gw — the GridWork kernel's command line
 
   gw build-info
+  gw daemon
+  gw admin init
+  gw admin verify
+  gw admin rebuild-projections --scratch-database <name>
+  gw admin blob pin <address> <evidence-id>
+  gw admin blob unpin <address> <evidence-id>
+  gw admin blob sweep
+  gw admin blob shred <address>
   gw kernel health|status|watermark|verify-sealed
   gw kernel activate --cutover-id <id> --archive-manifest-sha256 <hex>
   gw command submit --file <path|->
@@ -162,6 +183,9 @@ gw — the GridWork kernel's command line
 
 Every answer is JSON on standard output. Exits: 0 success, 2 usage or input,
 3 refused, 4 not found, 5 unavailable, 6 does not verify, 10 a fault in gw.
+
+`daemon` and `admin` read GWK_DATABASE_URL / GWK_ADMIN_DATABASE_URL and the blob
+KEK. Every other verb uses only the socket.
 ";
 
 /// Parse the arguments after the program name.
@@ -184,6 +208,8 @@ fn verb(rest: &mut Rest) -> Result<Verb, Failure> {
     match first.as_str() {
         "help" => Ok(Verb::Help),
         "build-info" => Ok(Verb::BuildInfo),
+        "daemon" => Ok(Verb::Daemon),
+        "admin" => admin(rest),
         "kernel" => kernel(rest),
         "command" => match rest.word("command")?.as_str() {
             "submit" => Ok(Verb::CommandSubmit {
@@ -230,6 +256,36 @@ fn verb(rest: &mut Rest) -> Result<Verb, Failure> {
             other => Err(unknown("ingest", other)),
         },
         other => Err(unknown("gw", other)),
+    }
+}
+
+fn admin(rest: &mut Rest) -> Result<Verb, Failure> {
+    match rest.word("admin")?.as_str() {
+        "init" => Ok(Verb::AdminInit),
+        "verify" => Ok(Verb::AdminVerify),
+        "rebuild-projections" => Ok(Verb::AdminRebuildProjections {
+            scratch: rest.required("--scratch-database")?,
+        }),
+        // Retention, which is why it is here and not on the client socket: no
+        // wire request removes a blob.
+        "blob" => Ok(Verb::AdminBlob {
+            what: match rest.word("admin blob")?.as_str() {
+                "pin" => Retention::Pin {
+                    address: blob_address(&rest.word("a blob address")?)?,
+                    evidence: rest.word("an evidence id")?,
+                },
+                "unpin" => Retention::Unpin {
+                    address: blob_address(&rest.word("a blob address")?)?,
+                    evidence: rest.word("an evidence id")?,
+                },
+                "sweep" => Retention::Sweep,
+                "shred" => Retention::Shred {
+                    address: blob_address(&rest.word("a blob address")?)?,
+                },
+                other => return Err(unknown("admin blob", other)),
+            },
+        }),
+        other => Err(unknown("admin", other)),
     }
 }
 

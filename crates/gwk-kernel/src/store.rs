@@ -129,6 +129,26 @@ impl PgEventStore {
         })
     }
 
+    /// A store that can READ the log and cannot write it.
+    ///
+    /// It claims no epoch, and that is the whole point. `claim_epoch` BUMPS a
+    /// durable counter, so a verification path that opened an ordinary store
+    /// would fence the daemon it was verifying out of its own log — the
+    /// rebuild-into-scratch comparison is meant to run against a live system,
+    /// not to take it down.
+    ///
+    /// Epoch 0 is never a live epoch, so the fence every mutating transaction
+    /// already compares refuses this store's appends by construction. A reader
+    /// cannot write even by mistake, and the guarantee costs no new check.
+    pub fn open_reader(pool: PgPool) -> Self {
+        Self {
+            pool,
+            admission: Semaphore::new(MAX_INFLIGHT_APPENDS),
+            boot_epoch: 0,
+            blobs: None,
+        }
+    }
+
     /// Attach the blob store a checkpoint writes its records to.
     ///
     /// Without it this store never checkpoints, and that is a real state rather

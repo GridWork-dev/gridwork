@@ -18,6 +18,7 @@
 //!   The database and the KEK belong to `daemon` and `admin`, which is the whole
 //!   reason those two are separate verbs.
 
+pub mod admin;
 pub mod args;
 pub mod client;
 pub mod exit;
@@ -90,6 +91,17 @@ async fn execute(verb: Verb, pretty: bool) -> Result<(), Failure> {
             emit(&build_info(), pretty);
             Ok(())
         }
+
+        // The two verbs that hold a database and a key. Kept in one module so
+        // which paths touch credentials is a question answered by reading the
+        // imports.
+        Verb::Daemon => admin::daemon(pretty).await,
+        Verb::AdminInit => admin::init(pretty).await,
+        Verb::AdminVerify => admin::verify(pretty).await,
+        Verb::AdminRebuildProjections { scratch } => {
+            admin::rebuild_projections(&scratch, pretty).await
+        }
+        Verb::AdminBlob { what } => admin::retention(&what, pretty).await,
 
         // Everything below needs the daemon.
         Verb::Health => ask(KernelRequest::Health {}, pretty).await,
