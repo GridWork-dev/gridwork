@@ -17,8 +17,8 @@ use gwk_domain::envelope::{
 };
 use gwk_domain::fsm::{AttemptState, LeaseMode, TaskState};
 use gwk_domain::ids::{
-    AttemptId, CommandId, DispatchNodeId, EngineId, EngineSessionId, IdempotencyKey, LeaseId,
-    ProjectId, ReceiptId, Seq, TaskId, Timestamp, WorktreeId,
+    AggregateId, AttemptId, CommandId, DispatchNodeId, EngineId, EngineSessionId, IdempotencyKey,
+    LeaseId, ProjectId, ReceiptId, Seq, TaskId, Timestamp, WorktreeId,
 };
 use gwk_domain::inherited::{FindingAction, OrchestratorCheckpoint, RoundFindingSummary};
 use gwk_domain::protocol::{KernelErrorCode, KernelResult};
@@ -465,6 +465,127 @@ async fn a_key_taken_on_this_aggregate_by_another_project_is_a_conflict_not_a_re
     assert!(
         matches!(fresh, KernelResult::CommandApplied { .. }),
         "{fresh:?}"
+    );
+
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
+async fn the_envelopes_routing_and_cas_fields_are_honored_not_ignored() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "routing", 64).await;
+
+    apply(&store, "task", task("t-1")).await;
+    apply(
+        &store,
+        "wt",
+        KernelCommand::RegisterWorktree {
+            worktree_id: WorktreeId::new("wt-1"),
+            repo: "gridwork".into(),
+            path: "/w/kernel".into(),
+            branch: "feature/kernel".into(),
+            base_sha: None,
+            lease_id: None,
+        },
+    )
+    .await;
+
+    let labelled = |key: &str,
+                    ty: Option<&str>,
+                    id: Option<&str>,
+                    version: Option<u32>,
+                    command: &KernelCommand| {
+        let mut envelope = envelope(key, command);
+        envelope.target_aggregate_type = ty.map(str::to_owned);
+        envelope.target_aggregate_id = id.map(AggregateId::new);
+        envelope.expected_version = version;
+        envelope
+    };
+    let transition = KernelCommand::TransitionTask {
+        task_id: TaskId::new("t-1"),
+        to: TaskState::Working,
+        expected_version: 1,
+    };
+
+    // A label that names another aggregate must not quietly mutate the one the
+    // body names — the same reason from_envelope refuses a command_type that
+    // disagrees with its body.
+    for (key, ty, id) in [
+        ("wrong-type", Some("attempt"), None),
+        ("wrong-id", None, Some("t-2")),
+    ] {
+        let result = store
+            .submit(&labelled(key, ty, id, None, &transition))
+            .await;
+        assert!(
+            matches!(
+                result,
+                KernelResult::Error {
+                    code: KernelErrorCode::Validation,
+                    ..
+                }
+            ),
+            "{key}: {result:?}"
+        );
+    }
+    assert_eq!(task_row(&store, "t-1").await, ("submitted".to_owned(), 1));
+
+    // For a command whose body carries no version, the envelope's field is the
+    // only CAS a caller can express. Ignoring it makes an intended
+    // compare-and-swap a silent last-write-wins.
+    let update = KernelCommand::UpdateWorktree {
+        worktree_id: WorktreeId::new("wt-1"),
+        dirty: true,
+        unpushed: false,
+        base_sha: None,
+    };
+    let stale = store
+        .submit(&labelled("wt-stale", None, None, Some(9), &update))
+        .await;
+    assert!(
+        matches!(
+            stale,
+            KernelResult::Error {
+                code: KernelErrorCode::StaleVersion,
+                ..
+            }
+        ),
+        "{stale:?}"
+    );
+    let dirty: bool = sqlx::query_scalar("SELECT dirty FROM gwk.worktree WHERE id = $1")
+        .bind("wt-1")
+        .fetch_one(store.pool())
+        .await
+        .expect("worktree row");
+    assert!(!dirty, "the refused update was applied anyway");
+
+    // Correctly labelled and correctly versioned goes through.
+    let ok = store
+        .submit(&labelled(
+            "wt-ok",
+            Some("worktree"),
+            Some("wt-1"),
+            Some(1),
+            &update,
+        ))
+        .await;
+    assert!(matches!(ok, KernelResult::CommandApplied { .. }), "{ok:?}");
+
+    // A create asserts the aggregate has no events, so 0 is the only version an
+    // envelope may claim for one.
+    let claimed = store
+        .submit(&labelled("t-3", None, None, Some(4), &task("t-3")))
+        .await;
+    assert!(
+        matches!(
+            claimed,
+            KernelResult::Error {
+                code: KernelErrorCode::StaleVersion,
+                ..
+            }
+        ),
+        "{claimed:?}"
     );
 
     drop_database(&maintenance, &name).await;

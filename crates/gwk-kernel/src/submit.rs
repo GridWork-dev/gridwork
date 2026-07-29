@@ -93,6 +93,7 @@ impl PgEventStore {
         let command = KernelCommand::from_envelope(envelope)
             .map_err(|e| Refusal::validation(e.to_string()))?;
         let route = route_of(&command)?;
+        check_routing(envelope, &route)?;
         let payload = serde_json::to_value(&command)
             .map_err(|e| Refusal::storage(format!("serialize command body: {e}")))?;
 
@@ -122,6 +123,7 @@ impl PgEventStore {
             }
             Prior::Unused => decide(&mut tx, envelope, &command, &route).await?,
         };
+        check_expected_version(envelope, expected_version)?;
 
         let event = build_event(envelope, payload, &route, expected_version)?;
         // The kernel's own command path is authorized by the writer LOCK plus
@@ -282,6 +284,56 @@ fn route_of(command: &KernelCommand) -> Result<Route, Refusal> {
         aggregate_id,
         event_type,
     })
+}
+
+/// The envelope's routing metadata must name the aggregate its body does.
+///
+/// `KernelCommand::from_envelope` already refuses an envelope whose
+/// `command_type` disagrees with its body, for the reason that a handler chosen
+/// by the metadata would otherwise run a body of some other shape. These two
+/// fields are the same metadata pointing at the same body; leaving them
+/// unchecked would mean a caller can label an envelope for one aggregate and
+/// mutate another, and be told it succeeded.
+fn check_routing(envelope: &CommandEnvelope, route: &Route) -> Result<(), Refusal> {
+    let mismatch = |field: &str, declared: &str| {
+        Refusal::validation(format!(
+            "envelope {field} {declared:?} does not name the aggregate the body addresses \
+             ({}/{})",
+            route.aggregate_type, route.aggregate_id
+        ))
+    };
+    if let Some(declared) = &envelope.target_aggregate_type
+        && declared != route.aggregate_type
+    {
+        return Err(mismatch("target_aggregate_type", declared));
+    }
+    if let Some(declared) = &envelope.target_aggregate_id
+        && declared.as_str() != route.aggregate_id
+    {
+        return Err(mismatch("target_aggregate_id", declared.as_str()));
+    }
+    Ok(())
+}
+
+/// The envelope's `expected_version`, when present, must agree with the version
+/// the kernel derived for this command.
+///
+/// The field is documented as the CAS precondition, and for the five commands
+/// whose bodies carry no version of their own it is the ONLY CAS a caller can
+/// express — ignoring it turns an intended compare-and-swap into silent
+/// last-write-wins. Checking it against the derived version rather than
+/// replacing that version keeps one rule for all twenty commands: a create
+/// derives 0, a body-CAS command derives what its body already agreed to, and
+/// the rest derive what the log holds now.
+fn check_expected_version(envelope: &CommandEnvelope, derived: u32) -> Result<(), Refusal> {
+    match envelope.expected_version {
+        Some(expected) if expected != derived => Err(Refusal::new(
+            KernelErrorCode::StaleVersion,
+            format!("version conflict: actual {derived}, expected {expected}"),
+        )
+        .with_detail(serde_json::json!({ "actual": derived, "expected": expected }))),
+        _ => Ok(()),
+    }
 }
 
 /// What this command's key already means.
