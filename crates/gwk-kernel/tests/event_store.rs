@@ -7,6 +7,12 @@
 //! `numeric(20,0)` column, epoch supersession, the advisory lock, the wake-up
 //! channel, and the admission bound.
 //!
+//! These cases take a `raw_store` — no genesis, no activation — because the
+//! port sits BELOW the epoch: they append through it directly rather than
+//! through the command path, and their assertions are about exact sequences and
+//! watermarks. An epoch's two events would shift every one of those numbers
+//! while proving nothing about the store.
+//!
 //! `#[ignore]` because it needs a server — see `tests/common/mod.rs` for the
 //! one-line `docker run` that provides one.
 
@@ -14,7 +20,7 @@ mod common;
 
 use std::time::Duration;
 
-use common::{drop_database, fresh_store, maintenance_pool, secret, url_for};
+use common::{drop_database, maintenance_pool, raw_store, secret, url_for};
 use gwk_cert::conformance;
 use gwk_domain::port::{AppendError, EventStore};
 use gwk_kernel::numeric::{from_numeric_text, to_numeric_text};
@@ -33,7 +39,7 @@ async fn the_postgres_store_passes_the_contract_conformance_suite() {
     let mut databases = Vec::new();
     macro_rules! case {
         ($tag:literal, $check:path) => {{
-            let (name, store) = fresh_store(&maintenance, $tag, 64).await;
+            let (name, store) = raw_store(&maintenance, $tag, 64).await;
             $check(&store).await;
             databases.push(name);
         }};
@@ -59,7 +65,7 @@ async fn the_postgres_store_passes_the_contract_conformance_suite() {
 #[ignore = "needs a PostgreSQL; see the module docs"]
 async fn sequences_are_allocated_in_commit_order_under_concurrency() {
     let maintenance = maintenance_pool().await;
-    let (name, store) = fresh_store(&maintenance, "concurrent", 64).await;
+    let (name, store) = raw_store(&maintenance, "concurrent", 64).await;
 
     // Distinct aggregates, so nothing is serialized by the CAS — only by the
     // writer row lock. If allocation were not held to commit, two of these
@@ -146,7 +152,7 @@ async fn the_numeric_column_carries_the_full_u64_range() {
 #[ignore = "needs a PostgreSQL; see the module docs"]
 async fn a_replayed_keyed_batch_returns_the_original_events() {
     let maintenance = maintenance_pool().await;
-    let (name, store) = fresh_store(&maintenance, "idempotent", 64).await;
+    let (name, store) = raw_store(&maintenance, "idempotent", 64).await;
 
     let mut event = conformance::fixture_event("agg", 1);
     event.idempotency_key = Some(gwk_domain::ids::IdempotencyKey::new("retry-me"));
@@ -219,7 +225,7 @@ async fn a_replayed_keyed_batch_returns_the_original_events() {
 #[ignore = "needs a PostgreSQL; see the module docs"]
 async fn a_superseded_epoch_cannot_commit() {
     let maintenance = maintenance_pool().await;
-    let (name, first) = fresh_store(&maintenance, "epoch", 64).await;
+    let (name, first) = raw_store(&maintenance, "epoch", 64).await;
 
     first
         .append(0, None, vec![conformance::fixture_event("agg", 1)])
@@ -253,7 +259,7 @@ async fn a_superseded_epoch_cannot_commit() {
 #[ignore = "needs a PostgreSQL; see the module docs"]
 async fn only_one_process_may_hold_the_writer_lock() {
     let maintenance = maintenance_pool().await;
-    let (name, _store) = fresh_store(&maintenance, "lock", 64).await;
+    let (name, _store) = raw_store(&maintenance, "lock", 64).await;
 
     let held = WriterLock::acquire(&secret(&name))
         .await
@@ -279,7 +285,7 @@ async fn only_one_process_may_hold_the_writer_lock() {
 #[ignore = "needs a PostgreSQL; see the module docs"]
 async fn losing_the_lock_connection_cancels_the_writer() {
     let maintenance = maintenance_pool().await;
-    let (name, _store) = fresh_store(&maintenance, "lockloss", 64).await;
+    let (name, _store) = raw_store(&maintenance, "lockloss", 64).await;
 
     let held = WriterLock::acquire_with_interval(&secret(&name), Duration::from_millis(100))
         .await
@@ -321,7 +327,7 @@ async fn losing_the_lock_connection_cancels_the_writer() {
 #[ignore = "needs a PostgreSQL; see the module docs"]
 async fn a_commit_wakes_listeners_and_a_rollback_does_not() {
     let maintenance = maintenance_pool().await;
-    let (name, store) = fresh_store(&maintenance, "notify", 64).await;
+    let (name, store) = raw_store(&maintenance, "notify", 64).await;
 
     let mut listener = PgListener::connect(&url_for(&name))
         .await
@@ -361,7 +367,7 @@ async fn a_commit_wakes_listeners_and_a_rollback_does_not() {
 #[ignore = "needs a PostgreSQL; see the module docs"]
 async fn a_saturated_writer_refuses_instead_of_queueing() {
     let maintenance = maintenance_pool().await;
-    let (name, store) = fresh_store(&maintenance, "bounded", 1).await;
+    let (name, store) = raw_store(&maintenance, "bounded", 1).await;
 
     // Hold the writer row from outside, so the one admitted append blocks on
     // the lock and the bound is genuinely full.

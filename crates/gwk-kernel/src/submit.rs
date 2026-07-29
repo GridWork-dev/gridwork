@@ -16,6 +16,11 @@
 //!    projections to land together; splitting them would let a crash leave a
 //!    log the projections do not reflect.
 //!
+//! Before any of it sits the **epoch** ([`crate::epoch`]): a log with only its
+//! genesis event is SEALED and admits `activate_kernel` alone, and a log
+//! without even that admits nothing. The check is read under the writer lock
+//! taken in step 1, and activation's own CAS re-proves it at append time.
+//!
 //! Between ownership and the decision sits **authority**: a gated command is
 //! evaluated against the grants on record, and a page commits its receipt and
 //! attention item before refusing. That is the one refusal here that leaves
@@ -41,6 +46,7 @@ use serde::de::DeserializeOwned;
 use sqlx::{PgConnection, Row};
 
 use crate::authority;
+use crate::epoch::{self, Epoch};
 use crate::numeric::from_numeric_text;
 use crate::project::{
     Refusal, apply_event, from_wire_str, page_attention, unresolved_attention, wire_str,
@@ -112,6 +118,7 @@ impl PgEventStore {
         let route = route_of(&command)?;
         check_routing(envelope, &route)?;
         check_body_project(envelope, &command)?;
+        check_activation(envelope, &command)?;
         let payload = serde_json::to_value(&command)
             .map_err(|e| Refusal::storage(format!("serialize command body: {e}")))?;
 
@@ -124,6 +131,14 @@ impl PgEventStore {
         // decides is read under this lock, so no concurrent writer can move the
         // ground between the decision and the append.
         let writer = self.lock_writer(&mut tx).await?;
+        // Under the lock and before the key check: a sealed kernel refuses
+        // whether or not this key has been seen, and answering "replay" out of
+        // a log the caller may not read from yet would be a leak dressed as a
+        // convenience.
+        let epoch = epoch::epoch_of(&mut tx).await?;
+        if !admitted(epoch, &command) {
+            return Err(epoch::sealed_refusal(epoch, command.command_type()));
+        }
 
         let expected_version = match prior_for_key(&mut tx, envelope, &route, &payload).await? {
             Prior::Replay(events) => {
@@ -145,6 +160,7 @@ impl PgEventStore {
                 // answer a retrier can act on. Ownership is the question that
                 // only arises once the request is genuinely new.
                 check_aggregate_owner(&mut tx, envelope, &route).await?;
+                check_second_cutover(&mut tx, &command, epoch).await?;
                 let decision = authority::evaluate(
                     &mut tx,
                     envelope,
@@ -278,6 +294,14 @@ impl PgEventStore {
 fn route_of(command: &KernelCommand) -> Result<Route, Refusal> {
     use KernelCommand as C;
     let (aggregate_type, aggregate_id, event_type) = match command {
+        // The kernel's own lifecycle is an aggregate like any other, which is
+        // what lets the epoch be read off the log instead of a state table.
+        C::ActivateKernel { .. } => (
+            epoch::KERNEL_AGGREGATE,
+            epoch::KERNEL_SINGLETON.to_owned(),
+            epoch::ACTIVATION_EVENT_TYPE,
+        ),
+
         C::CreateTask { task_id, .. } => ("task", task_id.as_str().to_owned(), "task_created"),
         C::TransitionTask { task_id, .. } => {
             ("task", task_id.as_str().to_owned(), "task_transitioned")
@@ -577,6 +601,88 @@ fn check_body_project(envelope: &CommandEnvelope, command: &KernelCommand) -> Re
     Ok(())
 }
 
+/// The sealed allowlist, as a pattern rather than a name.
+///
+/// Matching the variant instead of comparing `command_type` means adding a
+/// command cannot quietly widen what a sealed kernel accepts: the allowlist is
+/// one arm here, and everything else is the fallthrough.
+fn admitted(epoch: Epoch, command: &KernelCommand) -> bool {
+    match epoch {
+        Epoch::Active => true,
+        Epoch::Sealed => matches!(command, KernelCommand::ActivateKernel { .. }),
+        Epoch::None => false,
+    }
+}
+
+/// What an activation must carry before it is allowed to touch the log.
+///
+/// The cutover boundary is the one irreversible write in this kernel, so both
+/// of its payload fields are checked here rather than left to be discovered
+/// later: `from_envelope` validates shape, not content, and a malformed digest
+/// in an immutable event is unfixable. The key is REQUIRED to equal
+/// [`epoch::activation_key`] rather than being derived from the body — see that
+/// function for why.
+fn check_activation(envelope: &CommandEnvelope, command: &KernelCommand) -> Result<(), Refusal> {
+    let KernelCommand::ActivateKernel {
+        cutover_id,
+        archive_manifest_sha256,
+    } = command
+    else {
+        return Ok(());
+    };
+    if cutover_id.is_empty() {
+        return Err(Refusal::validation(
+            "an activation with an empty cutover id names no cutover",
+        ));
+    }
+    if !gwk_domain::blob::is_sha256_hex(archive_manifest_sha256) {
+        return Err(Refusal::validation(format!(
+            "archive_manifest_sha256 must be a lowercase 64-hex digest, not \
+             {archive_manifest_sha256:?}"
+        )));
+    }
+    let required = epoch::activation_key(cutover_id);
+    if envelope.idempotency_key.as_str() != required {
+        return Err(Refusal::validation(format!(
+            "activating cutover {cutover_id:?} requires idempotency key {required:?}, not {:?}",
+            envelope.idempotency_key.as_str()
+        )));
+    }
+    Ok(())
+}
+
+/// An activated kernel has one cutover, and it is not this one.
+///
+/// Reached only with an unused key, which for an activation already means a
+/// different cutover id — the same one would have come back as a replay, and
+/// the same id with a different manifest as an idempotency conflict. So the
+/// answer names the cutover that actually took: the alternative is a bare CAS
+/// refusal ("expected 1, found 2") at the moment an operator most needs to know
+/// which epoch they are standing in.
+async fn check_second_cutover(
+    conn: &mut PgConnection,
+    command: &KernelCommand,
+    epoch: Epoch,
+) -> Result<(), Refusal> {
+    let KernelCommand::ActivateKernel { cutover_id, .. } = command else {
+        return Ok(());
+    };
+    if epoch != Epoch::Active {
+        return Ok(());
+    }
+    let committed = epoch::committed_cutover(conn).await?.ok_or_else(|| {
+        Refusal::storage("the kernel is past genesis with no activation event".to_owned())
+    })?;
+    Err(Refusal::new(
+        KernelErrorCode::AlreadyActive,
+        format!(
+            "this kernel activated at cutover {committed:?}; {cutover_id:?} is a different \
+                 cutover"
+        ),
+    )
+    .with_detail(serde_json::json!({ "activated_cutover_id": committed })))
+}
+
 /// The project that created an aggregate is the only one that may write to it.
 ///
 /// `ProjectId` is documented as the project an aggregate belongs to, but the
@@ -701,6 +807,11 @@ async fn decide(
 ) -> Result<u32, Refusal> {
     use KernelCommand as C;
     Ok(match command {
+        // Genesis is version 1, so activation asserts version 1 — which makes
+        // the CAS a second, independent proof that the kernel was still sealed
+        // at the instant of the append, not merely when the epoch was read.
+        C::ActivateKernel { .. } => 1,
+
         // Version 0 is the assertion "this aggregate has no events" — so the
         // CAS in the append is what refuses a duplicate create, and no separate
         // existence check can drift from it.

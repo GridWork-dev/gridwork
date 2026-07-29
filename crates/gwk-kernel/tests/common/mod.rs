@@ -34,6 +34,15 @@ pub const RUNTIME_ROLE: &str = "gwk_test_runtime";
 /// The project every case shares unless it is specifically about crossing one.
 pub const PROJECT: &str = "p";
 
+/// A syntactically real 40-hex revision. Genesis refuses anything else, and
+/// what it records is never resolved against a repository.
+pub const TEST_REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
+/// The cutover [`fresh_store`] activates at.
+pub const TEST_CUTOVER: &str = "cutover-test";
+/// A syntactically real archive-manifest digest.
+pub const TEST_MANIFEST_SHA256: &str =
+    "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2";
+
 pub fn actor(kind: &str) -> Actor {
     Actor {
         kind: kind.to_owned(),
@@ -100,11 +109,39 @@ pub async fn refuse(
     }
 }
 
+/// How many BUSINESS events the log holds.
+///
+/// The kernel's own aggregate is excluded: genesis and activation are epoch
+/// bookkeeping every store carries, and counting them would make each case
+/// assert a constant offset that says nothing about the case.
 pub async fn event_count(store: &PgEventStore) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM gwk.event WHERE aggregate_type <> 'kernel'")
+        .fetch_one(store.pool())
+        .await
+        .expect("count events")
+}
+
+/// Every event, including the epoch's — what the epoch suite asserts on.
+pub async fn total_event_count(store: &PgEventStore) -> i64 {
     sqlx::query_scalar("SELECT count(*) FROM gwk.event")
         .fetch_one(store.pool())
         .await
         .expect("count events")
+}
+
+/// One activation envelope, in the project genesis wrote under. Any other
+/// project is refused by the aggregate-ownership rule, which is the point.
+pub fn activation(cutover_id: &str) -> CommandEnvelope {
+    let command = KernelCommand::ActivateKernel {
+        cutover_id: cutover_id.to_owned(),
+        archive_manifest_sha256: TEST_MANIFEST_SHA256.to_owned(),
+    };
+    envelope_in(
+        gwk_kernel::SYSTEM_PROJECT,
+        &format!("kernel_activated:{cutover_id}"),
+        actor("kernel"),
+        &command,
+    )
 }
 
 /// A state row's own view of where it is and what version it carries — the
@@ -134,12 +171,34 @@ pub fn secret(database: &str) -> SecretString {
     SecretString::from(url_for(database))
 }
 
-/// A freshly initialized database plus a store bound to it.
+/// A freshly initialized database, its genesis appended, and a store bound to
+/// it — sealed, so only activation is admitted.
+pub async fn fresh_sealed_store(
+    maintenance: &PgPool,
+    tag: &str,
+    inflight: usize,
+) -> (String, PgEventStore) {
+    let (name, store) = raw_store(maintenance, tag, inflight).await;
+    store.ensure_genesis(TEST_REVISION).await.expect("genesis");
+    (name, store)
+}
+
+/// The same store, activated. Everything that is not about the epoch itself
+/// wants this: a sealed kernel admits no business command at all.
 pub async fn fresh_store(
     maintenance: &PgPool,
     tag: &str,
     inflight: usize,
 ) -> (String, PgEventStore) {
+    let (name, store) = fresh_sealed_store(maintenance, tag, inflight).await;
+    match store.submit(&activation(TEST_CUTOVER)).await {
+        KernelResult::CommandApplied { .. } => (name, store),
+        other => panic!("activation: expected CommandApplied, got {other:?}"),
+    }
+}
+
+/// A store on an initialized database with NO genesis — the epoch-less state.
+pub async fn raw_store(maintenance: &PgPool, tag: &str, inflight: usize) -> (String, PgEventStore) {
     let name = format!("gwk_store_{}_{tag}", std::process::id());
     drop_database(maintenance, &name).await;
     sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name};")))
