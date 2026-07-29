@@ -36,8 +36,19 @@
 //! with the cursor the consumer ACTUALLY received — not the one the kernel had
 //! reached — so resuming from it has no gap. The connection stays open and its
 //! other work carries on.
+//!
+//! "Actually received" is why a batch travels with a progress cell rather than
+//! alone. Queuing a batch is not delivering it: the write loop buffers up to
+//! `BATCH_QUEUE_DEPTH` of them, so the cursor the kernel has READ to can be
+//! thousands of events past the last frame that reached the socket — and a
+//! client resuming from that number would skip every event in between. The cell
+//! is written by the loop that owns the write half, after the frame is out, so
+//! the number this subscription closes with is one the client has seen. It can
+//! lag a frame that is being written as the timeout fires; lagging repeats an
+//! event, which at-least-once allows, where leading loses one.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use gwk_domain::ids::{RequestId, Seq};
@@ -49,7 +60,7 @@ use sqlx::PgPool;
 use sqlx::postgres::PgListener;
 use tokio::sync::{mpsc, watch};
 
-use super::serve::fit_page;
+use super::serve::{Outgoing, fit_page};
 use crate::store::{EVENT_CHANNEL, PgEventStore};
 
 /// Events read per catch-up page.
@@ -110,13 +121,18 @@ enum Ended {
 /// `batches` is the queue the consumer drains and `responses` is the priority
 /// one, which is why a `StreamClosed` can still be delivered to a consumer
 /// whose batch queue is precisely the thing that is full.
-pub async fn run(
+///
+/// `delivered` starts at the cursor this subscription was opened with, so a
+/// stream that ends having sent nothing reports where it began rather than the
+/// beginning of the log.
+pub(crate) async fn run(
     log: Arc<PgEventStore>,
     request_id: RequestId,
     mut cursor: Option<Seq>,
-    batches: mpsc::Sender<ServerControl>,
+    batches: mpsc::Sender<Outgoing>,
     responses: mpsc::Sender<ServerControl>,
     mut wake: watch::Receiver<u64>,
+    delivered: Arc<AtomicU64>,
 ) {
     let ended = loop {
         let events = match log.read_from(cursor, SUBSCRIPTION_BATCH_ROWS).await {
@@ -154,10 +170,13 @@ pub async fn run(
             break Ended::Storage;
         };
 
-        let batch = ServerControl::EventBatch {
-            request_id: request_id.clone(),
-            events,
-            cursor: last,
+        let batch = Outgoing {
+            control: ServerControl::EventBatch {
+                request_id: request_id.clone(),
+                events,
+                cursor: last,
+            },
+            delivered: Some((Arc::clone(&delivered), last.value())),
         };
         match tokio::time::timeout(
             Duration::from_secs(SLOW_CONSUMER_TIMEOUT_SECS),
@@ -165,9 +184,10 @@ pub async fn run(
         )
         .await
         {
-            // Delivered — or at least queued, which is what at-least-once
-            // means. The cursor advances only now, so a batch that never
-            // reached the queue is re-read rather than skipped.
+            // Queued, which is what lets the READ cursor advance: a batch that
+            // never reached the queue is re-read rather than skipped. Whether it
+            // was DELIVERED is a different question, answered by the cell above
+            // once the frame is written.
             Ok(Ok(())) => cursor = Some(last),
             Ok(Err(_)) => break Ended::Gone,
             Err(_) => break Ended::SlowConsumer,
@@ -181,13 +201,19 @@ pub async fn run(
         Ended::SlowConsumer => KernelErrorCode::SlowConsumer,
         Ended::Storage => KernelErrorCode::Storage,
     };
-    // `cursor` is what the consumer RECEIVED, which is the whole point: a
-    // resume from it is gap-free even though the kernel had read further.
+    // Not `cursor` — that is how far the kernel READ, and on a slow consumer it
+    // is exactly the queue's depth ahead of the last frame that left. The cell
+    // is what the client has seen, and a resume from it is gap-free.
+    let last_cursor = match delivered.load(Ordering::Acquire) {
+        // The subscription opened at the beginning and never got a frame out.
+        0 => None,
+        seq => Some(Seq::new(seq)),
+    };
     let _ = responses
         .send(ServerControl::StreamClosed {
             request_id,
             code,
-            last_cursor: cursor,
+            last_cursor,
         })
         .await;
 }

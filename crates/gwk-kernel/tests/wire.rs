@@ -17,11 +17,12 @@ use base64::prelude::{BASE64_STANDARD, Engine as _};
 use common::*;
 use gwk_domain::blob::BLOB_CHUNK_BYTES;
 use gwk_domain::ids::Seq;
+use gwk_domain::port::EventStore;
 use gwk_domain::protocol::{
     CONNECTION_EGRESS_BYTES_PER_WINDOW, CONNECTION_INGRESS_BYTES_PER_WINDOW, CONTRACT_VERSION,
     FRAME_BODY_MAX_BYTES, FrameKind, KernelErrorCode, KernelResult,
     MAX_SUBSCRIPTIONS_PER_CONNECTION, ProjectionKind, ProjectionRecord, ProtocolVersion,
-    SUBSCRIPTION_POLL_SECS, ServerControl,
+    SLOW_CONSUMER_TIMEOUT_SECS, SUBSCRIPTION_POLL_SECS, ServerControl,
 };
 use gwk_kernel::store::PgEventStore;
 use gwk_kernel::wire::frame::{Budget, Incoming, read_frame, write_frame};
@@ -53,15 +54,27 @@ async fn daemon_for(store: PgEventStore, tag: &str) -> (Daemon, PathBuf) {
 }
 
 /// A client that speaks the wire: handshake, then one request per call.
-struct Client {
-    stream: UnixStream,
+///
+/// Generic over its transport, with the socket as the default so every case that
+/// wants one says nothing. The slow-consumer case wants a pipe instead: what it
+/// has to control is the exact moment the daemon's write blocks, and a kernel
+/// socket buffer's capacity is not a number a test can know.
+struct Client<S = UnixStream> {
+    stream: S,
     budget: Budget,
 }
 
-impl Client {
+impl Client<UnixStream> {
     async fn connect(path: &std::path::Path) -> (Self, ServerControl) {
+        Self::greet(UnixStream::connect(path).await.expect("connect")).await
+    }
+}
+
+impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Client<S> {
+    /// Take an open transport through the handshake.
+    async fn greet(stream: S) -> (Self, ServerControl) {
         let mut client = Self {
-            stream: UnixStream::connect(path).await.expect("connect"),
+            stream,
             budget: Budget::new(
                 CONNECTION_INGRESS_BYTES_PER_WINDOW,
                 CONNECTION_EGRESS_BYTES_PER_WINDOW,
@@ -710,6 +723,110 @@ async fn a_subscription_that_never_hears_a_notification_still_catches_up() {
     }
 
     served.close().await;
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL, and waits out SLOW_CONSUMER_TIMEOUT_SECS on purpose"]
+async fn a_consumer_that_stops_reading_is_cut_off_at_the_last_batch_it_actually_got() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "wire_slow", 8).await;
+
+    // Enough batches that the queue fills and STAYS full: one per subscription
+    // the connection may hold, plus the one the writer is holding, plus the one
+    // whose send has to block for the timeout to be reached — and a few over, so
+    // this does not sit exactly on the boundary. 256 is the catch-up page.
+    let before = store
+        .watermark()
+        .await
+        .expect("watermark")
+        .expect("genesis");
+    let batches_needed = MAX_SUBSCRIPTIONS_PER_CONNECTION as u64 + 6;
+    seed_events(store.pool(), batches_needed * 256).await;
+    let (daemon, blobs) = daemon_for(store, "slow").await;
+    let dir = runtime_dir("slow");
+
+    // A pipe, not a socket, and small: the writer must be blocked mid-frame when
+    // the timeout fires, which is the whole state under test. Over a socket that
+    // depends on `net.core.wmem_default`.
+    let (mine, theirs) = tokio::io::duplex(4096);
+    let serving = tokio::spawn(async move {
+        let (mut reader, mut writer) = tokio::io::split(theirs);
+        let _ = gwk_kernel::wire::serve::serve_connection(&daemon, &mut reader, &mut writer).await;
+    });
+    let (mut client, _) = Client::greet(mine).await;
+
+    match client.ask("r-sub", &subscribe_from(before)).await {
+        KernelResult::Subscribed { .. } => {}
+        other => panic!("{other:?}"),
+    }
+
+    // Read two batches and then stop, which is what makes this a SLOW consumer
+    // rather than an absent one: some of the stream arrived, and the cursor it is
+    // sent home with has to be inside that part.
+    let mut received: Vec<Seq> = Vec::new();
+    for _ in 0..2 {
+        match client.recv().await.expect("the connection stayed open") {
+            ServerControl::EventBatch { cursor, .. } => received.push(cursor),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    // Nothing is read for longer than the kernel is willing to hold a batch.
+    tokio::time::sleep(std::time::Duration::from_secs(
+        SLOW_CONSUMER_TIMEOUT_SECS + 3,
+    ))
+    .await;
+
+    // Now drain. `StreamClosed` travels on the response queue, so it overtakes
+    // every batch still sitting in the batch queue — but not the one the writer
+    // was already mid-frame on, which arrives first.
+    let closed = loop {
+        match client.recv().await.expect("the connection stayed open") {
+            ServerControl::EventBatch { cursor, .. } => received.push(cursor),
+            ServerControl::StreamClosed {
+                request_id,
+                code,
+                last_cursor,
+            } => {
+                assert_eq!(request_id.as_str(), "r-sub");
+                assert_eq!(code, KernelErrorCode::SlowConsumer);
+                break last_cursor.expect("the consumer had received batches");
+            }
+            other => panic!("{other:?}"),
+        }
+    };
+
+    // The claim: the cursor is one the client HELD IN ITS HAND, not one the
+    // kernel had merely read to. Before this was measured at the write, the
+    // reported cursor was the read position — every batch the queue was holding
+    // plus the one in flight past the last frame that left, so a client resuming
+    // from it would have skipped thousands of events it never saw.
+    let position = received
+        .iter()
+        .position(|cursor| *cursor == closed)
+        .unwrap_or_else(|| {
+            panic!("the stream closed at {closed:?}, which was never sent: {received:?}")
+        });
+    // The last frame written, or the one before it: the frame the writer is
+    // mid-way through when the timeout fires is not delivered yet, so trailing by
+    // one is the documented behaviour. Trailing repeats an event on resume, which
+    // at-least-once allows; leading loses one, which is the bug.
+    assert!(
+        received.len() - 1 - position <= 1,
+        "closed at {closed:?}, {} batches behind the {} that were sent",
+        received.len() - 1 - position,
+        received.len()
+    );
+    assert!(
+        closed.value() < before.value() + batches_needed * 256,
+        "the kernel reported its own read position, not what it delivered"
+    );
+
+    drop(client);
+    serving.await.expect("join");
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&blobs);
     drop_database(&maintenance, &name).await;
 }
 

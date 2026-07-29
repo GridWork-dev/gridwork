@@ -347,6 +347,55 @@ pub async fn raw_store(maintenance: &PgPool, tag: &str, inflight: usize) -> (Str
     (name, store)
 }
 
+/// Put `count` synthetic events in the log by INSERT, and return the last
+/// sequence written.
+///
+/// Not through the port, and that is the point: an append is a locked round trip
+/// per batch, so the two cases that need a log longer than a page — the read
+/// clamp at [`MAX_READ_LIMIT`](gwk_domain::port::MAX_READ_LIMIT) and a batch
+/// queue full enough to starve a consumer — would spend minutes in it to prove
+/// something about reading. These rows are only ever read.
+///
+/// `next_seq` is carried forward with them, so a store that appends after a seed
+/// allocates past it rather than colliding on the primary key.
+///
+/// It also sends NO `pg_notify`, which the append path does from inside its own
+/// transaction. That makes this the only way to produce the case a subscription's
+/// poll exists for: events that are committed and visible while every listener,
+/// healthy or not, was never told.
+pub async fn seed_events(pool: &PgPool, count: u64) -> Seq {
+    let mut tx = pool.begin().await.expect("begin a seed");
+    let first: String = sqlx::query_scalar("SELECT next_seq::text FROM gwk_internal.writer")
+        .fetch_one(&mut *tx)
+        .await
+        .expect("read next_seq");
+    let first: u64 = first.parse().expect("next_seq is a number");
+    let last = first + count - 1;
+    sqlx::query(
+        "INSERT INTO gwk.event (seq, event_id, project_id, aggregate_type, aggregate_id, \
+            aggregate_version, event_type, schema_version, occurred_at, appended_at, \
+            actor, origin, payload) \
+         SELECT n, 'evt-seed-' || n, $1, 'task', 'agg-seed-' || n, 1, 'seed_tick', $2, \
+            now(), now(), '{\"kind\":\"seed\"}'::jsonb, '{\"system\":\"gwk-test\"}'::jsonb, \
+            '{}'::jsonb \
+         FROM generate_series($3::bigint, $4::bigint) AS n",
+    )
+    .bind(PROJECT)
+    .bind(i64::from(ENVELOPE_SCHEMA_VERSION))
+    .bind(first as i64)
+    .bind(last as i64)
+    .execute(&mut *tx)
+    .await
+    .expect("seed events");
+    sqlx::query("UPDATE gwk_internal.writer SET next_seq = $1::numeric")
+        .bind((last + 1).to_string())
+        .execute(&mut *tx)
+        .await
+        .expect("carry next_seq forward");
+    tx.commit().await.expect("commit a seed");
+    Seq::new(last)
+}
+
 pub async fn drop_database(maintenance: &PgPool, name: &str) {
     let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
         "DROP DATABASE IF EXISTS {name} WITH (FORCE);"

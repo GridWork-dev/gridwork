@@ -82,6 +82,19 @@ const BATCH_QUEUE_DEPTH: usize = MAX_SUBSCRIPTIONS_PER_CONNECTION;
 /// queued, so a deeper queue would buffer responses that cannot exist.
 const RESPONSE_QUEUE_DEPTH: usize = 1;
 
+/// One frame on its way out, and what its departure proves.
+///
+/// A response proves nothing beyond itself, so `delivered` is `None` for one. A
+/// subscription's batch carries the cell its stream reports on closing plus the
+/// sequence to publish there — because a batch sitting in the queue has not
+/// reached the client, and only the loop that owns the write half can say when
+/// one has. See [`subscribe`](super::subscribe) for why that distinction is the
+/// difference between a gap-free resume and a silently skipped page.
+pub(crate) struct Outgoing {
+    pub(crate) control: ServerControl,
+    pub(crate) delivered: Option<(Arc<std::sync::atomic::AtomicU64>, u64)>,
+}
+
 /// Cut a page down to what one frame can carry, and say whether it was cut.
 ///
 /// The first item always survives: a page that returned nothing because its
@@ -583,7 +596,7 @@ struct Subscriptions<'a> {
     /// closed connection stop reading the database — a stream parked between
     /// polls has nothing to notice a hangup by.
     live: tokio::task::JoinSet<()>,
-    batches: mpsc::Sender<ServerControl>,
+    batches: mpsc::Sender<Outgoing>,
     responses: mpsc::Sender<ServerControl>,
     /// An admitted subscription waiting to be started. See [`Self::admit`].
     admitted: Option<(RequestId, Option<Seq>)>,
@@ -593,7 +606,7 @@ impl<'a> Subscriptions<'a> {
     fn new(
         daemon: &'a Daemon,
         responses: mpsc::Sender<ServerControl>,
-        batches: mpsc::Sender<ServerControl>,
+        batches: mpsc::Sender<Outgoing>,
     ) -> Self {
         Self {
             daemon,
@@ -639,6 +652,12 @@ impl<'a> Subscriptions<'a> {
         let Some((request_id, cursor)) = self.admitted.take() else {
             return;
         };
+        // Seeded with where the stream starts, so a subscription that ends
+        // before a single frame left reports its own starting point rather than
+        // sending the client back to the beginning of the log.
+        let delivered = Arc::new(std::sync::atomic::AtomicU64::new(
+            cursor.map_or(0, |seq| seq.value()),
+        ));
         self.live.spawn(subscribe::run(
             Arc::clone(&self.daemon.store),
             request_id,
@@ -646,6 +665,7 @@ impl<'a> Subscriptions<'a> {
             self.batches.clone(),
             self.responses.clone(),
             self.daemon.wake.subscribe(),
+            delivered,
         ));
     }
 }
@@ -779,25 +799,30 @@ where
 async fn write_frames<W>(
     writer: &mut W,
     mut responses: mpsc::Receiver<ServerControl>,
-    mut batches: mpsc::Receiver<ServerControl>,
+    mut batches: mpsc::Receiver<Outgoing>,
     budget: &mut Budget,
 ) -> std::result::Result<(), WireError>
 where
     W: AsyncWrite + Unpin,
 {
     loop {
-        let control = tokio::select! {
+        let outgoing = tokio::select! {
             biased;
-            Some(control) = responses.recv() => control,
-            Some(control) = batches.recv() => control,
+            Some(control) = responses.recv() => Outgoing { control, delivered: None },
+            Some(outgoing) = batches.recv() => outgoing,
             // Both queues closed: the reader is done and no subscription is
             // left to produce anything.
             else => return Ok(()),
         };
-        let body = serde_json::to_vec(&control).map_err(|e| {
+        let body = serde_json::to_vec(&outgoing.control).map_err(|e| {
             WireError::new(KernelErrorCode::Storage, format!("serialize a frame: {e}"))
         })?;
         write_frame(writer, FrameKind::Json, &body, budget).await?;
+        // AFTER the write, and only on success — the whole value of this number
+        // is that nothing is claimed delivered before it left.
+        if let Some((cell, seq)) = outgoing.delivered {
+            cell.store(seq, std::sync::atomic::Ordering::Release);
+        }
     }
 }
 
