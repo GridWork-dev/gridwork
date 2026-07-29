@@ -11,8 +11,9 @@
 //! fingerprint, the one-shot initializer, the fenced append store, the epoch
 //! that seals a fresh log until it is activated, the work lifecycle's command
 //! path and projections, and the blob spine — the encrypted container format
-//! and the store that dedups, pins, sweeps, rotates and shreds it. The wire
-//! server lands on top of them.
+//! and the store that dedups, pins, sweeps, rotates and shreds it, the
+//! projection snapshots, and the recovery that decides what a restart may claim
+//! about them. The wire server lands on top of them.
 
 pub mod admin;
 pub mod authority;
@@ -24,6 +25,7 @@ pub mod epoch;
 pub mod error;
 pub mod numeric;
 pub mod project;
+pub mod recover;
 pub mod store;
 pub mod submit;
 pub mod writer;
@@ -35,5 +37,6 @@ pub use contract_sql::{CONTRACT_SQL, CONTRACT_SQL_SHA256};
 pub use epoch::{GENESIS_KEY, KERNEL_AGGREGATE, KERNEL_SINGLETON, SYSTEM_PROJECT};
 pub use error::{KernelError, Result};
 pub use project::Refusal;
+pub use recover::{RebuildReport, RecoveryReport, Verdict};
 pub use store::{EVENT_CHANNEL, MAX_INFLIGHT_APPENDS, PgEventStore, connect_pool};
 pub use writer::{WRITER_LOCK_KEY, WriterLock, claim_epoch};

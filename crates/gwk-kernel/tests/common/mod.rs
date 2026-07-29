@@ -23,7 +23,13 @@ use gwk_domain::command::KernelCommand;
 use gwk_domain::envelope::{
     Actor, CommandEnvelope, ENVELOPE_SCHEMA_VERSION, EventEnvelope, Origin,
 };
-use gwk_domain::ids::{ByteCount, CommandId, IdempotencyKey, ProjectId, Timestamp};
+use gwk_domain::fsm::LeaseMode;
+use gwk_domain::ids::{
+    AttemptId, AttentionItemId, AuthorityGrantId, ByteCount, CommandId, DispatchNodeId, EngineId,
+    EngineSessionId, EvidenceId, GateId, IdempotencyKey, LeaseId, MessageId, ProjectId, Seq,
+    TaskId, Timestamp, WorktreeId,
+};
+use gwk_domain::inherited::OrchestratorCheckpoint;
 use gwk_domain::port::BlobStore;
 use gwk_domain::protocol::{KernelErrorCode, KernelResult};
 use gwk_kernel::admin::{self, InitOutcome};
@@ -362,4 +368,207 @@ pub async fn maintenance_pool() -> PgPool {
     .execute(&pool)
     .await;
     pool
+}
+
+/// One row in every projection table the kernel can reach today.
+///
+/// Deliberately exhaustive: `canonical_records` only exercises a table that has
+/// rows in it, so an empty table proves nothing about whether its columns still
+/// match its contract type. Any projection missing from here is a parity check
+/// nobody is running.
+pub async fn populate(store: &PgEventStore) {
+    apply(
+        store,
+        "task",
+        KernelCommand::CreateTask {
+            task_id: TaskId::new("t-1"),
+            kind: Some("phase".into()),
+            title: Some("ship the kernel".into()),
+            spec_ref: None,
+            project: Some(PROJECT.to_owned()),
+            priority: Some(3),
+            tracker_ref: None,
+        },
+    )
+    .await;
+    apply(
+        store,
+        "attempt",
+        KernelCommand::CreateAttempt {
+            attempt_id: AttemptId::new("a-1"),
+            task_id: TaskId::new("t-1"),
+            engine: EngineId::new("engine-a"),
+            capability: Some("code_write".into()),
+            role: None,
+            model_lane: Some("standard".into()),
+            permission_profile: None,
+            worktree_lease_id: None,
+            base_sha: None,
+            budget: None,
+        },
+    )
+    .await;
+    apply(
+        store,
+        "session",
+        KernelCommand::OpenEngineSession {
+            engine_session_id: EngineSessionId::new("s-1"),
+            attempt_id: AttemptId::new("a-1"),
+            engine: EngineId::new("engine-a"),
+            provider_session_ref: Some("prov-1".into()),
+        },
+    )
+    .await;
+    apply(
+        store,
+        "node",
+        KernelCommand::RegisterDispatchNode {
+            dispatch_node_id: DispatchNodeId::new("n-1"),
+            parent_id: None,
+            attempt_id: Some(AttemptId::new("a-1")),
+            kind: "subagent".into(),
+            label: Some("reviewer".into()),
+        },
+    )
+    .await;
+    apply(
+        store,
+        "lease",
+        KernelCommand::AcquireLease {
+            lease_id: LeaseId::new("l-1"),
+            mode: LeaseMode::Exclusive,
+            holder: Some("a-1".into()),
+            scope: Some("worktree".into()),
+            repo: Some("gridwork".into()),
+            path: Some("/w/kernel".into()),
+            branch: Some("feature/kernel".into()),
+            base_sha: None,
+            expires_at: Some(gwk_domain::ids::Timestamp::new("2026-07-28T01:00:00Z")),
+        },
+    )
+    .await;
+    apply(
+        store,
+        "worktree",
+        KernelCommand::RegisterWorktree {
+            worktree_id: WorktreeId::new("wt-1"),
+            repo: "gridwork".into(),
+            path: "/w/kernel".into(),
+            branch: "feature/kernel".into(),
+            base_sha: None,
+            lease_id: Some(LeaseId::new("l-1")),
+        },
+    )
+    .await;
+    apply(
+        store,
+        "message",
+        KernelCommand::SendMessage {
+            message_id: MessageId::new("m-1"),
+            correlation_id: None,
+            reply_to: None,
+            sender: Some("orchestrator".into()),
+            recipient: Some("engine-a".into()),
+            channel: Some("dispatch".into()),
+            kind: Some("brief".into()),
+            payload: Some(serde_json::json!({ "goal": "ship the kernel" })),
+            deadline: None,
+        },
+    )
+    .await;
+    apply(
+        store,
+        "gate",
+        KernelCommand::OpenGate {
+            gate_id: GateId::new("g-1"),
+            attempt_id: None,
+            phase_ref: Some("4p-kernel".into()),
+            kind: Some("review".into()),
+        },
+    )
+    .await;
+    // `issue_command` is in the authority risk table, so the grant comes first
+    // — and it is the row that populates `authority_grant`.
+    apply(
+        store,
+        "grant",
+        KernelCommand::GrantAuthority {
+            authority_grant_id: AuthorityGrantId::new("g-stop"),
+            grantee: actor("kernel"),
+            action_class: "stop".to_owned(),
+            scope: None,
+            expires_at: None,
+        },
+    )
+    .await;
+    // Applying it also writes the receipt every authority decision leaves.
+    apply(
+        store,
+        "command",
+        KernelCommand::IssueCommand {
+            command_id: CommandId::new("c-1"),
+            kind: "stop_attempt".to_owned(),
+            targets: vec!["a-1".to_owned()],
+            actor: None,
+        },
+    )
+    .await;
+    apply(
+        store,
+        "evidence",
+        KernelCommand::RecordEvidence {
+            evidence_id: EvidenceId::new("ev-1"),
+            kind: "diff".to_owned(),
+            r#ref: "blob://sha256-abc".to_owned(),
+            digest: Some("sha256-abc".into()),
+            // The whole reason the column is `numeric(20,0)` and the canonical
+            // form casts it to text: as a JSON number this loses precision
+            // above 2^53 and comes back a DIFFERENT value, silently.
+            byte_size: Some(ByteCount::new(u64::MAX)),
+        },
+    )
+    .await;
+    apply(
+        store,
+        "attention",
+        KernelCommand::RaiseAttention {
+            attention_item_id: AttentionItemId::new("att-1"),
+            kind: "risk_tag".to_owned(),
+            summary: "data-migration pages".to_owned(),
+            subject_ref: Some("task/t-1".to_owned()),
+            raised_by: Some(actor("kernel")),
+        },
+    )
+    .await;
+    apply(
+        store,
+        "orch",
+        KernelCommand::WriteOrchestratorCheckpoint {
+            checkpoint: OrchestratorCheckpoint {
+                orchestrator_id: Some("orch-1".into()),
+                seq: Seq::new(u64::MAX),
+                native_session_ref: None,
+                active_goal: Some("ship".into()),
+                active_step_ref: None,
+                latest_command_ref: None,
+                open_attempts: Some(vec![]),
+                leases: None,
+                pending_approvals: None,
+                budget_cursor: None,
+            },
+        },
+    )
+    .await;
+}
+
+pub fn task(id: &str) -> KernelCommand {
+    KernelCommand::CreateTask {
+        task_id: TaskId::new(id),
+        kind: None,
+        title: None,
+        spec_ref: None,
+        project: None,
+        priority: None,
+        tracker_ref: None,
+    }
 }

@@ -1,10 +1,13 @@
 //! Projection snapshots: the recovery shortcut, never the truth.
 //!
 //! A checkpoint is the projection tables, canonicalized, hashed, and stored as
-//! one encrypted blob at one `global_sequence`. Recovery ALWAYS replays the
-//! suffix after it, so the worst a missing or corrupt checkpoint costs is time
-//! — which is why an append is allowed to take one and none of the contract
-//! depends on it existing.
+//! one encrypted blob at one `global_sequence`. It is EVIDENCE, not a restore
+//! point: this schema's `born_initial` and `no_truncate` guards mean projection
+//! rows can only ever be produced by replaying the log, so what a checkpoint
+//! buys is the ability to check that result, not to skip it (see
+//! [`crate::recover`]). The worst a missing or corrupt one costs is a
+//! comparison — which is why an append is allowed to take one and none of the
+//! contract depends on it existing.
 //!
 //! Two things make the hash mean anything.
 //!
@@ -66,41 +69,122 @@ pub const RECORDS_MEDIA_TYPE: &str = "application/x-ndjson";
 ///   general tolerance, so a column added to any other table still fails the
 ///   round trip. That failure IS the parity check between the DDL and
 ///   `gwk-domain`, and nothing else in this kernel performs it.
-const PROJECTIONS: &[&str] = &[
-    "SELECT jsonb_build_object('projection_type', 'attempt', 'attempt', to_jsonb(t))::text \
-     FROM gwk.attempt t ORDER BY t.id",
-    "SELECT jsonb_build_object('projection_type', 'attention_item', 'attention_item', \
-       to_jsonb(t))::text FROM gwk.attention_item t ORDER BY t.id",
-    "SELECT jsonb_build_object('projection_type', 'authority_grant', 'authority_grant', \
-       to_jsonb(t))::text FROM gwk.authority_grant t ORDER BY t.id",
-    "SELECT jsonb_build_object('projection_type', 'command', 'command', to_jsonb(t))::text \
-     FROM gwk.command t ORDER BY t.id",
-    "SELECT jsonb_build_object('projection_type', 'dispatch_node', 'dispatch_node', \
-       to_jsonb(t))::text FROM gwk.dispatch_node t ORDER BY t.id",
-    "SELECT jsonb_build_object('projection_type', 'engine_session', 'engine_session', \
-       to_jsonb(t))::text FROM gwk.engine_session t ORDER BY t.id",
-    "SELECT jsonb_build_object('projection_type', 'evidence', 'evidence', \
-       to_jsonb(t) || jsonb_build_object('byte_size', t.byte_size::text))::text \
-     FROM gwk.evidence t ORDER BY t.id",
-    "SELECT jsonb_build_object('projection_type', 'gate', 'gate', to_jsonb(t))::text \
-     FROM gwk.gate t ORDER BY t.id",
-    "SELECT jsonb_build_object('projection_type', 'lease', 'lease', \
-       to_jsonb(t) || jsonb_build_object('fence_token', t.fence_token::text))::text \
-     FROM gwk.lease t ORDER BY t.id",
-    "SELECT jsonb_build_object('projection_type', 'message', 'message', to_jsonb(t))::text \
-     FROM gwk.message t ORDER BY t.id",
-    "SELECT jsonb_build_object('projection_type', 'orchestrator_checkpoint', \
-       'orchestrator_checkpoint', \
-       (to_jsonb(t) - 'updated_at') || jsonb_build_object('seq', t.seq::text))::text \
-     FROM gwk.orchestrator_checkpoint t ORDER BY t.orchestrator_id",
-    "SELECT jsonb_build_object('projection_type', 'receipt', 'receipt', \
-       (to_jsonb(t) - 'from_state' - 'to_state') \
-       || jsonb_strip_nulls(jsonb_build_object('from', t.from_state, 'to', t.to_state)))::text \
-     FROM gwk.receipt t ORDER BY t.id",
-    "SELECT jsonb_build_object('projection_type', 'task', 'task', to_jsonb(t))::text \
-     FROM gwk.task t ORDER BY t.id",
-    "SELECT jsonb_build_object('projection_type', 'worktree', 'worktree', to_jsonb(t))::text \
-     FROM gwk.worktree t ORDER BY t.id",
+///
+/// The `derived` flag is the third adjustment, and the one with teeth. Two
+/// tables hold rows the log cannot reproduce:
+///
+/// * `gwk.receipt` — `submit` writes the authority receipt itself, and on the
+///   PAGED path it does so for a command that is REFUSED and therefore appends
+///   no event at all ("the one refusal in the kernel that leaves rows behind").
+/// * `gwk.attention_item` — the same paged path raises its item directly
+///   through `page_attention`, again with no event behind it.
+///
+/// A hash over those tables could never be reproduced by a replay, so a
+/// checkpoint carrying them would fail every scratch rebuild forever and the
+/// failure would say nothing. They stay in the canonical dump — that is where
+/// the DDL-to-contract parity check happens, and it must cover all fourteen —
+/// and stay OUT of the digest. What guards them instead is what always did:
+/// `receipt_append_only` and the delete guards, which no privilege can bypass.
+struct Projection {
+    tag: &'static str,
+    query: &'static str,
+    /// Whether replaying the log through `apply_event` rebuilds this table.
+    derived: bool,
+}
+
+const fn derived(tag: &'static str, query: &'static str) -> Projection {
+    Projection {
+        tag,
+        query,
+        derived: true,
+    }
+}
+
+const fn written_beside_the_log(tag: &'static str, query: &'static str) -> Projection {
+    Projection {
+        tag,
+        query,
+        derived: false,
+    }
+}
+
+const PROJECTIONS: &[Projection] = &[
+    derived(
+        "attempt",
+        "SELECT jsonb_build_object('projection_type', 'attempt', 'attempt', to_jsonb(t))::text \
+         FROM gwk.attempt t ORDER BY t.id",
+    ),
+    written_beside_the_log(
+        "attention_item",
+        "SELECT jsonb_build_object('projection_type', 'attention_item', 'attention_item', \
+           to_jsonb(t))::text FROM gwk.attention_item t ORDER BY t.id",
+    ),
+    derived(
+        "authority_grant",
+        "SELECT jsonb_build_object('projection_type', 'authority_grant', 'authority_grant', \
+           to_jsonb(t))::text FROM gwk.authority_grant t ORDER BY t.id",
+    ),
+    derived(
+        "command",
+        "SELECT jsonb_build_object('projection_type', 'command', 'command', to_jsonb(t))::text \
+         FROM gwk.command t ORDER BY t.id",
+    ),
+    derived(
+        "dispatch_node",
+        "SELECT jsonb_build_object('projection_type', 'dispatch_node', 'dispatch_node', \
+           to_jsonb(t))::text FROM gwk.dispatch_node t ORDER BY t.id",
+    ),
+    derived(
+        "engine_session",
+        "SELECT jsonb_build_object('projection_type', 'engine_session', 'engine_session', \
+           to_jsonb(t))::text FROM gwk.engine_session t ORDER BY t.id",
+    ),
+    derived(
+        "evidence",
+        "SELECT jsonb_build_object('projection_type', 'evidence', 'evidence', \
+           to_jsonb(t) || jsonb_build_object('byte_size', t.byte_size::text))::text \
+         FROM gwk.evidence t ORDER BY t.id",
+    ),
+    derived(
+        "gate",
+        "SELECT jsonb_build_object('projection_type', 'gate', 'gate', to_jsonb(t))::text \
+         FROM gwk.gate t ORDER BY t.id",
+    ),
+    derived(
+        "lease",
+        "SELECT jsonb_build_object('projection_type', 'lease', 'lease', \
+           to_jsonb(t) || jsonb_build_object('fence_token', t.fence_token::text))::text \
+         FROM gwk.lease t ORDER BY t.id",
+    ),
+    derived(
+        "message",
+        "SELECT jsonb_build_object('projection_type', 'message', 'message', to_jsonb(t))::text \
+         FROM gwk.message t ORDER BY t.id",
+    ),
+    derived(
+        "orchestrator_checkpoint",
+        "SELECT jsonb_build_object('projection_type', 'orchestrator_checkpoint', \
+           'orchestrator_checkpoint', \
+           (to_jsonb(t) - 'updated_at') || jsonb_build_object('seq', t.seq::text))::text \
+         FROM gwk.orchestrator_checkpoint t ORDER BY t.orchestrator_id",
+    ),
+    written_beside_the_log(
+        "receipt",
+        "SELECT jsonb_build_object('projection_type', 'receipt', 'receipt', \
+           (to_jsonb(t) - 'from_state' - 'to_state') \
+           || jsonb_strip_nulls(jsonb_build_object('from', t.from_state, 'to', t.to_state)))::text \
+         FROM gwk.receipt t ORDER BY t.id",
+    ),
+    derived(
+        "task",
+        "SELECT jsonb_build_object('projection_type', 'task', 'task', to_jsonb(t))::text \
+         FROM gwk.task t ORDER BY t.id",
+    ),
+    derived(
+        "worktree",
+        "SELECT jsonb_build_object('projection_type', 'worktree', 'worktree', to_jsonb(t))::text \
+         FROM gwk.worktree t ORDER BY t.id",
+    ),
 ];
 
 /// The canonical bytes of every projection row: one record per line, each one
@@ -110,15 +194,32 @@ const PROJECTIONS: &[&str] = &[
 /// transaction it sees that transaction's own uncommitted projections, which is
 /// exactly the state the checkpoint claims to describe.
 pub async fn canonical_records(conn: &mut PgConnection) -> Result<Vec<u8>, Refusal> {
+    records(conn, false).await
+}
+
+/// The subset a replay can rebuild — what a checkpoint actually hashes.
+///
+/// The two tables left out are written beside the log rather than from it (see
+/// [`Projection`]), so including them would produce a digest no rebuild could
+/// ever match. Everything downstream — the checkpoint, the readiness compare,
+/// the scratch rebuild — uses THIS one, and the difference between the two
+/// functions is the whole reason the invariant holds.
+pub async fn derived_records(conn: &mut PgConnection) -> Result<Vec<u8>, Refusal> {
+    records(conn, true).await
+}
+
+async fn records(conn: &mut PgConnection, derived_only: bool) -> Result<Vec<u8>, Refusal> {
     let mut out = Vec::new();
-    // Destructured to a `&'static str`: sqlx 0.9 accepts a literal-lifetime
-    // query and refuses anything else, so the borrow the loop hands out has to
-    // be dereferenced rather than asserted safe.
-    for &query in PROJECTIONS {
-        let rows = sqlx::query(query)
+    for projection in PROJECTIONS {
+        if derived_only && !projection.derived {
+            continue;
+        }
+        // Read through the struct field, which is a `&'static str`: sqlx 0.9
+        // accepts a literal-lifetime query and refuses anything else.
+        let rows = sqlx::query(projection.query)
             .fetch_all(&mut *conn)
             .await
-            .map_err(|e| Refusal::storage(format!("read projections: {e}")))?;
+            .map_err(|e| Refusal::storage(format!("read {} projections: {e}", projection.tag)))?;
         for row in &rows {
             let raw: String = row
                 .try_get(0)
@@ -162,7 +263,7 @@ pub async fn snapshot(
     through: Seq,
     created_at: &Timestamp,
 ) -> Result<Checkpoint, Refusal> {
-    let records = canonical_records(conn).await?;
+    let records = derived_records(conn).await?;
     let hash = projection_hash(&records);
     let address =
         BlobAddress::from_digest(&hash).map_err(|e| Refusal::storage(format!("hash: {e}")))?;
@@ -297,31 +398,56 @@ mod tests {
         // trusted: a table appearing twice would double its rows into the
         // digest, and one appearing under the wrong tag would deserialize into
         // the wrong contract type.
-        let mut tags: Vec<&str> = PROJECTIONS
-            .iter()
-            .map(|q| {
-                let after = q.split("'projection_type', '").nth(1).expect("a tag");
-                after.split('\'').next().expect("a closing quote")
-            })
-            .collect();
-        let ordered = tags.clone();
+        let ordered: Vec<&str> = PROJECTIONS.iter().map(|p| p.tag).collect();
+        let mut tags = ordered.clone();
         tags.sort_unstable();
         tags.dedup();
         assert_eq!(tags.len(), PROJECTIONS.len(), "a tag appears twice");
         assert_eq!(ordered, tags, "the visit order must be alphabetical");
 
-        // Every query names its tag TWICE — once as the `projection_type`
-        // value, once as the single field, because that is the shape the
-        // contract's records have.
-        for (query, tag) in PROJECTIONS.iter().zip(&ordered) {
+        for projection in PROJECTIONS {
+            let tag = projection.tag;
+            // Every query names its tag TWICE — once as the `projection_type`
+            // value, once as the single field, because that is the shape the
+            // contract's records have. Reading the tag off the struct and
+            // asserting the SQL agrees is what keeps the flag attached to the
+            // table it actually describes.
             assert!(
-                query.contains(&format!("'projection_type', '{tag}', '{tag}',")),
+                projection
+                    .query
+                    .contains(&format!("'projection_type', '{tag}', '{tag}',")),
                 "{tag}: the record's one field must be named for its tag"
+            );
+            assert!(
+                projection.query.contains(&format!(" FROM gwk.{tag} t ")),
+                "{tag}: the query must read the table it is tagged for"
             );
             // Unordered rows would hash differently on every read, which is a
             // checkpoint that fails its own validation at random.
-            assert!(query.contains(" ORDER BY "), "{tag}: rows must be ordered");
+            assert!(
+                projection.query.contains(" ORDER BY "),
+                "{tag}: rows must be ordered"
+            );
         }
+    }
+
+    #[test]
+    fn only_the_tables_a_replay_can_rebuild_reach_the_hash() {
+        // The exclusions are named here so adding a table cannot quietly join
+        // them, and so the reason survives: `submit` writes both of these
+        // itself, and on the paged path it does so for a command that appends
+        // NO event — a row no replay will ever produce.
+        let excluded: Vec<&str> = PROJECTIONS
+            .iter()
+            .filter(|p| !p.derived)
+            .map(|p| p.tag)
+            .collect();
+        assert_eq!(excluded, ["attention_item", "receipt"]);
+        assert_eq!(
+            PROJECTIONS.iter().filter(|p| p.derived).count(),
+            PROJECTIONS.len() - 2,
+            "everything else must be rebuildable from the log"
+        );
     }
 
     #[test]

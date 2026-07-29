@@ -640,6 +640,45 @@ fn append_storage(context: &str, error: impl std::fmt::Display) -> AppendError {
 }
 
 /// Rebuild an envelope from a row selected with [`EVENT_COLUMNS`].
+/// Read one page of the log through any executor.
+///
+/// Split out of [`EventStore::read_from`], which always reads from the pool,
+/// because recovery has to stream the log from inside its OWN snapshot
+/// transaction. A replay whose result is compared against a hash must see one
+/// fixed log; reading through a second connection would let the watermark move
+/// underneath it and turn a live append into a spurious divergence.
+pub(crate) async fn read_page<'e, E>(
+    executor: E,
+    cursor: Option<Seq>,
+    limit: usize,
+) -> Result<Vec<EventEnvelope>, StorageError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    // Clamped, not refused: the port documents a huge limit as a request
+    // for "as much as you'll give me".
+    let limit = limit.min(MAX_READ_LIMIT) as i64;
+    // The `IS NULL OR` reads like it would defeat the primary-key index. It
+    // does not: the parameter is a constant at plan time, so PostgreSQL
+    // folds the branch away and plans an Index Only Scan with
+    // `Index Cond: (seq > $1)` — identical to writing the bare comparison.
+    // Checked on 16 with EXPLAIN; the null case folds to a plain ordered
+    // index scan, which is what "read from the beginning" wants anyway.
+    let rows = sqlx::query(concat!(
+        "SELECT ",
+        event_columns!(),
+        " FROM gwk.event \
+         WHERE $1::numeric IS NULL OR seq > $1::numeric \
+         ORDER BY seq LIMIT $2"
+    ))
+    .bind(cursor.map(|c| to_numeric_text(c.value())))
+    .bind(limit)
+    .fetch_all(executor)
+    .await
+    .map_err(|e| storage("read_from", e))?;
+    rows.iter().map(row_to_envelope).collect()
+}
+
 fn row_to_envelope(row: &PgRow) -> Result<EventEnvelope, StorageError> {
     let get = |name: &str| -> Result<String, StorageError> {
         row.try_get::<String, _>(name)
@@ -747,28 +786,7 @@ impl EventStore for PgEventStore {
         cursor: Option<Seq>,
         limit: usize,
     ) -> Result<Vec<EventEnvelope>, StorageError> {
-        // Clamped, not refused: the port documents a huge limit as a request
-        // for "as much as you'll give me".
-        let limit = limit.min(MAX_READ_LIMIT) as i64;
-        // The `IS NULL OR` reads like it would defeat the primary-key index. It
-        // does not: the parameter is a constant at plan time, so PostgreSQL
-        // folds the branch away and plans an Index Only Scan with
-        // `Index Cond: (seq > $1)` — identical to writing the bare comparison.
-        // Checked on 16 with EXPLAIN; the null case folds to a plain ordered
-        // index scan, which is what "read from the beginning" wants anyway.
-        let rows = sqlx::query(concat!(
-            "SELECT ",
-            event_columns!(),
-            " FROM gwk.event \
-             WHERE $1::numeric IS NULL OR seq > $1::numeric \
-             ORDER BY seq LIMIT $2"
-        ))
-        .bind(cursor.map(|c| to_numeric_text(c.value())))
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| storage("read_from", e))?;
-        rows.iter().map(row_to_envelope).collect()
+        read_page(&self.pool, cursor, limit).await
     }
 
     async fn watermark(&self) -> Result<Option<Seq>, StorageError> {

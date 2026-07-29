@@ -1,10 +1,16 @@
-//! Projection checkpoints — the recovery shortcut, never the truth.
+//! Projection checkpoints — evidence about the projections, never the truth.
 //!
 //! A checkpoint is a hash-verified snapshot of the projection tables at one
-//! `global_sequence`. Startup validates the newest one, falls back through
-//! older valid ones, and finally replays the whole log; recovery ALWAYS replays
-//! the suffix after the checkpoint, so a checkpoint can only save time, never
-//! substitute for the log.
+//! `global_sequence`. Startup validates the newest one and falls back through
+//! older valid ones until one survives.
+//!
+//! What a checkpoint is NOT is a way to skip replay. A backend may forbid
+//! loading rows that did not arrive through its own projection writer — the
+//! PostgreSQL kernel does, with triggers requiring every row to be born in its
+//! initial state — in which case the only way to rebuild projections is to
+//! replay the log from the beginning, and the checkpoint's job is to say what
+//! the result should hash to. Nothing in the contract depends on a checkpoint
+//! existing; losing every one costs a comparison, not a recovery.
 
 use crate::envelope::PayloadRef;
 use crate::ids::{Seq, Timestamp};
@@ -24,7 +30,7 @@ pub const CHECKPOINT_INTERVAL_SECS: u64 = 300;
 ///
 /// `projection_hash` is deterministic over the canonical projection records
 /// sorted by table then primary key — that determinism is what lets startup
-/// compare a restored checkpoint against live projections and REFUSE readiness
+/// compare this recorded hash against the live projections and REFUSE readiness
 /// on disagreement instead of serving a silently divergent state.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
 #[serde(deny_unknown_fields)]

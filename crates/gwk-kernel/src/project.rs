@@ -1,15 +1,22 @@
 //! Event → projection rows.
 //!
-//! [`apply_event`] is the ONLY thing that writes a projection, and it derives
-//! every column from the event alone: the payload is the command body that
-//! caused it, the row's `version` is the event's `aggregate_version`, and the
-//! timestamps are the event's `appended_at`. Nothing reads the clock, nothing
-//! reads ambient state, so replaying a log produces byte-identical rows — which
-//! is what the checkpoint hash and the scratch rebuild will need.
+//! [`apply_event`] derives every column from the event alone: the payload is
+//! the command body that caused it, the row's `version` is the event's
+//! `aggregate_version`, and the timestamps are the event's `appended_at`.
+//! Nothing reads the clock, nothing reads ambient state, so replaying a log
+//! reproduces those rows BYTE for byte — which is what the checkpoint hash and
+//! the scratch rebuild rest on. That is also why the live command path routes
+//! through here rather than writing its own SQL: one applier means replay
+//! cannot disagree with the write that it is replaying.
 //!
-//! That is also why the live command path routes through here rather than
-//! writing its own SQL: one applier means replay cannot disagree with the write
-//! that it is replaying.
+//! It is the only projection writer for twelve of the fourteen tables, and the
+//! exception is worth stating plainly rather than leaving to be discovered by a
+//! rebuild that will not agree. [`write_receipt`] and [`page_attention`] are
+//! called by [`crate::submit`] directly, and on the PAGED path they run for a
+//! command that is REFUSED — so those rows exist with no event behind them and
+//! no replay can produce them. `gwk.receipt` and `gwk.attention_item` are
+//! therefore excluded from the checkpoint digest; see
+//! [`crate::checkpoint::derived_records`].
 
 use gwk_domain::command::KernelCommand;
 use gwk_domain::entity::DISPATCH_NODE_INITIAL_STATE;
