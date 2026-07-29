@@ -14,10 +14,12 @@
 mod common;
 
 use common::*;
+use gwk_domain::ids::Seq;
 use gwk_domain::protocol::{
     CONNECTION_EGRESS_BYTES_PER_WINDOW, CONNECTION_INGRESS_BYTES_PER_WINDOW, CONTRACT_VERSION,
-    FRAME_BODY_MAX_BYTES, FrameKind, KernelErrorCode, KernelResult, ProjectionKind,
-    ProjectionRecord, ProtocolVersion, ServerControl,
+    FRAME_BODY_MAX_BYTES, FrameKind, KernelErrorCode, KernelResult,
+    MAX_SUBSCRIPTIONS_PER_CONNECTION, ProjectionKind, ProjectionRecord, ProtocolVersion,
+    SUBSCRIPTION_POLL_SECS, ServerControl,
 };
 use gwk_kernel::store::PgEventStore;
 use gwk_kernel::wire::frame::{Budget, Incoming, read_frame, write_frame};
@@ -134,6 +136,71 @@ impl Served {
         drop(self.client);
         self.serving.await.expect("join");
         let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// The real accept loop, serving as many connections as a test opens.
+///
+/// [`Served`] takes exactly one, which is all request/response needs. A
+/// subscription needs two: the client watching the log must not be the client
+/// appending to it, or its own submit response and the batch that submit caused
+/// arrive on one wire with nothing in the protocol deciding their order. It also
+/// gets the notification listener, which `serve_stream` does not start.
+struct Running {
+    dir: PathBuf,
+    path: PathBuf,
+    stop: tokio::sync::oneshot::Sender<()>,
+    serving: tokio::task::JoinHandle<()>,
+}
+
+impl Running {
+    async fn open(store: PgEventStore, tag: &str) -> Self {
+        let dir = runtime_dir(tag);
+        let path = dir.join("gwk.sock");
+        let listener = Listener::bind(&path).await.expect("bind");
+        let daemon = Arc::new(daemon_for(store));
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let serving = tokio::spawn(async move {
+            let _ = gwk_kernel::wire::serve::run(listener, daemon, async move {
+                let _ = stopped.await;
+            })
+            .await;
+        });
+        Self {
+            dir,
+            path,
+            stop,
+            serving,
+        }
+    }
+
+    async fn client(&self) -> Client {
+        Client::connect(&self.path).await.0
+    }
+
+    /// Stop accepting and drain. Every client must be dropped first — a live one
+    /// makes the drain wait out its timeout rather than finish.
+    async fn close(self) {
+        let _ = self.stop.send(());
+        self.serving.await.expect("join");
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Subscribe from a known point, so a case that is about later events is not
+/// handed the whole log first.
+fn subscribe_from(cursor: Seq) -> String {
+    format!(
+        r#"{{"type":"subscribe_events","cursor":"{}"}}"#,
+        cursor.value()
+    )
+}
+
+/// The watermark, as the client sees it.
+async fn watermark_of(client: &mut Client, id: &str) -> Seq {
+    match client.ask(id, r#"{"type":"watermark"}"#).await {
+        KernelResult::Watermark { watermark } => watermark.expect("genesis is in the log"),
+        other => panic!("{other:?}"),
     }
 }
 
@@ -506,6 +573,177 @@ async fn a_command_submitted_over_the_wire_lands_once_however_often_it_is_sent()
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL"]
+async fn a_subscription_delivers_what_the_log_gains_after_it_started() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "wire_subscribe", 8).await;
+    let served = Running::open(store, "subscribe").await;
+
+    let mut watcher = served.client().await;
+    let mut appender = served.client().await;
+
+    // From the current watermark, so what arrives can only be what this test
+    // appended — a subscription from the beginning would deliver the log first
+    // and prove nothing about live delivery.
+    let watermark = watermark_of(&mut watcher, "r-wm").await;
+    match watcher.ask("r-sub", &subscribe_from(watermark)).await {
+        // The acknowledgement echoes where the stream starts, and it arrives
+        // BEFORE any batch: the writer drains responses first, and the
+        // subscription does not start until this is queued.
+        KernelResult::Subscribed { cursor } => assert_eq!(cursor, Some(watermark)),
+        other => panic!("{other:?}"),
+    }
+
+    let envelope = serde_json::to_string(&envelope("k-1", &task("t-1"))).expect("serialize");
+    match appender
+        .ask(
+            "r-submit",
+            &format!(r#"{{"type":"submit_command","envelope":{envelope}}}"#),
+        )
+        .await
+    {
+        KernelResult::CommandApplied { .. } => {}
+        other => panic!("{other:?}"),
+    }
+
+    // Well inside the poll interval, which is the assertion that matters: this
+    // arrived because the append notified, not because a timer came round.
+    let batch = tokio::time::timeout(std::time::Duration::from_secs(3), watcher.recv())
+        .await
+        .expect("a notified subscription delivers without waiting for the poll")
+        .expect("the connection stayed open");
+    match batch {
+        ServerControl::EventBatch {
+            request_id,
+            events,
+            cursor,
+        } => {
+            // The id of the subscription, not of the submit: an unsolicited
+            // frame is still matched to the request that asked for the stream.
+            assert_eq!(request_id.as_str(), "r-sub");
+            assert!(!events.is_empty(), "a batch with no events");
+            assert!(
+                events.iter().all(|e| e.global_sequence > watermark),
+                "the stream replayed what the cursor had already covered"
+            );
+            // What the consumer actually received, so resuming from it is
+            // gap-free and repeat-free.
+            assert_eq!(
+                cursor,
+                events.last().expect("non-empty").global_sequence,
+                "the batch cursor is not its last event"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+
+    drop(watcher);
+    drop(appender);
+    served.close().await;
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn a_subscription_that_never_hears_a_notification_still_catches_up() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "wire_poll", 8).await;
+    // `Served` serves through `serve_stream`, which never starts the notification
+    // listener — so this is the lost-notification case with the notification
+    // permanently lost, and the poll is the only thing that can deliver. It is
+    // also what makes one connection enough here: nothing can push a batch until
+    // long after the submit has been answered.
+    let mut served = Served::open(store, "poll").await;
+
+    let watermark = watermark_of(&mut served.client, "r-wm").await;
+    match served.client.ask("r-sub", &subscribe_from(watermark)).await {
+        KernelResult::Subscribed { .. } => {}
+        other => panic!("{other:?}"),
+    }
+
+    let envelope = serde_json::to_string(&envelope("k-1", &task("t-1"))).expect("serialize");
+    match served
+        .client
+        .ask(
+            "r-submit",
+            &format!(r#"{{"type":"submit_command","envelope":{envelope}}}"#),
+        )
+        .await
+    {
+        KernelResult::CommandApplied { .. } => {}
+        other => panic!("{other:?}"),
+    }
+
+    // Bounded, which is the whole claim: a subscriber whose notification was
+    // lost waits an interval, not forever.
+    let batch = tokio::time::timeout(
+        std::time::Duration::from_secs(SUBSCRIPTION_POLL_SECS + 5),
+        served.client.recv(),
+    )
+    .await
+    .expect("the poll delivered what the lost notification did not")
+    .expect("the connection stayed open");
+    match batch {
+        ServerControl::EventBatch { events, cursor, .. } => {
+            assert!(events.iter().all(|e| e.global_sequence > watermark));
+            assert_eq!(cursor, events.last().expect("non-empty").global_sequence);
+        }
+        other => panic!("{other:?}"),
+    }
+
+    served.close().await;
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn a_connection_may_not_hold_more_subscriptions_than_its_cap() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "wire_subcap", 8).await;
+    let mut served = Served::open(store, "subcap").await;
+
+    // All of them start at the watermark, so none has anything to deliver: this
+    // case is about how many streams may exist, and a batch arriving mid-test
+    // would be a different one.
+    let watermark = watermark_of(&mut served.client, "r-wm").await;
+    for i in 0..MAX_SUBSCRIPTIONS_PER_CONNECTION {
+        match served
+            .client
+            .ask(&format!("r-s{i}"), &subscribe_from(watermark))
+            .await
+        {
+            KernelResult::Subscribed { .. } => {}
+            other => panic!("subscription {i}: {other:?}"),
+        }
+    }
+
+    match served
+        .client
+        .ask("r-over", &subscribe_from(watermark))
+        .await
+    {
+        KernelResult::Error { code, message, .. } => {
+            assert_eq!(code, KernelErrorCode::Overloaded);
+            assert!(
+                message.contains(&MAX_SUBSCRIPTIONS_PER_CONNECTION.to_string()),
+                "the refusal does not say what the cap is: {message}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // One request refused, nothing else touched — neither the connection nor the
+    // eight subscriptions already on it.
+    assert!(matches!(
+        served.client.ask("r-after", r#"{"type":"health"}"#).await,
+        KernelResult::Health { .. }
+    ));
+
+    served.close().await;
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
 async fn a_request_this_layer_does_not_serve_is_refused_by_name() {
     let maintenance = maintenance_pool().await;
     let (name, store) = fresh_sealed_store(&maintenance, "wire_unserved", 8).await;
@@ -524,12 +762,22 @@ async fn a_request_this_layer_does_not_serve_is_refused_by_name() {
     });
 
     let (mut client, _) = Client::connect(&path).await;
-    match client.ask("r-sub", r#"{"type":"subscribe_events"}"#).await {
+    // A legal address for a blob that does not exist — the refusal happens
+    // before anything is looked up, which is the point: the request is not
+    // served, rather than served and found wanting.
+    let address = format!("sha256:{}", "0".repeat(64));
+    match client
+        .ask(
+            "r-blob",
+            &format!(r#"{{"type":"blob_stat","address":"{address}"}}"#),
+        )
+        .await
+    {
         KernelResult::Error { code, message, .. } => {
             assert_eq!(code, KernelErrorCode::Validation);
             // By name: a client learns which request it was, and the refusal
             // does not read as "your request was malformed".
-            assert!(message.contains("subscribe_events"), "{message}");
+            assert!(message.contains("blob_stat"), "{message}");
         }
         other => panic!("{other:?}"),
     }

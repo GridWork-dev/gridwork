@@ -6,11 +6,15 @@
 //! is what makes them one layer: a request goes out, a response comes back on
 //! the same `request_id`, and nothing arrives that was not asked for.
 //!
-//! Subscriptions and blob transfer are the other half and are deliberately not
-//! here. Both push frames the client did not individually request, which needs a
-//! writer that is not the request loop, per-connection queues, and a policy for
-//! a consumer that stops reading. That is a different shape, not more of this
-//! one.
+//! Subscriptions are the other half, and they are why a connection is two loops
+//! instead of one. A batch is a frame the client did not individually request,
+//! so it cannot be written by the code that answers requests: one loop owns the
+//! write half and takes work from two queues, responses before batches. What a
+//! subscription then DOES lives in [`subscribe`](super::subscribe) — this layer
+//! admits one, bounds how many a connection may hold, and writes what they
+//! produce.
+//!
+//! Blob transfer is still absent, and its requests are still refused by name.
 //!
 //! Pages are cut by BYTES, not rows. The frame limit is the real bound and a row
 //! count cannot respect it — see [`PAGE_BYTE_BUDGET`].
@@ -21,21 +25,22 @@
 
 use std::sync::Arc;
 
-use gwk_domain::ids::{EventCount, EventId, Seq, WriterEpoch};
+use gwk_domain::ids::{EventCount, EventId, RequestId, Seq, WriterEpoch};
 use gwk_domain::port::{EventStore, MAX_READ_LIMIT};
 use gwk_domain::protocol::{
     CONNECTION_EGRESS_BYTES_PER_WINDOW, CONNECTION_INGRESS_BYTES_PER_WINDOW, CONTRACT_VERSION,
-    FRAME_BODY_MAX_BYTES, FrameKind, KernelErrorCode, KernelRequest, KernelResult, ProjectionKind,
-    ProjectionRecord, ServerControl,
+    FRAME_BODY_MAX_BYTES, FrameKind, KernelErrorCode, KernelRequest, KernelResult,
+    MAX_SUBSCRIPTIONS_PER_CONNECTION, ProjectionKind, ProjectionRecord, ServerControl,
 };
 use sqlx::Row;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::UnixStream;
+use tokio::sync::{mpsc, watch};
 
 use super::frame::{Budget, Incoming, read_frame, write_frame};
 use super::hello::{self, Readiness};
 use super::listen::Listener;
-use super::{WireError, strict};
+use super::{WireError, strict, subscribe};
 use crate::epoch::{
     GENESIS_EVENT_TYPE, KERNEL_AGGREGATE, KERNEL_SINGLETON, epoch_of, is_public_revision,
 };
@@ -59,6 +64,19 @@ const PAGE_BYTE_BUDGET: usize = (FRAME_BODY_MAX_BYTES as usize) / 2;
 /// Rows fetched for a projection page the request gave no limit for.
 const DEFAULT_PAGE_ROWS: u32 = 256;
 
+/// Batches the writer may hold for a client that has stopped reading.
+///
+/// One per subscription the connection is allowed, so a batch that is ready
+/// never waits behind another subscription's batch. What it can still wait on is
+/// the consumer, which is the only thing the slow-consumer timeout is meant to
+/// be measuring.
+const BATCH_QUEUE_DEPTH: usize = MAX_SUBSCRIPTIONS_PER_CONNECTION;
+
+/// Responses the writer may hold. One, because the request loop is serial: it
+/// reads a request, answers it, and does not read the next until that answer is
+/// queued, so a deeper queue would buffer responses that cannot exist.
+const RESPONSE_QUEUE_DEPTH: usize = 1;
+
 /// Cut a page down to what one frame can carry, and say whether it was cut.
 ///
 /// The first item always survives: a page that returned nothing because its
@@ -69,7 +87,7 @@ const DEFAULT_PAGE_ROWS: u32 = 256;
 /// ponytail: serializes each item once here and again in the response frame.
 /// Measuring without a second pass means threading a counting writer through
 /// the encoder; worth doing if pages ever show up in a profile, not before.
-fn fit_page<T: serde::Serialize>(items: Vec<T>) -> Result<(Vec<T>, bool)> {
+pub(crate) fn fit_page<T: serde::Serialize>(items: Vec<T>) -> Result<(Vec<T>, bool)> {
     let mut kept: Vec<T> = Vec::with_capacity(items.len());
     let mut bytes = 0usize;
     for item in items {
@@ -105,9 +123,14 @@ fn cursor_key(record: &ProjectionRecord, key: &str) -> Result<String> {
 
 /// What a connection needs to answer the sealed surface.
 pub struct Daemon {
-    store: PgEventStore,
+    /// Shared rather than owned because a subscription outlives the request that
+    /// opened it and reads the log from its own task.
+    store: Arc<PgEventStore>,
     public_revision: String,
     writer_epoch: WriterEpoch,
+    /// Publishes "the log grew" to every live subscription. Held behind an `Arc`
+    /// because the listener that feeds it lives in a task of its own.
+    wake: Arc<watch::Sender<u64>>,
 }
 
 impl Daemon {
@@ -131,11 +154,31 @@ impl Daemon {
             )));
         }
         let writer_epoch = WriterEpoch::new(store.boot_epoch().max(0) as u64);
+        // The initial receiver is dropped on purpose. A watch with no receivers
+        // is a normal state — a daemon nobody has subscribed on — and
+        // `send_replace` in the listener treats it as one.
+        let (wake, _) = watch::channel(0u64);
         Ok(Self {
-            store,
+            store: Arc::new(store),
             public_revision,
             writer_epoch,
+            wake: Arc::new(wake),
         })
+    }
+
+    /// Start the listener that turns database notifications into wake-ups.
+    ///
+    /// Separate from [`Daemon::new`] because it spawns, and a constructor that
+    /// needed a running runtime to exist would be a trap for any caller that
+    /// builds a daemon before starting one. A daemon that never calls this still
+    /// serves subscriptions correctly — every one of them re-reads on
+    /// `SUBSCRIPTION_POLL_SECS` regardless — at poll latency instead of
+    /// notification latency.
+    pub fn notify_on_append(&self) {
+        tokio::spawn(subscribe::watch_events(
+            self.store.pool().clone(),
+            Arc::clone(&self.wake),
+        ));
     }
 
     /// Sealed state and watermark, as the `HelloAck` reports them.
@@ -166,8 +209,17 @@ impl Daemon {
     /// Answer one request, or say why not. A refusal is a `KernelResult`, never
     /// an error out of band — the connection stays open and the client gets a
     /// value it can branch on.
-    async fn answer(&self, request: &KernelRequest) -> KernelResult {
-        match self.try_answer(request).await {
+    ///
+    /// `subs` is the connection's own state, threaded in because exactly one
+    /// request needs it: a subscription is the only answer that outlives the
+    /// response carrying it.
+    async fn answer(
+        &self,
+        request_id: &RequestId,
+        request: &KernelRequest,
+        subs: &mut Subscriptions<'_>,
+    ) -> KernelResult {
+        match self.try_answer(request_id, request, subs).await {
             Ok(result) => result,
             Err(e) => KernelResult::Error {
                 code: KernelErrorCode::Storage,
@@ -177,7 +229,12 @@ impl Daemon {
         }
     }
 
-    async fn try_answer(&self, request: &KernelRequest) -> Result<KernelResult> {
+    async fn try_answer(
+        &self,
+        request_id: &RequestId,
+        request: &KernelRequest,
+        subs: &mut Subscriptions<'_>,
+    ) -> Result<KernelResult> {
         let readiness = self.readiness().await?;
         Ok(match request {
             // Liveness. A sealed kernel is READY — it is serving, it simply
@@ -276,12 +333,15 @@ impl Daemon {
                 }
             }
 
+            // Admitted here, started by the request loop — see
+            // [`Subscriptions::admit`] for why the two are separate steps.
+            KernelRequest::SubscribeEvents { cursor } => subs.admit(request_id, *cursor),
+
             // Named one by one so the protocol cannot grow a request this
-            // layer silently drops. The streaming and blob halves of task 19
-            // fill these in; until they do the refusal says which request it
-            // was, not "unsupported".
-            KernelRequest::SubscribeEvents { .. }
-            | KernelRequest::BlobBegin { .. }
+            // layer silently drops. The blob half of task 19 fills these in;
+            // until it does the refusal says which request it was, not
+            // "unsupported".
+            KernelRequest::BlobBegin { .. }
             | KernelRequest::BlobChunk { .. }
             | KernelRequest::BlobCommit { .. }
             | KernelRequest::BlobAbort { .. }
@@ -386,6 +446,84 @@ impl Daemon {
     }
 }
 
+/// The live subscriptions of one connection, and the queues they write through.
+///
+/// Per-connection rather than per-daemon because every bound here is about one
+/// client's behaviour: how many streams it may hold, and how much the kernel
+/// will buffer for it before deciding it has stopped reading.
+struct Subscriptions<'a> {
+    daemon: &'a Daemon,
+    /// Dropping this aborts every subscription on it, which is what makes a
+    /// closed connection stop reading the database — a stream parked between
+    /// polls has nothing to notice a hangup by.
+    live: tokio::task::JoinSet<()>,
+    batches: mpsc::Sender<ServerControl>,
+    responses: mpsc::Sender<ServerControl>,
+    /// An admitted subscription waiting to be started. See [`Self::admit`].
+    admitted: Option<(RequestId, Option<Seq>)>,
+}
+
+impl<'a> Subscriptions<'a> {
+    fn new(
+        daemon: &'a Daemon,
+        responses: mpsc::Sender<ServerControl>,
+        batches: mpsc::Sender<ServerControl>,
+    ) -> Self {
+        Self {
+            daemon,
+            live: tokio::task::JoinSet::new(),
+            batches,
+            responses,
+            admitted: None,
+        }
+    }
+
+    /// Take a subscription request, without starting it.
+    ///
+    /// Starting is [`Self::start`]'s, one step later, because a subscription's
+    /// first batch must not overtake the response that announced it. The task
+    /// begins only once `Subscribed` is on the response queue, and the writer
+    /// drains that queue first, so the client sees the acknowledgement before
+    /// anything acknowledged by it.
+    fn admit(&mut self, request_id: &RequestId, cursor: Option<Seq>) -> KernelResult {
+        // Ended subscriptions are still in the set until something reaps them,
+        // and counting a slow consumer's corpse against a client's allowance
+        // would make the cap tighten over the life of a connection.
+        while self.live.try_join_next().is_some() {}
+        if self.live.len() >= MAX_SUBSCRIPTIONS_PER_CONNECTION {
+            // The connection and every stream already on it are untouched: this
+            // refuses one request, it does not punish the session.
+            return KernelResult::Error {
+                code: KernelErrorCode::Overloaded,
+                message: format!(
+                    "this connection already holds {MAX_SUBSCRIPTIONS_PER_CONNECTION} subscriptions"
+                ),
+                detail: None,
+            };
+        }
+        self.admitted = Some((request_id.clone(), cursor));
+        // Echoes the cursor asked for, which is where the stream starts. A
+        // client that sent none gets none back and learns where it is from the
+        // first batch.
+        KernelResult::Subscribed { cursor }
+    }
+
+    /// Start whatever [`Self::admit`] took, now that its response is queued.
+    fn start(&mut self) {
+        let Some((request_id, cursor)) = self.admitted.take() else {
+            return;
+        };
+        self.live.spawn(subscribe::run(
+            Arc::clone(&self.daemon.store),
+            request_id,
+            cursor,
+            self.batches.clone(),
+            self.responses.clone(),
+            self.daemon.wake.subscribe(),
+        ));
+    }
+}
+
 /// The wire name of a request, for a message a human reads.
 fn request_name(request: &KernelRequest) -> &'static str {
     match request {
@@ -408,6 +546,12 @@ fn request_name(request: &KernelRequest) -> &'static str {
 }
 
 /// Drive one connection: handshake, then requests until the peer hangs up.
+///
+/// After the handshake the two directions are driven by two loops, and the first
+/// of them to finish ends the connection: the reader finishing means the peer
+/// hung up, the writer finishing means the transport failed, and neither is
+/// worth continuing half of. Cancelling the reader mid-frame is safe for exactly
+/// that reason — nothing is going to read the rest of it.
 pub async fn serve_connection<R, W>(
     daemon: &Daemon,
     reader: &mut R,
@@ -417,7 +561,7 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let mut budget = Budget::new(
+    let mut ingress = Budget::new(
         CONNECTION_INGRESS_BYTES_PER_WINDOW,
         CONNECTION_EGRESS_BYTES_PER_WINDOW,
     );
@@ -425,10 +569,37 @@ where
         .readiness()
         .await
         .map_err(|e| WireError::new(KernelErrorCode::Storage, format!("readiness: {e}")))?;
-    hello::negotiate(reader, writer, &mut budget, readiness).await?;
+    hello::negotiate(reader, writer, &mut ingress, readiness).await?;
 
+    // One allowance per direction, now that a direction is a loop. They were
+    // never coupled — a `spend` only ever touches the counter for the direction
+    // it charges — so the split changes nothing but which loop owns which half.
+    let mut egress = Budget::new(
+        CONNECTION_INGRESS_BYTES_PER_WINDOW,
+        CONNECTION_EGRESS_BYTES_PER_WINDOW,
+    );
+    let (responses_tx, responses_rx) = mpsc::channel(RESPONSE_QUEUE_DEPTH);
+    let (batches_tx, batches_rx) = mpsc::channel(BATCH_QUEUE_DEPTH);
+    let mut subs = Subscriptions::new(daemon, responses_tx, batches_tx);
+
+    tokio::select! {
+        read = read_requests(daemon, reader, &mut ingress, &mut subs) => read,
+        written = write_frames(writer, responses_rx, batches_rx, &mut egress) => written,
+    }
+}
+
+/// Read requests and queue their answers, until the peer hangs up.
+async fn read_requests<R>(
+    daemon: &Daemon,
+    reader: &mut R,
+    budget: &mut Budget,
+    subs: &mut Subscriptions<'_>,
+) -> std::result::Result<(), WireError>
+where
+    R: AsyncRead + Unpin,
+{
     loop {
-        let frame = match read_frame(reader, FRAME_BODY_MAX_BYTES, &mut budget).await? {
+        let frame = match read_frame(reader, FRAME_BODY_MAX_BYTES, budget).await? {
             Incoming::Frame(frame) => frame,
             Incoming::Closed => return Ok(()),
         };
@@ -456,14 +627,45 @@ where
             }
         };
 
-        let response = ServerControl::Response {
-            request_id,
-            result: daemon.answer(&request).await,
+        let result = daemon.answer(&request_id, &request, subs).await;
+        let response = ServerControl::Response { request_id, result };
+        if subs.responses.send(response).await.is_err() {
+            // The writer is gone, so nothing can be answered any more. Its own
+            // error is the one worth reporting and it already returned it.
+            return Ok(());
+        }
+        subs.start();
+    }
+}
+
+/// Own the write half, and take work from the two queues that feed it.
+///
+/// Responses first, always. A `StreamClosed` travels on the response queue for
+/// this reason: the thing it has to get past is precisely a batch queue that a
+/// stopped consumer has left full, and a fair writer would leave the client
+/// waiting on the frame that explains why nothing else is coming.
+async fn write_frames<W>(
+    writer: &mut W,
+    mut responses: mpsc::Receiver<ServerControl>,
+    mut batches: mpsc::Receiver<ServerControl>,
+    budget: &mut Budget,
+) -> std::result::Result<(), WireError>
+where
+    W: AsyncWrite + Unpin,
+{
+    loop {
+        let control = tokio::select! {
+            biased;
+            Some(control) = responses.recv() => control,
+            Some(control) = batches.recv() => control,
+            // Both queues closed: the reader is done and no subscription is
+            // left to produce anything.
+            else => return Ok(()),
         };
-        let body = serde_json::to_vec(&response).map_err(|e| {
-            WireError::new(KernelErrorCode::Storage, format!("serialize response: {e}"))
+        let body = serde_json::to_vec(&control).map_err(|e| {
+            WireError::new(KernelErrorCode::Storage, format!("serialize a frame: {e}"))
         })?;
-        write_frame(writer, FrameKind::Json, &body, &mut budget).await?;
+        write_frame(writer, FrameKind::Json, &body, budget).await?;
     }
 }
 
@@ -477,6 +679,10 @@ pub async fn run<S>(listener: Listener, daemon: Arc<Daemon>, shutdown: S) -> Res
 where
     S: std::future::Future<Output = ()> + Send,
 {
+    // Before the first connection, so a subscription opened on it is on the
+    // notified path rather than the poll path from its first read.
+    daemon.notify_on_append();
+
     let mut connections = tokio::task::JoinSet::new();
     let shutdown = std::pin::pin!(shutdown);
     let mut shutdown = shutdown;

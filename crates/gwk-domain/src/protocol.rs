@@ -142,6 +142,24 @@ pub const CONNECTION_BUDGET_WINDOW_SECS: u64 = 1;
 /// cursor, so it can resume rather than restart.
 pub const SLOW_CONSUMER_TIMEOUT_SECS: u64 = 30;
 
+/// Longest a subscriber can wait for an event that is already committed.
+///
+/// Delivery is driven by a database notification, which is fast and is NOT
+/// guaranteed: a notification can be lost, and one that is lost while the log
+/// then goes quiet would leave a subscriber waiting on an append that already
+/// happened. So every subscription also re-reads from its own cursor on this
+/// interval, which turns an unbounded stall into a bounded one. The notified
+/// path still delivers in milliseconds; this is the ceiling, not the norm.
+pub const SUBSCRIPTION_POLL_SECS: u64 = 5;
+
+/// Most live subscriptions one connection may hold.
+///
+/// Each carries a cursor and a queue, so without a bound a client's memory
+/// footprint on the kernel is a function of its own behaviour. Exceeding it
+/// refuses that request with [`KernelErrorCode::Overloaded`] and leaves the
+/// connection — and every subscription already on it — alone.
+pub const MAX_SUBSCRIPTIONS_PER_CONNECTION: usize = 8;
+
 /// Most capability names either side may offer or grant.
 pub const MAX_CAPABILITIES: usize = 64;
 
@@ -155,6 +173,10 @@ pub const CAPABILITY_NAME_MAX_BYTES: usize = 64;
 const _: () = {
     assert!(HELLO_MAX_BYTES < FRAME_BODY_MAX_BYTES);
     assert!(FRAME_BODY_MIN_BYTES >= 1);
+    // A poll slower than the slow-consumer timeout would let a subscriber be
+    // disconnected for not keeping up before it had been offered a second thing
+    // to read.
+    assert!(SUBSCRIPTION_POLL_SECS < SLOW_CONSUMER_TIMEOUT_SECS);
     assert!(crate::blob::BLOB_CHUNK_BYTES.div_ceil(3) * 4 < FRAME_BODY_MAX_BYTES as usize);
 };
 
@@ -878,6 +900,8 @@ mod tests {
         assert!(CONNECTION_INGRESS_BYTES_PER_WINDOW > FRAME_BODY_MAX_BYTES as usize);
         assert!(CONNECTION_EGRESS_BYTES_PER_WINDOW > FRAME_BODY_MAX_BYTES as usize);
         assert_eq!(SLOW_CONSUMER_TIMEOUT_SECS, 30);
+        assert_eq!(SUBSCRIPTION_POLL_SECS, 5);
+        assert_eq!(MAX_SUBSCRIPTIONS_PER_CONNECTION, 8);
         assert_eq!(HELLO_DEADLINE_SECS, 5);
         assert_eq!(MAX_CAPABILITIES, 64);
         // The relations between these bounds are pinned at compile time by the

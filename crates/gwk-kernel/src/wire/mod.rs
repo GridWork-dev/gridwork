@@ -23,6 +23,7 @@ pub mod hello;
 pub mod listen;
 pub mod serve;
 pub mod strict;
+pub mod subscribe;
 
 use gwk_domain::protocol::{KernelErrorCode, KernelResult};
 
