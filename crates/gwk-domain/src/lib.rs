@@ -50,12 +50,12 @@ pub use inherited::{
     PendingApproval, RoundFindingSummary,
 };
 pub use protocol::{
-    CAPABILITY_NAME_MAX_BYTES, CONNECTION_EGRESS_MAX_BYTES, CONNECTION_INGRESS_MAX_BYTES,
-    CONTRACT_VERSION, CapabilityName, CapabilityNameError, ClientControl, FRAME_BODY_MAX_BYTES,
-    FRAME_BODY_MIN_BYTES, FRAME_KIND_RESERVED_STREAM, FRAME_LENGTH_PREFIX_BYTES, FrameKind,
-    HELLO_DEADLINE_SECS, HELLO_MAX_BYTES, KernelErrorCode, KernelRequest, KernelResult,
-    MAX_CAPABILITIES, PROTOCOL_MINOR, ProjectionKind, ProjectionRecord, ProtocolVersion,
-    SLOW_CONSUMER_TIMEOUT_SECS, ServerControl,
+    CAPABILITY_NAME_MAX_BYTES, CONNECTION_EGRESS_BYTES_PER_WINDOW,
+    CONNECTION_INGRESS_BYTES_PER_WINDOW, CONTRACT_VERSION, CapabilityName, CapabilityNameError,
+    ClientControl, FRAME_BODY_MAX_BYTES, FRAME_BODY_MIN_BYTES, FRAME_KIND_RESERVED_STREAM,
+    FRAME_LENGTH_PREFIX_BYTES, FrameKind, HELLO_DEADLINE_SECS, HELLO_MAX_BYTES, KernelErrorCode,
+    KernelRequest, KernelResult, MAX_CAPABILITIES, PROTOCOL_MINOR, ProjectionKind,
+    ProjectionRecord, ProtocolVersion, SLOW_CONSUMER_TIMEOUT_SECS, ServerControl,
 };
 pub use transition::{
     Cursor, GuardCtx, GuardViolation, LIVENESS_PRODUCER_KIND, TransitionGuard, TransitionRequest,

@@ -116,11 +116,27 @@ pub const HELLO_MAX_BYTES: u32 = 64 * 1024;
 /// A connection that has not sent its hello within this many seconds is closed.
 pub const HELLO_DEADLINE_SECS: u64 = 5;
 
-/// Byte-accounted per-connection ingress budget.
-pub const CONNECTION_INGRESS_MAX_BYTES: usize = 8 * 1024 * 1024;
+/// Bytes a connection may RECEIVE per [`CONNECTION_BUDGET_WINDOW_SECS`].
+///
+/// A RATE, not a lifetime total. What this has to bound is a peer flooding the
+/// kernel — how fast bytes arrive and how fast the kernel is asked to produce
+/// them. A lifetime cap bounds that too, but it bounds every legitimate use
+/// along with it: a subscription is meant to run for days and a blob read moves
+/// as many bytes as the blob has, so under a total both die at a threshold that
+/// says nothing about whether they were behaving.
+pub const CONNECTION_INGRESS_BYTES_PER_WINDOW: usize = 8 * 1024 * 1024;
 
-/// Byte-accounted per-connection egress budget.
-pub const CONNECTION_EGRESS_MAX_BYTES: usize = 8 * 1024 * 1024;
+/// Bytes a connection may be SENT per [`CONNECTION_BUDGET_WINDOW_SECS`].
+pub const CONNECTION_EGRESS_BYTES_PER_WINDOW: usize = 8 * 1024 * 1024;
+
+/// The window the two allowances refill over.
+///
+/// Comfortably above every bound the contract sets elsewhere — a single frame
+/// caps at [`FRAME_BODY_MAX_BYTES`], so an allowance can never be too small for
+/// one frame to fit — and comfortably above the sustained event rate the phase
+/// targets. A peer that exceeds it is going too FAST, which is answered by
+/// making it wait, not by closing a connection that has done nothing wrong.
+pub const CONNECTION_BUDGET_WINDOW_SECS: u64 = 1;
 
 /// A subscriber blocked this long is disconnected with its last delivered
 /// cursor, so it can resume rather than restart.
@@ -853,8 +869,14 @@ mod tests {
         assert_eq!(FRAME_BODY_MIN_BYTES, 1);
         assert_eq!(FRAME_BODY_MAX_BYTES, 4_194_304);
         assert_eq!(HELLO_MAX_BYTES, 65_536);
-        assert_eq!(CONNECTION_INGRESS_MAX_BYTES, 8 * 1024 * 1024);
-        assert_eq!(CONNECTION_EGRESS_MAX_BYTES, 8 * 1024 * 1024);
+        assert_eq!(CONNECTION_INGRESS_BYTES_PER_WINDOW, 8 * 1024 * 1024);
+        assert_eq!(CONNECTION_EGRESS_BYTES_PER_WINDOW, 8 * 1024 * 1024);
+        assert_eq!(CONNECTION_BUDGET_WINDOW_SECS, 1);
+        // A window allowance smaller than one frame could never pass a frame no
+        // matter how long a peer waited, which would be a deadlock rather than
+        // a limit.
+        assert!(CONNECTION_INGRESS_BYTES_PER_WINDOW > FRAME_BODY_MAX_BYTES as usize);
+        assert!(CONNECTION_EGRESS_BYTES_PER_WINDOW > FRAME_BODY_MAX_BYTES as usize);
         assert_eq!(SLOW_CONSUMER_TIMEOUT_SECS, 30);
         assert_eq!(HELLO_DEADLINE_SECS, 5);
         assert_eq!(MAX_CAPABILITIES, 64);

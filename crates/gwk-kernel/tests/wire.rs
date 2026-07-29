@@ -15,7 +15,7 @@ mod common;
 
 use common::*;
 use gwk_domain::protocol::{
-    CONNECTION_EGRESS_MAX_BYTES, CONNECTION_INGRESS_MAX_BYTES, CONTRACT_VERSION,
+    CONNECTION_EGRESS_BYTES_PER_WINDOW, CONNECTION_INGRESS_BYTES_PER_WINDOW, CONTRACT_VERSION,
     FRAME_BODY_MAX_BYTES, FrameKind, KernelErrorCode, KernelResult, ProjectionKind,
     ProjectionRecord, ProtocolVersion, ServerControl,
 };
@@ -51,7 +51,10 @@ impl Client {
     async fn connect(path: &std::path::Path) -> (Self, ServerControl) {
         let mut client = Self {
             stream: UnixStream::connect(path).await.expect("connect"),
-            budget: Budget::new(CONNECTION_INGRESS_MAX_BYTES, CONNECTION_EGRESS_MAX_BYTES),
+            budget: Budget::new(
+                CONNECTION_INGRESS_BYTES_PER_WINDOW,
+                CONNECTION_EGRESS_BYTES_PER_WINDOW,
+            ),
         };
         client
             .send(r#"{"type":"hello","protocol_major":1,"protocol_minor":0,"capabilities":[]}"#)

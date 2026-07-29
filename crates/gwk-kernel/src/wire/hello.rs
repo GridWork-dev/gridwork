@@ -216,13 +216,17 @@ where
 #[cfg(test)]
 mod tests {
     use gwk_domain::protocol::{
-        CONNECTION_EGRESS_MAX_BYTES, CONNECTION_INGRESS_MAX_BYTES, FRAME_BODY_MAX_BYTES,
+        CONNECTION_EGRESS_BYTES_PER_WINDOW, CONNECTION_INGRESS_BYTES_PER_WINDOW,
+        FRAME_BODY_MAX_BYTES,
     };
 
     use super::*;
 
     fn budget() -> Budget {
-        Budget::new(CONNECTION_INGRESS_MAX_BYTES, CONNECTION_EGRESS_MAX_BYTES)
+        Budget::new(
+            CONNECTION_INGRESS_BYTES_PER_WINDOW,
+            CONNECTION_EGRESS_BYTES_PER_WINDOW,
+        )
     }
 
     fn ready() -> Readiness {

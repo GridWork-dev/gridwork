@@ -6,70 +6,137 @@
 //! arrived — a peer that claims 4 GiB is refused after four bytes, not after
 //! four gigabytes.
 //!
-//! The budget is byte-accounted per CONNECTION, not per frame. A peer that
-//! stays inside the frame cap forever still reaches its ingress ceiling, which
-//! is the bound that actually protects a long-lived connection.
+//! The budget is byte-accounted per CONNECTION and per WINDOW, not per frame. A
+//! peer that stays inside the frame cap forever cannot outrun its allowance,
+//! which is the bound that actually protects a long-lived connection — and
+//! because the allowance refills, a long-lived connection is possible at all.
+
+use std::time::Duration;
 
 use gwk_domain::protocol::{
-    FRAME_BODY_MAX_BYTES, FRAME_BODY_MIN_BYTES, FRAME_KIND_RESERVED_STREAM,
-    FRAME_LENGTH_PREFIX_BYTES, FrameKind, KernelErrorCode,
+    CONNECTION_BUDGET_WINDOW_SECS, FRAME_BODY_MAX_BYTES, FRAME_BODY_MIN_BYTES,
+    FRAME_KIND_RESERVED_STREAM, FRAME_LENGTH_PREFIX_BYTES, FrameKind, KernelErrorCode,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::time::Instant;
 
 use super::WireError;
 
-/// One connection's remaining ingress and egress allowance, in bytes.
+/// One connection's send and receive allowance, refilling each window.
+///
+/// A RATE, not a lifetime total. The thing worth bounding is a peer flooding
+/// the kernel — how fast bytes arrive, and how fast the kernel is asked to
+/// produce them. A running total bounds that, but it bounds every legitimate
+/// use with it: a subscription is meant to run for days and a blob read moves
+/// as many bytes as the blob holds, so under a total both die at a threshold
+/// that says nothing about whether they misbehaved.
+///
+/// Exceeding the allowance therefore WAITS rather than failing. "Too fast" is
+/// answered by going slower; a connection is only killed when it has done
+/// something a slower version of would still be wrong. The one exception is a
+/// frame larger than a whole window's allowance, which no amount of waiting
+/// would ever admit — that is a misconfiguration, and it fails loudly instead
+/// of hanging forever.
 ///
 /// Both directions are charged the FULL frame — prefix, kind byte, and body —
 /// because that is what the connection actually costs to move. Charging only
-/// the body would let a peer spend the budget on a million one-byte frames and
-/// be told it had used a megabyte.
+/// the body would let a peer spend the allowance on a million one-byte frames
+/// and be told it had used a megabyte.
+///
+/// ponytail: a fixed window, so a peer can spend a full allowance at the end of
+/// one and again at the start of the next — a 2x burst across the boundary. For
+/// a flood guard that is immaterial; a token bucket if smoothing ever matters.
 #[derive(Debug)]
 pub struct Budget {
-    ingress_left: usize,
-    egress_left: usize,
+    ingress_per_window: usize,
+    egress_per_window: usize,
+    window: Duration,
+    ingress_spent: usize,
+    egress_spent: usize,
+    window_started: Instant,
 }
 
 impl Budget {
-    pub const fn new(ingress: usize, egress: usize) -> Self {
+    pub fn new(ingress: usize, egress: usize) -> Self {
+        Self::with_window(
+            ingress,
+            egress,
+            Duration::from_secs(CONNECTION_BUDGET_WINDOW_SECS),
+        )
+    }
+
+    /// The same allowance over a caller-chosen window. Tests use a short one so
+    /// a refill is observable; nothing in the daemon does.
+    pub fn with_window(ingress: usize, egress: usize, window: Duration) -> Self {
         Self {
-            ingress_left: ingress,
-            egress_left: egress,
+            ingress_per_window: ingress,
+            egress_per_window: egress,
+            window,
+            ingress_spent: 0,
+            egress_spent: 0,
+            window_started: Instant::now(),
         }
     }
 
-    pub const fn ingress_left(&self) -> usize {
-        self.ingress_left
+    async fn spend_ingress(&mut self, bytes: usize) -> Result<(), WireError> {
+        self.spend(bytes, Direction::Ingress).await
     }
 
-    pub const fn egress_left(&self) -> usize {
-        self.egress_left
+    async fn spend_egress(&mut self, bytes: usize) -> Result<(), WireError> {
+        self.spend(bytes, Direction::Egress).await
     }
 
-    fn spend_ingress(&mut self, bytes: usize) -> Result<(), WireError> {
-        self.ingress_left = self.ingress_left.checked_sub(bytes).ok_or_else(|| {
-            WireError::new(
+    async fn spend(&mut self, bytes: usize, direction: Direction) -> Result<(), WireError> {
+        let per_window = match direction {
+            Direction::Ingress => self.ingress_per_window,
+            Direction::Egress => self.egress_per_window,
+        };
+        // Checked before any waiting: this one can never be satisfied, and
+        // sleeping on it would turn a bad bound into a hung connection.
+        if bytes > per_window {
+            return Err(WireError::new(
                 KernelErrorCode::FrameSize,
                 format!(
-                    "connection ingress budget exhausted: {bytes} more bytes with {} left",
-                    self.ingress_left
+                    "a {direction} frame of {bytes} bytes exceeds the whole \
+                     {per_window}-byte window allowance"
                 ),
-            )
-        })?;
-        Ok(())
+            ));
+        }
+        loop {
+            let elapsed = self.window_started.elapsed();
+            if elapsed >= self.window {
+                self.ingress_spent = 0;
+                self.egress_spent = 0;
+                self.window_started = Instant::now();
+            }
+            let spent = match direction {
+                Direction::Ingress => &mut self.ingress_spent,
+                Direction::Egress => &mut self.egress_spent,
+            };
+            if *spent + bytes <= per_window {
+                *spent += bytes;
+                return Ok(());
+            }
+            // Wait out the remainder of this window, then reconsider. One sleep
+            // is always enough for a frame that fits a window at all, but the
+            // loop re-reads the clock rather than assuming that.
+            tokio::time::sleep(self.window - elapsed).await;
+        }
     }
+}
 
-    fn spend_egress(&mut self, bytes: usize) -> Result<(), WireError> {
-        self.egress_left = self.egress_left.checked_sub(bytes).ok_or_else(|| {
-            WireError::new(
-                KernelErrorCode::FrameSize,
-                format!(
-                    "connection egress budget exhausted: {bytes} more bytes with {} left",
-                    self.egress_left
-                ),
-            )
-        })?;
-        Ok(())
+#[derive(Debug, Clone, Copy)]
+enum Direction {
+    Ingress,
+    Egress,
+}
+
+impl std::fmt::Display for Direction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Ingress => "received",
+            Self::Egress => "sent",
+        })
     }
 }
 
@@ -139,7 +206,7 @@ where
     }
 
     let total = FRAME_LENGTH_PREFIX_BYTES + announced as usize;
-    budget.spend_ingress(total)?;
+    budget.spend_ingress(total).await?;
 
     let mut body = vec![0u8; announced as usize];
     reader
@@ -191,7 +258,9 @@ where
             ),
         ));
     }
-    budget.spend_egress(FRAME_LENGTH_PREFIX_BYTES + announced as usize)?;
+    budget
+        .spend_egress(FRAME_LENGTH_PREFIX_BYTES + announced as usize)
+        .await?;
 
     // One buffer, one write: two writes would let a reader on the other side
     // observe a length with no body behind it if this task is cancelled between
@@ -309,10 +378,10 @@ mod tests {
         assert!(read_bytes(&[0, 0], FRAME_BODY_MAX_BYTES).await.is_err());
     }
 
-    #[tokio::test]
-    async fn the_budget_counts_the_whole_frame_and_then_refuses() {
-        // Sized so the first frame fits and the second cannot: a peer inside
-        // the per-frame cap forever still reaches the connection ceiling.
+    #[tokio::test(start_paused = true)]
+    async fn a_peer_that_outruns_its_allowance_waits_instead_of_dying() {
+        // Twelve bytes a window against a frame that costs seven: the first
+        // fits and the second cannot, until the allowance refills.
         let mut small = Budget::new(12, 12);
         let mut wire = Vec::new();
         let mut writing = Budget::new(1 << 20, 1 << 20);
@@ -320,26 +389,42 @@ mod tests {
             .await
             .expect("write");
         let mut stream = std::io::Cursor::new([wire.clone(), wire].concat());
+
+        let started = Instant::now();
         read_frame(&mut stream, FRAME_BODY_MAX_BYTES, &mut small)
             .await
             .expect("first frame");
-        // 4 prefix + 1 kind + 2 body = 7 charged, not 2.
-        assert_eq!(small.ingress_left(), 5);
-        let error = read_frame(&mut stream, FRAME_BODY_MAX_BYTES, &mut small)
+        // 4 prefix + 1 kind + 2 body = 7 charged, not 2, which is why twelve
+        // does not cover two of them.
+        assert!(
+            started.elapsed() < Duration::from_millis(1),
+            "the first frame should not have waited"
+        );
+
+        read_frame(&mut stream, FRAME_BODY_MAX_BYTES, &mut small)
             .await
-            .expect_err("budget not enforced");
-        assert_eq!(error.code, KernelErrorCode::FrameSize);
-        assert!(error.message.contains("ingress"), "{error}");
+            .expect("the second frame arrives after the refill");
+        // It ARRIVED. The connection was throttled, not killed, and that is the
+        // whole difference between a rate and a lifetime cap — under a total
+        // this peer would be finished, having done nothing but read two frames.
+        assert!(
+            started.elapsed() >= Duration::from_secs(CONNECTION_BUDGET_WINDOW_SECS),
+            "the second frame was not made to wait for its window"
+        );
     }
 
     #[tokio::test]
-    async fn egress_is_charged_before_the_bytes_are_written() {
+    async fn a_frame_larger_than_a_whole_window_fails_rather_than_hanging() {
         let mut sink = Vec::new();
+        // 4 prefix + 1 kind + 4 body = 9 bytes against a 6-byte window. No
+        // amount of waiting ever admits it, so waiting would be a hang dressed
+        // as a limit.
         let mut small = Budget::new(0, 6);
         let error = write_frame(&mut sink, FrameKind::Json, b"abcd", &mut small)
             .await
-            .expect_err("egress not enforced");
+            .expect_err("an unaffordable frame was not refused");
         assert_eq!(error.code, KernelErrorCode::FrameSize);
+        assert!(error.message.contains("sent"), "{error}");
         // Nothing reached the writer: a frame that cannot be afforded is not
         // half-sent.
         assert!(sink.is_empty());

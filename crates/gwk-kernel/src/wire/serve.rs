@@ -24,7 +24,7 @@ use std::sync::Arc;
 use gwk_domain::ids::{EventCount, EventId, Seq, WriterEpoch};
 use gwk_domain::port::{EventStore, MAX_READ_LIMIT};
 use gwk_domain::protocol::{
-    CONNECTION_EGRESS_MAX_BYTES, CONNECTION_INGRESS_MAX_BYTES, CONTRACT_VERSION,
+    CONNECTION_EGRESS_BYTES_PER_WINDOW, CONNECTION_INGRESS_BYTES_PER_WINDOW, CONTRACT_VERSION,
     FRAME_BODY_MAX_BYTES, FrameKind, KernelErrorCode, KernelRequest, KernelResult, ProjectionKind,
     ProjectionRecord, ServerControl,
 };
@@ -417,7 +417,10 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let mut budget = Budget::new(CONNECTION_INGRESS_MAX_BYTES, CONNECTION_EGRESS_MAX_BYTES);
+    let mut budget = Budget::new(
+        CONNECTION_INGRESS_BYTES_PER_WINDOW,
+        CONNECTION_EGRESS_BYTES_PER_WINDOW,
+    );
     let readiness = daemon
         .readiness()
         .await
