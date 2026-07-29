@@ -1,22 +1,32 @@
 //! One connection, from hello to hangup — and the accept loop that owns them.
 //!
-//! What is served here is the SEALED surface: hello, health, status, watermark,
-//! and the fresh-epoch proof. Those are exactly the requests a kernel can answer
-//! before it has been activated, so a sealed daemon is COMPLETE at this layer
-//! rather than half-built — an operator can bring one up, watch it, and prove
-//! its epoch without any of the request types task 19 adds.
+//! What is served here is the request/response surface: the readiness answers,
+//! the one mutation path, and the reads — a projection by id, a projection page,
+//! and a page of the log. Every one of them is a question with an answer, which
+//! is what makes them one layer: a request goes out, a response comes back on
+//! the same `request_id`, and nothing arrives that was not asked for.
 //!
-//! The remaining requests are matched BY NAME and refused, not swept up by a
-//! wildcard: the compiler has to notice when the protocol grows a request, and
-//! a reader has to be able to see which ones this layer does not answer yet.
+//! Subscriptions and blob transfer are the other half and are deliberately not
+//! here. Both push frames the client did not individually request, which needs a
+//! writer that is not the request loop, per-connection queues, and a policy for
+//! a consumer that stops reading. That is a different shape, not more of this
+//! one.
+//!
+//! Pages are cut by BYTES, not rows. The frame limit is the real bound and a row
+//! count cannot respect it — see [`PAGE_BYTE_BUDGET`].
+//!
+//! The requests this layer does not answer are matched BY NAME and refused, not
+//! swept up by a wildcard: the compiler has to notice when the protocol grows a
+//! request, and a reader has to be able to see which ones are still missing.
 
 use std::sync::Arc;
 
 use gwk_domain::ids::{EventCount, EventId, Seq, WriterEpoch};
-use gwk_domain::port::EventStore;
+use gwk_domain::port::{EventStore, MAX_READ_LIMIT};
 use gwk_domain::protocol::{
     CONNECTION_EGRESS_MAX_BYTES, CONNECTION_INGRESS_MAX_BYTES, CONTRACT_VERSION,
-    FRAME_BODY_MAX_BYTES, FrameKind, KernelErrorCode, KernelRequest, KernelResult, ServerControl,
+    FRAME_BODY_MAX_BYTES, FrameKind, KernelErrorCode, KernelRequest, KernelResult, ProjectionKind,
+    ProjectionRecord, ServerControl,
 };
 use sqlx::Row;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -35,6 +45,64 @@ use crate::store::PgEventStore;
 /// How long shutdown waits for connections that are mid-request.
 pub const DRAIN_TIMEOUT_SECS: u64 = 30;
 
+/// Ceiling on one page's serialized items, cursor continuation aside.
+///
+/// A row count cannot bound a page. An event or an ingested record carries up
+/// to `INLINE_PAYLOAD_MAX_BYTES` — 64 KiB — of payload, so sixty-four of them
+/// already exceed [`FRAME_BODY_MAX_BYTES`], and the response would fail at the
+/// WRITE rather than the request: a fatal framing error, connection closed,
+/// over a request that was perfectly well formed. Pages are therefore cut by
+/// bytes and the cursor says where. Half the frame leaves room for the response
+/// envelope and for re-serialization to land slightly wider than the estimate.
+const PAGE_BYTE_BUDGET: usize = (FRAME_BODY_MAX_BYTES as usize) / 2;
+
+/// Rows fetched for a projection page the request gave no limit for.
+const DEFAULT_PAGE_ROWS: u32 = 256;
+
+/// Cut a page down to what one frame can carry, and say whether it was cut.
+///
+/// The first item always survives: a page that returned nothing because its
+/// leading item was large would make the cursor stand still and the client loop
+/// forever. One item cannot overflow a frame on its own — the payload bound is
+/// a small fraction of it — so admitting it unconditionally is safe.
+///
+/// ponytail: serializes each item once here and again in the response frame.
+/// Measuring without a second pass means threading a counting writer through
+/// the encoder; worth doing if pages ever show up in a profile, not before.
+fn fit_page<T: serde::Serialize>(items: Vec<T>) -> Result<(Vec<T>, bool)> {
+    let mut kept: Vec<T> = Vec::with_capacity(items.len());
+    let mut bytes = 0usize;
+    for item in items {
+        bytes += serde_json::to_vec(&item)
+            .map_err(|e| KernelError::Config(format!("measure a page item: {e}")))?
+            .len();
+        if !kept.is_empty() && bytes > PAGE_BYTE_BUDGET {
+            return Ok((kept, true));
+        }
+        kept.push(item);
+    }
+    Ok((kept, false))
+}
+
+/// The value a page's next cursor continues from, read out of the last record
+/// it delivered.
+///
+/// `key` is the column the query ordered by, carried here from the same table
+/// that holds the SQL — so the cursor a client gets back is by construction the
+/// value the next page's `>` compares against. Read off the record rather than
+/// selected as a second column, which keeps the read query's record expression
+/// byte-identical to the one the checkpoint hashes.
+fn cursor_key(record: &ProjectionRecord, key: &str) -> Result<String> {
+    let tag = record.kind().as_str();
+    let json = serde_json::to_value(record)
+        .map_err(|e| KernelError::Config(format!("serialize a {tag} record: {e}")))?;
+    json.get(tag)
+        .and_then(|body| body.get(key))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| KernelError::Config(format!("a {tag} record has no {key} to page from")))
+}
+
 /// What a connection needs to answer the sealed surface.
 pub struct Daemon {
     store: PgEventStore,
@@ -48,16 +116,21 @@ impl Daemon {
     /// recorded. It is required rather than defaulted: a daemon that reported a
     /// placeholder would make that comparison answer "same" for two different
     /// builds.
-    pub fn new(
-        store: PgEventStore,
-        public_revision: String,
-        writer_epoch: WriterEpoch,
-    ) -> Result<Self> {
+    ///
+    /// The writer epoch is READ OFF the store rather than passed in, because
+    /// there is exactly one way to obtain one — `claim_epoch`, which BUMPS the
+    /// durable counter — and the store already did it when it opened. A caller
+    /// handed this as a parameter would have had to claim a second time, and a
+    /// second claim is not a second opinion about the epoch: it supersedes the
+    /// first, so the store this daemon is about to serve from would be fenced
+    /// out of its own log by the daemon in front of it.
+    pub fn new(store: PgEventStore, public_revision: String) -> Result<Self> {
         if !is_public_revision(&public_revision) {
             return Err(KernelError::Config(format!(
                 "public revision {public_revision:?} is not a full 40-hex revision"
             )));
         }
+        let writer_epoch = WriterEpoch::new(store.boot_epoch().max(0) as u64);
         Ok(Self {
             store,
             public_revision,
@@ -126,14 +199,88 @@ impl Daemon {
             },
             KernelRequest::VerifySealed {} => self.verify_sealed(readiness.sealed).await?,
 
+            // Forwarded, not gated. `submit` reads the epoch inside its own
+            // transaction and under the writer lock, so the sealed allowlist is
+            // checked against the state the append will actually commit
+            // against. A second check out here would be read at a different
+            // instant than the one that matters — it could only ever refuse a
+            // command the transaction would have allowed, or wave one through
+            // that it then refuses anyway.
+            KernelRequest::SubmitCommand { envelope } => self.store.submit(envelope).await,
+
+            KernelRequest::GetProjection { projection, id } => {
+                // One row is a one-row page: the same query, asked for an exact
+                // key instead of a cursor.
+                let (mut records, _, _) =
+                    self.projection_page(*projection, None, Some(id), 1).await?;
+                match records.pop() {
+                    Some(record) => KernelResult::Projection { record },
+                    // Absent is NOT an error condition — it is an answer, and
+                    // one a caller routinely branches on.
+                    None => KernelResult::Error {
+                        code: KernelErrorCode::NotFound,
+                        message: format!("no {} with id {id:?}", projection.as_str()),
+                        detail: None,
+                    },
+                }
+            }
+
+            KernelRequest::ListProjection {
+                projection,
+                cursor,
+                limit,
+            } => {
+                // Clamped, never refused — the same rule the event read
+                // documents, so a client that asks for everything gets a page
+                // and a cursor rather than a rejection it has to special-case.
+                let rows = limit
+                    .unwrap_or(DEFAULT_PAGE_ROWS)
+                    .clamp(1, MAX_READ_LIMIT as u32);
+                let (records, cut, key) = self
+                    .projection_page(*projection, cursor.as_deref(), None, rows)
+                    .await?;
+                // A page that filled either bound may have more behind it. A
+                // full page that happened to end the table costs the client one
+                // extra empty page; claiming the end early would cost it rows.
+                let exhausted = !cut && (records.len() as u32) < rows;
+                let next_cursor = if exhausted {
+                    None
+                } else {
+                    records
+                        .last()
+                        .map(|record| cursor_key(record, key))
+                        .transpose()?
+                };
+                KernelResult::ProjectionPage {
+                    records,
+                    next_cursor,
+                }
+            }
+
+            KernelRequest::ReadEvents { cursor, limit } => {
+                let events = self
+                    .store
+                    .read_from(*cursor, *limit as usize)
+                    .await
+                    .map_err(|e| KernelError::Config(format!("read events: {e}")))?;
+                // `read_from` bounds the ROW count; this bounds the bytes, which
+                // is the bound a frame actually has.
+                let (events, _) = fit_page(events)?;
+                KernelResult::Events {
+                    // The last sequence actually delivered, so a client that
+                    // resumes from it resumes from what it received rather than
+                    // from what the database was asked for.
+                    cursor: events.last().map(|e| e.global_sequence),
+                    watermark: readiness.watermark,
+                    events,
+                }
+            }
+
             // Named one by one so the protocol cannot grow a request this
-            // layer silently drops. Task 19 fills these in; until it does the
-            // refusal says which request it was, not "unsupported".
-            KernelRequest::SubmitCommand { .. }
-            | KernelRequest::GetProjection { .. }
-            | KernelRequest::ListProjection { .. }
-            | KernelRequest::ReadEvents { .. }
-            | KernelRequest::SubscribeEvents { .. }
+            // layer silently drops. The streaming and blob halves of task 19
+            // fill these in; until they do the refusal says which request it
+            // was, not "unsupported".
+            KernelRequest::SubscribeEvents { .. }
             | KernelRequest::BlobBegin { .. }
             | KernelRequest::BlobChunk { .. }
             | KernelRequest::BlobCommit { .. }
@@ -148,6 +295,49 @@ impl Daemon {
                 detail: None,
             },
         })
+    }
+
+    /// One page of a projection, as the checkpoint would have canonicalized it.
+    ///
+    /// `cursor` and `exact` are the two ways to narrow the same query: a page
+    /// continues after a key, a get names one. Passing both is meaningless and
+    /// no caller does — the SQL would simply AND them.
+    async fn projection_page(
+        &self,
+        kind: ProjectionKind,
+        cursor: Option<&str>,
+        exact: Option<&str>,
+        rows: u32,
+    ) -> Result<(Vec<ProjectionRecord>, bool, &'static str)> {
+        let (query, key) = crate::checkpoint::read_query(kind).ok_or_else(|| {
+            KernelError::Config(format!("projection {} has no table", kind.as_str()))
+        })?;
+        let mut conn = self.connection().await?;
+        let raw: Vec<String> = sqlx::query_scalar(query)
+            .bind(cursor)
+            .bind(exact)
+            .bind(i64::from(rows))
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(|e| KernelError::Config(format!("read {} projections: {e}", kind.as_str())))?;
+
+        let mut records = Vec::with_capacity(raw.len());
+        for line in raw {
+            // The same round trip the checkpoint makes, and for the same
+            // reason: `deny_unknown_fields` turns a column with no contract
+            // field into a refusal here, rather than a value that quietly never
+            // reaches the client.
+            records.push(
+                serde_json::from_str::<ProjectionRecord>(&line).map_err(|e| {
+                    KernelError::Config(format!(
+                        "a {} row does not match the contract type: {e}",
+                        kind.as_str()
+                    ))
+                })?,
+            );
+        }
+        let (records, cut) = fit_page(records)?;
+        Ok((records, cut, key))
     }
 
     /// The fresh-epoch proof: one genesis event, at whatever sequence the

@@ -440,6 +440,31 @@ impl ProjectionKind {
         Self::OrchestratorCheckpoint,
         Self::IngestedRecord,
     ];
+
+    /// The wire name — the same string `serde` writes, and the same one that
+    /// tags the matching [`ProjectionRecord`]. Held as one method so a server
+    /// looking a projection up by name and a client reading the tag off a
+    /// record can never be working from two different spellings; the test
+    /// below is what keeps that true.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Task => "task",
+            Self::Attempt => "attempt",
+            Self::EngineSession => "engine_session",
+            Self::Message => "message",
+            Self::Command => "command",
+            Self::Gate => "gate",
+            Self::AuthorityGrant => "authority_grant",
+            Self::Receipt => "receipt",
+            Self::Evidence => "evidence",
+            Self::AttentionItem => "attention_item",
+            Self::Worktree => "worktree",
+            Self::Lease => "lease",
+            Self::DispatchNode => "dispatch_node",
+            Self::OrchestratorCheckpoint => "orchestrator_checkpoint",
+            Self::IngestedRecord => "ingested_record",
+        }
+    }
 }
 
 /// One returned projection row, tagged by `projection_type`.
@@ -931,6 +956,10 @@ mod tests {
             let tag = json["projection_type"].as_str().expect("tagged");
             let kind_wire = serde_json::to_value(record.kind()).expect("serialize kind");
             assert_eq!(serde_json::json!(tag), kind_wire);
+            // And the hand-written name matches both. A server looks a
+            // projection up by `as_str` while a client reads the tag; one
+            // spelling drifting from the other would serve the wrong table.
+            assert_eq!(record.kind().as_str(), tag);
             let back: ProjectionRecord = serde_json::from_value(json).expect("deserialize");
             assert_eq!(&back, record);
         }

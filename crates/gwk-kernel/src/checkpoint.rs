@@ -33,7 +33,7 @@ use gwk_domain::checkpoint::{CHECKPOINT_SCHEMA_VERSION, Checkpoint};
 use gwk_domain::envelope::PayloadRef;
 use gwk_domain::ids::{ByteCount, Seq, Timestamp};
 use gwk_domain::port::BlobStore;
-use gwk_domain::protocol::ProjectionRecord;
+use gwk_domain::protocol::{ProjectionKind, ProjectionRecord};
 use sha2::{Digest, Sha256};
 use sqlx::{PgConnection, Row};
 
@@ -87,109 +87,254 @@ pub const RECORDS_MEDIA_TYPE: &str = "application/x-ndjson";
 /// `receipt_append_only` and the delete guards, which no privilege can bypass.
 struct Projection {
     tag: &'static str,
+    /// The column `read` orders and pages by, which is also the field a client
+    /// reads a continuation cursor out of. Written down rather than inferred:
+    /// fourteen projections key on `id` and `orchestrator_checkpoint` does not,
+    /// and a rule that guessed would hand back the wrong cursor for the one
+    /// table that differs — a page that silently restarts, not one that fails.
+    key: &'static str,
     query: &'static str,
+    /// The same record, one page at a time: `$1` a cursor (exclusive), `$2` an
+    /// exact key, `$3` the row ceiling. One query serves both reads because
+    /// get-by-id IS a one-row page — a second near-identical string per table
+    /// would be one more place for the record shape to drift from `query`.
+    ///
+    /// Ordering and the cursor comparison are both `COLLATE "C"`. Under a
+    /// locale collation — which is what the stock PostgreSQL image gives you —
+    /// ids differing only in punctuation can TIE, and two ties either side of a
+    /// page boundary drop a row or repeat one. Byte order has no ties.
+    read: &'static str,
     /// Whether replaying the log through `apply_event` rebuilds this table.
     derived: bool,
 }
 
-const fn derived(tag: &'static str, query: &'static str) -> Projection {
+const fn derived(
+    tag: &'static str,
+    key: &'static str,
+    query: &'static str,
+    read: &'static str,
+) -> Projection {
     Projection {
         tag,
+        key,
         query,
+        read,
         derived: true,
     }
 }
 
-const fn written_beside_the_log(tag: &'static str, query: &'static str) -> Projection {
+const fn written_beside_the_log(
+    tag: &'static str,
+    key: &'static str,
+    query: &'static str,
+    read: &'static str,
+) -> Projection {
     Projection {
         tag,
+        key,
         query,
+        read,
         derived: false,
     }
+}
+
+/// The paged read for one projection and the column it pages by, or `None` if
+/// the kind has no table — which cannot happen while
+/// [`every_projection_is_visited_exactly_once_in_a_written_down_order`] passes,
+/// and is returned rather than panicked because this is reached from a client
+/// request.
+///
+/// The two travel together on purpose: a caller that had the query but chose
+/// the cursor field for itself would be free to choose a different one.
+pub fn read_query(kind: ProjectionKind) -> Option<(&'static str, &'static str)> {
+    PROJECTIONS
+        .iter()
+        .find(|p| p.tag == kind.as_str())
+        .map(|p| (p.read, p.key))
 }
 
 const PROJECTIONS: &[Projection] = &[
     derived(
         "attempt",
+        "id",
         "SELECT jsonb_build_object('projection_type', 'attempt', 'attempt', to_jsonb(t))::text \
          FROM gwk.attempt t ORDER BY t.id",
+        "SELECT jsonb_build_object('projection_type', 'attempt', 'attempt', to_jsonb(t))::text \
+         FROM gwk.attempt t \
+         WHERE ($1::text IS NULL OR t.id COLLATE \"C\" > $1) \
+           AND ($2::text IS NULL OR t.id = $2) \
+         ORDER BY t.id COLLATE \"C\" LIMIT $3",
     ),
     written_beside_the_log(
         "attention_item",
+        "id",
         "SELECT jsonb_build_object('projection_type', 'attention_item', 'attention_item', \
            to_jsonb(t))::text FROM gwk.attention_item t ORDER BY t.id",
+        "SELECT jsonb_build_object('projection_type', 'attention_item', 'attention_item', \
+           to_jsonb(t))::text FROM gwk.attention_item t \
+         WHERE ($1::text IS NULL OR t.id COLLATE \"C\" > $1) \
+           AND ($2::text IS NULL OR t.id = $2) \
+         ORDER BY t.id COLLATE \"C\" LIMIT $3",
     ),
     derived(
         "authority_grant",
+        "id",
         "SELECT jsonb_build_object('projection_type', 'authority_grant', 'authority_grant', \
            to_jsonb(t))::text FROM gwk.authority_grant t ORDER BY t.id",
+        "SELECT jsonb_build_object('projection_type', 'authority_grant', 'authority_grant', \
+           to_jsonb(t))::text FROM gwk.authority_grant t \
+         WHERE ($1::text IS NULL OR t.id COLLATE \"C\" > $1) \
+           AND ($2::text IS NULL OR t.id = $2) \
+         ORDER BY t.id COLLATE \"C\" LIMIT $3",
     ),
     derived(
         "command",
+        "id",
         "SELECT jsonb_build_object('projection_type', 'command', 'command', to_jsonb(t))::text \
          FROM gwk.command t ORDER BY t.id",
+        "SELECT jsonb_build_object('projection_type', 'command', 'command', to_jsonb(t))::text \
+         FROM gwk.command t \
+         WHERE ($1::text IS NULL OR t.id COLLATE \"C\" > $1) \
+           AND ($2::text IS NULL OR t.id = $2) \
+         ORDER BY t.id COLLATE \"C\" LIMIT $3",
     ),
     derived(
         "dispatch_node",
+        "id",
         "SELECT jsonb_build_object('projection_type', 'dispatch_node', 'dispatch_node', \
            to_jsonb(t))::text FROM gwk.dispatch_node t ORDER BY t.id",
+        "SELECT jsonb_build_object('projection_type', 'dispatch_node', 'dispatch_node', \
+           to_jsonb(t))::text FROM gwk.dispatch_node t \
+         WHERE ($1::text IS NULL OR t.id COLLATE \"C\" > $1) \
+           AND ($2::text IS NULL OR t.id = $2) \
+         ORDER BY t.id COLLATE \"C\" LIMIT $3",
     ),
     derived(
         "engine_session",
+        "id",
         "SELECT jsonb_build_object('projection_type', 'engine_session', 'engine_session', \
            to_jsonb(t))::text FROM gwk.engine_session t ORDER BY t.id",
+        "SELECT jsonb_build_object('projection_type', 'engine_session', 'engine_session', \
+           to_jsonb(t))::text FROM gwk.engine_session t \
+         WHERE ($1::text IS NULL OR t.id COLLATE \"C\" > $1) \
+           AND ($2::text IS NULL OR t.id = $2) \
+         ORDER BY t.id COLLATE \"C\" LIMIT $3",
     ),
     derived(
         "evidence",
+        "id",
         "SELECT jsonb_build_object('projection_type', 'evidence', 'evidence', \
            to_jsonb(t) || jsonb_build_object('byte_size', t.byte_size::text))::text \
          FROM gwk.evidence t ORDER BY t.id",
+        "SELECT jsonb_build_object('projection_type', 'evidence', 'evidence', \
+           to_jsonb(t) || jsonb_build_object('byte_size', t.byte_size::text))::text \
+         FROM gwk.evidence t \
+         WHERE ($1::text IS NULL OR t.id COLLATE \"C\" > $1) \
+           AND ($2::text IS NULL OR t.id = $2) \
+         ORDER BY t.id COLLATE \"C\" LIMIT $3",
     ),
     derived(
         "gate",
+        "id",
         "SELECT jsonb_build_object('projection_type', 'gate', 'gate', to_jsonb(t))::text \
          FROM gwk.gate t ORDER BY t.id",
+        "SELECT jsonb_build_object('projection_type', 'gate', 'gate', to_jsonb(t))::text \
+         FROM gwk.gate t \
+         WHERE ($1::text IS NULL OR t.id COLLATE \"C\" > $1) \
+           AND ($2::text IS NULL OR t.id = $2) \
+         ORDER BY t.id COLLATE \"C\" LIMIT $3",
     ),
     derived(
         "ingested_record",
+        "id",
         "SELECT jsonb_build_object('projection_type', 'ingested_record', 'ingested_record', \
            to_jsonb(t) || jsonb_build_object('event_seq', t.event_seq::text))::text \
          FROM gwk.ingested_record t ORDER BY t.id",
+        "SELECT jsonb_build_object('projection_type', 'ingested_record', 'ingested_record', \
+           to_jsonb(t) || jsonb_build_object('event_seq', t.event_seq::text))::text \
+         FROM gwk.ingested_record t \
+         WHERE ($1::text IS NULL OR t.id COLLATE \"C\" > $1) \
+           AND ($2::text IS NULL OR t.id = $2) \
+         ORDER BY t.id COLLATE \"C\" LIMIT $3",
     ),
     derived(
         "lease",
+        "id",
         "SELECT jsonb_build_object('projection_type', 'lease', 'lease', \
            to_jsonb(t) || jsonb_build_object('fence_token', t.fence_token::text))::text \
          FROM gwk.lease t ORDER BY t.id",
+        "SELECT jsonb_build_object('projection_type', 'lease', 'lease', \
+           to_jsonb(t) || jsonb_build_object('fence_token', t.fence_token::text))::text \
+         FROM gwk.lease t \
+         WHERE ($1::text IS NULL OR t.id COLLATE \"C\" > $1) \
+           AND ($2::text IS NULL OR t.id = $2) \
+         ORDER BY t.id COLLATE \"C\" LIMIT $3",
     ),
     derived(
         "message",
+        "id",
         "SELECT jsonb_build_object('projection_type', 'message', 'message', to_jsonb(t))::text \
          FROM gwk.message t ORDER BY t.id",
+        "SELECT jsonb_build_object('projection_type', 'message', 'message', to_jsonb(t))::text \
+         FROM gwk.message t \
+         WHERE ($1::text IS NULL OR t.id COLLATE \"C\" > $1) \
+           AND ($2::text IS NULL OR t.id = $2) \
+         ORDER BY t.id COLLATE \"C\" LIMIT $3",
     ),
     derived(
         "orchestrator_checkpoint",
+        "orchestrator_id",
         "SELECT jsonb_build_object('projection_type', 'orchestrator_checkpoint', \
            'orchestrator_checkpoint', \
            (to_jsonb(t) - 'updated_at') || jsonb_build_object('seq', t.seq::text))::text \
          FROM gwk.orchestrator_checkpoint t ORDER BY t.orchestrator_id",
+        // Keyed on `orchestrator_id`: this is the one projection whose primary
+        // key is not called `id`, and paging it by a column it does not have
+        // would fail at the database rather than quietly.
+        "SELECT jsonb_build_object('projection_type', 'orchestrator_checkpoint', \
+           'orchestrator_checkpoint', \
+           (to_jsonb(t) - 'updated_at') || jsonb_build_object('seq', t.seq::text))::text \
+         FROM gwk.orchestrator_checkpoint t \
+         WHERE ($1::text IS NULL OR t.orchestrator_id COLLATE \"C\" > $1) \
+           AND ($2::text IS NULL OR t.orchestrator_id = $2) \
+         ORDER BY t.orchestrator_id COLLATE \"C\" LIMIT $3",
     ),
     written_beside_the_log(
         "receipt",
+        "id",
         "SELECT jsonb_build_object('projection_type', 'receipt', 'receipt', \
            (to_jsonb(t) - 'from_state' - 'to_state') \
            || jsonb_strip_nulls(jsonb_build_object('from', t.from_state, 'to', t.to_state)))::text \
          FROM gwk.receipt t ORDER BY t.id",
+        "SELECT jsonb_build_object('projection_type', 'receipt', 'receipt', \
+           (to_jsonb(t) - 'from_state' - 'to_state') \
+           || jsonb_strip_nulls(jsonb_build_object('from', t.from_state, 'to', t.to_state)))::text \
+         FROM gwk.receipt t \
+         WHERE ($1::text IS NULL OR t.id COLLATE \"C\" > $1) \
+           AND ($2::text IS NULL OR t.id = $2) \
+         ORDER BY t.id COLLATE \"C\" LIMIT $3",
     ),
     derived(
         "task",
+        "id",
         "SELECT jsonb_build_object('projection_type', 'task', 'task', to_jsonb(t))::text \
          FROM gwk.task t ORDER BY t.id",
+        "SELECT jsonb_build_object('projection_type', 'task', 'task', to_jsonb(t))::text \
+         FROM gwk.task t \
+         WHERE ($1::text IS NULL OR t.id COLLATE \"C\" > $1) \
+           AND ($2::text IS NULL OR t.id = $2) \
+         ORDER BY t.id COLLATE \"C\" LIMIT $3",
     ),
     derived(
         "worktree",
+        "id",
         "SELECT jsonb_build_object('projection_type', 'worktree', 'worktree', to_jsonb(t))::text \
          FROM gwk.worktree t ORDER BY t.id",
+        "SELECT jsonb_build_object('projection_type', 'worktree', 'worktree', to_jsonb(t))::text \
+         FROM gwk.worktree t \
+         WHERE ($1::text IS NULL OR t.id COLLATE \"C\" > $1) \
+           AND ($2::text IS NULL OR t.id = $2) \
+         ORDER BY t.id COLLATE \"C\" LIMIT $3",
     ),
 ];
 
@@ -477,5 +622,67 @@ mod tests {
             projection_hash(&[]),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
+    }
+
+    #[test]
+    fn a_served_row_is_the_same_row_the_hash_canonicalizes() {
+        // Each projection now spells its record-building expression twice, once
+        // for the dump and once for the paged read. An edit landing on one and
+        // not the other would make the row a client is served differ from the
+        // row the checkpoint hashed — a disagreement nothing else in the system
+        // is positioned to notice. Only the tail after `FROM` may differ.
+        for projection in PROJECTIONS {
+            let head = |q: &'static str| {
+                q.split_once(" FROM ")
+                    .expect("every projection query selects FROM a table")
+                    .0
+                    .to_owned()
+            };
+            assert_eq!(
+                head(projection.query),
+                head(projection.read),
+                "{} builds a different record for the hash than for a read",
+                projection.tag
+            );
+        }
+    }
+
+    #[test]
+    fn the_cursor_key_is_the_column_the_page_was_ordered_by() {
+        // `key` is what a client's next cursor is read out of and what the SQL
+        // compares that cursor against. If they were ever different columns the
+        // page would still return rows — the wrong ones, skipping or repeating
+        // at every boundary, with nothing failing.
+        for projection in PROJECTIONS {
+            let key = projection.key;
+            assert!(
+                projection
+                    .read
+                    .contains(&format!("ORDER BY t.{key} COLLATE")),
+                "{} pages by {key} but does not order by it",
+                projection.tag
+            );
+            assert!(
+                projection
+                    .read
+                    .contains(&format!("t.{key} COLLATE \"C\" > $1")),
+                "{} orders by {key} but compares the cursor against another column",
+                projection.tag
+            );
+        }
+    }
+
+    #[test]
+    fn every_projection_a_client_can_name_has_a_read_behind_it() {
+        // `ProjectionKind` is the request's vocabulary and `PROJECTIONS` is the
+        // server's; a kind with no entry is a request that parses, is accepted,
+        // and can never be answered.
+        for kind in ProjectionKind::ALL {
+            assert!(
+                read_query(*kind).is_some(),
+                "{} has no read query",
+                kind.as_str()
+            );
+        }
     }
 }
