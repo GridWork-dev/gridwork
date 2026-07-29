@@ -180,6 +180,22 @@ pub async fn blob_store(store: &PgEventStore, tag: &str) -> (PathBuf, PgBlobStor
     (root, blobs)
 }
 
+/// An activated store that CAN checkpoint: a blob store on the same database,
+/// attached as the home its snapshot records go to.
+///
+/// The blob store is attached AFTER genesis and activation deliberately. Those
+/// two appends run through the same barrier, and a store that checkpointed
+/// during its own initialization would snapshot an empty projection set every
+/// time — a real answer, but not one any case is asking about.
+pub async fn checkpointing_store(
+    maintenance: &PgPool,
+    tag: &str,
+) -> (String, PathBuf, PgEventStore) {
+    let (name, store) = fresh_store(maintenance, tag, 8).await;
+    let (root, blobs) = blob_store(&store, tag).await;
+    (name, root, store.with_blobs(blobs))
+}
+
 /// A second store over the SAME root and database under a different KEK — what
 /// a deployment looks like after a key rotation.
 pub async fn blob_store_with(store: &PgEventStore, root: &Path, kek: [u8; 32]) -> PgBlobStore {

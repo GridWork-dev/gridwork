@@ -208,6 +208,15 @@ impl PgEventStore {
                 apply_event(&mut tx, event).await?;
             }
         }
+        // After the projections, never before: a checkpoint names the sequence
+        // it describes, and taking it above this loop would snapshot a state
+        // that does not yet include the events it claims. A replay is the only
+        // thing that would ever notice, and by then the checkpoint is wrong in
+        // a way nothing can repair.
+        if let Some(last) = appended.events.last() {
+            self.checkpoint_if_due(&mut tx, &writer, last.global_sequence, &last.appended_at)
+                .await?;
+        }
         tx.commit()
             .await
             .map_err(|e| Refusal::storage(format!("commit: {e}")))?;

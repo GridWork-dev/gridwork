@@ -27,6 +27,7 @@ const BACKEND_MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0001_kernel_internal.sql"),
     include_str!("../migrations/0002_writer.sql"),
     include_str!("../migrations/0003_blob.sql"),
+    include_str!("../migrations/0004_checkpoint.sql"),
 ];
 
 // ponytail: still no migration runner, and now for a better reason than "there
@@ -276,7 +277,8 @@ pub fn backend_script(role: &str, contract_sha256: &str) -> String {
          GRANT SELECT ON gwk_internal.schema_fingerprint TO {role};\n\
          GRANT SELECT, UPDATE ON gwk_internal.writer TO {role};\n\
          GRANT SELECT, INSERT, UPDATE, DELETE ON \
-           gwk_internal.blob, gwk_internal.blob_pin, gwk_internal.blob_upload TO {role};\n"
+           gwk_internal.blob, gwk_internal.blob_pin, gwk_internal.blob_upload TO {role};\n\
+         GRANT SELECT, INSERT ON gwk_internal.checkpoint TO {role};\n"
     )
 }
 

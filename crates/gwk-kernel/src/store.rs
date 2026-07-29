@@ -17,6 +17,7 @@
 //! same row lock. The bound is what turns a flood into a refusal instead of an
 //! unbounded queue of connections waiting on one row.
 
+use gwk_domain::checkpoint::{CHECKPOINT_EVENT_INTERVAL, CHECKPOINT_INTERVAL_SECS};
 use gwk_domain::envelope::{Actor, EventEnvelope, INLINE_PAYLOAD_MAX_BYTES, Origin, PayloadRef};
 use gwk_domain::ids::{
     AggregateId, CorrelationId, EventId, FenceToken, IdempotencyKey, ProjectId, Seq, Timestamp,
@@ -30,6 +31,8 @@ use tokio::sync::{Semaphore, SemaphorePermit};
 // Aliased, not imported bare: this module's signatures are the port's, whose
 // error types are AppendError/StorageError, so a `Result<T>` in scope that
 // means `Result<T, KernelError>` would shadow exactly the wrong thing.
+use crate::blob::store::PgBlobStore;
+use crate::checkpoint;
 use crate::error::Result as KernelResult;
 use crate::numeric::{from_numeric_text, to_numeric_text};
 use crate::writer::claim_epoch;
@@ -98,6 +101,9 @@ pub struct PgEventStore {
     pool: PgPool,
     admission: Semaphore,
     boot_epoch: i64,
+    /// Where a checkpoint's records go. `None` means this store takes no
+    /// snapshots — see [`PgEventStore::with_blobs`].
+    blobs: Option<PgBlobStore>,
 }
 
 impl PgEventStore {
@@ -119,7 +125,64 @@ impl PgEventStore {
             pool,
             admission: Semaphore::new(inflight),
             boot_epoch,
+            blobs: None,
         })
+    }
+
+    /// Attach the blob store a checkpoint writes its records to.
+    ///
+    /// Without it this store never checkpoints, and that is a real state rather
+    /// than a degraded one: `admin init` and the certifier drive the log with no
+    /// filesystem at all, and a snapshot they neither want nor could store is
+    /// not something to make them configure around. What must not happen is a
+    /// SERVING kernel in that state, which is why the daemon's own construction
+    /// takes the blob store rather than opting into it.
+    #[must_use]
+    pub fn with_blobs(mut self, blobs: PgBlobStore) -> Self {
+        self.blobs = Some(blobs);
+        self
+    }
+
+    /// The blob store checkpoints write through, if one is attached.
+    pub fn blobs(&self) -> Option<&PgBlobStore> {
+        self.blobs.as_ref()
+    }
+
+    /// The checkpoint barrier, if either bound has tripped.
+    ///
+    /// Called AFTER the caller has written this batch's projections, and that
+    /// ordering is the whole correctness argument. A checkpoint claims to
+    /// describe the state through a sequence; taken inside `append_locked` it
+    /// would run before the projections of the very events it names, producing
+    /// a snapshot one batch stale that then fails its own validation forever.
+    /// The test that caught it compares the stored hash against a re-read.
+    ///
+    /// Still inside the caller's transaction and still under the writer row
+    /// lock, which is what "writer barrier" means: every other appender is
+    /// blocked, so the snapshot sees this transaction's rows and nobody's
+    /// half-written ones.
+    ///
+    /// A snapshot that FAILS fails the append. Swallowing it would be worse by
+    /// far — a barrier that silently stops firing grows recovery time without
+    /// bound, and the first anyone hears of it is a restart that replays the
+    /// entire log.
+    pub(crate) async fn checkpoint_if_due(
+        &self,
+        tx: &mut PgConnection,
+        writer: &WriterState,
+        through: Seq,
+        created_at: &Timestamp,
+    ) -> Result<(), AppendError> {
+        let Some(blobs) = &self.blobs else {
+            return Ok(());
+        };
+        if !writer.checkpoint_due(through.value()) {
+            return Ok(());
+        }
+        checkpoint::snapshot(tx, blobs, through, created_at)
+            .await
+            .map(|_| ())
+            .map_err(|e| AppendError::Storage(format!("checkpoint: {e}")))
     }
 
     /// The epoch this process must present for the rest of its life.
@@ -157,9 +220,13 @@ impl PgEventStore {
         tx: &mut PgConnection,
     ) -> Result<WriterState, AppendError> {
         let writer = sqlx::query(
-            "SELECT epoch, fence_token::text AS fence_text, next_seq::text AS next_seq_text \
+            "SELECT epoch, fence_token::text AS fence_text, next_seq::text AS next_seq_text, \
+                    checkpoint_seq::text AS checkpoint_seq_text, \
+                    now() - checkpoint_at >= make_interval(secs => $1::double precision) \
+                      AS checkpoint_overdue \
              FROM gwk_internal.writer WHERE id = 1 FOR UPDATE",
         )
+        .bind(CHECKPOINT_INTERVAL_SECS as f64)
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| append_storage("lock writer row", e))?
@@ -195,9 +262,21 @@ impl PgEventStore {
         )
         .map_err(|e| append_storage("column next_seq", e))?;
 
+        let checkpoint_seq = from_numeric_text(
+            &writer
+                .try_get::<String, _>("checkpoint_seq_text")
+                .map_err(|e| append_storage("column checkpoint_seq", e))?,
+        )
+        .map_err(|e| append_storage("column checkpoint_seq", e))?;
+        let checkpoint_overdue: bool = writer
+            .try_get("checkpoint_overdue")
+            .map_err(|e| append_storage("column checkpoint_at", e))?;
+
         Ok(WriterState {
             next_seq,
             current_fence,
+            checkpoint_seq,
+            checkpoint_overdue,
         })
     }
 
@@ -396,6 +475,20 @@ impl PgEventStore {
 pub(crate) struct WriterState {
     pub(crate) next_seq: u64,
     pub(crate) current_fence: Option<u64>,
+    /// The sequence the last snapshot covered through.
+    pub(crate) checkpoint_seq: u64,
+    /// Whether [`CHECKPOINT_INTERVAL_SECS`] has passed since that snapshot.
+    /// Evaluated in the database, under the same lock, so every appender in
+    /// every process is reading one clock.
+    pub(crate) checkpoint_overdue: bool,
+}
+
+impl WriterState {
+    /// Is a snapshot due at `through`? Either bound trips it.
+    fn checkpoint_due(&self, through: u64) -> bool {
+        self.checkpoint_overdue
+            || through.saturating_sub(self.checkpoint_seq) >= CHECKPOINT_EVENT_INTERVAL
+    }
 }
 
 /// What an append produced, and whether it was a keyed retry.

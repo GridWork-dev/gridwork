@@ -75,16 +75,20 @@ macro_rules! blob_columns {
 /// is the only remaining evidence that the blob existed and was destroyed
 /// rather than never written. A retention audit needs that difference.
 ///
-/// When the kernel's own checkpoints land — they carry a `records_ref` — this
-/// predicate grows a second `NOT EXISTS`. A checkpoint's blob swept out from
-/// under it is a recovery that cannot run.
+/// Checkpoints are the SECOND holder of a reference, and not an optional one.
+/// A checkpoint's records blob is committed before the transaction that records
+/// the checkpoint row, so a rolled-back append leaves a records blob nothing
+/// points at — reclaiming that is the whole reason this runs. Reclaiming a
+/// blob a LIVE checkpoint still names is a recovery that cannot run.
 macro_rules! unreferenced {
     () => {
         "SELECT b.digest FROM gwk_internal.blob b \
          WHERE b.tombstoned_at IS NULL \
            AND NOT EXISTS (SELECT 1 FROM gwk_internal.blob_pin p WHERE p.digest = b.digest) \
            AND NOT EXISTS (SELECT 1 FROM gwk.event e \
-                           WHERE e.payload_ref ->> 'digest' = 'sha256:' || b.digest)"
+                           WHERE e.payload_ref ->> 'digest' = 'sha256:' || b.digest) \
+           AND NOT EXISTS (SELECT 1 FROM gwk_internal.checkpoint c \
+                           WHERE c.records_ref ->> 'digest' = 'sha256:' || b.digest)"
     };
 }
 
