@@ -97,9 +97,27 @@ log itself never shrinks. The persisted format and key hierarchy are locked by
 ## Crash recovery
 
 The kernel checkpoints its coordination state (open attempts, held leases,
-pending approvals, budget cursor) as data. Recovery is: load the checkpoint,
-re-read the log from its cursor, reconcile against live observation — and
-trust the log over the checkpoint wherever they disagree. Attempts whose real
+pending approvals, budget cursor) as data — but a checkpoint is EVIDENCE, not a
+restore point, and the difference is deliberate.
+
+Recovery is: replay the log from the beginning through the same code that wrote
+the projections in the first place, then use the checkpoint to check the
+result. It is not "load the checkpoint and replay the tail". The schema forbids
+that, twice, with triggers no privilege can step around: a projection row must
+be born in its initial state at version 1, and the table cannot be truncated.
+Those guards are what make a projection row unforgeable by anything except the
+log, so the only way to buy a faster restart would be to open a hole in them.
+On a system that restarts rarely, that is a bad trade.
+
+What the checkpoint buys is an honest verdict. A clean shutdown takes a final
+snapshot at the watermark, and a restart that finds one can compare hashes and
+report the projections as verified. After a crash the newest checkpoint sits
+behind the watermark and there is no way to reconstruct the expected hash
+without replaying, so recovery reports `unverified` rather than implying a
+check it never ran — which is a statement about proof, not a degraded kernel:
+the tail is still transactionally coupled to its events either way.
+
+Where the log and any other source disagree, the log wins. Attempts whose real
 outcome cannot be established terminate as `unknown`, never a fabricated
 `failed` or `succeeded`.
 
