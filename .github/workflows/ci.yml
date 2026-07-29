@@ -32,6 +32,34 @@ jobs:
       - run: cargo test --workspace --all-targets --locked
       - run: cargo test --workspace --doc --locked
 
+  # The kernel's ignored integration suite needs a live PostgreSQL superuser:
+  # each case creates and initializes its own database plus the runtime role.
+  # Keep this separate so service failures do not read as Rust regressions.
+  kernel-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16@sha256:33f923b05f64ca54ac4401c01126a6b92afe839a0aa0a52bc5aeb5cc958e5f20
+        env:
+          POSTGRES_PASSWORD: ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      GWK_TEST_ADMIN_DATABASE_URL: postgresql://postgres:ci@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - run: cargo test -p gwk-kernel --locked -- --ignored
+
   msrv:
     runs-on: ubuntu-latest
     timeout-minutes: 15
