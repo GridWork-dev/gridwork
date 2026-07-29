@@ -9,14 +9,19 @@
 //!   duplicate keys, unknown fields, invalid UTF-8, trailing bytes.
 //! * [`hello`] — the handshake. Major matches exactly, minor negotiates down,
 //!   capabilities intersect, and the whole thing is on a deadline.
+//! * [`listen`] — the socket itself: where it may live, who may connect, and
+//!   what is removed when the daemon stops.
 //!
-//! What is deliberately NOT here: authentication. The UDS peer credential is
-//! the only identity this kernel has (ADR 0002), it is checked before a single
-//! byte is read, and it lives with the listener. A hello cannot grant anything
-//! — `client` is a log label and the capability set is a feature list.
+//! Authentication is [`listen`]'s, not the handshake's. The UDS peer credential
+//! is the only identity this kernel has (ADR 0002) and it is checked before a
+//! single byte of the connection is read, so an unauthorized peer never reaches
+//! the decoder at all. Nothing in a hello can widen what a connection may do —
+//! `client` is a log label and the capability set is a feature list.
 
 pub mod frame;
 pub mod hello;
+pub mod listen;
+pub mod serve;
 pub mod strict;
 
 use gwk_domain::protocol::{KernelErrorCode, KernelResult};
