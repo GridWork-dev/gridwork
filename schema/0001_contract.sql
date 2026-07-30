@@ -575,6 +575,25 @@ CREATE UNIQUE INDEX attention_item_unresolved_dedup
   ON gwk.attention_item (kind, subject_ref)
   WHERE resolved_at IS NULL;
 
+-- The only projection a replay cannot rebuild. `gwk.receipt` is the other one,
+-- and it is append-only; this table is not, because resolving an item is an
+-- UPDATE. But the kernel's own page path writes the row directly inside the
+-- refused command's transaction with no event behind it, so a deleted item is
+-- gone from every copy at once — and `derived_records`, which is what a
+-- checkpoint and a scratch rebuild hash, deliberately leaves this table out.
+-- Nothing else would notice. The refusal's receipt survives either way, so what
+-- these guards protect is the operator's queue rather than the audit trail.
+CREATE TRIGGER attention_item_no_delete
+  BEFORE DELETE ON gwk.attention_item
+  FOR EACH ROW EXECUTE FUNCTION gwk.forbid_state_row_delete('attention_item');
+
+CREATE TRIGGER attention_item_no_truncate
+  BEFORE TRUNCATE ON gwk.attention_item
+  FOR EACH STATEMENT EXECUTE FUNCTION gwk.forbid_state_row_delete('attention_item');
+
+ALTER TABLE gwk.attention_item ENABLE ALWAYS TRIGGER attention_item_no_delete;
+ALTER TABLE gwk.attention_item ENABLE ALWAYS TRIGGER attention_item_no_truncate;
+
 -- `released_at`/`disposition` are what make a released worktree distinguishable
 -- from a live one in the projection. Without them the release is recoverable
 -- only by replaying the log, and `projection get worktree <id>` — a first-class

@@ -299,6 +299,9 @@ async fn the_receipt_ledger_refuses_mutation_even_from_the_kernel() {
     for sql in [
         "UPDATE gwk.receipt SET action = 'tampered'",
         "DELETE FROM gwk.receipt",
+        // Row triggers never fire on TRUNCATE, so the statement-level partner is
+        // what stands between a ledger and one command wiping it.
+        "TRUNCATE gwk.receipt",
     ] {
         let refused = sqlx::query(sql).execute(store.pool()).await;
         assert!(refused.is_err(), "{sql} must be refused");
@@ -309,6 +312,43 @@ async fn the_receipt_ledger_refuses_mutation_even_from_the_kernel() {
     let (code, _) = refuse(&store, "stop", stop("c-1")).await;
     assert_eq!(code, KernelErrorCode::Authority);
     assert_eq!(counts(&store).await.0, 1);
+
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
+async fn the_attention_queue_cannot_be_emptied_only_resolved() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "attentionloss", 64).await;
+
+    // A page the kernel raised itself: no event carries it, so unlike every
+    // other projection a replay cannot put this row back. `derived_records` —
+    // what a checkpoint and a scratch rebuild hash — leaves this table out for
+    // exactly that reason, which is also why nothing downstream would notice.
+    let (code, _) = refuse(&store, "stop", stop("c-1")).await;
+    assert_eq!(code, KernelErrorCode::Authority);
+    assert_eq!(counts(&store).await.1, 1);
+
+    for sql in [
+        "DELETE FROM gwk.attention_item",
+        "TRUNCATE gwk.attention_item",
+    ] {
+        let refused = sqlx::query(sql).execute(store.pool()).await;
+        assert!(refused.is_err(), "{sql} must be refused");
+    }
+    assert_eq!(counts(&store).await.1, 1, "the page is still there");
+
+    // And the guard stops at loss: resolving is an UPDATE and still works, or
+    // the queue would be immortal instead of durable.
+    let resolved = sqlx::query(
+        "UPDATE gwk.attention_item SET resolved_at = now(), resolution = 'handled' \
+         WHERE resolved_at IS NULL",
+    )
+    .execute(store.pool())
+    .await
+    .expect("resolving is not a loss");
+    assert_eq!(resolved.rows_affected(), 1);
 
     drop_database(&maintenance, &name).await;
 }
