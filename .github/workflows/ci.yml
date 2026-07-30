@@ -142,6 +142,41 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: cargo test --workspace --all-targets --locked
 
+  # What a crates.io consumer actually receives. `cargo package` verifies by
+  # building the packaged LIB, which is why it passed for a year while
+  # `gwk-domain`'s own DDL test reached `../../../schema/` — a path that exists
+  # in the repo and not in the tarball. So this builds the packaged crate's TEST
+  # targets, which is the thing that was broken, and asserts the LICENSE rode
+  # along (a root-level file is outside every package root; the per-crate ones
+  # are symlinks, and cargo archives them as real files).
+  #
+  # `gridwork` is absent on purpose: it depends on `gwk-kernel`, which is
+  # `publish = false`, so it cannot be packaged at all until the kernel is
+  # released. That is a release-ordering fact, not a failure to catch here.
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: every published crate carries its tests and its license
+        run: |
+          set -euo pipefail
+          for crate in gwk gwk-domain gwk-cert gwk-theme; do
+            version=$(cargo metadata --format-version 1 --no-deps \
+              | jq -r --arg c "$crate" '.packages[] | select(.name == $c) | .version')
+            cargo package -p "$crate" --locked
+            # Listed to a file, not piped into `grep -q`: grep would exit on the
+            # match, tar would take SIGPIPE, and `pipefail` would read that as a
+            # failed package.
+            tar tzf "target/package/$crate-$version.crate" > /tmp/crate-files
+            grep -qx "$crate-$version/LICENSE" /tmp/crate-files
+            ( cd "target/package/$crate-$version" && cargo build --tests --locked )
+          done
+
   msrv:
     runs-on: ubuntu-latest
     timeout-minutes: 15

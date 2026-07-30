@@ -20,7 +20,6 @@ pub mod authority;
 pub mod blob;
 pub mod checkpoint;
 pub mod config;
-pub mod contract_sql;
 pub mod epoch;
 pub mod error;
 pub mod numeric;
@@ -34,9 +33,14 @@ pub mod writer;
 pub use admin::{InitOutcome, RoleAttributes, RuntimePrivileges, TargetState};
 pub use blob::store::{PgBlobStore, UPLOAD_EXPIRY_SECS};
 pub use config::{AdminConfig, BlobConfig, DEFAULT_SOCKET_PATH, KernelConfig};
-pub use contract_sql::{CONTRACT_SQL, CONTRACT_SQL_SHA256};
 pub use epoch::{GENESIS_KEY, KERNEL_AGGREGATE, KERNEL_SINGLETON, SYSTEM_PROJECT};
 pub use error::{KernelError, Result};
+// The DDL is contract, so it is generated into `gwk-domain` and re-exported here
+// — the paths every caller already uses keep resolving, and the crate that
+// asserts the SQL matches its own state machines carries the bytes it asserts
+// against. See `xtask/src/schema.rs` for why a constant and not `include_str!`.
+pub use gwk_domain::contract_sql;
+pub use gwk_domain::contract_sql::{CONTRACT_SQL, CONTRACT_SQL_SHA256};
 pub use project::Refusal;
 pub use recover::{RebuildReport, RecoveryReport, Verdict};
 pub use store::{EVENT_CHANNEL, MAX_INFLIGHT_APPENDS, PgEventStore, connect_pool};

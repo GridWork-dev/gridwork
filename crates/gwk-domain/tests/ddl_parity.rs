@@ -9,7 +9,11 @@ use std::collections::BTreeSet;
 
 use gwk_domain::fsm::{AttemptState, CommandState, MessageState, StateMachine, TaskState};
 
-const DDL: &str = include_str!("../../../schema/0001_contract.sql");
+/// The generated copy, not `include_str!` of the root file: the source sits
+/// outside this package, so `cargo package` leaves it behind and the published
+/// crate could not compile this test at all. `xtask -- contract --check` is what
+/// holds the constant equal to the file, on every CI run.
+use gwk_domain::contract_sql::CONTRACT_SQL as DDL;
 
 type Edge = (String, String, String);
 

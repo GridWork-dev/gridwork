@@ -1,5 +1,5 @@
-//! Embeds the backend-neutral contract DDL into a Rust constant the kernel
-//! can carry.
+//! Embeds the backend-neutral contract DDL into a Rust constant the contract
+//! crate can carry.
 //!
 //! `schema/0001_contract.sql` sits at the repo root, outside every package
 //! directory, and `include_str!` cannot reach it from a crate that will be
@@ -8,11 +8,17 @@
 //! bytes in through the generator keeps ONE authored file (the root SQL, which
 //! CI applies to a real PostgreSQL) and makes the copy a checked artifact
 //! rather than a second source.
+//!
+//! It lands in `gwk-domain` rather than `gwk-kernel` because the DDL is
+//! contract, not implementation: `gwk-domain`'s own `ddl_parity` test asserts
+//! the SQL seed matches its `EDGES` tables, and that test used to be the
+//! `../../../` reach this module exists to forbid — it shipped in the published
+//! crate unable to compile. The kernel re-exports the constants unchanged.
 
 use sha2::{Digest, Sha256};
 
 /// Where the generated copy lands, relative to the repo root.
-pub const GENERATED_PATH: &str = "crates/gwk-kernel/src/contract_sql.rs";
+pub const GENERATED_PATH: &str = "crates/gwk-domain/src/contract_sql.rs";
 
 /// Lowercase-hex SHA-256 of `bytes`.
 pub fn sha256_hex(bytes: &[u8]) -> String {

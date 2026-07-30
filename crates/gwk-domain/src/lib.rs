@@ -7,6 +7,7 @@
 pub mod blob;
 pub mod checkpoint;
 pub mod command;
+pub mod contract_sql;
 pub mod entity;
 pub mod envelope;
 pub mod fsm;
