@@ -48,8 +48,9 @@ exactly the three things rule 4 names:
    citation must resolve — a dead ID is a failed check, not a nit.
 2. **framing** — no source-derived framing: no comment, name, or structure that reads as
    transcribed from another implementation rather than from a specification.
-3. **leak** — `./tools/leak-scan.sh` green, and no capture cited by an estate path
-   instead of its registered ID.
+3. **references** — no other project named as a comparand, and no capture cited by path.
+   Captures are referenced by registered ID and SHA-256, never otherwise.
+4. **leak** — `./tools/leak-scan.sh` green.
 
 A behavior with no citable permitted source is an escalation, not a guess.
 

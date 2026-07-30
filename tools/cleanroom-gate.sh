@@ -124,9 +124,9 @@ if ! grep -qE '^reviewer: .*[^[:space:]]' "$record"; then
   exit 1
 fi
 
-# CLEANROOM.md rule 4's three checks, each ticked. Keyed on the leading token so
+# CLEANROOM.md rule 4's four checks, each ticked. Keyed on the leading token so
 # the prose can be edited in the template without silently disarming the gate.
-for check in citations framing leak; do
+for check in citations framing references leak; do
   if ! grep -qE "^- \[x\] $check\b" "$record"; then
     echo "cleanroom-gate: $record does not record a pass on the '$check' check" >&2
     exit 1

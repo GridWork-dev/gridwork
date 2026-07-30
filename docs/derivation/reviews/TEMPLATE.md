@@ -13,7 +13,9 @@ date: <YYYY-MM-DD>
 - [ ] citations — every non-obvious terminal behavior cites a public specification or a
       `docs/derivation/CAPTURES.md` entry by ID, and every cited ID resolves
 - [ ] framing — no source-derived framing in comments, names, or structure
-- [ ] leak — `./tools/leak-scan.sh` green, no capture cited by path instead of ID
+- [ ] references — no naming of other projects as comparands, and no capture cited by
+      path: captures are referenced by their registered ID and SHA-256, never otherwise
+- [ ] leak — `./tools/leak-scan.sh` green
 
 ## Notes
 

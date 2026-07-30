@@ -22,7 +22,8 @@ public record of that procedure, in force before any engine code exists.
    SHA-256. A behavior with no citable permitted source is an escalation, not a guess.
 4. **Independent second review.** Every change touching the clean-room paths gets an
    additional fresh-context review before it reaches `main`, checking exactly this:
-   citations present and resolving, no source-derived framing, leak gate green. The
+   citations present and resolving, no source-derived framing, no other project named as
+   a comparand and no capture cited by path, leak gate green. The
    reviewer is a fresh-context session with no exposure to the implementing session —
    **not a second human**: this repository has one maintainer, and claiming a control it
    cannot deliver would be worse than stating the narrower one plainly. The review is
