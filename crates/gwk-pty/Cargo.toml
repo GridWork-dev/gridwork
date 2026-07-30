@@ -1,0 +1,25 @@
+[package]
+name = "gwk-pty"
+version = "0.0.2"
+description = "PTY engine: authoritative terminal grid, render-state deltas, and dual-attach reattach"
+homepage = "https://gridwork.dev"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Not published. Building this crate needs Zig 0.15.2 and a ghostty checkout at
+# a pinned revision (see pins.env), neither of which a crates.io consumer has —
+# publishing it would ship a crate that fails to build for almost everyone.
+#
+# This keeps it out of the `package` job's derived assertion loops for free —
+# they filter on `publish != []`. It does NOT keep it out of `cargo package
+# --workspace`, which packages unpublishable members anyway and only declines to
+# upload them; that job excludes this crate by name for exactly that reason.
+publish = false
+
+[dependencies]
+libghostty-vt.workspace = true
+
+[lints]
+workspace = true
