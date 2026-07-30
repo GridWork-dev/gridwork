@@ -1,5 +1,9 @@
 # Paths under the clean-room second-review gate (see CLEANROOM.md).
 # Prefix match; one entry per line; comments with '#'.
-crates/gwk-pty/
+#
+# No trailing slash on the crate-family prefixes: a `-sys` binding crate is
+# engine code by any reading, and `crates/gwk-pty/` would not have matched
+# `crates/gwk-pty-sys/`. The gate should over-cover a sibling, never miss one.
+crates/gwk-pty
 crates/gwk-adapter-
 crates/gwk-tui/src/workspace/

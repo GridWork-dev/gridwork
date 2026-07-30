@@ -150,9 +150,9 @@ jobs:
   # along (a root-level file is outside every package root; the per-crate ones
   # are symlinks, and cargo archives them as real files).
   #
-  # `gridwork` is absent on purpose: it depends on `gwk-kernel`, which is
-  # `publish = false`, so it cannot be packaged at all until the kernel is
-  # released. That is a release-ordering fact, not a failure to catch here.
+  # Both crate lists are DERIVED, never typed. A hardcoded list is a gate that
+  # silently stops covering the next crate someone adds, which is the same
+  # failure shape as a check that cannot fail.
   package:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -174,7 +174,14 @@ jobs:
           # `tokio/macros`: the workspace build handed it the feature that
           # `gridwork` had enabled, and no job ever built the crate on its own.
           cargo package --workspace --locked
-          for crate in gwk gwk-domain gwk-cert gwk-theme gwk-kernel gridwork; do
+
+          # Every publishable member, straight from the manifest graph:
+          # `publish = false` shows up as an empty array, so xtask drops out and
+          # a newly added crate is covered the day it exists.
+          cargo metadata --format-version 1 --no-deps \
+            | jq -r '.packages[] | select(.publish != []) | .name' > /tmp/publishable
+
+          while read -r crate; do
             version=$(cargo metadata --format-version 1 --no-deps \
               | jq -r --arg c "$crate" '.packages[] | select(.name == $c) | .version')
             # Listed to a file, not piped into `grep -q`: grep would exit on the
@@ -187,18 +194,28 @@ jobs:
             if [ "$crate" = gwk-cert ]; then
               grep -qx "$crate-$version/fixtures/valid-stream.json" /tmp/crate-files
             fi
-          done
+          done < /tmp/publishable
+
           # Building the TESTS from the tarball only works for crates with no
           # unpublished sibling: the others resolve that sibling from crates.io,
           # at the version the release is in the middle of introducing. That is
           # not a hypothetical — it is how this job first failed. `cargo package
           # --workspace` above already built every crate's lib from its own
           # tarball against the local packages, which is the check that matters.
-          for crate in gwk gwk-domain gwk-theme; do
+          #
+          # "No unpublished sibling" is exactly "no path dependency", so derive
+          # it rather than restating it as a list that drifts.
+          cargo metadata --format-version 1 --no-deps \
+            | jq -r '.packages[]
+                     | select(.publish != [])
+                     | select([.dependencies[] | select(.path != null)] | length == 0)
+                     | .name' > /tmp/no-sibling
+
+          while read -r crate; do
             version=$(cargo metadata --format-version 1 --no-deps \
               | jq -r --arg c "$crate" '.packages[] | select(.name == $c) | .version')
             ( cd "target/package/$crate-$version" && cargo build --tests --locked )
-          done
+          done < /tmp/no-sibling
 
   msrv:
     runs-on: ubuntu-latest
