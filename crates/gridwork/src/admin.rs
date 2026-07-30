@@ -424,11 +424,15 @@ fn beside(url: &SecretString, database: &str) -> Result<SecretString, Failure> {
             "{database:?} is not a database name"
         )));
     }
-    let (prefix, _) = url
+    let (prefix, tail) = url
         .expose_secret()
         .rsplit_once('/')
         .ok_or_else(|| Failure::usage("the admin DSN has no /database to replace"))?;
-    Ok(SecretString::from(format!("{prefix}/{database}")))
+    // The database name is followed by the query string, if there is one, and
+    // dropping it would connect the scratch on different terms than the live
+    // one — a DSN that asked for `sslmode=require` would silently stop.
+    let query = tail.find('?').map(|at| &tail[at..]).unwrap_or("");
+    Ok(SecretString::from(format!("{prefix}/{database}{query}")))
 }
 
 /// A configuration or storage error, which is what almost everything here is.
@@ -487,6 +491,20 @@ mod tests {
         assert_eq!(
             scratch.expose_secret(),
             "postgres://gw@localhost:5432/gwk_scratch"
+        );
+    }
+
+    #[test]
+    fn the_scratch_connects_on_the_same_terms_as_the_live_one() {
+        let url = SecretString::from(
+            "postgres://gw@localhost:5432/gwk_live?sslmode=require&connect_timeout=5".to_owned(),
+        );
+        // A rebuild that dropped `sslmode=require` would compare a TLS
+        // connection's log against a plaintext one's projections, and the first
+        // symptom would be a refused connection on a host that requires it.
+        assert_eq!(
+            beside(&url, "gwk_scratch").expect("derive").expose_secret(),
+            "postgres://gw@localhost:5432/gwk_scratch?sslmode=require&connect_timeout=5"
         );
     }
 

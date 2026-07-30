@@ -510,9 +510,12 @@ fn write_file(path: &Path, bytes: &[u8]) -> Result<(), Failure> {
 /// The address a blob will have: a digest over its PLAINTEXT, which is what
 /// makes deduplication work across encryptions of the same content.
 fn address_of(plaintext: &[u8]) -> BlobAddress {
-    BlobAddress::from_digest(&hex_lower(plaintext))
-        // 64 lowercase hex characters by construction.
-        .unwrap_or_else(|_| BlobAddress::parse("sha256:").expect("unreachable"))
+    // `hex_lower` returns 64 lowercase hex characters, which is exactly what
+    // `from_digest` accepts, so this cannot fail. The fallback that used to sit
+    // here — parsing `"sha256:"` — was the worse of the two: it is itself an
+    // error, so a broken invariant would have aborted on the SECOND failure
+    // with "unreachable" instead of naming the first.
+    BlobAddress::from_digest(&hex_lower(plaintext)).expect("a sha256 digest is 64 lowercase hex")
 }
 
 fn digest_of_json(value: &Value) -> String {
