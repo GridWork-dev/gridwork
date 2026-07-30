@@ -44,6 +44,7 @@ use gwk_kernel::MAX_INFLIGHT_APPENDS;
 use gwk_kernel::checkpoint;
 use gwk_kernel::recover::Verdict;
 use sqlx::PgPool;
+use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
 
@@ -217,6 +218,15 @@ async fn the_phase_performance_envelope_holds() {
 /// command has answered, so a slow kernel shows up as queueing in the samples
 /// rather than as a quietly reduced rate. Missed ticks are delayed rather than
 /// made up in a burst — catching up would measure a load nobody offered.
+///
+/// Open-loop with one bound. The generator never offers more concurrency than the
+/// store admits, because past [`MAX_INFLIGHT_APPENDS`] the kernel refuses — which
+/// is CORRECT backpressure and not a latency sample, but arrives here as
+/// "a command was not applied" and reads like a kernel defect. That is a claim
+/// about the harness's own load, not about the kernel, so the harness owns it.
+/// Half the store's admission leaves headroom for the rest of the process; a
+/// machine genuinely too slow for the offered rate now stretches `offered` and is
+/// reported by the rate assertion below, which says so in those words.
 async fn command_latency(maintenance: &PgPool) -> Vec<Measurement> {
     let (name, store) = fresh_store(maintenance, "perf_latency", MAX_INFLIGHT_APPENDS).await;
     let store = Arc::new(store);
@@ -227,11 +237,17 @@ async fn command_latency(maintenance: &PgPool) -> Vec<Measurement> {
     ));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut inflight = JoinSet::new();
+    let offering = Arc::new(Semaphore::new(MAX_INFLIGHT_APPENDS / 2));
     let started = Instant::now();
     for n in 0..total {
         ticker.tick().await;
         let store = Arc::clone(&store);
+        let permit = Arc::clone(&offering)
+            .acquire_owned()
+            .await
+            .expect("the offering semaphore is never closed");
         inflight.spawn(async move {
+            let _permit = permit;
             let command = mixed_command(n);
             let envelope = envelope(&format!("perf-lat-{n}"), &command);
             let at = Instant::now();
