@@ -22,8 +22,16 @@ public record of that procedure, in force before any engine code exists.
    `Derivation:` marker on the line above the derived construct:
 
    ```
-   // Derivation: ECMA-48 §8.3.14 — cursor save/restore semantics
+   // Derivation: ECMA-48 §8.3.20 — CUF advances the active position by Pn, default 1
    ```
+
+   **Check the section number against the specification, not against another marker.**
+   This example previously read `§8.3.14 — cursor save/restore semantics` and was wrong
+   twice: §8.3.14 is CPR, a device *report* that moves nothing, and ECMA-48 defines no
+   cursor save/restore at all — DECSC/DECRC are DEC private and belong under
+   `XTERM-CTLSEQS`. The gate resolved it happily, and the first real marker written in
+   this repo copied the wrong number straight out of this block. A wrong example
+   propagates further than a wrong line of code.
 
    `cleanroom-gate` enforces this mechanically: every gated source file carries at least
    one marker, and every cited ID resolves in one of the two registries. Never cite a
@@ -33,8 +41,9 @@ public record of that procedure, in force before any engine code exists.
 
    What the gate proves is that the claim was made and that the source is registered.
    It does not prove the claim is TRUE — a marker can name a spec the code did not come
-   from, and only rule 4's reader catches that. The gate makes a false citation
-   attributable; the review is what makes it unlikely.
+   from, or the right spec with the wrong section, and only rule 4's reader catches
+   that. The gate makes a false citation attributable; the review is what makes it
+   unlikely. That is not hypothetical: it is how the two errors above were found.
 4. **Independent second review.** Every change touching the clean-room paths gets an
    additional fresh-context review before it reaches `main`, checking exactly this:
    citations present and resolving, no source-derived framing, no other project named as

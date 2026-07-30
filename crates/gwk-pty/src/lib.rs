@@ -83,10 +83,9 @@ mod tests {
     fn cursor_forward_advances_by_the_parameter() {
         let mut grid = Grid::new(80, 24).expect("80x24 is a valid grid");
 
-        // Derivation: ECMA-48 §8.3.14 — CUF moves the active position forward by
-        // Pn columns, and a CSI sequence with no parameter defaults Pn to 1.
-        // Both halves are asserted below; the default is the half a hand-written
-        // parser gets wrong.
+        // Derivation: ECMA-48 §8.3.20 — CUF moves the active position forward by
+        // Pn columns, with parameter default Pn = 1. Both halves are asserted
+        // below; the default is the half a hand-written parser gets wrong.
         grid.write(b"hello\x1b[5C world");
         assert_eq!(grid.cursor(), Some((16, 0)), "5 + 5 + 6");
 

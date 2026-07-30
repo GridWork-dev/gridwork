@@ -207,35 +207,19 @@ jobs:
       # job gets them. Populating a package cache is not a build.
       - name: fetch registry dependencies
         run: cargo fetch --locked
-      # The actual proof of ruling 2, and the reason this is not just `--offline`:
-      # `--offline` gates CARGO's registry access and says nothing about what a
-      # build script does. libghostty-vt-sys clones ghostty and Zig fetches a
-      # package graph — neither is cargo, and neither is blocked by that flag.
-      #
-      # So run the build with no network at all. `unshare -rn` puts it in a
-      # namespace whose only interface is loopback; if the build reaches out for
-      # anything, it fails here instead of silently succeeding on a runner that
-      # happens to have internet.
+      # The actual proof that the build reaches no network. `tools/no-network.sh`
+      # runs its argument in a namespace with no interfaces and REFUSES to run it
+      # at all if it cannot make one — see the header there for why `--offline`
+      # alone would prove something adjacent to the claim rather than the claim.
       - name: build and test with no network
         run: |
           set -euo pipefail
-          # Fail loudly rather than skipping. A proof that quietly does not run
-          # is the green-checkbox failure this repo keeps finding.
-          unshare -rn true || {
-            echo 'unshare -rn is unavailable — cannot prove the build is network-free' >&2
-            exit 1
-          }
           eval "$(./tools/pty-toolchain.sh --env)"
-          unshare -rn env \
-            PATH="$PATH" HOME="$HOME" \
-            CARGO_TERM_COLOR=always \
-            GHOSTTY_SOURCE_DIR="$GHOSTTY_SOURCE_DIR" \
-            GHOSTTY_ZIG_SYSTEM_DIR="$GHOSTTY_ZIG_SYSTEM_DIR" \
-            bash -euo pipefail -c '
-              cargo clippy -p gwk-pty --all-targets --locked --offline -- -D warnings
-              cargo test -p gwk-pty --all-targets --locked --offline
-              cargo test -p gwk-pty --doc --locked --offline
-            '
+          ./tools/no-network.sh bash -euo pipefail -c '
+            cargo clippy -p gwk-pty --all-targets --locked --offline -- -D warnings
+            cargo test -p gwk-pty --all-targets --locked --offline
+            cargo test -p gwk-pty --doc --locked --offline
+          '
 
   # What a crates.io consumer actually receives. `cargo package` verifies by
   # building the packaged LIB, which is why it passed for a year while
@@ -330,8 +314,11 @@ jobs:
         with:
           toolchain: "1.94"
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      # Default members — see the note in `test`. gwk-pty's MSRV is checked in
-      # the `pty` job, which is the only one with a toolchain that can build it.
+      # Default members — see the note in `test`. NOTHING checks gwk-pty's MSRV:
+      # the `pty` job builds it on stable, and this job cannot reach it without
+      # the Zig toolchain. Stated rather than papered over — the crate is not
+      # published, so nobody is relying on an MSRV it does not advertise, and the
+      # honest fix is a 1.94 leg on the `pty` job if that ever stops being true.
       - run: cargo check --all-targets --locked
 
   # The DDL is contract: it must apply clean against the pinned postgres major.
