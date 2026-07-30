@@ -474,6 +474,24 @@ jobs:
             exit 1
           fi
           echo "cleanroom-gate: seeded violation correctly rejected ($seed)"
+      - name: the subject digest does not depend on the locale
+        run: |
+          set -euo pipefail
+          # The digest is order-dependent and `sort` is locale-collated, so this
+          # once produced two different subjects for identical content: a dev box
+          # under en_US.UTF-8 ordered `pins.env` before `README.md` (case folded),
+          # a runner under C put `README.md` first (`R` 0x52 < `p` 0x70). The
+          # record written from one was rejected by the other, and the failure
+          # read as a stale review rather than a broken gate.
+          paths="$(grep -Ev '^[[:space:]]*(#|$)' .github/cleanroom-paths.txt | head -n1)/a.rs
+          $(grep -Ev '^[[:space:]]*(#|$)' .github/cleanroom-paths.txt | head -n1)/README.md"
+          c="$(printf '%s\n' "$paths" | LC_ALL=C ./tools/cleanroom-gate.sh --subject)"
+          u="$(printf '%s\n' "$paths" | LC_ALL=en_US.UTF-8 ./tools/cleanroom-gate.sh --subject)"
+          [ "$c" = "$u" ] || {
+            echo "cleanroom-gate: subject is locale-dependent — C gave $c, en_US.UTF-8 gave $u" >&2
+            exit 1
+          }
+          echo "cleanroom-gate: subject is stable across locales ($c)"
       - name: prove the marker check can fail (CLEANROOM.md rule 3)
         run: |
           set -euo pipefail
