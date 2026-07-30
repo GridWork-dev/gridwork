@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "through_sequence": "9007199254740993",
+  "projection_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "records_ref": {
+    "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "media_type": "application/octet-stream",
+    "byte_size": "4194304",
+    "retention_class": "standard"
+  },
+  "created_at": "2026-07-28T12:00:03Z"
+}

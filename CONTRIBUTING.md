@@ -6,8 +6,9 @@ an issue first.
 
 ## What's actually useful right now
 
-The kernel is being built (stage 2 of the [roadmap](ROADMAP.md)) and none of it has
-merged, so "implement a feature" mostly isn't a thing you can do yet. What is:
+The kernel has landed and the engines have not (stage 3 of the
+[roadmap](ROADMAP.md)), so there is a running daemon to break but no human surface to
+build on yet. What is most useful:
 
 - **Read the contract and argue with it.** `crates/gwk-domain/src/fsm.rs` and
   `transition.rs` hold the entire state-machine contract — four enums, four edge

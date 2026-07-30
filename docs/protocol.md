@@ -1,13 +1,14 @@
 # Protocol
 
-The client↔kernel contract. **Semantics below are locked at the contract
-phase; the exact byte-level frame encoding is finalized with the kernel and
-captured as a recorded decision** — clients written against the semantics
-will not need redesign, only a codec.
+The client↔kernel contract. Semantics and byte-level framing are locked by
+[ADR 0001](decisions/0001-wire-codec.md). The UDS-only authentication boundary
+is locked by [ADR 0002](decisions/0002-listener-before-auth.md).
 
-> **Nothing here is implemented.** There is no kernel, no socket, and no
-> framing code in the tree — write a client against these semantics if you want
-> to be ready, but you cannot connect to anything today.
+> **This is implemented.** The daemon, the socket, the framing, the handshake,
+> the request surface and event subscriptions are all in the tree and certified
+> against a real PostgreSQL — `gw` is a client of exactly what is described
+> below. Build it with a clone (`cargo run -p gridwork -- daemon`); it is not on
+> crates.io yet.
 
 ## Connection and hello
 
@@ -26,9 +27,11 @@ granted in the hello.
 
 ## Framing and bounds
 
-Messages are length-prefixed frames carrying one JSON value, encoded per the
-generated contract (`contracts/bindings.ts` mirrors the canonical Rust
-types). Bounds are part of the contract:
+Messages carry a big-endian unsigned 32-bit body length, a one-byte frame kind, and the
+body. The length includes the kind byte and excludes the prefix; it is
+`1..=4,194,304`. Kind `0x01` is strict UTF-8 JSON control; kind `0x02` is reserved and
+refused in v1. Empty, oversized, unknown-kind, invalid UTF-8, recursively duplicate-keyed,
+unknown-field, and trailing-byte inputs are refused. Bounds are part of the contract:
 
 - a frame has a hard maximum size (rejected, not truncated, when exceeded),
 - inline event payloads are bounded at 64 KiB serialized — larger content

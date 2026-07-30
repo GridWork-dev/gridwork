@@ -109,8 +109,36 @@ pub struct OrchestratorCheckpoint {
     pub budget_cursor: Option<BudgetCursor>,
 }
 
+/// What a review round decided to do about one finding. CLOSED: these are the
+/// three buckets [`RoundFindingSummary`] counts, so a fourth action would make
+/// its tally stop adding up.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    specta::Type,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingAction {
+    AutoFix,
+    AskUser,
+    NoOp,
+}
+
+impl FindingAction {
+    /// Every action, in declaration order.
+    pub const ALL: &'static [Self] = &[Self::AutoFix, Self::AskUser, Self::NoOp];
+}
+
 /// Per-round finding tally appended to an attempt's retry ledger. Actions are
-/// the closed finding taxonomy, snake_case.
+/// the closed finding taxonomy, snake_case ([`FindingAction`]).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
 #[serde(deny_unknown_fields)]
 pub struct RoundFindingSummary {
@@ -146,5 +174,21 @@ mod tests {
         assert!(json.contains("\"seq\":\"7\""));
         let back: OrchestratorCheckpoint = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back, cp);
+    }
+
+    #[test]
+    fn finding_actions_are_the_three_buckets_the_summary_counts() {
+        let wire: Vec<serde_json::Value> = FindingAction::ALL
+            .iter()
+            .map(|a| serde_json::to_value(a).expect("serialize"))
+            .collect();
+        assert_eq!(
+            wire,
+            [
+                serde_json::json!("auto_fix"),
+                serde_json::json!("ask_user"),
+                serde_json::json!("no_op")
+            ]
+        );
     }
 }

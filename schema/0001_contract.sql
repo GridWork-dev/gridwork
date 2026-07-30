@@ -43,7 +43,11 @@ CREATE TABLE gwk.event (
   aggregate_id      text NOT NULL,
   aggregate_version bigint NOT NULL CHECK (aggregate_version BETWEEN 1 AND 4294967295),
   event_type        text NOT NULL,
-  schema_version    integer NOT NULL CHECK (schema_version >= 1),
+  -- bigint, not integer: the envelope declares `schema_version: u32`, and a
+  -- signed integer tops out at 2^31-1 — half that range. The narrow column made
+  -- the contract claim a width the storage could not hold, on the one field a
+  -- future decoder dispatches on. Same treatment as aggregate_version above.
+  schema_version    bigint NOT NULL CHECK (schema_version BETWEEN 1 AND 4294967295),
   occurred_at       timestamptz NOT NULL,
   appended_at       timestamptz NOT NULL,
   actor             jsonb NOT NULL,
@@ -57,9 +61,21 @@ CREATE TABLE gwk.event (
   UNIQUE (aggregate_type, aggregate_id, aggregate_version)
 );
 
--- retry-stable appends: the same keyed write cannot land twice per aggregate
+-- retry-stable appends: the same keyed write cannot land twice per aggregate.
+-- This is the index the REPLAY lookup reads — a retry of the same command on
+-- the same aggregate is answered from here with the original events.
 CREATE UNIQUE INDEX event_idempotency
   ON gwk.event (aggregate_type, aggregate_id, idempotency_key)
+  WHERE idempotency_key IS NOT NULL;
+
+-- Idempotency is GLOBAL per (project_id, idempotency_key), not per aggregate:
+-- one key names one request, and reusing it for a different one is a caller bug
+-- that must be refused rather than silently landed twice. The per-aggregate
+-- index above cannot see that case — the two writes differ in aggregate_id, so
+-- it admits both. This is the guard; the kernel's own pre-check turns the
+-- violation into a typed `idempotency_conflict` before it reaches the index.
+CREATE UNIQUE INDEX event_idempotency_project
+  ON gwk.event (project_id, idempotency_key)
   WHERE idempotency_key IS NOT NULL;
 
 -- Append-only is a CONTRACT property, so it is enforced here as a trigger any
@@ -484,6 +500,12 @@ CREATE TABLE gwk.authority_grant (
   scope        text,
   granted_at   timestamptz NOT NULL DEFAULT now(),
   expires_at   timestamptz,
+  -- Set together when the grant is withdrawn. Without them a revoke could only
+  -- be expressed by backdating `expires_at`, which makes "revoked for cause"
+  -- and "expired on schedule" the same row — and `gw authority list` reads this
+  -- table as the audit trail, so that difference is the point of it.
+  revoked_at    timestamptz,
+  revoke_reason text,
   receipt_id   text
 );
 
@@ -536,28 +558,192 @@ CREATE TABLE gwk.attention_item (
   subject_ref text,
   raised_by   jsonb,
   raised_at   timestamptz NOT NULL DEFAULT now(),
-  resolved_at timestamptz
+  resolved_at timestamptz,
+  resolution  text
 );
 
+-- Attention deduplicates by (kind, subject_ref) WHILE UNRESOLVED: a page fires
+-- once per real problem, not once per retry of the command that hit it. The
+-- predicate is what makes the same pair raisable again after someone resolves
+-- it — a recurring problem is a new item, not a reopened one.
+--
+-- NULL `subject_ref` stays distinct (the PostgreSQL default): an item about
+-- nothing in particular is not the same item as another about nothing in
+-- particular. The kernel's own page path always names a subject, so this only
+-- affects an explicit RaiseAttention that omits one.
+CREATE UNIQUE INDEX attention_item_unresolved_dedup
+  ON gwk.attention_item (kind, subject_ref)
+  WHERE resolved_at IS NULL;
+
+-- The only projection a replay cannot rebuild. `gwk.receipt` is the other one,
+-- and it is append-only; this table is not, because resolving an item is an
+-- UPDATE. But the kernel's own page path writes the row directly inside the
+-- refused command's transaction with no event behind it, so a deleted item is
+-- gone from every copy at once — and `derived_records`, which is what a
+-- checkpoint and a scratch rebuild hash, deliberately leaves this table out.
+-- Nothing else would notice. The refusal's receipt survives either way, so what
+-- these guards protect is the operator's queue rather than the audit trail.
+CREATE TRIGGER attention_item_no_delete
+  BEFORE DELETE ON gwk.attention_item
+  FOR EACH ROW EXECUTE FUNCTION gwk.forbid_state_row_delete('attention_item');
+
+CREATE TRIGGER attention_item_no_truncate
+  BEFORE TRUNCATE ON gwk.attention_item
+  FOR EACH STATEMENT EXECUTE FUNCTION gwk.forbid_state_row_delete('attention_item');
+
+ALTER TABLE gwk.attention_item ENABLE ALWAYS TRIGGER attention_item_no_delete;
+ALTER TABLE gwk.attention_item ENABLE ALWAYS TRIGGER attention_item_no_truncate;
+
+-- `released_at`/`disposition` are what make a released worktree distinguishable
+-- from a live one in the projection. Without them the release is recoverable
+-- only by replaying the log, and `projection get worktree <id>` — a first-class
+-- read in the CLI surface — could not answer "is anyone still in this tree?".
+-- The lease beside it carries the same pair for the same reason.
 CREATE TABLE gwk.worktree (
-  id         text PRIMARY KEY,
-  repo       text NOT NULL,
-  path       text NOT NULL,
-  branch     text NOT NULL,
-  base_sha   text,
-  lease_id   text REFERENCES gwk.lease(id),
-  dirty      boolean NOT NULL DEFAULT false,
-  unpushed   boolean NOT NULL DEFAULT false,
-  created_at timestamptz NOT NULL DEFAULT now()
+  id          text PRIMARY KEY,
+  repo        text NOT NULL,
+  path        text NOT NULL,
+  branch      text NOT NULL,
+  base_sha    text,
+  lease_id    text REFERENCES gwk.lease(id),
+  dirty       boolean NOT NULL DEFAULT false,
+  unpushed    boolean NOT NULL DEFAULT false,
+  released_at timestamptz,
+  disposition text,
+  created_at  timestamptz NOT NULL DEFAULT now()
 );
 
+-- A dispatch node is bookkeeping over the spawn tree, NOT one of the four
+-- public state machines: `state` is an OPEN bounded lifecycle label with no
+-- seeded edge set, so `assert_transition` (which trusts gwk.transition) does
+-- not apply. What DOES apply is the CAS discipline every versioned row owes,
+-- because concurrent writers race the same node.
 CREATE TABLE gwk.dispatch_node (
   id         text PRIMARY KEY,
+  version    bigint NOT NULL DEFAULT 1 CHECK (version BETWEEN 1 AND 4294967295),
   parent_id  text REFERENCES gwk.dispatch_node(id),
   attempt_id text REFERENCES gwk.attempt(id),
   kind       text NOT NULL,
+  state      text NOT NULL DEFAULT 'registered',
   label      text,
-  created_at timestamptz NOT NULL DEFAULT now()
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
 );
+
+-- Version CAS without edge legality — the guard an open-lifecycle versioned
+-- table needs. Deliberately NOT gwk.assert_transition: that one refuses any
+-- state change lacking a gwk.transition row, and dispatch_node has no seeded
+-- edges by design, so every transition would be refused.
+CREATE FUNCTION gwk.assert_version_cas() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.version IS DISTINCT FROM OLD.version + 1 THEN
+    RAISE EXCEPTION '% version must advance by exactly 1 (got % -> %)',
+      TG_ARGV[0], OLD.version, NEW.version;
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE TRIGGER dispatch_node_cas
+  BEFORE UPDATE ON gwk.dispatch_node
+  FOR EACH ROW EXECUTE FUNCTION gwk.assert_version_cas('dispatch_node');
+CREATE TRIGGER dispatch_node_no_delete
+  BEFORE DELETE ON gwk.dispatch_node
+  FOR EACH ROW EXECUTE FUNCTION gwk.forbid_state_row_delete('dispatch_node');
+
+ALTER TABLE gwk.dispatch_node ENABLE ALWAYS TRIGGER dispatch_node_cas;
+ALTER TABLE gwk.dispatch_node ENABLE ALWAYS TRIGGER dispatch_node_no_delete;
+
+-- The orchestrator's crash-recovery snapshot, latest-per-orchestrator.
+--
+-- Distinct from `gwk-domain::checkpoint::Checkpoint`, which is the kernel's own
+-- projection-hash checkpoint: this one is the orchestrator's impression of its
+-- own in-flight work at crash time. Recovery re-reads the live rows; this is
+-- the crash-time impression, not truth.
+--
+-- `seq` is the monotonic per-orchestrator counter and is guarded below. It is a
+-- resume cursor, so a rewind would let recovery restart from state that has
+-- already been superseded.
+CREATE TABLE gwk.orchestrator_checkpoint (
+  orchestrator_id    text PRIMARY KEY,
+  seq                numeric(20,0) NOT NULL
+                       CHECK (seq >= 0 AND seq <= 18446744073709551615),
+  native_session_ref text,
+  active_goal        text,
+  active_step_ref    text,
+  latest_command_ref text,
+  open_attempts      jsonb,
+  leases             jsonb,
+  pending_approvals  jsonb,
+  budget_cursor      jsonb,
+  updated_at         timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE FUNCTION gwk.assert_checkpoint_seq_advances() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.seq <= OLD.seq THEN
+    RAISE EXCEPTION 'orchestrator_checkpoint seq must advance (got % -> %)',
+      OLD.seq, NEW.seq;
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE TRIGGER orchestrator_checkpoint_seq
+  BEFORE UPDATE ON gwk.orchestrator_checkpoint
+  FOR EACH ROW EXECUTE FUNCTION gwk.assert_checkpoint_seq_advances();
+
+ALTER TABLE gwk.orchestrator_checkpoint ENABLE ALWAYS TRIGGER orchestrator_checkpoint_seq;
+
+-- Records that entered the log through ingestion rather than through an
+-- aggregate's lifecycle: memory, knowledge, graph snapshots, eval verdicts,
+-- insights, cost, health, session, config, checkpoints, rounds, findings.
+--
+-- `kind` is the one CLOSED classification column in this file. Everywhere else
+-- an open bounded string is preferred so a new label is additive; here the
+-- closed set IS the property — the absence of an import path is load-bearing,
+-- and an open column would let `import` in as data. The CHECK
+-- lists the twelve accepted kinds so the refusal happens in the database and
+-- not only in the process that wrote the row.
+--
+-- No version, no state, no updated_at: an ingested record is a fact that
+-- arrived, like gwk.receipt. `event_seq` points back at the log entry that
+-- produced it, which is the only thing that can prove the row — ingestion
+-- writes no gwk.transition.
+CREATE TABLE gwk.ingested_record (
+  id          text PRIMARY KEY,
+  kind        text NOT NULL
+                CHECK (kind IN ('memory', 'knowledge', 'graph_snapshot',
+                                'eval_verdict', 'insight', 'cost', 'health',
+                                'session', 'config', 'checkpoint', 'round',
+                                'finding')),
+  -- Bounded inline content, or a descriptor of the blob beside it. The 64 KiB
+  -- bound belongs to the append path (it bounds the whole event payload); a
+  -- column CHECK here would be a second, drifting copy of it.
+  payload     jsonb NOT NULL,
+  payload_ref jsonb,
+  ingested_by jsonb,
+  event_seq   numeric(20,0) NOT NULL
+                CHECK (event_seq >= 0 AND event_seq <= 18446744073709551615),
+  ingested_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE FUNCTION gwk.forbid_ingested_record_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'gwk.ingested_record is append-only (% refused)', TG_OP;
+END $$;
+
+CREATE TRIGGER ingested_record_append_only
+  BEFORE UPDATE OR DELETE ON gwk.ingested_record
+  FOR EACH ROW EXECUTE FUNCTION gwk.forbid_ingested_record_mutation();
+
+-- Statement-level TRUNCATE cover, as on gwk.event and gwk.receipt.
+CREATE TRIGGER ingested_record_no_truncate
+  BEFORE TRUNCATE ON gwk.ingested_record
+  FOR EACH STATEMENT EXECUTE FUNCTION gwk.forbid_ingested_record_mutation();
+
+ALTER TABLE gwk.ingested_record ENABLE ALWAYS TRIGGER ingested_record_append_only;
+ALTER TABLE gwk.ingested_record ENABLE ALWAYS TRIGGER ingested_record_no_truncate;
 
 COMMIT;

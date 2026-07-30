@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::envelope::Actor;
+use crate::envelope::{Actor, PayloadRef};
 use crate::fsm::{
     AttemptState, CommandState, GateVerdict, LeaseMode, LeaseState, MessageState, Outcome,
     TaskState,
@@ -16,8 +16,9 @@ use crate::fsm::{
 use crate::ids::{
     AttemptId, AttentionItemId, AuthorityGrantId, ByteCount, CommandId, CorrelationId, CostMicros,
     DispatchNodeId, EngineId, EngineSessionId, EvidenceId, FenceToken, GateId, IdempotencyKey,
-    LeaseId, MessageId, ReceiptId, TaskId, Timestamp, WorktreeId,
+    IngestedRecordId, LeaseId, MessageId, ReceiptId, Seq, TaskId, Timestamp, WorktreeId,
 };
+use crate::ingestion::IngestionKind;
 
 /// Tracker-visible work item.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, specta::Type)]
@@ -261,6 +262,14 @@ pub struct AuthorityGrant {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[specta(optional)]
     pub expires_at: Option<Timestamp>,
+    // Set together when the grant is withdrawn. Absent means live: a grant with
+    // no revocation stamp is one that still matches, subject only to expiry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub revoked_at: Option<Timestamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub revoke_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[specta(optional)]
     pub receipt_id: Option<ReceiptId>,
@@ -309,6 +318,39 @@ pub struct Evidence {
     pub created_at: Timestamp,
 }
 
+/// One record that entered the log through ingestion rather than through an
+/// aggregate's lifecycle.
+///
+/// Immutable like [`Evidence`] — no `version`, no `state`, written once. Its
+/// `kind` is the CLOSED [`IngestionKind`] set, unlike the open classification
+/// strings elsewhere in this contract: the absence of an import path is
+/// load-bearing here, and an open string would be that door.
+///
+/// `payload` and `payload_ref` are not exclusive. The inline half is bounded
+/// (the append path enforces
+/// [`INLINE_PAYLOAD_MAX_BYTES`](crate::envelope::INLINE_PAYLOAD_MAX_BYTES)) and
+/// carries either the whole content or a descriptor of the blob beside it —
+/// a graph snapshot's node and edge counts are worth having in the projection
+/// without fetching ninety megabytes to learn them.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, specta::Type)]
+#[serde(deny_unknown_fields)]
+pub struct IngestedRecord {
+    pub id: IngestedRecordId,
+    pub kind: IngestionKind,
+    #[specta(type = crate::envelope::JsonValue)]
+    pub payload: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub payload_ref: Option<PayloadRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub ingested_by: Option<Actor>,
+    /// Where this record's event sits in the log — the pointer back to the one
+    /// thing that can prove the row, since ingestion writes no transition.
+    pub event_seq: Seq,
+    pub ingested_at: Timestamp,
+}
+
 /// Something the operator should look at. `kind` is OPEN.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
 #[serde(deny_unknown_fields)]
@@ -323,9 +365,15 @@ pub struct AttentionItem {
     #[specta(optional)]
     pub raised_by: Option<Actor>,
     pub raised_at: Timestamp,
+    // Set together when someone closes the item. While `resolved_at` is absent
+    // the item is what the (kind, subject_ref) dedup counts, so it is also the
+    // field that decides whether the same problem raises a second time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[specta(optional)]
     pub resolved_at: Option<Timestamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub resolution: Option<String>,
 }
 
 /// An isolated working copy a writer attempt runs in.
@@ -344,6 +392,14 @@ pub struct Worktree {
     pub lease_id: Option<LeaseId>,
     pub dirty: bool,
     pub unpushed: bool,
+    // Set together when the tree is handed back. Absent means still held: a
+    // worktree with no release stamp is one somebody may still be working in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub released_at: Option<Timestamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub disposition: Option<String>,
     pub created_at: Timestamp,
 }
 
@@ -399,6 +455,7 @@ pub struct Lease {
 #[serde(deny_unknown_fields)]
 pub struct DispatchNode {
     pub id: DispatchNodeId,
+    pub version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[specta(optional)]
     pub parent_id: Option<DispatchNodeId>,
@@ -406,11 +463,19 @@ pub struct DispatchNode {
     #[specta(optional)]
     pub attempt_id: Option<AttemptId>,
     pub kind: String,
+    // OPEN bounded lifecycle label, NOT an FSM state: the spawn tree has no
+    // seeded edge set, so storage guards the version CAS and nothing else.
+    // Plain `//` — a doc attribute here would flow into the bindings.ts golden.
+    pub state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[specta(optional)]
     pub label: Option<String>,
     pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
+
+/// The state a dispatch node is born in — the spawn tree's only fixed label.
+pub const DISPATCH_NODE_INITIAL_STATE: &str = "registered";
 
 #[cfg(test)]
 mod tests {

@@ -5,11 +5,12 @@ mitigation lives. Written for contributors: if your change touches one of
 these boundaries, the relevant stance is review criteria, not background
 reading. Reporting: see `SECURITY.md`.
 
-GridWork is pre-alpha, stage 2 of 5 (see `ROADMAP.md`) — several stances below
-are design commitments whose enforcing code does not exist yet. Each stance
-therefore carries a status: **in force** (enforced at HEAD), **partial**
-(naming what is enforced versus designed), or **designed, not yet built**. A
-design stance is a commitment the build is held to, not a shipped mitigation.
+GridWork is pre-alpha, at stage 3 of 5 (see `ROADMAP.md`): the kernel is built, the
+engines and the whole human surface are not — so several stances below are still
+design commitments whose enforcing code does not exist yet. Each stance therefore
+carries a status: **in force** (enforced at HEAD), **partial** (naming what is
+enforced versus designed), or **designed, not yet built**. A design stance is a
+commitment the build is held to, not a shipped mitigation.
 
 ## Assets
 
@@ -44,9 +45,25 @@ Residual risk is real and disclosed: within its granted read surface, an
 injected agent can still read and egress — containment bounds the blast
 radius, it does not make injection impossible.
 
-**Status: designed, not yet built.** The command-envelope shapes and the
-authority-grant schema exist in the contract; there is no kernel yet, so no
-policy evaluation runs and no receipts are emitted.
+**Status: partial.** The kernel evaluates authority as data and writes an
+immutable receipt for every gated decision, in the transaction that decided it;
+a page raises a deduplicated attention item and does NOT mutate the target — a
+refusal that leaves a trail, not a queued write. Grants are read under the same
+writer lock the command is decided under, and "unexpired" is measured against
+the command's own `issued_at`, so replaying the log reaches the verdict it
+reached live.
+
+What is narrow is the risk table: exactly one action class is gated today
+(`issue_command` → `stop`, the kill spine). Every other command is
+UNCLASSIFIED — not evaluated, no receipt. That is deliberate rather than
+unfinished. `action_class` is an open string, no accepted artifact maps the
+command surface onto it, and inventing classes would gate ordinary work behind
+grants nobody has issued. Two commands are excluded structurally, because a gate
+that cannot be opened is a deadlock and not a gate: `grant_authority` (the first
+grant would need a grant, on a kernel that has none) and `activate_kernel`
+(genesis precedes every grant — protected instead by exactly one append against
+a sealed allowlist, which does not depend on prior state). The residual risk
+above is unchanged and still disclosed.
 
 ### 2. Terminal escape injection (ANSI/OSC)
 
@@ -67,12 +84,19 @@ Any local process with socket access can send arbitrary frames.
 `docs/protocol.md`); strict framing bounds and `deny_unknown_fields`
 decoding bound WHAT they can say; commands are CAS-guarded, idempotent, and
 policy-checked, so a misbehaving client can be refused but not corrupt
-order. No network listener exists before a recorded authentication decision.
+order. Same-EUID peer validation reinforces socket permissions. No network listener
+exists before the authentication decision required by ADR 0002.
 
-**Status: partial.** Strict unknown-field rejection and the CAS + idempotency
-command semantics are implemented in the contract crates; the framing bounds,
-the filesystem-permission boundary, and the policy check are designed, not yet
-built — there is no socket to connect to yet.
+**Status: in force.** The daemon binds a Unix socket inside a directory it
+resolves and checks the ownership and mode of, refuses a peer whose effective
+uid is not its own, and reads a length prefix before allocating anything —
+bodies bounded by `FRAME_BODY_MAX_BYTES`, the hello by a lower cap, and every
+control frame decoded with `deny_unknown_fields` plus duplicate-key and
+trailing-value rejection. Commands are CAS-guarded and idempotency-keyed in the
+storage layer, so a misbehaving client can be refused without reordering
+anything. A frame the codec refuses takes down ITS connection and no other.
+There is still no network listener of any kind, which is how ADR 0002's
+requirement is met rather than something implemented.
 
 ### 4. Log tampering and projection poisoning
 
@@ -85,16 +109,28 @@ internal consistency of a stream — it cannot detect a coherent FORGERY from
 stream input alone. Tamper *evidence* is a storage/provenance property
 (append-only enforcement, host controls), not a stream-inspection property.
 
-**Status: partial.** The database triggers are in force — and now cover the
-four FSM state tables (task, attempt, message, command) as well as the
-append-only event log and receipt ledger. On the append-only tables, UPDATE
-and DELETE are refused; on the state tables, rows are born at their initial
-state, deletes are refused, and every transition follows a legal edge. Across
-all of them, TRUNCATE is refused at the statement level and each guard is set
-`ENABLE ALWAYS`, so a replica-mode session cannot switch them off. Fencing
-exists as a contract type and a column, not yet as enforced behavior; no
-projections exist yet to rebuild. The `gwk-cert` non-claim describes the
-shipped certifier exactly.
+**Status: in force.** The database triggers cover the append-only event log, the
+receipt ledger and the ingestion ledger (UPDATE and DELETE refused) and the four
+FSM state tables (task, attempt, message, command — rows born at their initial
+state, deletes refused, every transition a legal edge). Across all of them
+TRUNCATE is refused at the statement level and each guard is `ENABLE ALWAYS`, so
+a replica-mode session cannot switch them off.
+
+Fencing is enforced behaviour now, not just a column: once a token has been
+granted, presenting the current one is mandatory and omitting it is refused —
+dropping the token is not a way around the check. A single writer row locked
+`FOR UPDATE` to commit serializes every append ACROSS processes, so sequence
+order is commit order.
+
+Projections exist, are written in the same transaction as their events, and are
+rebuildable — into a SCRATCH database, compared by hash, never swapped as a side
+effect, because replacing live state is an operator act with its own blast
+radius. The live tables refuse to be reset at all, which is what makes a
+projection row unforgeable by anything except a replay of the log. One
+consequence is deliberate and worth stating: a checkpoint cannot be restored, so
+recovery replays, and after a crash it answers "unverified" rather than implying
+a check it did not run. The `gwk-cert` non-claim still describes the shipped
+certifier exactly.
 
 ### 5. Path traversal and symlink games
 
@@ -104,8 +140,15 @@ then require the result inside the allowed root); worktree identity is by id
 and lease, not caller-supplied paths; blob access is by digest, never by
 client-named file path.
 
-**Status: designed, not yet built.** No code handles an untrusted path yet —
-the stance is the rule that code will be built to.
+**Status: partial.** Blob containment is by construction rather than by
+assertion: an address parses only as 64 lowercase hex characters, and the storage
+path is that digest sharded under the store's own root — there is no input
+through which a separator or a `..` could reach the path at all, so there is no
+canonicalize-and-compare step to get wrong. The socket's parent directory is
+resolved and checked before the bind, and a path that is a symlink is refused
+rather than followed. Worktree and evidence paths are still only RECORDED —
+no kernel code opens one yet — so for those the resolve-then-contain rule
+remains the rule code will be built to.
 
 ### 6. Secret echo into transcripts and the log
 
@@ -116,13 +159,20 @@ with retention classes and crypto-shred deletion; a redaction pass gates
 transcript capture; CI leak-scans the public repository — the tracked tree
 plus the commit content across each pushed and pull-request range — with a
 seeded violation proving the gate can fail. Secrets never appear in contract
-types.
+types. ADR 0003 locks the chunked AEAD container, envelope encryption, and tombstone-first
+crypto-shred ordering.
 
-**Status: partial.** The CI leak scan — the tracked tree plus commit content
-across each pushed and PR range, with its seeded proof of failure — and the
-inline payload byte bound (a contract constant the certifier checks) are in
-force. The blob store, retention classes, crypto-shred deletion, and the
-redaction pass are designed, not yet built.
+**Status: partial.** In force: the CI leak scan — the tracked tree plus commit
+content across each pushed and PR range, with its seeded proof of failure — the
+inline payload byte bound, and the blob store itself. The store is what ADR 0003
+specified: a chunked AEAD container whose final chunk is sealed AS final, so a
+truncated container is detected rather than read as a shorter blob; envelope
+encryption, with each blob's key wrapped under a KEK the store never writes
+down; and tombstone-first crypto-shred, where the key is destroyed only after
+the tombstone commits — so a read of a shredded blob is REFUSED rather than
+reported missing, permanently. Retention is pin / unpin / sweep, and a sweep
+reclaims only what nothing references, checkpoints included. The redaction pass
+gating transcript capture is designed, not yet built.
 
 ### 7. Resource exhaustion
 
@@ -132,9 +182,16 @@ budgets (tokens, tool calls, wall clock, cost) as contract data with
 kill-and-alert semantics; bounded channels internally — backpressure over
 buffering.
 
-**Status: partial.** The inline payload maximum is in force, and budgets are
-real as contract data; the frame bounds, kill-and-alert enforcement, and
-bounded channels are designed, not yet built.
+**Status: partial.** In force: the frame and inline-payload bounds, decided from
+the length prefix before anything is allocated; a per-connection byte RATE in
+each direction, which makes a peer that outruns its allowance WAIT rather than
+lose its connection; bounded queues inside a connection, with responses drained
+ahead of event batches; and a bounded admission count in front of the writer that
+REFUSES when full instead of queueing — overload becomes a typed answer the
+caller can act on rather than an unbounded pile of connections on one row. A
+consumer that stops reading loses its stream and is told the cursor it actually
+received, so resuming does not skip what it never got. Budgets remain contract
+data only: kill-and-alert needs an engine to kill, and stage 3 has not started.
 
 ### 8. Provenance of agent-authored code
 
@@ -156,9 +213,12 @@ best-effort); capabilities are explicit grants in the hello; the stable wire
 version is pinned per adapter; permission prompts relay through the kernel —
 an adapter that cannot relay them does not get write capabilities.
 
-**Status: partial.** Strict refusal of an unknown envelope `schema_version`
-is implemented in the contract types; the hello negotiation, capability
-grants, and permission relay are designed, not yet built.
+**Status: partial.** Hello negotiation is in force: an unknown protocol major is
+refused rather than downgraded, and the refusal is a frame the client can read —
+a peer that guessed the version wrong must be able to tell that from a socket
+nobody was listening on. Capabilities are explicit in the hello and the
+unknown-`schema_version` refusal in the contract types is unchanged. Permission
+relay stays designed: adapters are stage 3.
 
 ## Non-goals
 

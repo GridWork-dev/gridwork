@@ -445,7 +445,7 @@ footer .wrap { padding-block:var(--s7) }
   <div class="wrap">
     <b><span class="cursor" aria-hidden="true">&#9611;</span>&nbsp;gridwork</b>
     <span class="seg hide-sm">apache-2.0</span>
-    <span class="seg">stage 2/5 &middot; kernel</span>
+    <span class="seg">stage 3/5 &middot; engines</span>
     <span class="spacer"></span>
     <span class="tag">pre-1.0</span>
   </div>
@@ -606,8 +606,8 @@ footer .wrap { padding-block:var(--s7) }
     </div>
 
     <p class="gauge">
-      <span class="bar" aria-hidden="true">&#9608;<b>&#9608;</b>&#9617;&#9617;&#9617;</span>
-      <span>stage 2 of 5 &mdash; kernel, in progress. Stage 1 shipped.</span>
+      <span class="bar" aria-hidden="true">&#9608;&#9608;<b>&#9608;</b>&#9617;&#9617;</span>
+      <span>stage 3 of 5 &mdash; engines, next. Stages 1 and 2 shipped.</span>
     </p>
 
     <ol class="stages">
@@ -625,26 +625,28 @@ footer .wrap { padding-block:var(--s7) }
         </ul>
       </li>
 
-      <li class="stage stage--now">
+      <li class="stage">
         <div class="stage__hd">
           <span class="stage__no">02</span>
           <h3>Kernel</h3>
-          <span class="pill pill--now">current</span>
+          <span class="pill pill--done">shipped</span>
         </div>
-        <p class="stage__sub">In flight &mdash; nothing merged yet.</p>
+        <p class="stage__sub">Certified against a real PostgreSQL 16, with the performance envelope measured.</p>
         <ul class="rows">
-          <li>A daemon owning an append-only event store &mdash; the sole writer; every other view is a projection</li>
+          <li>A daemon owning an append-only event store &mdash; the sole writer; one row locked per append, so sequence order is commit order across processes</li>
+          <li>Projections written in the same transaction as their events, rebuildable into a scratch database and compared by hash</li>
+          <li>Content-addressed blobs: a chunked AEAD container sealed against truncation, with pin / sweep / crypto-shred retention</li>
           <li>The attention queue: one prioritized feed of everything that needs a human</li>
-          <li>Authority policy as data: what agents may do unattended, what always pages</li>
-          <li>Headless CLI verbs over the same protocol the TUI will use</li>
+          <li>Authority policy as data &mdash; every decision leaving an immutable receipt; a page raises attention and changes nothing</li>
+          <li><code>gw</code>: headless CLI verbs over the same framed socket protocol the TUI will use</li>
         </ul>
       </li>
 
-      <li class="stage">
+      <li class="stage stage--now">
         <div class="stage__hd">
           <span class="stage__no">03</span>
           <h3>Engines</h3>
-          <span class="pill">planned</span>
+          <span class="pill pill--now">current</span>
         </div>
         <ul class="rows">
           <li>PTY engine: authoritative server-side virtual terminal, render-state deltas, detach/reattach, recording</li>
@@ -724,7 +726,7 @@ footer .wrap { padding-block:var(--s7) }
           <tr><td>gwk</td><td>Namespace root for the <code>gwk-</code> crates. No API</td><td><span class="pill">name only</span></td></tr>
           <tr><td>gridwork</td><td>Will ship the <code>gw</code> binary. No API yet</td><td><span class="pill">name only</span></td></tr>
           <tr><td>xtask</td><td>Codegen and release glue. Not published</td><td><span class="pill">in-tree</span></td></tr>
-          <tr><td>gwk-kernel</td><td>Daemon: event store, projections, attention, authority</td><td><span class="pill">planned</span></td></tr>
+          <tr><td>gwk-kernel</td><td>Daemon: event store, projections, attention, authority, blobs, the wire</td><td><span class="pill">in-tree</span></td></tr>
           <tr><td>gwk-pty</td><td>PTY engine: server-side VT, render-state deltas, reattach</td><td><span class="pill">planned</span></td></tr>
           <tr><td>gwk-adapter-*</td><td>Per-engine ACP and hooks adapters</td><td><span class="pill">planned</span></td></tr>
           <tr><td>gwk-tui</td><td>The client: modes, lenses, palette</td><td><span class="pill">planned</span></td></tr>

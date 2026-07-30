@@ -1,7 +1,9 @@
 //! Workspace task runner. `contract` generates the TypeScript contract, theme
-//! data, and golden fixtures; `contract --check` is the CI drift gate.
+//! data, golden fixtures, and the kernel's embedded copy of the contract DDL;
+//! `contract --check` is the CI drift gate.
 
 mod contract;
+mod schema;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();

@@ -1,7 +1,7 @@
 [package]
 name = "gridwork"
 version = "0.0.1"
-description = "GridWork — an agent operating system for the terminal. Placeholder for the gw binary; the contract surface currently lives in the gwk-* crates."
+description = "GridWork — an agent operating system for the terminal. The gw binary: the CLI that speaks the kernel's local protocol."
 homepage = "https://gridwork.dev"
 keywords = ["agent", "terminal", "orchestration", "tui"]
 categories = ["command-line-utilities", "development-tools"]
@@ -9,6 +9,39 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+
+[[bin]]
+name = "gw"
+path = "src/main.rs"
+
+[dependencies]
+base64.workspace = true
+gwk-domain.workspace = true
+gwk-kernel.workspace = true
+# `admin` derives the scratch DSN from the admin one, which means holding a
+# secret long enough to change one path segment in it.
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# A blob's address is a digest over its own plaintext, and `commit` refuses one
+# that does not match what the kernel recomputed — so a client that uploads has
+# to be able to compute it too.
+sha2.workspace = true
+tokio = { workspace = true, features = [
+  "io-std",
+  "io-util",
+  "macros",
+  "net",
+  "rt",
+  "rt-multi-thread",
+  "signal",
+  "time",
+] }
+
+[dev-dependencies]
+# The live case stands up a real daemon on a temp socket and drives the built
+# binary against it, which needs a database to point the daemon at.
+sqlx = { workspace = true, features = ["json"] }
 
 [lints]
 workspace = true

@@ -32,6 +32,151 @@ jobs:
       - run: cargo test --workspace --all-targets --locked
       - run: cargo test --workspace --doc --locked
 
+  # The kernel's ignored integration suite needs a live PostgreSQL superuser:
+  # each case creates and initializes its own database plus the runtime role.
+  # Keep this separate so service failures do not read as Rust regressions.
+  kernel-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16@sha256:33f923b05f64ca54ac4401c01126a6b92afe839a0aa0a52bc5aeb5cc958e5f20
+        env:
+          POSTGRES_PASSWORD: ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      GWK_TEST_ADMIN_DATABASE_URL: postgresql://postgres:ci@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Assert ignored kernel tests exist
+        shell: bash
+        run: |
+          tests="$(cargo test -p gwk-kernel --locked -- --ignored --list)"
+          printf '%s\n' "$tests"
+          if ! grep -Eq ': test$' <<<"$tests"; then
+            echo 'no ignored gwk-kernel tests were discovered' >&2
+            exit 1
+          fi
+      # The performance envelope is ignored as well and REFUSES a debug profile —
+      # its numbers are release-mode evidence — so it has its own job below.
+      # Named rather than filtered by target: if it is ever renamed this skip
+      # stops matching and the debug run fails loudly, which beats a suite that
+      # quietly measures nothing.
+      - run: cargo test -p gwk-kernel --locked -- --ignored --skip the_phase_performance_envelope_holds
+      # The CLI's live case stands a real daemon up on a temp socket and drives
+      # the built binary against it. Same service, separate step, so a failure
+      # names which half broke.
+      - run: cargo test -p gridwork --locked -- --ignored
+
+  # The accepted performance bounds, in release, against the pinned
+  # postgres major. The bounds themselves are hardware numbers and the run that
+  # asserts them as written is the operator's; a hosted runner is slower and
+  # noisier, so this job carries slack and keeps the receipt as the artifact. An
+  # order-of-magnitude collapse still reds the build, runner variance does not,
+  # and nobody is tempted to repair a flaky gate by loosening what it gates.
+  perf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16@sha256:33f923b05f64ca54ac4401c01126a6b92afe839a0aa0a52bc5aeb5cc958e5f20
+        env:
+          POSTGRES_PASSWORD: ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      GWK_TEST_ADMIN_DATABASE_URL: postgresql://postgres:ci@localhost:5432/postgres
+      GWK_PERF_RECEIPT: gwk-perf-receipt.json
+      GWK_PERF_REVISION: ${{ github.sha }}
+      GWK_PERF_SLACK: "3"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - run: cargo test --release -p gwk-kernel --test perf -- --ignored --nocapture
+      # Kept even on failure: a receipt naming which bound collapsed and by how
+      # much is the whole point of the job.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: perf-receipt
+          path: gwk-perf-receipt.json
+
+  # The second platform the kernel claims. Socket behaviour is not portable by
+  # assumption — `sun_path` is 104 bytes here and 108 on Linux, a parent
+  # directory's mode is enforced differently, and whether the OS will name a
+  # peer's credentials at all is per-kernel — so the UDS rules are run rather
+  # than reasoned about.
+  #
+  # Without PostgreSQL: GitHub's macOS runners cannot run service containers, and
+  # brew-installing a server would make the slowest job in this file also the one
+  # that breaks on runner-image changes instead of on our code. What runs here is
+  # everything that needs no server — the socket cases in `listen.rs`, the frame
+  # codec and its properties, the domain and the contract — while the
+  # server-backed suites stay on Linux above.
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - run: cargo test --workspace --all-targets --locked
+
+  # What a crates.io consumer actually receives. `cargo package` verifies by
+  # building the packaged LIB, which is why it passed for a year while
+  # `gwk-domain`'s own DDL test reached `../../../schema/` — a path that exists
+  # in the repo and not in the tarball. So this builds the packaged crate's TEST
+  # targets, which is the thing that was broken, and asserts the LICENSE rode
+  # along (a root-level file is outside every package root; the per-crate ones
+  # are symlinks, and cargo archives them as real files).
+  #
+  # `gridwork` is absent on purpose: it depends on `gwk-kernel`, which is
+  # `publish = false`, so it cannot be packaged at all until the kernel is
+  # released. That is a release-ordering fact, not a failure to catch here.
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: every published crate carries its tests and its license
+        run: |
+          set -euo pipefail
+          for crate in gwk gwk-domain gwk-cert gwk-theme; do
+            version=$(cargo metadata --format-version 1 --no-deps \
+              | jq -r --arg c "$crate" '.packages[] | select(.name == $c) | .version')
+            cargo package -p "$crate" --locked
+            # Listed to a file, not piped into `grep -q`: grep would exit on the
+            # match, tar would take SIGPIPE, and `pipefail` would read that as a
+            # failed package.
+            tar tzf "target/package/$crate-$version.crate" > /tmp/crate-files
+            grep -qx "$crate-$version/LICENSE" /tmp/crate-files
+            ( cd "target/package/$crate-$version" && cargo build --tests --locked )
+          done
+
   msrv:
     runs-on: ubuntu-latest
     timeout-minutes: 15

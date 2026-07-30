@@ -8,6 +8,39 @@ rust-version = "1.94"
 license = "Apache-2.0"
 repository = "https://github.com/GridWork-dev/gridwork"
 
+# Every public dependency is pinned here once. A crate that names its own
+# version is a second place for the same number to drift.
+[workspace.dependencies]
+aead = "0.6.1"
+aead-stream = "0.6.0"
+base64 = "0.23.0"
+chacha20poly1305 = "0.11.0"
+gwk-cert = { path = "crates/gwk-cert", version = "0.0.1" }
+gwk-domain = { path = "crates/gwk-domain", version = "0.0.1" }
+gwk-kernel = { path = "crates/gwk-kernel", version = "0.0.1" }
+# Generative tests only, for the three invariants where a hand-picked example
+# cannot cover the input space: the frame codec, the u64-through-decimal-TEXT
+# conversion, and cursor paging. Default features off — `fork` and `timeout`
+# want a subprocess per case, which buys nothing for pure functions.
+proptest = { version = "1.11.0", default-features = false, features = ["std", "bit-set"] }
+# One call: `geteuid`, for the UDS peer check. Chosen over `libc` because its
+# wrapper is SAFE — the workspace forbids `unsafe_code`, so a raw extern call
+# would not compile here — and over `nix` because it was already in the tree.
+rustix = { version = "1.1.4", default-features = false, features = ["process", "std"] }
+secrecy = "0.10.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11.0"
+specta = { version = "=2.0.0-rc.25", features = ["derive"] }
+sqlx = { version = "0.9.0", default-features = false, features = [
+  "postgres",
+  "runtime-tokio",
+  "tls-rustls-ring-native-roots",
+] }
+thiserror = "2.0.19"
+tokio = { version = "1.53.1", default-features = false }
+zeroize = "1.9.0"
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 unsafe_op_in_unsafe_fn = "deny"

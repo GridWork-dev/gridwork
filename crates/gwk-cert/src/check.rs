@@ -363,11 +363,20 @@ pub fn check_stream(events: &[EventEnvelope]) -> Vec<Finding> {
             // aggregate on first sight — open-world types and any governed
             // aggregate whose creation we never saw included. Neither has an
             // established state to disagree with, so only compare once a
-            // creation has seeded the real one. `seen_creation` is exactly the
-            // set `replay` held pre-round-2 (populated on creation alone), so
-            // this restores that behavior: an open-world aggregate whose first
-            // event is a `_state_changed` no longer false-reds a mismatch
+            // creation has seeded the real one: an open-world aggregate whose
+            // first event is a `_state_changed` no longer false-reds a mismatch
             // against "".
+            //
+            // This gate is DELIBERATELY broader than the pre-placeholder
+            // behaviour, and the earlier claim that it was "exactly the set
+            // `replay` held" was wrong — that baseline populated `replay` from
+            // state changes too, so it also caught a chain that disagreed with
+            // ITSELF: `pending -> settled` followed by `pending -> archived` on
+            // an aggregate no creation was ever seen for. Under this gate that
+            // stream certifies clean. The trade is intentional — an aggregate
+            // whose type this checker does not model gets envelope-level checks
+            // only, and inventing a prior state for it is how the false red
+            // happened — but it is a loosening, not a restoration.
             if seen_creation.contains(&agg_key)
                 && let Some(current) = replay.get(&agg_key)
                 && current.state != from

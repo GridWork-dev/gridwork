@@ -4,14 +4,23 @@ The implementation contract behind the roadmap: what owns truth, what the
 pieces are, and which decisions are locked versus deliberately deferred.
 Locked decisions change only by a recorded amendment, not by drift.
 
-> **Read this as a design contract, not a description of running code.** It is
+> **Read this as a design contract, not a description of running code** — it is
 > written in the present tense throughout because it specifies what the pieces
-> must do — but the kernel, the socket, projections, blobs, the PTY engine, the
-> adapters, and the TUI are today all zero lines of code. What exists
-> today is the contract itself: `gwk-domain`, `gwk-cert`, `gwk-theme`, the SQL
-> DDL, and the generated TypeScript. `docs/security/THREAT_MODEL.md` labels each
-> stance **in force** / **partial** / **designed, not yet built**; when this file
-> and that one disagree about status, that one is right.
+> must do, and some of them do not exist yet.
+>
+> **Built:** the contract (`gwk-domain`, `gwk-cert`, `gwk-theme`, the SQL DDL,
+> the generated TypeScript), `gwk-kernel`'s PostgreSQL event store and
+> projections, the blob store, the daemon and its Unix socket, and `gw` — the
+> CLI half of the protocol. All of it certified against a real PostgreSQL 16,
+> with the performance envelope measured rather than asserted.
+>
+> **Not built:** the PTY engine, the agent adapters, and the TUI — the whole
+> human surface. Anything this file says about rendering, attaching, replaying,
+> or an engine is specification.
+>
+> `docs/security/THREAT_MODEL.md` labels each security stance **in force** /
+> **partial** / **designed, not yet built**; when this file and that one disagree
+> about status, that one is right.
 
 ## Truth ownership
 
@@ -40,7 +49,9 @@ kernel boundary.
 SSH to the host, then the same socket — the kernel does not listen on a
 network interface, and will not until a recorded authentication decision
 introduces one deliberately. Filesystem permissions on the socket are the
-local trust boundary.
+local trust boundary, reinforced by a same-EUID peer check. See
+`docs/decisions/0001-wire-codec.md` and
+`docs/decisions/0002-listener-before-auth.md`.
 
 **Singleton fencing.** One kernel writes per store. Fencing tokens (strictly
 increasing, invalidated on re-grant) make a deposed writer's appends fail
@@ -57,15 +68,20 @@ and then never see N. Assigning at commit closes the hole by construction —
 `schema/0001_contract.sql` encodes this, and the storage conformance suite
 (`gwk-cert::conformance`) certifies it for any backend.
 
-## The storage port
+## The storage ports
 
-Storage is engine-neutral behind one trait (`gwk-domain::port::EventStore`):
-atomic append with an expected-version CAS, read-by-cursor, watermark, and
-fencing. The first production backend is PostgreSQL; an **embedded backend is
+Storage is engine-neutral behind two traits in `gwk-domain::port`. `EventStore`
+is the log: atomic append with an expected-version CAS, read-by-cursor,
+watermark, and fencing. `BlobStore` is the out-of-line content spine:
+streaming upload, read, stat, pin/unpin, sweep, and crypto-shred over
+plaintext-addressed blobs. The first production backend is PostgreSQL; an **embedded backend is
 a real release phase, not an aspiration** — the port and its conformance
 suite exist so that claim is testable, and engine-specific mechanics
 (queues, notification channels, lock strategies) are confined to backend and
-deployment layers, never contract semantics.
+deployment layers, never contract semantics. For PostgreSQL that boundary is
+literal: `gwk-kernel` owns the driver, and everything it needs beyond the
+contract lives in a separate `gwk_internal` schema, so which schema an object
+sits in tells you whether it is contract or mechanism.
 
 ## Projections and watermarks
 
@@ -82,25 +98,47 @@ larger lives outside the log as an **encrypted, content-addressed blob**
 referenced by digest, media type, and size. Blobs carry a retention class;
 deletion is by retention sweep or crypto-shred (destroying the key), and an
 `evidence_pin` exempts a blob from sweeps while it backs an audit trail. The
-log itself never shrinks.
+log itself never shrinks. The persisted format and key hierarchy are locked by
+`docs/decisions/0003-payload-encryption.md`.
 
 ## Crash recovery
 
 The kernel checkpoints its coordination state (open attempts, held leases,
-pending approvals, budget cursor) as data. Recovery is: load the checkpoint,
-re-read the log from its cursor, reconcile against live observation — and
-trust the log over the checkpoint wherever they disagree. Attempts whose real
+pending approvals, budget cursor) as data — but a checkpoint is EVIDENCE, not a
+restore point, and the difference is deliberate.
+
+Recovery is: replay the log from the beginning through the same code that wrote
+the projections in the first place, then use the checkpoint to check the
+result. It is not "load the checkpoint and replay the tail". The schema forbids
+that, twice, with triggers no privilege can step around: a projection row must
+be born in its initial state at version 1, and the table cannot be truncated.
+Those guards are what make a projection row unforgeable by anything except the
+log, so the only way to buy a faster restart would be to open a hole in them.
+On a system that restarts rarely, that is a bad trade.
+
+What the checkpoint buys is an honest verdict. A clean shutdown takes a final
+snapshot at the watermark, and a restart that finds one can compare hashes and
+report the projections as verified. After a crash the newest checkpoint sits
+behind the watermark and there is no way to reconstruct the expected hash
+without replaying, so recovery reports `unverified` rather than implying a
+check it never ran — which is a statement about proof, not a degraded kernel:
+the tail is still transactionally coupled to its events either way.
+
+Where the log and any other source disagree, the log wins. Attempts whose real
 outcome cannot be established terminate as `unknown`, never a fabricated
 `failed` or `succeeded`.
 
 ## Contract surfaces
 
-The Rust crate `gwk-domain` is canonical. Two derived surfaces are checked,
+The Rust crate `gwk-domain` is canonical. Three derived surfaces are checked,
 not trusted: the generated TypeScript (`contracts/bindings.ts`, with golden
-round-trip fixtures decoded at runtime in CI) and the SQL DDL
+round-trip fixtures decoded at runtime in CI), the SQL DDL
 (`schema/0001_contract.sql`, applied clean against the pinned
-PostgreSQL major in CI). `gwk-cert` certifies event streams against the same
-tables the types are built from. Naming rules: `docs/contract/NAMING.md`.
+PostgreSQL major in CI), and the contract crate's embedded copy of that DDL
+(`crates/gwk-domain/src/contract_sql.rs`, which a published crate needs because
+`include_str!` cannot reach outside its own package). `gwk-cert` certifies
+event streams against the same tables the types are built from. Naming rules:
+`docs/contract/NAMING.md`.
 
 ## Platforms
 

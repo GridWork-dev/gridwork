@@ -1,0 +1,1283 @@
+//! The daemon over a real Unix socket, answering a real kernel.
+//!
+//! The unit cases prove the codec and the socket rules in isolation; this suite
+//! proves they compose — a client that speaks the framing, completes the
+//! handshake, and asks a question gets an answer derived from the database
+//! rather than from constants.
+//!
+//! The read cases are worth more than they look. A projection query is a static
+//! string per table, so nothing but a live PostgreSQL with the real DDL behind
+//! it can tell a correct one from a plausible one: a wrong column name, a wrong
+//! cursor, or a record shape that no longer matches its contract type all
+//! compile and all pass a unit test.
+
+mod common;
+
+use base64::prelude::{BASE64_STANDARD, Engine as _};
+use common::*;
+use gwk_domain::blob::BLOB_CHUNK_BYTES;
+use gwk_domain::ids::Seq;
+use gwk_domain::port::EventStore;
+use gwk_domain::protocol::{
+    CONNECTION_EGRESS_BYTES_PER_WINDOW, CONNECTION_INGRESS_BYTES_PER_WINDOW, CONTRACT_VERSION,
+    FRAME_BODY_MAX_BYTES, KernelErrorCode, KernelResult, MAX_SUBSCRIPTIONS_PER_CONNECTION,
+    ProjectionKind, ProjectionRecord, ProtocolVersion, SLOW_CONSUMER_TIMEOUT_SECS,
+    SUBSCRIPTION_POLL_SECS, ServerControl,
+};
+use gwk_kernel::store::connect_pool;
+use gwk_kernel::wire::frame::{Budget, Incoming, read_frame};
+use gwk_kernel::wire::listen::Listener;
+use gwk_kernel::wire::serve::serve_stream;
+use std::sync::Arc;
+use tokio::net::UnixStream;
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn a_sealed_daemon_answers_the_whole_surface_it_promises() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_sealed_store(&maintenance, "wire_sealed", 8).await;
+    let dir = runtime_dir("sealed");
+    let path = dir.join("gwk.sock");
+    let listener = Listener::bind(&path).await.expect("bind");
+    let (daemon, blobs) = daemon_for(store, "sealed").await;
+    let daemon = Arc::new(daemon);
+
+    let serving = tokio::spawn({
+        let daemon = Arc::clone(&daemon);
+        async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let _ = serve_stream(&daemon, stream).await;
+            listener.remove();
+        }
+    });
+
+    let (mut client, ack) = Client::connect(&path).await;
+    match ack {
+        ServerControl::HelloAck {
+            protocol_major,
+            sealed,
+            capabilities,
+            ..
+        } => {
+            assert_eq!(protocol_major, ProtocolVersion::V1);
+            // The ack tells a client it is sealed before its first request, so
+            // it never has to discover that by being refused.
+            assert!(sealed);
+            assert!(capabilities.is_empty());
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // A sealed kernel is READY. It admits no business command, which is a
+    // different thing from being unhealthy — conflating them would fail a
+    // health check for every deployment between genesis and cutover.
+    assert_eq!(
+        client.ask("r-health", r#"{"type":"health"}"#).await,
+        KernelResult::Health {
+            ready: true,
+            sealed: true
+        }
+    );
+
+    match client.ask("r-status", r#"{"type":"status"}"#).await {
+        KernelResult::Status {
+            sealed,
+            contract_version,
+            public_revision,
+            watermark,
+            ..
+        } => {
+            assert!(sealed);
+            assert_eq!(contract_version, CONTRACT_VERSION);
+            assert_eq!(public_revision, TEST_REVISION);
+            assert!(watermark.is_some(), "genesis is in the log");
+        }
+        other => panic!("{other:?}"),
+    }
+
+    let watermark = match client.ask("r-wm", r#"{"type":"watermark"}"#).await {
+        KernelResult::Watermark { watermark } => watermark.expect("genesis is in the log"),
+        other => panic!("{other:?}"),
+    };
+
+    match client.ask("r-sealed", r#"{"type":"verify_sealed"}"#).await {
+        KernelResult::SealedVerification {
+            sealed,
+            genesis_watermark,
+            event_count,
+            ..
+        } => {
+            assert!(sealed);
+            // The proof: ONE event, at whatever sequence the database assigned
+            // it. The count and the sequence are different questions and this
+            // asserts both rather than assuming genesis sits at 1.
+            assert_eq!(event_count.value(), 1);
+            assert_eq!(genesis_watermark, watermark);
+        }
+        other => panic!("{other:?}"),
+    }
+
+    drop(client);
+    serving.await.expect("join");
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&blobs);
+    drop_database(&maintenance, &name).await;
+}
+
+/// The id a page continues from, for whichever projection this is.
+fn record_key(record: &ProjectionRecord) -> String {
+    let json = serde_json::to_value(record).expect("serialize");
+    let body = &json[record.kind().as_str()];
+    body.get("id")
+        .or_else(|| body.get("orchestrator_id"))
+        .and_then(serde_json::Value::as_str)
+        .expect("every projection record carries the key it is paged by")
+        .to_owned()
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn every_projection_a_client_can_name_comes_back_through_the_wire() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "wire_projections", 8).await;
+    // Every table gets rows on purpose. A query against an EMPTY table returns
+    // no rows whether it is right or wrong, so an unpopulated projection is a
+    // case that passes without having tested anything.
+    populate(&store).await;
+    let mut served = Served::open(store, "projections").await;
+
+    for kind in ProjectionKind::ALL {
+        let tag = kind.as_str();
+        match served
+            .client
+            .ask(
+                &format!("r-{tag}"),
+                &format!(r#"{{"type":"list_projection","projection":"{tag}"}}"#),
+            )
+            .await
+        {
+            KernelResult::ProjectionPage { records, .. } => {
+                assert!(!records.is_empty(), "{tag} came back empty");
+                for record in &records {
+                    // The round trip through the contract type happens server
+                    // side; this asserts the server answered about the table it
+                    // was asked about, which a copy-paste in the query table
+                    // would silently get wrong.
+                    assert_eq!(record.kind(), *kind, "{tag} answered with another table");
+                }
+            }
+            other => panic!("{tag}: {other:?}"),
+        }
+    }
+
+    served.close().await;
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn a_page_at_a_time_walks_a_projection_exactly_once() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "wire_paging", 8).await;
+    // Ids chosen to differ by punctuation and case, because that is precisely
+    // where a locale collation puts two keys in an order its `>` disagrees
+    // with — and a cursor walk across that boundary loses a row.
+    let ids = ["t-a", "t-A", "t_a", "t-a-1", "t-a1", "tA", "ta"];
+    for id in ids {
+        apply(&store, id, task(id)).await;
+    }
+    let mut served = Served::open(store, "paging").await;
+
+    let mut seen: Vec<String> = Vec::new();
+    let mut cursor: Option<String> = None;
+    // One row per page: the boundary is crossed between every adjacent pair,
+    // which is the only way to exercise all of them.
+    for round in 0..ids.len() + 2 {
+        let request = match &cursor {
+            Some(c) => format!(
+                r#"{{"type":"list_projection","projection":"task","cursor":"{c}","limit":1}}"#
+            ),
+            None => r#"{"type":"list_projection","projection":"task","limit":1}"#.to_owned(),
+        };
+        match served.client.ask(&format!("r-{round}"), &request).await {
+            KernelResult::ProjectionPage {
+                records,
+                next_cursor,
+            } => {
+                seen.extend(records.iter().map(record_key));
+                match next_cursor {
+                    Some(next) => cursor = Some(next),
+                    None => break,
+                }
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    let mut expected: Vec<String> = ids.iter().map(|s| (*s).to_owned()).collect();
+    expected.sort_unstable();
+    let mut got = seen.clone();
+    got.sort_unstable();
+    // Exactly once: `sort` then compare catches a repeat, and the length check
+    // that a dedup would have hidden catches it too.
+    assert_eq!(
+        got, expected,
+        "the walk did not see every task exactly once"
+    );
+    assert_eq!(seen.len(), ids.len(), "a row was delivered twice");
+    // And the walk was in the order the cursor claimed, not merely complete.
+    assert_eq!(seen, expected, "pages did not arrive in key order");
+
+    served.close().await;
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn one_record_by_id_is_the_same_record_the_page_delivered() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "wire_get", 8).await;
+    apply(&store, "t-1", task("t-1")).await;
+    let mut served = Served::open(store, "get").await;
+
+    let from_page = match served
+        .client
+        .ask(
+            "r-list",
+            r#"{"type":"list_projection","projection":"task"}"#,
+        )
+        .await
+    {
+        KernelResult::ProjectionPage { mut records, .. } => records.pop().expect("one task"),
+        other => panic!("{other:?}"),
+    };
+
+    match served
+        .client
+        .ask(
+            "r-get",
+            r#"{"type":"get_projection","projection":"task","id":"t-1"}"#,
+        )
+        .await
+    {
+        // The get and the list run the same query with different bindings, so
+        // a difference here means one of the two bindings is wrong.
+        KernelResult::Projection { record } => assert_eq!(record, from_page),
+        other => panic!("{other:?}"),
+    }
+
+    match served
+        .client
+        .ask(
+            "r-missing",
+            r#"{"type":"get_projection","projection":"task","id":"t-nope"}"#,
+        )
+        .await
+    {
+        // Absent is an ANSWER. A client that asked whether a task exists gets
+        // told, and the connection carries on.
+        KernelResult::Error { code, .. } => assert_eq!(code, KernelErrorCode::NotFound),
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(
+        served.client.ask("r-after", r#"{"type":"health"}"#).await,
+        KernelResult::Health { .. }
+    ));
+
+    served.close().await;
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn the_log_reads_back_from_a_cursor_in_the_order_it_was_written() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "wire_events", 8).await;
+    for i in 0..6 {
+        apply(&store, &format!("t-{i}"), task(&format!("t-{i}"))).await;
+    }
+    let mut served = Served::open(store, "events").await;
+
+    let watermark = match served.client.ask("r-wm", r#"{"type":"watermark"}"#).await {
+        KernelResult::Watermark { watermark } => watermark.expect("events exist"),
+        other => panic!("{other:?}"),
+    };
+
+    let mut collected: Vec<u64> = Vec::new();
+    let mut cursor: Option<u64> = None;
+    for round in 0..10 {
+        let request = match cursor {
+            Some(c) => format!(r#"{{"type":"read_events","cursor":"{c}","limit":2}}"#),
+            None => r#"{"type":"read_events","limit":2}"#.to_owned(),
+        };
+        match served.client.ask(&format!("r-e{round}"), &request).await {
+            KernelResult::Events {
+                events,
+                cursor: last,
+                ..
+            } => {
+                if events.is_empty() {
+                    // The cursor a page reports is the last one DELIVERED, so an
+                    // empty page reports nothing and the walk is over.
+                    assert!(last.is_none());
+                    break;
+                }
+                collected.extend(events.iter().map(|e| e.global_sequence.value()));
+                // Reported against delivered, not against requested: a client
+                // resuming from this value resumes from what it actually got.
+                assert_eq!(
+                    last.expect("a non-empty page reports its last sequence"),
+                    events.last().expect("non-empty").global_sequence
+                );
+                cursor = Some(last.expect("checked").value());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    assert!(!collected.is_empty());
+    assert_eq!(*collected.last().expect("non-empty"), watermark.value());
+    // Strictly ascending, with no sequence delivered twice.
+    assert!(
+        collected.windows(2).all(|w| w[0] < w[1]),
+        "the log came back out of order or repeated: {collected:?}"
+    );
+
+    served.close().await;
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn a_command_submitted_over_the_wire_lands_once_however_often_it_is_sent() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "wire_submit", 8).await;
+    let mut served = Served::open(store, "submit").await;
+
+    let envelope = serde_json::to_string(&envelope("k-1", &task("t-1"))).expect("serialize");
+    let first = match served
+        .client
+        .ask(
+            "r-submit",
+            &format!(r#"{{"type":"submit_command","envelope":{envelope}}}"#),
+        )
+        .await
+    {
+        KernelResult::CommandApplied { events, .. } => events,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(first.len(), 1);
+
+    // The identical request again. Idempotency is enforced under the writer
+    // lock in `submit`, not out here — this asserts the wire does not undo it
+    // by, say, rebuilding the envelope on the way through.
+    let again = match served
+        .client
+        .ask(
+            "r-submit-2",
+            &format!(r#"{{"type":"submit_command","envelope":{envelope}}}"#),
+        )
+        .await
+    {
+        KernelResult::CommandApplied { events, .. } => events,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(again, first, "a retry appended a second event");
+
+    match served
+        .client
+        .ask(
+            "r-check",
+            r#"{"type":"list_projection","projection":"task"}"#,
+        )
+        .await
+    {
+        KernelResult::ProjectionPage { records, .. } => assert_eq!(records.len(), 1),
+        other => panic!("{other:?}"),
+    }
+
+    served.close().await;
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn a_subscription_delivers_what_the_log_gains_after_it_started() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "wire_subscribe", 8).await;
+    let served = Running::open(store, "subscribe").await;
+
+    let mut watcher = served.client().await;
+    let mut appender = served.client().await;
+
+    // From the current watermark, so what arrives can only be what this test
+    // appended — a subscription from the beginning would deliver the log first
+    // and prove nothing about live delivery.
+    let watermark = watermark_of(&mut watcher, "r-wm").await;
+    match watcher.ask("r-sub", &subscribe_from(watermark)).await {
+        // The acknowledgement echoes where the stream starts, and it arrives
+        // BEFORE any batch: the writer drains responses first, and the
+        // subscription does not start until this is queued.
+        KernelResult::Subscribed { cursor } => assert_eq!(cursor, Some(watermark)),
+        other => panic!("{other:?}"),
+    }
+
+    let envelope = serde_json::to_string(&envelope("k-1", &task("t-1"))).expect("serialize");
+    match appender
+        .ask(
+            "r-submit",
+            &format!(r#"{{"type":"submit_command","envelope":{envelope}}}"#),
+        )
+        .await
+    {
+        KernelResult::CommandApplied { .. } => {}
+        other => panic!("{other:?}"),
+    }
+
+    // Well inside the poll interval, which is the assertion that matters: this
+    // arrived because the append notified, not because a timer came round.
+    let batch = tokio::time::timeout(std::time::Duration::from_secs(3), watcher.recv())
+        .await
+        .expect("a notified subscription delivers without waiting for the poll")
+        .expect("the connection stayed open");
+    match batch {
+        ServerControl::EventBatch {
+            request_id,
+            events,
+            cursor,
+        } => {
+            // The id of the subscription, not of the submit: an unsolicited
+            // frame is still matched to the request that asked for the stream.
+            assert_eq!(request_id.as_str(), "r-sub");
+            assert!(!events.is_empty(), "a batch with no events");
+            assert!(
+                events.iter().all(|e| e.global_sequence > watermark),
+                "the stream replayed what the cursor had already covered"
+            );
+            // What the consumer actually received, so resuming from it is
+            // gap-free and repeat-free.
+            assert_eq!(
+                cursor,
+                events.last().expect("non-empty").global_sequence,
+                "the batch cursor is not its last event"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+
+    drop(watcher);
+    drop(appender);
+    served.close().await;
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn a_subscription_that_never_hears_a_notification_still_catches_up() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "wire_poll", 8).await;
+    // `Served` serves through `serve_stream`, which never starts the notification
+    // listener — so this is the lost-notification case with the notification
+    // permanently lost, and the poll is the only thing that can deliver. It is
+    // also what makes one connection enough here: nothing can push a batch until
+    // long after the submit has been answered.
+    let mut served = Served::open(store, "poll").await;
+
+    let watermark = watermark_of(&mut served.client, "r-wm").await;
+    match served.client.ask("r-sub", &subscribe_from(watermark)).await {
+        KernelResult::Subscribed { .. } => {}
+        other => panic!("{other:?}"),
+    }
+
+    let envelope = serde_json::to_string(&envelope("k-1", &task("t-1"))).expect("serialize");
+    match served
+        .client
+        .ask(
+            "r-submit",
+            &format!(r#"{{"type":"submit_command","envelope":{envelope}}}"#),
+        )
+        .await
+    {
+        KernelResult::CommandApplied { .. } => {}
+        other => panic!("{other:?}"),
+    }
+
+    // Bounded, which is the whole claim: a subscriber whose notification was
+    // lost waits an interval, not forever.
+    let batch = tokio::time::timeout(
+        std::time::Duration::from_secs(SUBSCRIPTION_POLL_SECS + 5),
+        served.client.recv(),
+    )
+    .await
+    .expect("the poll delivered what the lost notification did not")
+    .expect("the connection stayed open");
+    match batch {
+        ServerControl::EventBatch { events, cursor, .. } => {
+            assert!(events.iter().all(|e| e.global_sequence > watermark));
+            assert_eq!(cursor, events.last().expect("non-empty").global_sequence);
+        }
+        other => panic!("{other:?}"),
+    }
+
+    served.close().await;
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn a_frame_the_codec_refuses_takes_down_its_own_connection_and_no_other() {
+    use tokio::io::AsyncWriteExt as _;
+
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "wire_strict", 8).await;
+    let served = Running::open(store, "strict").await;
+
+    // The codec's refusals are certified in isolation by the unit suite. What
+    // only the accept loop can answer is what a refusal COSTS: the daemon serves
+    // every connection in its own task and the comment there claims a malformed
+    // frame from one client must not take down the others. That is this case.
+    let mut bystander = served.client().await;
+    assert!(matches!(
+        bystander.ask("r-before", r#"{"type":"health"}"#).await,
+        KernelResult::Health { .. }
+    ));
+
+    // A length prefix past the frame bound, and nothing else — refused from the
+    // five header bytes, before a body is read or allocated. Written raw because
+    // `write_frame` would not produce it.
+    let mut liar = UnixStream::connect(&served.path).await.expect("connect");
+    liar.write_all(&(FRAME_BODY_MAX_BYTES + 1).to_be_bytes())
+        .await
+        .expect("write a length");
+    liar.write_all(&[1u8]).await.expect("write a kind");
+    // A refusal comes back before the hangup, and that is deliberate: a client
+    // that got the framing wrong must be able to tell that from a socket nobody
+    // was listening on. It is the LAST thing this connection gets.
+    let mut budget = Budget::new(
+        CONNECTION_INGRESS_BYTES_PER_WINDOW,
+        CONNECTION_EGRESS_BYTES_PER_WINDOW,
+    );
+    match read_frame(&mut liar, FRAME_BODY_MAX_BYTES, &mut budget)
+        .await
+        .expect("read the refusal")
+    {
+        Incoming::Frame(frame) => {
+            match serde_json::from_slice(&frame.body).expect("decode the refusal") {
+                ServerControl::HelloRefusal { code, .. } => {
+                    assert_eq!(code, KernelErrorCode::FrameSize)
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        Incoming::Closed => panic!("the daemon hung up without saying why"),
+    }
+    match read_frame(&mut liar, FRAME_BODY_MAX_BYTES, &mut budget).await {
+        Ok(Incoming::Closed) => {}
+        // A reset rather than a clean EOF, and correctly so: the refusal was
+        // decided from the four length bytes, so the kind byte after them was
+        // never consumed and the daemon closed with data still queued. Both
+        // outcomes say the same thing — the connection is gone.
+        Err(error) => assert!(
+            error.fatal,
+            "a non-fatal error on a dead connection: {error}"
+        ),
+        Ok(Incoming::Frame(frame)) => {
+            panic!("the connection outlived the frame that broke it: {frame:?}")
+        }
+    }
+
+    // A well-framed lie: through the handshake, then a known request carrying a
+    // field the contract does not have. Strict decoding closes the connection
+    // rather than ignoring the field, because a field that was ignored is a
+    // client believing something it was never told.
+    let (mut sneak, _) = Client::connect(&served.path).await;
+    sneak
+        .send(r#"{"type":"request","request_id":"r-x","request":{"type":"health","extra":1}}"#)
+        .await;
+    assert!(
+        sneak.recv().await.is_none(),
+        "an unknown field was tolerated"
+    );
+
+    // Both liars are gone; the bystander never noticed either of them.
+    assert!(matches!(
+        bystander.ask("r-after", r#"{"type":"health"}"#).await,
+        KernelResult::Health { .. }
+    ));
+
+    drop(bystander);
+    drop(sneak);
+    served.close().await;
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn a_stream_survives_losing_the_listener_it_was_being_notified_through() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "wire_deaf", 8).await;
+    let admin = connect_pool(&secret(&name), 2).await.expect("connect");
+    let served = Running::open(store, "deaf").await;
+
+    let mut watcher = served.client().await;
+    let watermark = watermark_of(&mut watcher, "r-wm").await;
+    match watcher.ask("r-sub", &subscribe_from(watermark)).await {
+        KernelResult::Subscribed { .. } => {}
+        other => panic!("{other:?}"),
+    }
+
+    // A committed append that notifies NOBODY, under a listener that is perfectly
+    // healthy. This is the case the poll exists for and the only way to produce
+    // it deterministically — the append path queues its `pg_notify` inside the
+    // transaction, so nothing that goes through the kernel can lose one on
+    // purpose. `Running` started the listener, so it is not absent; it simply was
+    // never told, exactly as it would not be after a dropped connection.
+    let first = seed_events(&admin, 3).await;
+    let batch = tokio::time::timeout(
+        std::time::Duration::from_secs(SUBSCRIPTION_POLL_SECS + 5),
+        watcher.recv(),
+    )
+    .await
+    .expect("only the poll could have delivered this, and it had to")
+    .expect("the connection stayed open");
+    match batch {
+        ServerControl::EventBatch { events, cursor, .. } => {
+            assert!(events.iter().all(|e| e.global_sequence > watermark));
+            assert_eq!(cursor, first, "the batch did not reach the seeded tail");
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // Now take the channel away entirely, mid-stream: `Running`'s listener is a
+    // live backend and it goes away under a subscription that is using it. What
+    // PostgreSQL will not do is redeliver anything sent while it was gone.
+    let killed: Vec<bool> = sqlx::query_scalar(
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+         WHERE datname = current_database() AND pid <> pg_backend_pid() \
+           AND query LIKE 'LISTEN %'",
+    )
+    .fetch_all(&admin)
+    .await
+    .expect("terminate the listener");
+    assert!(
+        killed.iter().any(|ok| *ok),
+        "no LISTEN backend was found to kill: this half proved nothing"
+    );
+
+    // Still bounded, and still without a notification. The stream did not merely
+    // survive one gap and then stall on a dead channel.
+    let second = seed_events(&admin, 3).await;
+    let batch = tokio::time::timeout(
+        std::time::Duration::from_secs(SUBSCRIPTION_POLL_SECS + 5),
+        watcher.recv(),
+    )
+    .await
+    .expect("a stream whose listener died still delivers")
+    .expect("the connection stayed open");
+    match batch {
+        ServerControl::EventBatch { cursor, .. } => {
+            assert_eq!(cursor, second, "the stream stalled at the break")
+        }
+        other => panic!("{other:?}"),
+    }
+
+    drop(watcher);
+    served.close().await;
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL, and waits out SLOW_CONSUMER_TIMEOUT_SECS on purpose"]
+async fn a_consumer_that_stops_reading_is_cut_off_at_the_last_batch_it_actually_got() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "wire_slow", 8).await;
+
+    // Enough batches that the queue fills and STAYS full: one per subscription
+    // the connection may hold, plus the one the writer is holding, plus the one
+    // whose send has to block for the timeout to be reached — and a few over, so
+    // this does not sit exactly on the boundary. 256 is the catch-up page.
+    let before = store
+        .watermark()
+        .await
+        .expect("watermark")
+        .expect("genesis");
+    let batches_needed = MAX_SUBSCRIPTIONS_PER_CONNECTION as u64 + 6;
+    seed_events(store.pool(), batches_needed * 256).await;
+    let (daemon, blobs) = daemon_for(store, "slow").await;
+    let dir = runtime_dir("slow");
+
+    // A pipe, not a socket, and small: the writer must be blocked mid-frame when
+    // the timeout fires, which is the whole state under test. Over a socket that
+    // depends on `net.core.wmem_default`.
+    let (mine, theirs) = tokio::io::duplex(4096);
+    let serving = tokio::spawn(async move {
+        let (mut reader, mut writer) = tokio::io::split(theirs);
+        let _ = gwk_kernel::wire::serve::serve_connection(&daemon, &mut reader, &mut writer).await;
+    });
+    let (mut client, _) = Client::greet(mine).await;
+
+    match client.ask("r-sub", &subscribe_from(before)).await {
+        KernelResult::Subscribed { .. } => {}
+        other => panic!("{other:?}"),
+    }
+
+    // Read two batches and then stop, which is what makes this a SLOW consumer
+    // rather than an absent one: some of the stream arrived, and the cursor it is
+    // sent home with has to be inside that part.
+    let mut received: Vec<Seq> = Vec::new();
+    for _ in 0..2 {
+        match client.recv().await.expect("the connection stayed open") {
+            ServerControl::EventBatch { cursor, .. } => received.push(cursor),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    // Nothing is read for longer than the kernel is willing to hold a batch.
+    tokio::time::sleep(std::time::Duration::from_secs(
+        SLOW_CONSUMER_TIMEOUT_SECS + 3,
+    ))
+    .await;
+
+    // Now drain. `StreamClosed` travels on the response queue, so it overtakes
+    // every batch still sitting in the batch queue — but not the one the writer
+    // was already mid-frame on, which arrives first.
+    let closed = loop {
+        match client.recv().await.expect("the connection stayed open") {
+            ServerControl::EventBatch { cursor, .. } => received.push(cursor),
+            ServerControl::StreamClosed {
+                request_id,
+                code,
+                last_cursor,
+            } => {
+                assert_eq!(request_id.as_str(), "r-sub");
+                assert_eq!(code, KernelErrorCode::SlowConsumer);
+                break last_cursor.expect("the consumer had received batches");
+            }
+            other => panic!("{other:?}"),
+        }
+    };
+
+    // The claim: the cursor is one the client HELD IN ITS HAND, not one the
+    // kernel had merely read to. Before this was measured at the write, the
+    // reported cursor was the read position — every batch the queue was holding
+    // plus the one in flight past the last frame that left, so a client resuming
+    // from it would have skipped thousands of events it never saw.
+    let position = received
+        .iter()
+        .position(|cursor| *cursor == closed)
+        .unwrap_or_else(|| {
+            panic!("the stream closed at {closed:?}, which was never sent: {received:?}")
+        });
+    // The last frame written, or the one before it: the frame the writer is
+    // mid-way through when the timeout fires is not delivered yet, so trailing by
+    // one is the documented behaviour. Trailing repeats an event on resume, which
+    // at-least-once allows; leading loses one, which is the bug.
+    assert!(
+        received.len() - 1 - position <= 1,
+        "closed at {closed:?}, {} batches behind the {} that were sent",
+        received.len() - 1 - position,
+        received.len()
+    );
+    assert!(
+        closed.value() < before.value() + batches_needed * 256,
+        "the kernel reported its own read position, not what it delivered"
+    );
+
+    drop(client);
+    serving.await.expect("join");
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&blobs);
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn a_connection_may_not_hold_more_subscriptions_than_its_cap() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "wire_subcap", 8).await;
+    let mut served = Served::open(store, "subcap").await;
+
+    // All of them start at the watermark, so none has anything to deliver: this
+    // case is about how many streams may exist, and a batch arriving mid-test
+    // would be a different one.
+    let watermark = watermark_of(&mut served.client, "r-wm").await;
+    for i in 0..MAX_SUBSCRIPTIONS_PER_CONNECTION {
+        match served
+            .client
+            .ask(&format!("r-s{i}"), &subscribe_from(watermark))
+            .await
+        {
+            KernelResult::Subscribed { .. } => {}
+            other => panic!("subscription {i}: {other:?}"),
+        }
+    }
+
+    match served
+        .client
+        .ask("r-over", &subscribe_from(watermark))
+        .await
+    {
+        KernelResult::Error { code, message, .. } => {
+            assert_eq!(code, KernelErrorCode::Overloaded);
+            assert!(
+                message.contains(&MAX_SUBSCRIPTIONS_PER_CONNECTION.to_string()),
+                "the refusal does not say what the cap is: {message}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // One request refused, nothing else touched — neither the connection nor the
+    // eight subscriptions already on it.
+    assert!(matches!(
+        served.client.ask("r-after", r#"{"type":"health"}"#).await,
+        KernelResult::Health { .. }
+    ));
+
+    served.close().await;
+    drop_database(&maintenance, &name).await;
+}
+
+/// Begin an upload of `plaintext` and return the id the store minted.
+async fn begin_upload(client: &mut Client, id: &str, plaintext: &[u8]) -> String {
+    match client
+        .ask(
+            id,
+            &format!(
+                r#"{{"type":"blob_begin","media_type":"application/octet-stream","byte_size":"{}"}}"#,
+                plaintext.len()
+            ),
+        )
+        .await
+    {
+        KernelResult::BlobBegun { upload_id } => upload_id.as_str().to_owned(),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// One `blob_chunk` request, base64 as the wire carries it.
+fn chunk_request(upload_id: &str, sequence: u32, chunk: &[u8]) -> String {
+    format!(
+        r#"{{"type":"blob_chunk","upload_id":"{upload_id}","sequence":{sequence},"data_base64":"{}"}}"#,
+        BASE64_STANDARD.encode(chunk)
+    )
+}
+
+/// Read a blob whole over the wire, one clamped range at a time.
+async fn read_blob(client: &mut Client, address: &str, size: usize) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::with_capacity(size);
+    while out.len() < size {
+        let request = format!(
+            r#"{{"type":"blob_read","address":"{address}","offset":"{}","length":"{}"}}"#,
+            out.len(),
+            size - out.len()
+        );
+        match client.ask(&format!("r-read{}", out.len()), &request).await {
+            KernelResult::BlobBytes {
+                offset,
+                data_base64,
+                ..
+            } => {
+                // The echoed offset is what this range began at, so a client
+                // never has to trust its own arithmetic.
+                assert_eq!(offset.value(), out.len() as u64);
+                let part = BASE64_STANDARD.decode(&data_base64).expect("base64");
+                assert!(!part.is_empty(), "the read stalled at {}", out.len());
+                out.extend_from_slice(&part);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    out
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn a_blob_goes_up_in_chunks_and_comes_back_byte_for_byte() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "wire_blob", 8).await;
+    let mut served = Served::open(store, "blob").await;
+
+    // Not a round number, and not compressible into a pattern a wrong offset
+    // would still satisfy.
+    let plaintext: Vec<u8> = (0..9_001u32).map(|i| (i % 251) as u8).collect();
+    let address = address_of(&plaintext);
+
+    let upload = begin_upload(&mut served.client, "r-begin", &plaintext).await;
+    // Deliberately uneven chunks: `commit` re-chunks the staged plaintext into
+    // the container itself, so how a client splits its upload is its own
+    // business and not the format's.
+    for (sequence, chunk) in [&plaintext[..1], &plaintext[1..5_000], &plaintext[5_000..]]
+        .into_iter()
+        .enumerate()
+    {
+        let sequence = sequence as u32;
+        match served
+            .client
+            .ask(
+                &format!("r-chunk{sequence}"),
+                &chunk_request(&upload, sequence, chunk),
+            )
+            .await
+        {
+            KernelResult::BlobChunkAccepted {
+                upload_id,
+                sequence: acked,
+            } => {
+                assert_eq!(upload_id.as_str(), upload);
+                // Acknowledged by sequence, so a client can tell which chunk it
+                // is being told about.
+                assert_eq!(acked, sequence);
+            }
+            other => panic!("chunk {sequence}: {other:?}"),
+        }
+    }
+
+    let descriptor = match served
+        .client
+        .ask(
+            "r-commit",
+            &format!(
+                r#"{{"type":"blob_commit","upload_id":"{upload}","address":"{}"}}"#,
+                address.as_str()
+            ),
+        )
+        .await
+    {
+        KernelResult::BlobCommitted {
+            descriptor,
+            deduplicated,
+        } => {
+            assert!(!deduplicated, "nothing was there to deduplicate against");
+            assert_eq!(descriptor.address, address);
+            assert_eq!(descriptor.byte_size.value(), plaintext.len() as u64);
+            assert!(!descriptor.tombstoned);
+            descriptor
+        }
+        other => panic!("{other:?}"),
+    };
+
+    match served
+        .client
+        .ask(
+            "r-stat",
+            &format!(r#"{{"type":"blob_stat","address":"{}"}}"#, address.as_str()),
+        )
+        .await
+    {
+        // The same descriptor the commit reported: a stat is a re-read, not a
+        // second opinion.
+        KernelResult::BlobStat { descriptor: stat } => assert_eq!(stat, descriptor),
+        other => panic!("{other:?}"),
+    }
+
+    // Byte for byte through encryption, chunking, and base64 both ways. Nothing
+    // short of the real bytes passes this.
+    let back = read_blob(&mut served.client, address.as_str(), plaintext.len()).await;
+    assert_eq!(back, plaintext, "the blob did not come back as it went in");
+
+    served.close().await;
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn the_same_bytes_uploaded_twice_are_stored_once() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "wire_blob_dedup", 8).await;
+    let mut served = Served::open(store, "blobdedup").await;
+
+    let plaintext = b"the same bytes, twice".to_vec();
+    let address = address_of(&plaintext);
+    let commit = format!(
+        r#"{{"type":"blob_commit","upload_id":"{{upload}}","address":"{}"}}"#,
+        address.as_str()
+    );
+
+    for round in 0..2 {
+        let upload = begin_upload(&mut served.client, &format!("r-begin{round}"), &plaintext).await;
+        match served
+            .client
+            .ask(
+                &format!("r-chunk{round}"),
+                &chunk_request(&upload, 0, &plaintext),
+            )
+            .await
+        {
+            KernelResult::BlobChunkAccepted { .. } => {}
+            other => panic!("{other:?}"),
+        }
+        match served
+            .client
+            .ask(
+                &format!("r-commit{round}"),
+                &commit.replace("{upload}", &upload),
+            )
+            .await
+        {
+            KernelResult::BlobCommitted { deduplicated, .. } => assert_eq!(
+                deduplicated,
+                round == 1,
+                "round {round} reported the wrong dedup verdict"
+            ),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    served.close().await;
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn an_upload_that_does_not_add_up_is_refused_and_can_be_abandoned() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "wire_blob_bad", 8).await;
+    let mut served = Served::open(store, "blobbad").await;
+
+    let plaintext = b"eleven bytes".to_vec();
+    let upload = begin_upload(&mut served.client, "r-begin", &plaintext).await;
+
+    // Not base64. Refused as the CLIENT's mistake — the upload is untouched and
+    // still expects chunk 0.
+    match served
+        .client
+        .ask(
+            "r-garbage",
+            &format!(
+                r#"{{"type":"blob_chunk","upload_id":"{upload}","sequence":0,"data_base64":"not base64 at all!"}}"#
+            ),
+        )
+        .await
+    {
+        KernelResult::Error { code, .. } => assert_eq!(code, KernelErrorCode::Validation),
+        other => panic!("{other:?}"),
+    }
+
+    // Out of order. Refused as an INTEGRITY failure rather than reordered: the
+    // staged file is a stream and a gap in it cannot be filled in later.
+    match served
+        .client
+        .ask("r-gap", &chunk_request(&upload, 3, &plaintext))
+        .await
+    {
+        KernelResult::Error { code, .. } => assert_eq!(code, KernelErrorCode::BlobIntegrity),
+        other => panic!("{other:?}"),
+    }
+
+    // A chunk over the contract's size, refused before it is staged.
+    match served
+        .client
+        .ask(
+            "r-oversized",
+            &chunk_request(&upload, 0, &vec![0u8; BLOB_CHUNK_BYTES + 1]),
+        )
+        .await
+    {
+        KernelResult::Error { code, message, .. } => {
+            assert_eq!(code, KernelErrorCode::Validation);
+            assert!(message.contains("chunk"), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // The right bytes, then a commit claiming somebody else's digest.
+    match served
+        .client
+        .ask("r-chunk", &chunk_request(&upload, 0, &plaintext))
+        .await
+    {
+        KernelResult::BlobChunkAccepted { .. } => {}
+        other => panic!("{other:?}"),
+    }
+    let wrong = address_of(b"different bytes entirely");
+    match served
+        .client
+        .ask(
+            "r-liar",
+            &format!(
+                r#"{{"type":"blob_commit","upload_id":"{upload}","address":"{}"}}"#,
+                wrong.as_str()
+            ),
+        )
+        .await
+    {
+        // The kernel hashes what it staged; the claim is checked, not trusted.
+        KernelResult::Error { code, .. } => assert_eq!(code, KernelErrorCode::BlobIntegrity),
+        other => panic!("{other:?}"),
+    }
+
+    match served
+        .client
+        .ask(
+            "r-abort",
+            &format!(r#"{{"type":"blob_abort","upload_id":"{upload}"}}"#),
+        )
+        .await
+    {
+        KernelResult::BlobAborted { upload_id } => assert_eq!(upload_id.as_str(), upload),
+        other => panic!("{other:?}"),
+    }
+    // And it is gone: a second chunk has nowhere to land.
+    match served
+        .client
+        .ask("r-after-abort", &chunk_request(&upload, 1, &plaintext))
+        .await
+    {
+        KernelResult::Error { code, .. } => assert_eq!(code, KernelErrorCode::NotFound),
+        other => panic!("{other:?}"),
+    }
+
+    served.close().await;
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn a_read_larger_than_a_frame_is_clamped_rather_than_refused() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "wire_blob_clamp", 8).await;
+    let mut served = Served::open(store, "blobclamp").await;
+
+    let plaintext = b"a few bytes".to_vec();
+    let address = address_of(&plaintext);
+    let upload = begin_upload(&mut served.client, "r-begin", &plaintext).await;
+    match served
+        .client
+        .ask("r-chunk", &chunk_request(&upload, 0, &plaintext))
+        .await
+    {
+        KernelResult::BlobChunkAccepted { .. } => {}
+        other => panic!("{other:?}"),
+    }
+    match served
+        .client
+        .ask(
+            "r-commit",
+            &format!(
+                r#"{{"type":"blob_commit","upload_id":"{upload}","address":"{}"}}"#,
+                address.as_str()
+            ),
+        )
+        .await
+    {
+        KernelResult::BlobCommitted { .. } => {}
+        other => panic!("{other:?}"),
+    }
+
+    // A length no frame could ever carry. Clamped, so the answer is bytes and an
+    // offset rather than a refusal the client has to special-case — the same
+    // rule the log and the projections follow.
+    match served
+        .client
+        .ask(
+            "r-huge",
+            &format!(
+                r#"{{"type":"blob_read","address":"{}","offset":"0","length":"{}"}}"#,
+                address.as_str(),
+                u64::from(u32::MAX)
+            ),
+        )
+        .await
+    {
+        KernelResult::BlobBytes { data_base64, .. } => {
+            let bytes = BASE64_STANDARD.decode(&data_base64).expect("base64");
+            assert_eq!(bytes, plaintext);
+        }
+        other => panic!("{other:?}"),
+    }
+
+    served.close().await;
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn a_blob_that_was_never_written_is_absent_rather_than_an_error() {
+    let maintenance = maintenance_pool().await;
+    // Sealed on purpose. Sealing gates COMMANDS; the blob spine is open before
+    // cutover, which is what lets an operator stage evidence at all.
+    let (name, store) = fresh_sealed_store(&maintenance, "wire_unwritten", 8).await;
+    let dir = runtime_dir("unwritten");
+    let path = dir.join("gwk.sock");
+    let listener = Listener::bind(&path).await.expect("bind");
+    let (daemon, blob_root) = daemon_for(store, "unwritten").await;
+    let daemon = Arc::new(daemon);
+
+    let serving = tokio::spawn({
+        let daemon = Arc::clone(&daemon);
+        async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let _ = serve_stream(&daemon, stream).await;
+            listener.remove();
+        }
+    });
+
+    let (mut client, _) = Client::connect(&path).await;
+    // A legal address nothing was ever written at.
+    let address = format!("sha256:{}", "0".repeat(64));
+    match client
+        .ask(
+            "r-stat",
+            &format!(r#"{{"type":"blob_stat","address":"{address}"}}"#),
+        )
+        .await
+    {
+        // Absent, not tombstoned: the two are different facts and a retention
+        // audit reads them differently.
+        KernelResult::Error { code, .. } => assert_eq!(code, KernelErrorCode::NotFound),
+        other => panic!("{other:?}"),
+    }
+    // And the connection is still usable afterwards — a refusal is a value.
+    assert!(matches!(
+        client.ask("r-after", r#"{"type":"health"}"#).await,
+        KernelResult::Health { .. }
+    ));
+
+    drop(client);
+    serving.await.expect("join");
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&blob_root);
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn the_accept_loop_stops_taking_work_and_takes_its_socket_with_it() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_sealed_store(&maintenance, "wire_drain", 8).await;
+    let dir = runtime_dir("drain");
+    let path = dir.join("gwk.sock");
+    let listener = Listener::bind(&path).await.expect("bind");
+    let (daemon, blob_root) = daemon_for(store, "drain").await;
+    let daemon = Arc::new(daemon);
+
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let running = tokio::spawn(gwk_kernel::wire::serve::run(listener, daemon, async move {
+        let _ = stopped.await;
+    }));
+
+    // One live client, mid-session, to prove the drain waits for it.
+    let (mut client, _) = Client::connect(&path).await;
+    assert!(matches!(
+        client.ask("r-1", r#"{"type":"health"}"#).await,
+        KernelResult::Health { .. }
+    ));
+
+    stop.send(()).expect("signal shutdown");
+    // The client hanging up is what lets the drain finish; without this the
+    // 30-second timeout would be doing the work instead, which is the path this
+    // case is NOT testing.
+    drop(client);
+    running.await.expect("join").expect("run");
+
+    // The socket goes with it. A daemon that left its socket behind would make
+    // the next start take the stale-takeover path for no reason.
+    assert!(!path.exists(), "shutdown left the socket behind");
+    // And nothing can connect any more.
+    assert!(UnixStream::connect(&path).await.is_err());
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&blob_root);
+    drop_database(&maintenance, &name).await;
+}

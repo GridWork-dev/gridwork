@@ -1,0 +1,44 @@
+[package]
+name = "gwk-kernel"
+version = "0.0.1"
+description = "The GridWork kernel: the PostgreSQL backend behind the gwk contract"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# Held back from crates.io until the kernel serves the wire. The contract
+# crates are published because other people build against them; a half-built
+# daemon has no such audience.
+publish = false
+
+[dependencies]
+# The blob container's crypto (ADR 0003). `aead` supplies the traits and the
+# CSPRNG; `aead-stream` is where the streaming constructions moved in this
+# generation, which is why it is a separate pin.
+aead = { workspace = true, features = ["alloc", "getrandom"] }
+aead-stream = { workspace = true, features = ["alloc"] }
+base64.workspace = true
+chacha20poly1305 = { workspace = true, features = ["zeroize"] }
+gwk-domain.workspace = true
+rustix.workspace = true
+secrecy.workspace = true
+sha2.workspace = true
+# Traits only (Serialize/DeserializeOwned): the projection layer takes contract
+# types generically so the stored `state` column and the JSON one come from the
+# same serializer and cannot drift. No derives are used in this crate.
+serde.workspace = true
+serde_json.workspace = true
+sqlx = { workspace = true, features = ["json"] }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "net", "rt", "sync", "time"] }
+zeroize.workspace = true
+
+[dev-dependencies]
+gwk-cert.workspace = true
+proptest.workspace = true
+# `test-util` is what lets the hello deadline be tested without spending five
+# real seconds per run — the case pauses the clock and advances it.
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+
+[lints]
+workspace = true

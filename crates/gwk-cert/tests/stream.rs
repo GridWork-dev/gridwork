@@ -804,6 +804,41 @@ fn open_world_first_event_state_changed_certifies_clean() {
 }
 
 #[test]
+fn an_open_world_chain_that_contradicts_itself_is_not_caught_and_that_is_the_trade() {
+    // The blind spot the `seen_creation` gate above buys, pinned so it cannot
+    // change silently. `sess-1` says it went `draft -> active` and then, in the
+    // very next event, that it left `draft` again — one of the two is a lie, and
+    // no creation was ever seen for the aggregate, so nothing here is compared.
+    //
+    // A checker that DID catch this would have to hold an inferred prior state
+    // for an aggregate type it does not model, which is exactly what false-red
+    // an honest open-world stream (see the case above). If a later round teaches
+    // it to distinguish the two, this test fails and the trade gets re-decided
+    // on purpose rather than by accident.
+    let events = vec![
+        event(
+            1,
+            "session",
+            "sess-1",
+            1,
+            "session_state_changed",
+            "kernel",
+            change("draft", "active"),
+        ),
+        event(
+            2,
+            "session",
+            "sess-1",
+            2,
+            "session_state_changed",
+            "kernel",
+            change("draft", "archived"),
+        ),
+    ];
+    assert_eq!(check_stream(&events), vec![]);
+}
+
+#[test]
 fn uncreated_machine_aggregate_reds_creation_missing_exactly_once() {
     // Three non-state events on an attempt that was never created. Keyed off a
     // separate seen-creation set, CreationMissing fires once — not once per

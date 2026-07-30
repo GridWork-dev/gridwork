@@ -12,14 +12,22 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use gwk_domain::blob::{BlobAddress, BlobDescriptor};
+use gwk_domain::checkpoint::{CHECKPOINT_SCHEMA_VERSION, Checkpoint};
+use gwk_domain::command::KernelCommand;
 use gwk_domain::entity::{Attempt, Budget, Command, Message, Task};
 use gwk_domain::envelope::{Actor, CommandEnvelope, EventEnvelope, Origin, PayloadRef};
 use gwk_domain::fsm::{AttemptState, CommandState, MessageState, Outcome, TaskState};
 use gwk_domain::ids::{
-    AggregateId, AttemptId, ByteCount, CommandId, CorrelationId, CostMicros, EngineId, EventId,
-    IdempotencyKey, LeaseId, MessageId, ProjectId, Seq, TaskId, Timestamp,
+    AggregateId, AttemptId, BlobUploadId, ByteCount, CommandId, CorrelationId, CostMicros,
+    EngineId, EventCount, EventId, IdempotencyKey, LeaseId, MessageId, ProjectId, RequestId, Seq,
+    TaskId, Timestamp,
 };
 use gwk_domain::inherited::{BudgetCursor, OrchestratorCheckpoint, PendingApproval};
+use gwk_domain::protocol::{
+    CapabilityName, ClientControl, KernelErrorCode, KernelRequest, KernelResult, PROTOCOL_MINOR,
+    ProjectionKind, ProtocolVersion, ServerControl,
+};
 use gwk_domain::transition::TransitionResult;
 
 const HEADER: &str = "\
@@ -69,6 +77,16 @@ fn bindings() -> String {
         .register::<TransitionResult<TaskState>>()
         .register::<OrchestratorCheckpoint>()
         .register::<gwk_domain::inherited::RoundFindingSummary>()
+        // The kernel protocol. The two control unions reach every request,
+        // result, projection record, and error code by field walk.
+        // `KernelCommand` is NOT among them: it travels as the envelope's
+        // `payload`, which the contract types as an opaque JSON tree, so
+        // without its own root a TS client would have no type for the thing it
+        // has to construct.
+        .register::<ClientControl>()
+        .register::<ServerControl>()
+        .register::<KernelCommand>()
+        .register::<Checkpoint>()
         .register::<gwk_theme::Token>();
     // PhasesFormat, not the unified Format: `skip_serializing_if` (the
     // tri-state omission) is direction-dependent, which unified mode refuses
@@ -309,6 +327,168 @@ fn golden_checkpoint() -> OrchestratorCheckpoint {
     }
 }
 
+fn capability(name: &str) -> CapabilityName {
+    CapabilityName::new(name).expect("golden capability name is valid")
+}
+
+fn blob_address(nibble: char) -> BlobAddress {
+    BlobAddress::from_digest(&nibble.to_string().repeat(64)).expect("golden digest is valid")
+}
+
+fn golden_activate_command() -> KernelCommand {
+    KernelCommand::ActivateKernel {
+        cutover_id: "00000000-0000-4000-8000-000000000001".into(),
+        archive_manifest_sha256: "b".repeat(64),
+    }
+}
+
+/// The activation envelope, exactly as `gw kernel activate` submits it: the
+/// typed command IS the payload, and `command_type` names the same variant.
+fn golden_activate_envelope() -> CommandEnvelope {
+    CommandEnvelope {
+        command_id: CommandId::new("cmd-activate"),
+        project_id: ProjectId::new("system"),
+        command_type: "activate_kernel".into(),
+        schema_version: 1,
+        issued_at: Timestamp::new("2026-07-28T12:00:00Z"),
+        actor: actor("operator", Some("op-1")),
+        origin: Origin {
+            system: "gw".into(),
+            r#ref: None,
+        },
+        target_aggregate_type: Some("kernel".into()),
+        target_aggregate_id: Some(AggregateId::new("singleton")),
+        expected_version: Some(1),
+        idempotency_key: IdempotencyKey::new(
+            "kernel_activated:00000000-0000-4000-8000-000000000001",
+        ),
+        causation_id: None,
+        correlation_id: None,
+        payload: serde_json::to_value(golden_activate_command()).expect("serialize command"),
+    }
+}
+
+fn golden_client_control() -> Vec<ClientControl> {
+    vec![
+        ClientControl::Hello {
+            protocol_major: ProtocolVersion::V1,
+            protocol_minor: PROTOCOL_MINOR,
+            capabilities: vec![capability("event_subscribe"), capability("blob")],
+            client: Some("gw".into()),
+        },
+        ClientControl::Request {
+            request_id: RequestId::new("req-1"),
+            request: KernelRequest::VerifySealed {},
+        },
+        ClientControl::Request {
+            request_id: RequestId::new("req-2"),
+            request: KernelRequest::SubmitCommand {
+                envelope: golden_activate_envelope(),
+            },
+        },
+        ClientControl::Request {
+            request_id: RequestId::new("req-3"),
+            request: KernelRequest::ReadEvents {
+                cursor: Some(Seq::new(9_007_199_254_740_993)),
+                limit: 512,
+            },
+        },
+        ClientControl::Request {
+            request_id: RequestId::new("req-4"),
+            request: KernelRequest::ListProjection {
+                projection: ProjectionKind::Attempt,
+                cursor: None,
+                limit: Some(50),
+            },
+        },
+        ClientControl::Request {
+            request_id: RequestId::new("req-5"),
+            request: KernelRequest::BlobCommit {
+                upload_id: BlobUploadId::new("upl-1"),
+                address: blob_address('a'),
+            },
+        },
+    ]
+}
+
+fn golden_server_control() -> Vec<ServerControl> {
+    vec![
+        ServerControl::HelloAck {
+            protocol_major: ProtocolVersion::V1,
+            protocol_minor: PROTOCOL_MINOR,
+            // The INTERSECTION: the client asked for blob too, this kernel
+            // grants only the subscription.
+            capabilities: vec![capability("event_subscribe")],
+            sealed: true,
+            watermark: Some(Seq::new(9_007_199_254_740_993)),
+        },
+        ServerControl::HelloRefusal {
+            code: KernelErrorCode::UnsupportedVersion,
+            message: "protocol major 2 is not served".into(),
+        },
+        ServerControl::Response {
+            request_id: RequestId::new("req-1"),
+            result: KernelResult::SealedVerification {
+                sealed: true,
+                genesis_event_id: EventId::new("evt-genesis"),
+                // NOT 1: the sequence is database-assigned.
+                genesis_watermark: Seq::new(9_007_199_254_740_993),
+                event_count: EventCount::new(1),
+            },
+        },
+        ServerControl::Response {
+            request_id: RequestId::new("req-2"),
+            result: KernelResult::Error {
+                code: KernelErrorCode::IdempotencyConflict,
+                message: "idempotency key reused with different request content".into(),
+                detail: Some(serde_json::json!({ "idempotency_key": "kernel_activated:cut-1" })),
+            },
+        },
+        ServerControl::Response {
+            request_id: RequestId::new("req-5"),
+            result: KernelResult::BlobCommitted {
+                descriptor: BlobDescriptor {
+                    address: blob_address('a'),
+                    media_type: "application/octet-stream".into(),
+                    byte_size: ByteCount::new(1_048_576),
+                    kek_id: "kek-2026-07".into(),
+                    created_at: Timestamp::new("2026-07-28T12:00:02Z"),
+                    pinned: true,
+                    tombstoned: false,
+                },
+                deduplicated: false,
+            },
+        },
+        ServerControl::EventBatch {
+            request_id: RequestId::new("req-6"),
+            events: vec![golden_event_envelope_minimal()],
+            cursor: Seq::new(1),
+        },
+        ServerControl::StreamClosed {
+            request_id: RequestId::new("req-6"),
+            code: KernelErrorCode::SlowConsumer,
+            // The consumer resumes from here rather than restarting.
+            last_cursor: Some(Seq::new(1)),
+        },
+    ]
+}
+
+fn golden_kernel_checkpoint() -> Checkpoint {
+    Checkpoint {
+        schema_version: CHECKPOINT_SCHEMA_VERSION,
+        through_sequence: Seq::new(9_007_199_254_740_993),
+        projection_hash: "c".repeat(64),
+        records_ref: PayloadRef {
+            digest: format!("sha256:{}", "d".repeat(64)),
+            media_type: "application/octet-stream".into(),
+            byte_size: ByteCount::new(4_194_304),
+            retention_class: Some("standard".into()),
+            evidence_pin: None,
+        },
+        created_at: Timestamp::new("2026-07-28T12:00:03Z"),
+    }
+}
+
 fn goldens() -> Vec<(&'static str, String)> {
     fn pretty<T: serde::Serialize>(value: &T) -> String {
         let mut out = serde_json::to_string_pretty(value).expect("serialize golden");
@@ -337,6 +517,18 @@ fn goldens() -> Vec<(&'static str, String)> {
             pretty(&golden_transition_results()),
         ),
         ("orchestrator-checkpoint.json", pretty(&golden_checkpoint())),
+        (
+            "kernel-client-control.json",
+            pretty(&golden_client_control()),
+        ),
+        (
+            "kernel-server-control.json",
+            pretty(&golden_server_control()),
+        ),
+        (
+            "kernel-checkpoint.json",
+            pretty(&golden_kernel_checkpoint()),
+        ),
     ]
 }
 
@@ -408,6 +600,11 @@ pub fn run(check: bool) {
     let theme_json = signal_theme_json();
     let golden_files = goldens();
 
+    let contract_sql_path = root.join(crate::schema::GENERATED_PATH);
+    let contract_sql = std::fs::read_to_string(root.join("schema/0001_contract.sql"))
+        .expect("read schema/0001_contract.sql");
+    let contract_sql_rs = crate::schema::contract_sql_rs(&contract_sql);
+
     if !check {
         std::fs::create_dir_all(&goldens_dir).expect("create contracts/goldens");
         std::fs::write(contracts.join("bindings.ts"), &bindings_ts).expect("write bindings.ts");
@@ -416,15 +613,18 @@ pub fn run(check: bool) {
         for (name, content) in &golden_files {
             std::fs::write(goldens_dir.join(name), content).expect("write golden");
         }
+        std::fs::write(&contract_sql_path, &contract_sql_rs).expect("write contract_sql.rs");
         eprintln!(
-            "contract: wrote bindings.ts, signal-theme.json, {} goldens",
-            golden_files.len()
+            "contract: wrote bindings.ts, signal-theme.json, {} goldens, {}",
+            golden_files.len(),
+            crate::schema::GENERATED_PATH
         );
         return;
     }
 
     let mut drift: Vec<String> = Vec::new();
     check_file(&contracts.join("bindings.ts"), &bindings_ts, &mut drift);
+    check_file(&contract_sql_path, &contract_sql_rs, &mut drift);
     check_file(
         &contracts.join("signal-theme.json"),
         &theme_json,
@@ -480,6 +680,21 @@ pub fn run(check: bool) {
             &ts_goldens_dir,
             find("orchestrator-checkpoint.json"),
         ),
+        round_trip::<Vec<ClientControl>>(
+            "kernel-client-control.json",
+            &ts_goldens_dir,
+            find("kernel-client-control.json"),
+        ),
+        round_trip::<Vec<ServerControl>>(
+            "kernel-server-control.json",
+            &ts_goldens_dir,
+            find("kernel-server-control.json"),
+        ),
+        round_trip::<Checkpoint>(
+            "kernel-checkpoint.json",
+            &ts_goldens_dir,
+            find("kernel-checkpoint.json"),
+        ),
     ];
     for result in round_trips {
         if let Err(msg) = result {
@@ -505,7 +720,7 @@ mod tests {
     /// manual root registry described in its doc comment. Update this
     /// constant AND the `.register()` chain together in the same change;
     /// a mismatch means one moved without the other.
-    const REGISTERED_ROOT_COUNT: usize = 20;
+    const REGISTERED_ROOT_COUNT: usize = 24;
 
     #[test]
     fn bindings_registry_matches_its_pin() {
