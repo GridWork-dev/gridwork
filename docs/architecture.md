@@ -134,8 +134,8 @@ The Rust crate `gwk-domain` is canonical. Three derived surfaces are checked,
 not trusted: the generated TypeScript (`contracts/bindings.ts`, with golden
 round-trip fixtures decoded at runtime in CI), the SQL DDL
 (`schema/0001_contract.sql`, applied clean against the pinned
-PostgreSQL major in CI), and the kernel's embedded copy of that DDL
-(`crates/gwk-kernel/src/contract_sql.rs`, which a published crate needs because
+PostgreSQL major in CI), and the contract crate's embedded copy of that DDL
+(`crates/gwk-domain/src/contract_sql.rs`, which a published crate needs because
 `include_str!` cannot reach outside its own package). `gwk-cert` certifies
 event streams against the same tables the types are built from. Naming rules:
 `docs/contract/NAMING.md`.

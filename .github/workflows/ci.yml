@@ -78,7 +78,7 @@ jobs:
       # names which half broke.
       - run: cargo test -p gridwork --locked -- --ignored
 
-  # The seven accepted performance bounds, in release, against the pinned
+  # The accepted performance bounds, in release, against the pinned
   # postgres major. The bounds themselves are hardware numbers and the run that
   # asserts them as written is the operator's; a hosted runner is slower and
   # noisier, so this job carries slack and keeps the receipt as the artifact. An

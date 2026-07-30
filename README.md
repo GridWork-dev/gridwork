@@ -107,7 +107,7 @@ GWK_RUNTIME_ROLE=gridwork \
 # point, not friction: the sole writer must not be able to rewrite history.
 export GWK_DATABASE_URL=postgres://gridwork@localhost/gridwork
 cargo run -p gridwork -- daemon &
-cargo run -p gridwork -- kernel health              # {"ready":true,"sealed":true}
+cargo run -p gridwork -- kernel health   # {"type":"health","ready":true,"sealed":true}
 ```
 
 A freshly initialized kernel is **sealed**: it answers questions, and refuses every
