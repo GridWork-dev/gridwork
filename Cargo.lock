@@ -513,7 +513,7 @@ dependencies = [
 
 [[package]]
 name = "gridwork"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "base64 0.23.0",
  "gwk-domain",
@@ -528,11 +528,11 @@ dependencies = [
 
 [[package]]
 name = "gwk"
-version = "0.0.1"
+version = "0.0.2"
 
 [[package]]
 name = "gwk-cert"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "gwk-domain",
  "proptest",
@@ -544,7 +544,7 @@ dependencies = [
 
 [[package]]
 name = "gwk-domain"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -553,7 +553,7 @@ dependencies = [
 
 [[package]]
 name = "gwk-kernel"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "aead",
  "aead-stream",
@@ -575,7 +575,7 @@ dependencies = [
 
 [[package]]
 name = "gwk-theme"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "serde",
  "serde_json",

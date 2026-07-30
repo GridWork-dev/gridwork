@@ -13,7 +13,7 @@ publish = false
 # depends on these exporter crates.
 [dependencies]
 gwk-domain.workspace = true
-gwk-theme = { path = "../crates/gwk-theme" }
+gwk-theme.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
