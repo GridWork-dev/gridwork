@@ -482,8 +482,9 @@ footer .wrap { padding-block:var(--s7) }
     <div class="cmd">
       <code>git clone https://github.com/GridWork-dev/gridwork</code>
       <code>cargo build --workspace<i>   # stable rust &middot; msrv 1.94</i></code>
-      <span class="note"><code>cargo install gridwork</code> lands when that crate ships the binary. Today it is a
-      published name with no API; the one thing you can run is <code>gwk-cert</code>.</span>
+      <span class="note"><code>cargo install gridwork</code> works as of 0.0.2 &mdash; it builds the <code>gw</code>
+      binary, which wants a PostgreSQL 16 before it does anything. No clone needed for
+      <code>gwk-cert</code> either.</span>
     </div>
 
     <div class="actions">
@@ -617,7 +618,7 @@ footer .wrap { padding-block:var(--s7) }
           <h3>Contract</h3>
           <span class="pill pill--done">shipped</span>
         </div>
-        <p class="stage__sub">The shared language everything else speaks. Published at 0.0.1.</p>
+        <p class="stage__sub">The shared language everything else speaks. Published at 0.0.2.</p>
         <ul class="rows">
           <li>Domain types, event schemas, and four state machines in <code>gwk-domain</code>, with an invariant suite that walks the edge tables exhaustively</li>
           <li>Event-stream conformance checking in <code>gwk-cert</code>, plus a storage suite any backend runs against its own event store</li>
@@ -720,13 +721,13 @@ footer .wrap { padding-block:var(--s7) }
           <tr><th scope="col">Crate</th><th scope="col">What</th><th scope="col">Status</th></tr>
         </thead>
         <tbody>
-          <tr><td>gwk-domain</td><td>Shared types, events, state machines &mdash; the contract</td><td><span class="pill pill--done">0.0.1</span></td></tr>
-          <tr><td>gwk-cert</td><td>Conformance checker for event streams, and the storage suite a backend runs against its own store</td><td><span class="pill pill--done">0.0.1</span></td></tr>
-          <tr><td>gwk-theme</td><td>The 12 SIGNAL tokens &mdash; one source for this page, the TUI, and the generated TypeScript</td><td><span class="pill pill--done">0.0.1</span></td></tr>
+          <tr><td>gwk-domain</td><td>Shared types, events, state machines &mdash; the contract</td><td><span class="pill pill--done">0.0.2</span></td></tr>
+          <tr><td>gwk-cert</td><td>Conformance checker for event streams, and the storage suite a backend runs against its own store</td><td><span class="pill pill--done">0.0.2</span></td></tr>
+          <tr><td>gwk-theme</td><td>The 12 SIGNAL tokens &mdash; one source for this page, the TUI, and the generated TypeScript</td><td><span class="pill pill--done">0.0.2</span></td></tr>
+          <tr><td>gwk-kernel</td><td>Daemon: event store, projections, attention, authority, blobs, the wire</td><td><span class="pill pill--done">0.0.2</span></td></tr>
+          <tr><td>gridwork</td><td>Ships the <code>gw</code> binary &mdash; the CLI that speaks the kernel&rsquo;s protocol</td><td><span class="pill pill--done">0.0.2</span></td></tr>
           <tr><td>gwk</td><td>Namespace root for the <code>gwk-</code> crates. No API</td><td><span class="pill">name only</span></td></tr>
-          <tr><td>gridwork</td><td>Will ship the <code>gw</code> binary. No API yet</td><td><span class="pill">name only</span></td></tr>
           <tr><td>xtask</td><td>Codegen and release glue. Not published</td><td><span class="pill">in-tree</span></td></tr>
-          <tr><td>gwk-kernel</td><td>Daemon: event store, projections, attention, authority, blobs, the wire</td><td><span class="pill">in-tree</span></td></tr>
           <tr><td>gwk-pty</td><td>PTY engine: server-side VT, render-state deltas, reattach</td><td><span class="pill">planned</span></td></tr>
           <tr><td>gwk-adapter-*</td><td>Per-engine ACP and hooks adapters</td><td><span class="pill">planned</span></td></tr>
           <tr><td>gwk-tui</td><td>The client: modes, lenses, palette</td><td><span class="pill">planned</span></td></tr>

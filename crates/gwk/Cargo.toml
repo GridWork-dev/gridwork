@@ -1,10 +1,11 @@
 [package]
 name = "gwk"
-version = "0.0.1"
+version = "0.0.2"
 description = "The GridWork kernel namespace — umbrella crate for the gwk-* contract crates (gwk-domain, gwk-cert, gwk-theme)."
 homepage = "https://gridwork.dev"
 keywords = ["gridwork", "agent", "contract", "namespace"]
 categories = ["development-tools"]
+readme = "README.md"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

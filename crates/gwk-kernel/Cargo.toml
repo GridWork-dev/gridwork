@@ -1,15 +1,15 @@
 [package]
 name = "gwk-kernel"
-version = "0.0.1"
+version = "0.0.2"
 description = "The GridWork kernel: the PostgreSQL backend behind the gwk contract"
+homepage = "https://gridwork.dev"
+keywords = ["gridwork", "event-sourcing", "postgres", "daemon", "agent"]
+categories = ["database-implementations", "development-tools"]
+readme = "README.md"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-# Held back from crates.io until the kernel serves the wire. The contract
-# crates are published because other people build against them; a half-built
-# daemon has no such audience.
-publish = false
 
 [dependencies]
 # The blob container's crypto (ADR 0003). `aead` supplies the traits and the
@@ -30,7 +30,19 @@ serde.workspace = true
 serde_json.workspace = true
 sqlx = { workspace = true, features = ["json"] }
 thiserror.workspace = true
-tokio = { workspace = true, features = ["fs", "io-util", "net", "rt", "sync", "time"] }
+# `macros` is for `tokio::select!` in the wire loops. It is named here rather
+# than left to the graph: the dev-dependency below and the `gridwork` crate both
+# enable it, and feature unification handed it to the lib in every workspace
+# build — so this crate compiled locally and in CI while being unbuildable alone.
+tokio = { workspace = true, features = [
+  "fs",
+  "io-util",
+  "macros",
+  "net",
+  "rt",
+  "sync",
+  "time",
+] }
 zeroize.workspace = true
 
 [dev-dependencies]

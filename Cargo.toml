@@ -15,9 +15,10 @@ aead = "0.6.1"
 aead-stream = "0.6.0"
 base64 = "0.23.0"
 chacha20poly1305 = "0.11.0"
-gwk-cert = { path = "crates/gwk-cert", version = "0.0.1" }
-gwk-domain = { path = "crates/gwk-domain", version = "0.0.1" }
-gwk-kernel = { path = "crates/gwk-kernel", version = "0.0.1" }
+gwk-cert = { path = "crates/gwk-cert", version = "0.0.2" }
+gwk-domain = { path = "crates/gwk-domain", version = "0.0.2" }
+gwk-kernel = { path = "crates/gwk-kernel", version = "0.0.2" }
+gwk-theme = { path = "crates/gwk-theme", version = "0.0.2" }
 # Generative tests only, for the three invariants where a hand-picked example
 # cannot cover the input space: the frame codec, the u64-through-decimal-TEXT
 # conversion, and cursor paging. Default features off — `fork` and `timeout`

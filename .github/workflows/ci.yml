@@ -162,18 +162,41 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - name: every published crate carries its tests and its license
+      - name: every published crate builds alone and carries its license and readme
         run: |
           set -euo pipefail
-          for crate in gwk gwk-domain gwk-cert gwk-theme; do
+          # `--workspace`, not a per-crate loop. The kernel and the CLI depend on
+          # siblings at a version that reaches crates.io only when the release
+          # lands, and only this form resolves those against the locally built
+          # packages. It also VERIFIES each crate by building it from its own
+          # tarball — the one place feature unification is OFF. That is how
+          # gwk-kernel 0.0.1 could pass every other job while missing
+          # `tokio/macros`: the workspace build handed it the feature that
+          # `gridwork` had enabled, and no job ever built the crate on its own.
+          cargo package --workspace --locked
+          for crate in gwk gwk-domain gwk-cert gwk-theme gwk-kernel gridwork; do
             version=$(cargo metadata --format-version 1 --no-deps \
               | jq -r --arg c "$crate" '.packages[] | select(.name == $c) | .version')
-            cargo package -p "$crate" --locked
             # Listed to a file, not piped into `grep -q`: grep would exit on the
             # match, tar would take SIGPIPE, and `pipefail` would read that as a
             # failed package.
             tar tzf "target/package/$crate-$version.crate" > /tmp/crate-files
             grep -qx "$crate-$version/LICENSE" /tmp/crate-files
+            grep -qx "$crate-$version/README.md" /tmp/crate-files
+            # README.md promises the sample stream ships inside the crate.
+            if [ "$crate" = gwk-cert ]; then
+              grep -qx "$crate-$version/fixtures/valid-stream.json" /tmp/crate-files
+            fi
+          done
+          # Building the TESTS from the tarball only works for crates with no
+          # unpublished sibling: the others resolve that sibling from crates.io,
+          # at the version the release is in the middle of introducing. That is
+          # not a hypothetical — it is how this job first failed. `cargo package
+          # --workspace` above already built every crate's lib from its own
+          # tarball against the local packages, which is the check that matters.
+          for crate in gwk gwk-domain gwk-theme; do
+            version=$(cargo metadata --format-version 1 --no-deps \
+              | jq -r --arg c "$crate" '.packages[] | select(.name == $c) | .version')
             ( cd "target/package/$crate-$version" && cargo build --tests --locked )
           done
 
