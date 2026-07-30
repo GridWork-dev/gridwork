@@ -5,7 +5,7 @@
 //! fire against a server. This does, and it is `#[ignore]` because it needs one:
 //!
 //! ```text
-//! docker run --rm -d -p 55432:5432 -e POSTGRES_HOST_AUTH_METHOD=trust \
+//! docker run --rm -d -p 127.0.0.1:55432:5432 -e POSTGRES_HOST_AUTH_METHOD=trust \
 //!   --name gwk-pg postgres:16
 //! GWK_TEST_ADMIN_DATABASE_URL=postgres://postgres@localhost:55432/postgres \
 //!   cargo test -p gwk-kernel --test admin_init -- --ignored
@@ -13,6 +13,8 @@
 //!
 //! Trust auth, so the throwaway container needs no password at all — and so
 //! this file carries no credential-shaped literal for the leak gate to find.
+//! That is only safe because the publish is bound to loopback: `-p 55432:5432`
+//! would put a passwordless superuser on every interface the host has.
 //!
 //! Wiring it into CI beside the existing `schema` job belongs to the task that
 //! gates the kernel; this is the local proof until then.

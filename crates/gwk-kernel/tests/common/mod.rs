@@ -6,7 +6,7 @@
 //! the bug the suite is supposed to catch.
 //!
 //! ```text
-//! docker run --rm -d -p 55432:5432 -e POSTGRES_HOST_AUTH_METHOD=trust \
+//! docker run --rm -d -p 127.0.0.1:55432:5432 -e POSTGRES_HOST_AUTH_METHOD=trust \
 //!   --name gwk-pg postgres:16
 //! GWK_TEST_ADMIN_DATABASE_URL=postgres://postgres@localhost:55432/postgres \
 //!   cargo test -p gwk-kernel -- --ignored
