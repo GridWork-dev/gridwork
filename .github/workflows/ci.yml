@@ -339,8 +339,10 @@ jobs:
         run: |
           set -euo pipefail
           if [ -n "${GITHUB_BASE_REF:-}" ]; then
-            git fetch --no-tags --depth=0 origin "$GITHUB_BASE_REF"
-            base="$(git merge-base "origin/$GITHUB_BASE_REF" HEAD)"
+            # FETCH_HEAD, not origin/<ref>: the checkout action fetches the PR merge
+            # ref, so a remote-tracking branch for the base may not exist locally.
+            git fetch --no-tags origin "$GITHUB_BASE_REF"
+            base="$(git merge-base FETCH_HEAD HEAD)"
           else
             base="$(git rev-parse HEAD^1)"
           fi
