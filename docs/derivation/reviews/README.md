@@ -33,14 +33,14 @@ subject=$(git diff --name-only origin/main...HEAD | ./tools/cleanroom-gate.sh --
 cp docs/derivation/reviews/TEMPLATE.md "docs/derivation/reviews/$subject.md"
 ```
 
-Fill in `subject:`, `reviewer:`, and tick the three checks. Commit it in the same
+Fill in `subject:`, `reviewer:`, and tick all four checks. Commit it in the same
 branch. The gate verifies the file exists, that it declares the matching subject, that
-it names a reviewer, and that all three checks are ticked.
+it names a reviewer, and that all four checks are ticked.
 
 ## What the reviewer does
 
 Read the gated diff cold — without the implementing session's context — and check
-exactly the three things rule 4 names:
+exactly the four things rule 4 names:
 
 1. **citations** — every non-obvious terminal behavior carries a derivation citation:
    a public specification (ECMA-48, XTerm ctlseqs, the Kitty keyboard protocol, ACP, …)
