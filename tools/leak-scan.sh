@@ -66,6 +66,22 @@ cd "$here/.."
 scan_err="$(mktemp)"
 trap 'rm -f "$scan_err"' EXIT
 
+# A tracked file deleted in the worktree but not staged is named by `git ls-files`
+# and missing from disk, so both scans below emit "No such file or directory" and
+# the gate refuses — correctly, but with a message that blames the scanner for what
+# is a plain `rm`. Keep the refusal: skipping tracked paths on the quiet is the
+# wrong direction for a publication gate, and a dangling symlink produces the same
+# diagnostic while being a genuine finding. Name the fix instead, which is otherwise
+# undiscoverable from the message.
+refuse() {
+  echo "leak-scan: $1 emitted diagnostics — refusing to pass:" >&2
+  cat "$scan_err" >&2
+  if grep -q 'No such file or directory' "$scan_err"; then
+    echo 'leak-scan: hint — if a tracked file was deleted but not staged, `git rm` it (or restore it) and re-run' >&2
+  fi
+  exit 2
+}
+
 # Defence-in-depth: flag binary-looking tracked files early with a clear message.
 # file(1) classifies from the head of a file, so this guard alone is bypassable by
 # bytes placed past its window — the pattern scan below therefore uses grep -a
@@ -84,9 +100,7 @@ binaries=$( { git ls-files -z ':!site/og.png' | xargs -0 -r file -L --mime-encod
   | grep -Ev ': *(us-ascii|utf-8|ascii)$' \
   | while IFS=: read -r f _; do [[ -s "$f" ]] && echo "$f: non-text encoding"; done; } 2>"$scan_err" || true)
 if [[ -s "$scan_err" ]]; then
-  echo 'leak-scan: encoding scan emitted diagnostics — refusing to pass:' >&2
-  cat "$scan_err" >&2
-  exit 2
+  refuse 'encoding scan'
 fi
 if [[ -n "$binaries" ]]; then
   echo "$binaries"
@@ -106,9 +120,7 @@ fi
 # are the correct failure direction for a publication gate.
 matches=$( { git ls-files -z ':!tools/leak-scan.sh' | xargs -0 -r grep -Ean "$patterns"; } 2>"$scan_err" || true)
 if [[ -s "$scan_err" ]]; then
-  echo 'leak-scan: content scan emitted diagnostics — refusing to pass:' >&2
-  cat "$scan_err" >&2
-  exit 2
+  refuse 'content scan'
 fi
 if [[ -n "$matches" ]]; then
   echo "$matches"
