@@ -67,11 +67,57 @@ jobs:
             echo 'no ignored gwk-kernel tests were discovered' >&2
             exit 1
           fi
-      - run: cargo test -p gwk-kernel --locked -- --ignored
+      # The performance envelope is ignored as well and REFUSES a debug profile —
+      # its numbers are release-mode evidence — so it has its own job below.
+      # Named rather than filtered by target: if it is ever renamed this skip
+      # stops matching and the debug run fails loudly, which beats a suite that
+      # quietly measures nothing.
+      - run: cargo test -p gwk-kernel --locked -- --ignored --skip the_phase_performance_envelope_holds
       # The CLI's live case stands a real daemon up on a temp socket and drives
       # the built binary against it. Same service, separate step, so a failure
       # names which half broke.
       - run: cargo test -p gridwork --locked -- --ignored
+
+  # The seven accepted performance bounds, in release, against the pinned
+  # postgres major. The bounds themselves are hardware numbers and the run that
+  # asserts them as written is the operator's; a hosted runner is slower and
+  # noisier, so this job carries slack and keeps the receipt as the artifact. An
+  # order-of-magnitude collapse still reds the build, runner variance does not,
+  # and nobody is tempted to repair a flaky gate by loosening what it gates.
+  perf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16@sha256:33f923b05f64ca54ac4401c01126a6b92afe839a0aa0a52bc5aeb5cc958e5f20
+        env:
+          POSTGRES_PASSWORD: ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      GWK_TEST_ADMIN_DATABASE_URL: postgresql://postgres:ci@localhost:5432/postgres
+      GWK_PERF_RECEIPT: gwk-perf-receipt.json
+      GWK_PERF_REVISION: ${{ github.sha }}
+      GWK_PERF_SLACK: "3"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - run: cargo test --release -p gwk-kernel --test perf -- --ignored --nocapture
+      # Kept even on failure: a receipt naming which bound collapsed and by how
+      # much is the whole point of the job.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: perf-receipt
+          path: gwk-perf-receipt.json
 
   msrv:
     runs-on: ubuntu-latest

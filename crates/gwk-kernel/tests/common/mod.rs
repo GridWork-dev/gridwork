@@ -32,14 +32,22 @@ use gwk_domain::ids::{
 use gwk_domain::ingestion::IngestionKind;
 use gwk_domain::inherited::OrchestratorCheckpoint;
 use gwk_domain::port::BlobStore;
-use gwk_domain::protocol::{KernelErrorCode, KernelResult};
+use gwk_domain::protocol::{
+    CONNECTION_EGRESS_BYTES_PER_WINDOW, CONNECTION_INGRESS_BYTES_PER_WINDOW, FRAME_BODY_MAX_BYTES,
+    FrameKind, KernelErrorCode, KernelResult, ServerControl,
+};
 use gwk_kernel::admin::{self, InitOutcome};
 use gwk_kernel::blob::store::PgBlobStore;
 use gwk_kernel::config::{ADMIN_DATABASE_URL_ENV, AdminConfig, BlobConfig, RUNTIME_ROLE_ENV};
 use gwk_kernel::store::{PgEventStore, connect_pool};
+use gwk_kernel::wire::frame::{Budget, Incoming, read_frame, write_frame};
+use gwk_kernel::wire::listen::Listener;
+use gwk_kernel::wire::serve::{Daemon, serve_stream};
 use secrecy::SecretString;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
+use std::sync::Arc;
+use tokio::net::UnixStream;
 
 pub const ADMIN_URL_ENV: &str = "GWK_TEST_ADMIN_DATABASE_URL";
 pub const RUNTIME_ROLE: &str = "gwk_test_runtime";
@@ -327,7 +335,13 @@ pub async fn raw_store(maintenance: &PgPool, tag: &str, inflight: usize) -> (Str
         .await
         .expect("create test database");
 
-    let pool = connect_pool(&secret(&name), 8).await.expect("connect");
+    // Two connections per admitted append, the same ratio the daemon binds at:
+    // every connection also READS — readiness, a page, a subscription's
+    // catch-up — and an append parked waiting for a read to give its connection
+    // back would show up as kernel latency that the kernel is not spending.
+    let pool = connect_pool(&secret(&name), (inflight as u32 * 2).max(8))
+        .await
+        .expect("connect");
     let config = AdminConfig::from_lookup({
         let url = url_for(&name);
         move |key| match key {
@@ -364,6 +378,76 @@ pub async fn raw_store(maintenance: &PgPool, tag: &str, inflight: usize) -> (Str
 /// poll exists for: events that are committed and visible while every listener,
 /// healthy or not, was never told.
 pub async fn seed_events(pool: &PgPool, count: u64) -> Seq {
+    seed_with(
+        pool,
+        count,
+        "'evt-seed-' || n, $1, 'task', 'agg-seed-' || n, 1, 'seed_tick', $2, \
+         now(), now(), '{\"kind\":\"seed\"}'::jsonb, '{\"system\":\"gwk-test\"}'::jsonb, \
+         '{}'::jsonb",
+    )
+    .await
+}
+
+/// The same, with payloads that are real `create_task` command bodies — so the
+/// rows can be REPLAYED, which [`seed_events`]'s cannot.
+///
+/// `padding` bytes of title travel in the event and land in the projection row,
+/// exactly as a real create would put them there: this is the "1 KiB inline
+/// payload" the envelope's storage bound is about, and dropping it on the
+/// projection side would measure a cheaper log than the one being claimed.
+pub async fn seed_command_events(pool: &PgPool, count: u64, padding: usize) -> Seq {
+    let title = if padding == 0 {
+        "null".to_owned()
+    } else {
+        // A distinct 32 hex characters per row, repeated to length. Nothing here
+        // is compressed — the row stays under the TOAST threshold, which is what
+        // "inline" means — so the pattern only has to be the right SIZE.
+        format!("repeat(md5(n::text), {})", padding.div_ceil(32))
+    };
+    seed_with(
+        pool,
+        count,
+        &format!(
+            "'evt-perf-' || n, $1, 'task', 't-perf-' || n, 1, 'task_created', $2, \
+             now(), now(), '{{\"kind\":\"kernel\"}}'::jsonb, \
+             '{{\"system\":\"gwk-perf\"}}'::jsonb, \
+             jsonb_build_object('type', 'create_task', 'task_id', 't-perf-' || n, \
+                'title', {title})"
+        ),
+    )
+    .await
+}
+
+/// The projection rows every seeded `task_created` event would have written,
+/// derived FROM those events in one statement.
+///
+/// Every column comes off the event, which is the rule `apply_event` follows —
+/// so this writes the same rows a replay would, without the round trip per row.
+/// They are born in their INITIAL state at version 1, the only shape
+/// `task_born_initial` admits: the same trigger that makes a checkpoint
+/// unrestorable also refuses a projection row that no create could have
+/// produced.
+///
+/// For where a row COUNT is what is being measured and paying a replay per row
+/// would measure the replay instead. Returns how many rows it wrote.
+pub async fn seed_task_rows(pool: &PgPool) -> u64 {
+    sqlx::query(
+        "INSERT INTO gwk.task (id, version, state, project, title, created_at, updated_at) \
+         SELECT e.aggregate_id, e.aggregate_version, 'submitted', e.project_id, \
+                e.payload ->> 'title', e.appended_at, e.appended_at \
+         FROM gwk.event e \
+         WHERE e.aggregate_type = 'task' AND e.event_type = 'task_created' \
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .execute(pool)
+    .await
+    .expect("seed task rows")
+    .rows_affected()
+}
+
+/// One `INSERT ... SELECT generate_series` bracketed by the writer's sequence
+/// allocation, with the caller supplying every column after `seq`.
+async fn seed_with(pool: &PgPool, count: u64, columns: &str) -> Seq {
     let mut tx = pool.begin().await.expect("begin a seed");
     let first: String = sqlx::query_scalar("SELECT next_seq::text FROM gwk_internal.writer")
         .fetch_one(&mut *tx)
@@ -371,15 +455,16 @@ pub async fn seed_events(pool: &PgPool, count: u64) -> Seq {
         .expect("read next_seq");
     let first: u64 = first.parse().expect("next_seq is a number");
     let last = first + count - 1;
-    sqlx::query(
+    // Asserted safe because `columns` comes from this file's own two seeders and
+    // never from a row, an argument or an environment variable. Every VALUE is
+    // still bound.
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "INSERT INTO gwk.event (seq, event_id, project_id, aggregate_type, aggregate_id, \
             aggregate_version, event_type, schema_version, occurred_at, appended_at, \
             actor, origin, payload) \
-         SELECT n, 'evt-seed-' || n, $1, 'task', 'agg-seed-' || n, 1, 'seed_tick', $2, \
-            now(), now(), '{\"kind\":\"seed\"}'::jsonb, '{\"system\":\"gwk-test\"}'::jsonb, \
-            '{}'::jsonb \
-         FROM generate_series($3::bigint, $4::bigint) AS n",
-    )
+         SELECT n, {columns} \
+         FROM generate_series($3::bigint, $4::bigint) AS n"
+    )))
     .bind(PROJECT)
     .bind(i64::from(ENVELOPE_SCHEMA_VERSION))
     .bind(first as i64)
@@ -640,5 +725,217 @@ pub fn task(id: &str) -> KernelCommand {
         project: None,
         priority: None,
         tracker_ref: None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The wire half of the harness.
+//
+// A daemon is a socket, a handshake and a codec before it is a kernel, so every
+// suite that wants to ask it something has to speak all three. That client
+// lived in `wire.rs` until a second suite needed it: the performance envelope
+// measures subscription delivery, which is a question about what arrives at a
+// client and cannot be asked any other way.
+// ---------------------------------------------------------------------------
+
+/// A private runtime directory, as the daemon requires of its socket's parent.
+pub fn runtime_dir(tag: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("gwk-wire-{}-{tag}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create runtime dir");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+    dir
+}
+
+/// A daemon over `store`, with the blob store a serving one is required to have.
+///
+/// The root comes back so the caller can take it away again: these live under
+/// the temp directory, one per case, and a case that left its own behind would
+/// hand the next run a directory it did not write.
+pub async fn daemon_for(store: PgEventStore, tag: &str) -> (Daemon, PathBuf) {
+    let (root, blobs) = blob_store(&store, &format!("wire-{tag}")).await;
+    let daemon = Daemon::new(store.with_blobs(blobs), TEST_REVISION.to_owned()).expect("daemon");
+    (daemon, root)
+}
+
+/// A client that speaks the wire: handshake, then one request per call.
+///
+/// Generic over its transport, with the socket as the default so every case that
+/// wants one says nothing. The slow-consumer case wants a pipe instead: what it
+/// has to control is the exact moment the daemon's write blocks, and a kernel
+/// socket buffer's capacity is not a number a test can know.
+pub struct Client<S = UnixStream> {
+    pub stream: S,
+    pub budget: Budget,
+}
+
+impl Client<UnixStream> {
+    pub async fn connect(path: &std::path::Path) -> (Self, ServerControl) {
+        Self::greet(UnixStream::connect(path).await.expect("connect")).await
+    }
+}
+
+impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Client<S> {
+    /// Take an open transport through the handshake.
+    pub async fn greet(stream: S) -> (Self, ServerControl) {
+        let mut client = Self {
+            stream,
+            budget: Budget::new(
+                CONNECTION_INGRESS_BYTES_PER_WINDOW,
+                CONNECTION_EGRESS_BYTES_PER_WINDOW,
+            ),
+        };
+        client
+            .send(r#"{"type":"hello","protocol_major":1,"protocol_minor":0,"capabilities":[]}"#)
+            .await;
+        let ack = client.recv().await.expect("the daemon acked");
+        (client, ack)
+    }
+
+    pub async fn send(&mut self, raw: &str) {
+        write_frame(
+            &mut self.stream,
+            FrameKind::Json,
+            raw.as_bytes(),
+            &mut self.budget,
+        )
+        .await
+        .expect("write");
+    }
+
+    pub async fn recv(&mut self) -> Option<ServerControl> {
+        match read_frame(&mut self.stream, FRAME_BODY_MAX_BYTES, &mut self.budget)
+            .await
+            .expect("read")
+        {
+            Incoming::Frame(frame) => {
+                Some(serde_json::from_slice(&frame.body).expect("decode the answer"))
+            }
+            Incoming::Closed => None,
+        }
+    }
+
+    pub async fn ask(&mut self, id: &str, request: &str) -> KernelResult {
+        self.send(&format!(
+            r#"{{"type":"request","request_id":"{id}","request":{request}}}"#
+        ))
+        .await;
+        match self.recv().await.expect("a response") {
+            ServerControl::Response { request_id, result } => {
+                // Every response carries the id it answers: a client with two
+                // requests in flight has nothing else to match them by.
+                assert_eq!(request_id.as_str(), id);
+                result
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
+/// A daemon on its own socket with a client already through the handshake.
+pub struct Served {
+    pub client: Client,
+    pub dir: PathBuf,
+    pub blobs: PathBuf,
+    pub serving: tokio::task::JoinHandle<()>,
+}
+
+impl Served {
+    pub async fn open(store: PgEventStore, tag: &str) -> Self {
+        let dir = runtime_dir(tag);
+        let path = dir.join("gwk.sock");
+        let listener = Listener::bind(&path).await.expect("bind");
+        let (daemon, blobs) = daemon_for(store, tag).await;
+        let daemon = Arc::new(daemon);
+        let serving = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let _ = serve_stream(&daemon, stream).await;
+            listener.remove();
+        });
+        let (client, _) = Client::connect(&path).await;
+        Self {
+            client,
+            dir,
+            blobs,
+            serving,
+        }
+    }
+
+    /// Hang up, let the connection task finish, and take the socket with it.
+    pub async fn close(self) {
+        drop(self.client);
+        self.serving.await.expect("join");
+        let _ = std::fs::remove_dir_all(&self.dir);
+        let _ = std::fs::remove_dir_all(&self.blobs);
+    }
+}
+
+/// The real accept loop, serving as many connections as a test opens.
+///
+/// [`Served`] takes exactly one, which is all request/response needs. A
+/// subscription needs two: the client watching the log must not be the client
+/// appending to it, or its own submit response and the batch that submit caused
+/// arrive on one wire with nothing in the protocol deciding their order. It also
+/// gets the notification listener, which `serve_stream` does not start.
+pub struct Running {
+    pub dir: PathBuf,
+    pub path: PathBuf,
+    pub blobs: PathBuf,
+    pub stop: tokio::sync::oneshot::Sender<()>,
+    pub serving: tokio::task::JoinHandle<()>,
+}
+
+impl Running {
+    pub async fn open(store: PgEventStore, tag: &str) -> Self {
+        let dir = runtime_dir(tag);
+        let path = dir.join("gwk.sock");
+        let listener = Listener::bind(&path).await.expect("bind");
+        let (daemon, blobs) = daemon_for(store, tag).await;
+        let daemon = Arc::new(daemon);
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let serving = tokio::spawn(async move {
+            let _ = gwk_kernel::wire::serve::run(listener, daemon, async move {
+                let _ = stopped.await;
+            })
+            .await;
+        });
+        Self {
+            dir,
+            path,
+            blobs,
+            stop,
+            serving,
+        }
+    }
+
+    pub async fn client(&self) -> Client {
+        Client::connect(&self.path).await.0
+    }
+
+    /// Stop accepting and drain. Every client must be dropped first — a live one
+    /// makes the drain wait out its timeout rather than finish.
+    pub async fn close(self) {
+        let _ = self.stop.send(());
+        self.serving.await.expect("join");
+        let _ = std::fs::remove_dir_all(&self.dir);
+        let _ = std::fs::remove_dir_all(&self.blobs);
+    }
+}
+
+/// Subscribe from a known point, so a case that is about later events is not
+/// handed the whole log first.
+pub fn subscribe_from(cursor: Seq) -> String {
+    format!(
+        r#"{{"type":"subscribe_events","cursor":"{}"}}"#,
+        cursor.value()
+    )
+}
+
+/// The watermark, as the client sees it.
+pub async fn watermark_of(client: &mut Client, id: &str) -> Seq {
+    match client.ask(id, r#"{"type":"watermark"}"#).await {
+        KernelResult::Watermark { watermark } => watermark.expect("genesis is in the log"),
+        other => panic!("{other:?}"),
     }
 }
