@@ -203,13 +203,39 @@ jobs:
       - name: materialize the pinned ghostty tree and its Zig package graph
         if: steps.ghostty-cache.outputs.cache-hit != 'true'
         run: ./tools/pty-toolchain.sh
-      - name: build and test offline
+      # Registry crates come down here, with the network, exactly as every other
+      # job gets them. Populating a package cache is not a build.
+      - name: fetch registry dependencies
+        run: cargo fetch --locked
+      # The actual proof of ruling 2, and the reason this is not just `--offline`:
+      # `--offline` gates CARGO's registry access and says nothing about what a
+      # build script does. libghostty-vt-sys clones ghostty and Zig fetches a
+      # package graph — neither is cargo, and neither is blocked by that flag.
+      #
+      # So run the build with no network at all. `unshare -rn` puts it in a
+      # namespace whose only interface is loopback; if the build reaches out for
+      # anything, it fails here instead of silently succeeding on a runner that
+      # happens to have internet.
+      - name: build and test with no network
         run: |
           set -euo pipefail
+          # Fail loudly rather than skipping. A proof that quietly does not run
+          # is the green-checkbox failure this repo keeps finding.
+          unshare -rn true || {
+            echo 'unshare -rn is unavailable — cannot prove the build is network-free' >&2
+            exit 1
+          }
           eval "$(./tools/pty-toolchain.sh --env)"
-          cargo clippy -p gwk-pty --all-targets --locked --offline -- -D warnings
-          cargo test -p gwk-pty --all-targets --locked --offline
-          cargo test -p gwk-pty --doc --locked --offline
+          unshare -rn env \
+            PATH="$PATH" HOME="$HOME" \
+            CARGO_TERM_COLOR=always \
+            GHOSTTY_SOURCE_DIR="$GHOSTTY_SOURCE_DIR" \
+            GHOSTTY_ZIG_SYSTEM_DIR="$GHOSTTY_ZIG_SYSTEM_DIR" \
+            bash -euo pipefail -c '
+              cargo clippy -p gwk-pty --all-targets --locked --offline -- -D warnings
+              cargo test -p gwk-pty --all-targets --locked --offline
+              cargo test -p gwk-pty --doc --locked --offline
+            '
 
   # What a crates.io consumer actually receives. `cargo package` verifies by
   # building the packaged LIB, which is why it passed for a year while
