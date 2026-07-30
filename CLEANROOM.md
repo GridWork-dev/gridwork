@@ -23,7 +23,11 @@ public record of that procedure, in force before any engine code exists.
 4. **Independent second review.** Every change touching the clean-room paths gets an
    additional fresh-context review before it reaches `main`, checking exactly this:
    citations present and resolving, no source-derived framing, leak gate green. The
-   review rides the public pull request.
+   reviewer is a fresh-context session with no exposure to the implementing session —
+   **not a second human**: this repository has one maintainer, and claiming a control it
+   cannot deliver would be worse than stating the narrower one plainly. The review is
+   recorded in `docs/derivation/reviews/`, bound by digest to the exact content it read,
+   and the `cleanroom-gate` check enforces that the record exists and matches.
 
 ## What this proves
 
@@ -31,3 +35,6 @@ Process, not similarity. Nobody on the reviewing side compares this codebase aga
 copyleft sources — doing so would itself breach rule 2. What the record shows is that
 every behavior traces to a permitted source, and that the trail was written at commit
 time rather than reconstructed after a question was raised.
+
+What it does not show is reviewer independence. No status check can establish that, and
+rule 4 says what the reviewer actually is instead of implying more.

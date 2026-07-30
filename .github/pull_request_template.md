@@ -9,12 +9,13 @@
 - [ ] Touched `gwk-domain`/`gwk-theme`? Contract regenerated and committed — `cargo run -p xtask -- contract` (bindings.ts, goldens/, signal-theme.json) **and** `cd contracts && bun test` (rewrites `goldens-ts/`; commit it)
 - [ ] Heavy AI assistance disclosed (see CONTRIBUTING.md)
 - [ ] Contains no code derived from AGPL/GPL or otherwise incompatibly-licensed projects
-- [ ] If this touches clean-room paths (`.github/cleanroom-paths.txt`): derivation citations included (CLEANROOM.md)
+- [ ] If this touches clean-room paths (`.github/cleanroom-paths.txt`): derivation citations included, and a second-reader record committed under `docs/derivation/reviews/` (CLEANROOM.md rule 4 — `./tools/cleanroom-gate.sh --subject` names the file)
 
 <!--
-Eight checks gate the merge: test, msrv, schema, contract, site, deny, leak-scan,
-commit-messages. `advisories` also runs and is NOT one of them — if it is your only
-red X, it is not your PR.
+Twelve checks gate the merge: test, msrv, schema, contract, site, deny, leak-scan,
+commit-messages, kernel-integration, package, macos, cleanroom-gate. `perf` and
+`advisories` also run and are NOT among them — if one of those is your only red X,
+it is not your PR.
 
 `commit-messages` runs the leak scanner over commit messages, the range diff, and
 every individual commit patch — not just the final tree. Adding a bad value and

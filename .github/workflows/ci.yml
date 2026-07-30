@@ -321,6 +321,50 @@ jobs:
         with:
           command: check advisories
 
+  # CLEANROOM.md rule 4. Deliberately has NO `paths:` filter and NO job-level `if:`:
+  # GitHub reports a job skipped by a conditional as SUCCESS for required-check
+  # purposes, and a workflow skipped by path filtering leaves its checks Pending
+  # forever — so either shortcut yields a required check that is green, or stuck,
+  # while having verified nothing. The job always runs and decides from the diff.
+  cleanroom-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          # The gate diffs against the merge base, which a shallow clone does not have.
+          fetch-depth: 0
+      - name: engine-adjacent changes carry their second-reader record
+        run: |
+          set -euo pipefail
+          if [ -n "${GITHUB_BASE_REF:-}" ]; then
+            git fetch --no-tags --depth=0 origin "$GITHUB_BASE_REF"
+            base="$(git merge-base "origin/$GITHUB_BASE_REF" HEAD)"
+          else
+            base="$(git rev-parse HEAD^1)"
+          fi
+          git diff --name-only "$base" HEAD > /tmp/changed-paths
+          # Fail CLOSED. An empty set from a diff that failed would otherwise read
+          # as "nothing engine-adjacent was touched" — the gate passing because it
+          # could not look, which is the failure mode this whole job exists for.
+          if [ ! -s /tmp/changed-paths ]; then
+            echo "cleanroom-gate: empty diff against $base — refusing to pass" >&2
+            exit 2
+          fi
+          ./tools/cleanroom-gate.sh < /tmp/changed-paths
+      - name: prove the gate can fail (seeded violation)
+        run: |
+          set -euo pipefail
+          # A synthetic change under the first gated prefix, with no record. The
+          # gate must reject it; if it does not, the check above proved nothing.
+          seed="$(grep -Ev '^[[:space:]]*(#|$)' .github/cleanroom-paths.txt | head -n1)seeded-violation.rs"
+          if echo "$seed" | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate accepted a seeded violation — the gate is broken' >&2
+            exit 1
+          fi
+          echo "cleanroom-gate: seeded violation correctly rejected ($seed)"
+
   # Hosted CI enforces the GENERIC pattern set only — the estate-specific extension
   # (tools/leak-scan.local) is untracked by design and exists solely on operator
   # machines as a local pre-commit/pre-push control. Seeds below therefore trip the
