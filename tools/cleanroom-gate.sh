@@ -151,7 +151,7 @@ check_markers() {
 CLEANROOM.md rule 3: every non-obvious terminal behavior names the permitted
 source it came from, immediately above the derived construct:
 
-  // Derivation: ECMA-48 §8.3.14 — cursor save/restore semantics
+  // Derivation: ECMA-48 §8.3.20 — CUF advances the active position by Pn, default 1
   // Derivation: CAP-001 — the wrap-at-column-N behavior this observes
 
 The citation is an ID registered in docs/derivation/SPECS.md (public
@@ -194,8 +194,16 @@ fi
 # so input order cannot change the digest. A path that no longer exists at HEAD
 # was deleted by this change and still needs review, so it contributes a marker
 # rather than being dropped.
+#
+# LC_ALL=C IS LOAD-BEARING. `sort` is locale-collated, and the digest is
+# order-dependent, so without a fixed collation the same content hashes to two
+# different subjects on two different machines. That is not theoretical: a
+# developer box under en_US.UTF-8 ordered `pins.env` before `README.md` (case
+# folded, p < r) while the CI runner under C ordered `README.md` first
+# (`R` 0x52 < `p` 0x70), and the record written from one was rejected by the
+# other. A gate whose verdict depends on $LANG is not a gate.
 subject="$(
-  for f in $(printf '%s\n' "${touched[@]}" | sort -u); do
+  for f in $(printf '%s\n' "${touched[@]}" | LC_ALL=C sort -u); do
     if obj="$(git rev-parse --verify --quiet "HEAD:$f")"; then
       printf '%s %s\n' "$obj" "$f"
     else
@@ -212,7 +220,9 @@ fi
 record="docs/derivation/reviews/$subject.md"
 
 echo "cleanroom-gate: engine-adjacent paths touched:"
-printf '  %s\n' $(printf '%s\n' "${touched[@]}" | sort -u)
+# Same collation as the digest, so what a reader sees listed is the order that
+# was actually hashed.
+printf '  %s\n' $(printf '%s\n' "${touched[@]}" | LC_ALL=C sort -u)
 echo "cleanroom-gate: subject $subject"
 
 if [[ ! -f "$record" ]]; then

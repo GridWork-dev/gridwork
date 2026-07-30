@@ -6,3 +6,9 @@
 /tools/leak-scan.local
 /docs/session-logs/
 /contracts/node_modules/
+# The pinned ghostty tree and its Zig package graph, materialized by the `pty`
+# CI job and by `just pty-toolchain` locally. Both are derived from
+# crates/gwk-pty/pins.env and never committed: 71 MB of source plus ~560 MB of
+# packages, neither of which is ours.
+/.ghostty/
+/.zig-packages/

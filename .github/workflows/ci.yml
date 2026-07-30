@@ -28,9 +28,29 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo test --workspace --all-targets --locked
-      - run: cargo test --workspace --doc --locked
+      # DEFAULT members, not `--workspace`. `--workspace` overrides
+      # `default-members` and would pull in gwk-pty, which needs Zig and a 71 MB
+      # ghostty tree — and whose build script CLONES ghostty when
+      # GHOSTTY_SOURCE_DIR is unset, so a stray `--workspace` here is a
+      # network-reaching build, not just a slow one. The `pty` job covers that
+      # crate with the same three commands.
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --all-targets --locked
+      - run: cargo test --doc --locked
+      # Ruling 9: `cargo install gridwork` must not require Zig. That holds only
+      # while gwk-pty stays out of the CLI's dependency closure, so assert it
+      # rather than trusting that nobody wires them together later.
+      - name: the installable crate stays free of the PTY toolchain
+        run: |
+          set -euo pipefail
+          if cargo tree -p gridwork --edges normal --prefix none | grep -qE 'libghostty|gwk-pty'; then
+            echo 'gridwork depends on the PTY stack — that makes `cargo install gridwork` need Zig' >&2
+            exit 1
+          fi
+          # Positive control: the same grep against the crate that DOES depend on
+          # it must match, or the check above passes by not working.
+          cargo tree -p gwk-pty --edges normal --prefix none | grep -q libghostty
+          echo "gridwork is Zig-free; the grep that proves it is live"
 
   # The kernel's ignored integration suite needs a live PostgreSQL superuser:
   # each case creates and initializes its own database plus the runtime role.
@@ -140,7 +160,66 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - run: cargo test --workspace --all-targets --locked
+      # Default members — see the note in `test`. macOS would need its own Zig
+      # and its own ghostty tree, and gwk-pty's portability is not what this job
+      # is here to prove.
+      - run: cargo test --all-targets --locked
+
+  # The one crate needing a non-Rust toolchain. Everything it pins lives in
+  # crates/gwk-pty/pins.env and is READ from there — a version typed into this
+  # file would be a second place for the same number to drift, and the two pins
+  # have to move together or the FFI bindings stop matching the C ABI.
+  #
+  # This job also proves ruling 2's "build-time network access: none". The proof
+  # is structural, not a claim: the ghostty tree and the Zig package graph are
+  # both materialized BEFORE cargo runs, and the build step then runs with
+  # `--offline` and both env vars set. libghostty-vt-sys clones ghostty itself
+  # when GHOSTTY_SOURCE_DIR is unset, so leaving it unset is a silent network
+  # build — which is exactly the failure the ruling exists to prevent.
+  pty:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: load the pins
+        run: grep -E '^[A-Z_]+=' crates/gwk-pty/pins.env >> "$GITHUB_ENV"
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      # Keyed on the ghostty revision, so a re-pin invalidates it and nothing
+      # else does. Restoring beats a 71 MB clone plus a ~560 MB package fetch.
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        id: ghostty-cache
+        with:
+          path: |
+            .ghostty
+            .zig-packages
+          key: ghostty-${{ env.GHOSTTY_COMMIT }}-zig-${{ env.ZIG_VERSION }}
+      # The same script a contributor runs. A second copy of this logic inline
+      # would drift the first time one side gained a flag.
+      - name: materialize the pinned ghostty tree and its Zig package graph
+        if: steps.ghostty-cache.outputs.cache-hit != 'true'
+        run: ./tools/pty-toolchain.sh
+      # Registry crates come down here, with the network, exactly as every other
+      # job gets them. Populating a package cache is not a build.
+      - name: fetch registry dependencies
+        run: cargo fetch --locked
+      # The actual proof that the build reaches no network. `tools/no-network.sh`
+      # runs its argument in a namespace with no interfaces and REFUSES to run it
+      # at all if it cannot make one — see the header there for why `--offline`
+      # alone would prove something adjacent to the claim rather than the claim.
+      - name: build and test with no network
+        run: |
+          set -euo pipefail
+          eval "$(./tools/pty-toolchain.sh --env)"
+          ./tools/no-network.sh bash -euo pipefail -c '
+            cargo clippy -p gwk-pty --all-targets --locked --offline -- -D warnings
+            cargo test -p gwk-pty --all-targets --locked --offline
+            cargo test -p gwk-pty --doc --locked --offline
+          '
 
   # What a crates.io consumer actually receives. `cargo package` verifies by
   # building the packaged LIB, which is why it passed for a year while
@@ -173,7 +252,14 @@ jobs:
           # gwk-kernel 0.0.1 could pass every other job while missing
           # `tokio/macros`: the workspace build handed it the feature that
           # `gridwork` had enabled, and no job ever built the crate on its own.
-          cargo package --workspace --locked
+          #
+          # `--exclude gwk-pty` is NOT redundant with its `publish = false`.
+          # `cargo package --workspace` packages unpublishable members too — it
+          # only declines to upload them — and packaging runs the verify build,
+          # which for this crate means Zig and a 71 MB ghostty tree. The derived
+          # loops below DO filter on `publish`, so they need no exclusion; this
+          # line does. Verified by observation, not by reading the flag's name.
+          cargo package --workspace --exclude gwk-pty --locked
 
           # Every publishable member, straight from the manifest graph:
           # `publish = false` shows up as an empty array, so xtask drops out and
@@ -228,7 +314,12 @@ jobs:
         with:
           toolchain: "1.94"
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - run: cargo check --workspace --all-targets --locked
+      # Default members — see the note in `test`. NOTHING checks gwk-pty's MSRV:
+      # the `pty` job builds it on stable, and this job cannot reach it without
+      # the Zig toolchain. Stated rather than papered over — the crate is not
+      # published, so nobody is relying on an MSRV it does not advertise, and the
+      # honest fix is a 1.94 leg on the `pty` job if that ever stops being true.
+      - run: cargo check --all-targets --locked
 
   # The DDL is contract: it must apply clean against the pinned postgres major.
   schema:
@@ -383,6 +474,24 @@ jobs:
             exit 1
           fi
           echo "cleanroom-gate: seeded violation correctly rejected ($seed)"
+      - name: the subject digest does not depend on the locale
+        run: |
+          set -euo pipefail
+          # The digest is order-dependent and `sort` is locale-collated, so this
+          # once produced two different subjects for identical content: a dev box
+          # under en_US.UTF-8 ordered `pins.env` before `README.md` (case folded),
+          # a runner under C put `README.md` first (`R` 0x52 < `p` 0x70). The
+          # record written from one was rejected by the other, and the failure
+          # read as a stale review rather than a broken gate.
+          paths="$(grep -Ev '^[[:space:]]*(#|$)' .github/cleanroom-paths.txt | head -n1)/a.rs
+          $(grep -Ev '^[[:space:]]*(#|$)' .github/cleanroom-paths.txt | head -n1)/README.md"
+          c="$(printf '%s\n' "$paths" | LC_ALL=C ./tools/cleanroom-gate.sh --subject)"
+          u="$(printf '%s\n' "$paths" | LC_ALL=en_US.UTF-8 ./tools/cleanroom-gate.sh --subject)"
+          [ "$c" = "$u" ] || {
+            echo "cleanroom-gate: subject is locale-dependent — C gave $c, en_US.UTF-8 gave $u" >&2
+            exit 1
+          }
+          echo "cleanroom-gate: subject is stable across locales ($c)"
       - name: prove the marker check can fail (CLEANROOM.md rule 3)
         run: |
           set -euo pipefail

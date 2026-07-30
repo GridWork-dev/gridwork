@@ -1,5 +1,24 @@
 [workspace]
 members = ["crates/*", "xtask"]
+# `gwk-pty` is a full member — one lockfile, the shared dependency pins above,
+# and `deny`/`advisories` coverage — but it is not a DEFAULT member, because
+# building it needs Zig 0.15.2 and a ghostty checkout (crates/gwk-pty/pins.env).
+# Without this, every `cargo test --workspace` job would need a 71 MB source tree
+# and a ~560 MB Zig package cache to build a crate three of them have no interest
+# in. The `pty` CI job runs clippy and tests for it explicitly, so it loses no
+# coverage — it just gets its own lane.
+#
+# Consequence to know before adding a crate: a new `crates/*` entry is a member
+# but NOT a default member unless it is listed here.
+default-members = [
+  "crates/gridwork",
+  "crates/gwk",
+  "crates/gwk-cert",
+  "crates/gwk-domain",
+  "crates/gwk-kernel",
+  "crates/gwk-theme",
+  "xtask",
+]
 resolver = "3"
 
 [workspace.package]
@@ -19,6 +38,12 @@ gwk-cert = { path = "crates/gwk-cert", version = "0.0.2" }
 gwk-domain = { path = "crates/gwk-domain", version = "0.0.2" }
 gwk-kernel = { path = "crates/gwk-kernel", version = "0.0.2" }
 gwk-theme = { path = "crates/gwk-theme", version = "0.0.2" }
+# The SAFE wrapper, not the raw `-sys` bindings: this workspace forbids
+# `unsafe_code`, so raw FFI would not compile here at all. Exact-pinned because
+# libghostty-vt is pre-1.0 and its own docs promise breaking changes — a caret
+# range would let a patch release move the C ABI under a green lockfile. Moves
+# only together with the two pins in crates/gwk-pty/pins.env.
+libghostty-vt = "=0.2.0"
 # Generative tests only, for the three invariants where a hand-picked example
 # cannot cover the input space: the frame codec, the u64-through-decimal-TEXT
 # conversion, and cursor paging. Default features off — `fork` and `timeout`
