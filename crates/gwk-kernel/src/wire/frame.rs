@@ -321,6 +321,72 @@ mod tests {
         }
     }
 
+    /// One runtime per case. The codec is async and `proptest!` bodies are not,
+    /// and a current-thread runtime costs less than the case it runs.
+    fn block_on<F: Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("a current-thread runtime")
+            .block_on(future)
+    }
+
+    proptest::proptest! {
+        /// The example above round-trips ONE body. The codec's promise is about
+        /// every body, and the interesting ones are the shapes nobody thinks to
+        /// write down: empty, a lone NUL, invalid UTF-8, a length that happens
+        /// to look like another frame's prefix.
+        ///
+        /// Bounded at 8 KiB rather than the 4 MiB ceiling because the ceiling is
+        /// a boundary — proved exactly, twice, by the cases around this one —
+        /// while this is about the space in between.
+        #[test]
+        fn any_body_survives_the_round_trip(body in proptest::collection::vec(proptest::num::u8::ANY, 0..8192)) {
+            let read = block_on(async {
+                let mut wire = Vec::new();
+                let mut out = budget();
+                write_frame(&mut wire, FrameKind::Json, &body, &mut out).await.expect("write");
+                // The length prefix counts the kind byte, so it is never zero
+                // even for an empty body — which is what keeps a zero-length
+                // announcement available as an illegal value.
+                assert_eq!(&wire[..4], &(body.len() as u32 + 1).to_be_bytes());
+                read_bytes(&wire, FRAME_BODY_MAX_BYTES).await.expect("read")
+            });
+            match read {
+                Incoming::Frame(frame) => {
+                    proptest::prop_assert_eq!(frame.kind, FrameKind::Json);
+                    proptest::prop_assert_eq!(frame.body, body);
+                }
+                Incoming::Closed => proptest::prop_assert!(false, "closed on a whole frame"),
+            }
+        }
+
+        /// Every byte that is not the one legal kind is refused, including the
+        /// reserved 5′ stream kind. Enumerated rather than reasoned about: a
+        /// `match` arm that accidentally admits one byte is exactly the kind of
+        /// mistake that reads correctly.
+        #[test]
+        fn no_other_kind_byte_is_admitted(kind in proptest::num::u8::ANY) {
+            proptest::prop_assume!(kind != FrameKind::Json.as_u8());
+            let mut wire = 2u32.to_be_bytes().to_vec();
+            wire.push(kind);
+            wire.push(b'x');
+            let error = block_on(read_bytes(&wire, FRAME_BODY_MAX_BYTES))
+                .expect_err("an unknown kind byte was admitted");
+            proptest::prop_assert_eq!(error.code, KernelErrorCode::Handshake);
+        }
+
+        /// Arbitrary bytes from the socket must not panic the codec. This is the
+        /// trust boundary — the first thing an unauthenticated peer reaches — and
+        /// a panic in it is a denial of service that no amount of validation
+        /// further in can prevent.
+        #[test]
+        fn arbitrary_bytes_are_answered_and_never_panic(raw in proptest::collection::vec(proptest::num::u8::ANY, 0..512)) {
+            // Any of the three outcomes is correct; there is no fourth, and
+            // reaching one at all is the property.
+            let _ = block_on(read_bytes(&raw, FRAME_BODY_MAX_BYTES));
+        }
+    }
+
     #[tokio::test]
     async fn an_illegal_length_is_refused_from_the_prefix_alone() {
         // Four bytes in, nothing allocated: the whole point of putting the

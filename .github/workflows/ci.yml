@@ -119,6 +119,29 @@ jobs:
           name: perf-receipt
           path: gwk-perf-receipt.json
 
+  # The second platform the kernel claims. Socket behaviour is not portable by
+  # assumption — `sun_path` is 104 bytes here and 108 on Linux, a parent
+  # directory's mode is enforced differently, and whether the OS will name a
+  # peer's credentials at all is per-kernel — so the UDS rules are run rather
+  # than reasoned about.
+  #
+  # Without PostgreSQL: GitHub's macOS runners cannot run service containers, and
+  # brew-installing a server would make the slowest job in this file also the one
+  # that breaks on runner-image changes instead of on our code. What runs here is
+  # everything that needs no server — the socket cases in `listen.rs`, the frame
+  # codec and its properties, the domain and the contract — while the
+  # server-backed suites stay on Linux above.
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - run: cargo test --workspace --all-targets --locked
+
   msrv:
     runs-on: ubuntu-latest
     timeout-minutes: 15

@@ -78,6 +78,45 @@ mod tests {
         assert_eq!(to_numeric_text(u64::MAX), "18446744073709551615");
     }
 
+    proptest::proptest! {
+        /// The boundary case above proves the five values that were REASONED
+        /// about. This one covers the rest of the range, which is the part no
+        /// list of examples can reach: the claim in this module's own header is
+        /// that decimal text is exact for every `u64`, and "every" is a
+        /// quantifier a generator can actually attack.
+        #[test]
+        fn a_counter_survives_the_round_trip_whatever_it_is(value: u64) {
+            proptest::prop_assert_eq!(from_numeric_text(&to_numeric_text(value)), Ok(value));
+        }
+
+        /// And nothing outside that shape gets in.
+        ///
+        /// The generator is weighted, not uniform: an arbitrary Unicode string
+        /// almost never looks like `+4` or `4e2`, which are exactly the strings a
+        /// lax parser accepts as a sequence number. Two thirds of the cases are
+        /// therefore drawn from the confusable alphabet — digits, signs, a
+        /// decimal point, an exponent, a space — and the last third from
+        /// anywhere, to catch a parser that trusts `char::is_numeric` (which is
+        /// true of `٤` and `４`) instead of ASCII.
+        #[test]
+        fn only_bare_ascii_digits_parse(
+            raw in proptest::prop_oneof![
+                r"[0-9]{0,24}",
+                r"[-+0-9.eE ]{0,12}",
+                r"\PC*",
+            ],
+        ) {
+            let bare = !raw.is_empty() && raw.bytes().all(|b| b.is_ascii_digit());
+            let parsed = from_numeric_text(&raw);
+            if bare {
+                // Still may be refused, but only for being out of range.
+                proptest::prop_assert!(parsed.is_ok() || raw.parse::<u64>().is_err());
+            } else {
+                proptest::prop_assert!(parsed.is_err(), "{raw:?} parsed as a counter");
+            }
+        }
+    }
+
     #[test]
     fn anything_that_is_not_a_bare_integer_is_refused() {
         for raw in [

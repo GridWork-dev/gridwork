@@ -18,6 +18,11 @@ chacha20poly1305 = "0.11.0"
 gwk-cert = { path = "crates/gwk-cert", version = "0.0.1" }
 gwk-domain = { path = "crates/gwk-domain", version = "0.0.1" }
 gwk-kernel = { path = "crates/gwk-kernel", version = "0.0.1" }
+# Generative tests only, for the three invariants where a hand-picked example
+# cannot cover the input space: the frame codec, the u64-through-decimal-TEXT
+# conversion, and cursor paging. Default features off — `fork` and `timeout`
+# want a subprocess per case, which buys nothing for pure functions.
+proptest = { version = "1.11.0", default-features = false, features = ["std", "bit-set"] }
 # One call: `geteuid`, for the UDS peer check. Chosen over `libc` because its
 # wrapper is SAFE — the workspace forbids `unsafe_code`, so a raw extern call
 # would not compile here — and over `nix` because it was already in the tree.
