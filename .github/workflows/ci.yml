@@ -183,11 +183,18 @@ jobs:
             tar tzf "target/package/$crate-$version.crate" > /tmp/crate-files
             grep -qx "$crate-$version/LICENSE" /tmp/crate-files
             grep -qx "$crate-$version/README.md" /tmp/crate-files
+            # README.md promises the sample stream ships inside the crate.
+            if [ "$crate" = gwk-cert ]; then
+              grep -qx "$crate-$version/fixtures/valid-stream.json" /tmp/crate-files
+            fi
           done
-          # The contract crates build their TESTS from the tarball too. The
-          # kernel and the CLI cannot until their siblings are on crates.io at
-          # this version — for those two, the verify build above is the check.
-          for crate in gwk gwk-domain gwk-cert gwk-theme; do
+          # Building the TESTS from the tarball only works for crates with no
+          # unpublished sibling: the others resolve that sibling from crates.io,
+          # at the version the release is in the middle of introducing. That is
+          # not a hypothetical — it is how this job first failed. `cargo package
+          # --workspace` above already built every crate's lib from its own
+          # tarball against the local packages, which is the check that matters.
+          for crate in gwk gwk-domain gwk-theme; do
             version=$(cargo metadata --format-version 1 --no-deps \
               | jq -r --arg c "$crate" '.packages[] | select(.name == $c) | .version')
             ( cd "target/package/$crate-$version" && cargo build --tests --locked )
