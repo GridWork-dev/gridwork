@@ -41,7 +41,7 @@ const VALUE_FLAGS: &[&str] = &[
 ];
 
 /// Every flag that is its own answer.
-const SWITCHES: &[&str] = &["--help", "--pretty", "-h"];
+const SWITCHES: &[&str] = &["--help", "--pretty", "--version", "-V", "-h"];
 
 /// Rows an event page asks for when the caller names no limit.
 const DEFAULT_EVENT_LIMIT: u32 = 256;
@@ -179,6 +179,7 @@ gw — the GridWork kernel's command line
   gw ingest submit --kind <kind> --file <path|-> [--project <id>] [--key <key>]
 
   --pretty   format the JSON answer for a human; the value is unchanged
+  --version  same answer as `build-info`, under the name every CLI is asked by
   --help     this
 
 Every answer is JSON on standard output. Exits: 0 success, 2 usage or input,
@@ -195,6 +196,16 @@ pub fn parse(argv: &[String]) -> Result<Invocation, Failure> {
         return Ok(Invocation {
             verb: Verb::Help,
             pretty: false,
+        });
+    }
+    // An alias, not a second answer. `--version` is the name every CLI gets asked
+    // by, and `build-info` already carries the crate version and the public
+    // revision; making it print something shorter would mean two version outputs
+    // that can disagree. Read before --pretty so the flag still applies.
+    if rest.switch("--version") || rest.switch("-V") {
+        return Ok(Invocation {
+            verb: Verb::BuildInfo,
+            pretty: rest.switch("--pretty"),
         });
     }
     let pretty = rest.switch("--pretty");
@@ -573,6 +584,20 @@ mod tests {
                 limit: Some(5)
             }
         );
+    }
+
+    #[test]
+    fn version_is_an_alias_for_build_info() {
+        // The point of the alias is that there is exactly one version answer, so
+        // assert both spellings land on the same verb `build-info` does — not
+        // merely that they parse.
+        for line in ["--version", "-V"] {
+            let got = parsed(line).expect("parse");
+            assert_eq!(got.verb, Verb::BuildInfo, "{line}");
+            assert!(!got.pretty, "{line}");
+        }
+        assert!(parsed("--version --pretty").expect("parse").pretty);
+        assert!(parsed("--pretty -V").expect("parse").pretty);
     }
 
     #[test]

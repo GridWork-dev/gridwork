@@ -7,8 +7,9 @@ No dates. A stage is done when its gates are green, not when a calendar says so.
 
 ## 1 · Contract *(shipped)*
 
-The shared language everything else speaks. Published to crates.io at 0.0.1 under
-Apache-2.0, all five crates with live docs.rs pages.
+The shared language everything else speaks. Published to crates.io under Apache-2.0 with
+live docs.rs pages — five crates at 0.0.1, six at 0.0.2 once the kernel itself went up,
+which is what made `cargo install gridwork` work.
 
 - Domain types, event schemas, and four state machines in `gwk-domain`. Each machine is
   an enum plus a fixed edge table, and the table *is* the contract: terminality is
