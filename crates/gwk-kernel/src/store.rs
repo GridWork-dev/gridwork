@@ -205,6 +205,57 @@ impl PgEventStore {
             .map_err(|e| AppendError::Storage(format!("checkpoint: {e}")))
     }
 
+    /// Snapshot the projections at the watermark, whether or not one is due.
+    ///
+    /// The one snapshot no append triggers. [`Self::checkpoint_if_due`] rides an
+    /// append's transaction and is therefore always AT that append's sequence; a
+    /// clean shutdown has no append to ride, so it takes the same writer barrier
+    /// itself — without it the hash would be taken over projections another
+    /// process is still moving, and a checkpoint that describes no single moment
+    /// is worse than none.
+    ///
+    /// This is what makes [`Verdict::Verified`](crate::recover::Verdict::Verified)
+    /// reachable in practice: it requires a checkpoint exactly at the watermark,
+    /// and the event-interval barrier only ever lands on a multiple of
+    /// [`CHECKPOINT_EVENT_INTERVAL`]. Without a snapshot on the way out, a
+    /// cleanly stopped kernel would restart into `Unverified` — honest, but a
+    /// weaker statement than it was entitled to make.
+    ///
+    /// `Ok(None)` means there was nothing to snapshot: no blob store to put the
+    /// records in, or an empty log.
+    pub async fn checkpoint_at_watermark(&self) -> Result<Option<Seq>, AppendError> {
+        let Some(blobs) = &self.blobs else {
+            return Ok(None);
+        };
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| append_storage("begin a shutdown checkpoint", e))?;
+        // The barrier, taken for the same reason every append takes it: nothing
+        // else may be writing while these rows are hashed.
+        let _writer = self.lock_writer(&mut tx).await?;
+        let at: (Option<String>, String) =
+            sqlx::query_as("SELECT max(seq)::text, to_json(now()) #>> '{}' FROM gwk.event")
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| append_storage("read the watermark", e))?;
+        let Some(watermark) = at.0 else {
+            // An empty log has no sequence to anchor a checkpoint at, and its
+            // projections are empty by construction.
+            return Ok(None);
+        };
+        let through =
+            Seq::new(from_numeric_text(&watermark).map_err(|e| append_storage("watermark", e))?);
+        checkpoint::snapshot(&mut tx, blobs, through, &Timestamp::new(at.1))
+            .await
+            .map_err(|e| AppendError::Storage(format!("shutdown checkpoint: {e}")))?;
+        tx.commit()
+            .await
+            .map_err(|e| append_storage("commit a shutdown checkpoint", e))?;
+        Ok(Some(through))
+    }
+
     /// The epoch this process must present for the rest of its life.
     pub fn boot_epoch(&self) -> i64 {
         self.boot_epoch

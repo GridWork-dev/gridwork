@@ -145,7 +145,7 @@ pub async fn daemon(pretty: bool) -> Result<(), Failure> {
     // advisory lock means another process took write authority, so this one
     // stops accepting rather than racing it. The lock is MOVED in here so it
     // lives exactly as long as the service does.
-    serve::run(listener, daemon, async move {
+    let stopped = serve::run(listener, daemon, async move {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {}
             () = terminated() => {}
@@ -155,7 +155,18 @@ pub async fn daemon(pretty: bool) -> Result<(), Failure> {
     .await
     .map_err(configuration)?;
 
-    emit(&json!({"type": "daemon_stopped"}), pretty);
+    emit(
+        &json!({
+            "type": "daemon_stopped",
+            // The parting snapshot's sequence, which is what lets the next start
+            // answer `verified` instead of `unverified`. Null with a reason is a
+            // barrier that stopped firing — reported, because the alternative is
+            // discovering it at a restart that replays the whole log.
+            "checkpoint": stopped.checkpoint.map(|seq| seq.value().to_string()),
+            "checkpoint_error": stopped.checkpoint_error,
+        }),
+        pretty,
+    );
     Ok(())
 }
 

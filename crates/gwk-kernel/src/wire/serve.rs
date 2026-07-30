@@ -826,13 +826,31 @@ where
     }
 }
 
-/// Accept until `shutdown` resolves, then stop accepting and drain.
+/// What a clean stop managed to do, for the caller to report.
+///
+/// The checkpoint is reported rather than returned as an error because a
+/// snapshot that fails must not keep the socket on the filesystem or the writer
+/// lock held — the next kernel would inherit both. It is reported rather than
+/// swallowed because a barrier that has silently stopped firing grows recovery
+/// time without bound, and the first anyone hears of it is a restart that
+/// replays the whole log.
+#[derive(Debug, Default)]
+pub struct Stopped {
+    /// The sequence the parting snapshot was taken at, if one was.
+    pub checkpoint: Option<Seq>,
+    /// Why there is no checkpoint, when the reason is a failure rather than
+    /// having nothing to snapshot.
+    pub checkpoint_error: Option<String>,
+}
+
+/// Accept until `shutdown` resolves, then stop accepting, drain, and checkpoint.
 ///
 /// The order is the contract's: acceptance stops FIRST, so no connection starts
-/// during the drain, then in-flight work gets at most
-/// [`DRAIN_TIMEOUT_SECS`], then the socket is removed — and only if it is still
-/// the file this process created.
-pub async fn run<S>(listener: Listener, daemon: Arc<Daemon>, shutdown: S) -> Result<()>
+/// during the drain, then in-flight work gets at most [`DRAIN_TIMEOUT_SECS`],
+/// then the projections are snapshotted at the watermark — after the drain, so
+/// the snapshot includes the last append rather than racing it — and only then
+/// is the socket removed, and only if it is still the file this process created.
+pub async fn run<S>(listener: Listener, daemon: Arc<Daemon>, shutdown: S) -> Result<Stopped>
 where
     S: std::future::Future<Output = ()> + Send,
 {
@@ -875,8 +893,18 @@ where
         // stopped reading cannot be allowed to hold either.
         connections.shutdown().await;
     }
+
+    // After the drain: an in-flight append that commits during it belongs in the
+    // snapshot, and the barrier this takes would otherwise be waiting on it
+    // anyway.
+    let mut stopped = Stopped::default();
+    match daemon.store.checkpoint_at_watermark().await {
+        Ok(at) => stopped.checkpoint = at,
+        Err(e) => stopped.checkpoint_error = Some(e.to_string()),
+    }
+
     listener.remove();
-    Ok(())
+    Ok(stopped)
 }
 
 /// One `UnixStream`, served. The split is here rather than in

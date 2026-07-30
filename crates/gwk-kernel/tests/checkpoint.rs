@@ -13,14 +13,19 @@
 
 mod common;
 
+use std::sync::Arc;
+
 use common::{
-    apply, blob_store_with, checkpointing_store, drop_database, fresh_store, maintenance_pool,
-    populate, read_all, task,
+    TEST_KEK, TEST_REVISION, apply, blob_store_with, checkpointing_store, drop_database,
+    fresh_store, maintenance_pool, populate, read_all, runtime_dir, secret, task,
 };
 use gwk_domain::blob::BlobAddress;
-use gwk_domain::port::BlobStore;
+use gwk_domain::port::{BlobStore, EventStore};
 use gwk_kernel::checkpoint::{self, RECORDS_MEDIA_TYPE};
-use gwk_kernel::store::PgEventStore;
+use gwk_kernel::recover::Verdict;
+use gwk_kernel::store::{PgEventStore, connect_pool};
+use gwk_kernel::wire::listen::Listener;
+use gwk_kernel::wire::serve::{self, Daemon};
 
 /// The `projection_type` tags present in a canonical dump.
 fn tags(records: &[u8]) -> Vec<String> {
@@ -221,4 +226,61 @@ async fn checkpoints(store: &PgEventStore) -> Vec<gwk_domain::checkpoint::Checkp
     checkpoint::checkpoints(&mut conn)
         .await
         .expect("read checkpoints")
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
+async fn a_clean_stop_leaves_a_checkpoint_the_next_start_can_verify() {
+    let maintenance = maintenance_pool().await;
+    let (name, root, store) = checkpointing_store(&maintenance, "cpshutdown").await;
+    populate(&store).await;
+    let watermark = store
+        .watermark()
+        .await
+        .expect("watermark")
+        .expect("a populated log");
+    // Neither bound has tripped: a dozen commands is not ten thousand events and
+    // the clock has not moved five minutes. So if a checkpoint lands at the
+    // watermark below, the only thing that could have written it is the stop.
+    assert!(
+        checkpoints(&store).await.is_empty(),
+        "the barrier fired on its own — this case would prove nothing"
+    );
+
+    let dir = runtime_dir("cpshutdown");
+    let path = dir.join("gwk.sock");
+    let listener = Listener::bind(&path).await.expect("bind");
+    let daemon = Arc::new(Daemon::new(store, TEST_REVISION.to_owned()).expect("daemon"));
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let serving = tokio::spawn(async move {
+        serve::run(listener, daemon, async move {
+            let _ = stopped.await;
+        })
+        .await
+    });
+
+    let _ = stop.send(());
+    let report = serving.await.expect("join").expect("a clean stop");
+    assert_eq!(
+        report.checkpoint,
+        Some(watermark),
+        "a clean stop must snapshot AT the watermark"
+    );
+    assert_eq!(report.checkpoint_error, None);
+
+    // A fresh process, on the same database and the same blob root — which is
+    // what a restart is. The checkpoint is only worth having if the next start
+    // can read it and reach the strong verdict.
+    let pool = connect_pool(&secret(&name), 4).await.expect("connect");
+    let next = PgEventStore::open(pool).await.expect("open");
+    let blobs = blob_store_with(&next, &root, TEST_KEK).await;
+    let next = next.with_blobs(blobs);
+    match next.recover().await.expect("recover").verdict {
+        Verdict::Verified { anchor } => assert_eq!(anchor, watermark),
+        other => panic!("a clean stop must restart into Verified, got {other:?}"),
+    }
+
+    drop_database(&maintenance, &name).await;
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&dir);
 }

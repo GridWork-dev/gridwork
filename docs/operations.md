@@ -20,3 +20,11 @@ recovery, fencing, privilege checks, and socket setup succeed.
 Notifications wake readers but never establish truth. Durable cursor reads recover every
 gap. Shutdown stops acceptance, drains bounded work for at most 30 seconds, checkpoints,
 removes the owned socket, and exits.
+
+The parting checkpoint is taken after the drain, under the writer barrier, at the
+watermark — which is what lets the next start report `verified` instead of `unverified`.
+It cannot block the exit: a snapshot that fails is reported on the `daemon_stopped` line
+as `checkpoint_error` and the socket comes off regardless, because the alternative is
+leaving the next kernel to inherit a socket and a writer lock. Watch that field. A
+barrier that has silently stopped firing grows recovery time without bound, and the first
+symptom is otherwise a restart that replays the entire log.
