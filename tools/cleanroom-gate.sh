@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Clean-room gate: a change touching an engine-adjacent path must carry a
-# second-reader record bound to the exact content that was reviewed.
+# second-reader record bound to the exact content that was reviewed, and every
+# gated source file in it must say what it was derived from.
 #
 # Gated paths are the prefixes in .github/cleanroom-paths.txt (CLEANROOM.md rule
 # 2). The record is docs/derivation/reviews/<subject>.md.
@@ -11,11 +12,15 @@
 # not move it, while any later edit to a gated file does. That is what stops a
 # review from being recycled across a rewrite of the thing it reviewed.
 #
-# WHAT THIS PROVES. That a review ran against exactly this content and its record
-# was written at commit time rather than reconstructed later. It does NOT prove
+# WHAT THIS PROVES. That a review ran against exactly this content, that its
+# record was written at commit time rather than reconstructed later, and that
+# every gated source file names a source the record also names. It does NOT prove
 # the reviewer was independent; on a single-maintainer repo no status check can,
-# and CLEANROOM.md rule 4 says so in the same words. A gate claiming otherwise
-# would be false, and a false clean-room claim is worse than an honest narrow one.
+# and CLEANROOM.md rule 4 says so in the same words. Nor does it prove a marker is
+# TRUE — a marker can cite a note the code did not actually come from, and only a
+# reader catches that. It proves the claim was made and cross-referenced, which is
+# what makes a false one attributable. A gate claiming more would be false, and a
+# false clean-room claim is worse than an honest narrow one.
 #
 # Reads the changed-path list on stdin, one path per line, so CI can feed it a
 # real diff and a seeded violation through the same code path — the house rule
@@ -29,8 +34,9 @@ cd "$here/.."
 mode="${1:-check}"
 case "$mode" in
   check | --subject) ;;
+  --markers) ;;
   *)
-    echo "usage: cleanroom-gate.sh [--subject] < changed-paths" >&2
+    echo "usage: cleanroom-gate.sh [--subject | --markers] < changed-paths" >&2
     exit 2
     ;;
 esac
@@ -53,6 +59,109 @@ if [[ ${#prefixes[@]} -eq 0 ]]; then
   exit 2
 fi
 
+# Which gated files owe a `Derivation:` marker. Restricted to code, because a
+# marker demanded of a Cargo.toml or a LICENSE buys nothing and teaches people to
+# write filler markers to get past the gate — and a filler marker is worse than no
+# marker, since it looks like provenance.
+#
+# vendor/ and fixtures/ are excluded on the same reasoning inverted: verbatim
+# upstream source and captured third-party test data are not clean-room-derived
+# work, they are dependencies. Demanding we annotate someone else's file with what
+# we took from it is a category error.
+#
+# ponytail: extension allowlist, not a language detector. Add extensions when a
+# gated crate starts carrying them.
+owes_marker() {
+  local f="$1"
+  [[ -f "$f" ]] || return 1 # deleted by this change; nothing to annotate
+  [[ "$f" == */vendor/* || "$f" == */fixtures/* ]] && return 1
+  case "$f" in
+    *.rs | *.zig | *.c | *.h | *.cpp | *.hpp) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Does this citation resolve? Rule 3 admits exactly two kinds of permitted source
+# — a public specification or a registered observation — so a citation resolves
+# iff it is an ID in one of the two registries.
+#
+# NOT a path. Rule 4's `references` check bans citing a capture by path outright,
+# so a marker naming a file would be a violation dressed as provenance. That is
+# also why this does not cross-reference the review record: the record is bound to
+# the content by digest already, and the content includes these markers, so
+# demanding the record restate them proves nothing the digest has not.
+resolves() {
+  local id="$1" reg
+  # An ID is alphanumerics, dashes, dots and underscores. Without this, the
+  # em-dash placeholder in an empty registry table is itself a matchable ID.
+  [[ "$id" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
+  for reg in docs/derivation/CAPTURES.md docs/derivation/SPECS.md; do
+    [[ -f "$reg" ]] || continue
+    # Table-cell match, so a passing mention in prose does not register an ID.
+    # Backticks optional — a markdown table reads better with them and the
+    # registries should not have to choose between legible and matchable.
+    if grep -qE "^\|[[:space:]]*\`?${id}\`?[[:space:]]*\|" "$reg"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# CLEANROOM.md rule 3, made mechanical. Derived code names its permitted source in
+# the line above it. Until now rule 3 was enforced only by a reviewer ticking a
+# box — which is the check that cannot fail, one layer up.
+check_markers() {
+  local f cited id bad=0
+
+  for f in "$@"; do
+    owes_marker "$f" || continue
+
+    # `<comment> Derivation: <ID>[ §section] — <what was taken>`. The description
+    # is required (that trailing `[^[:space:]]`), so a bare ID is not a marker.
+    # The separator before it is deliberately unconstrained: pinning an em-dash
+    # would make the gate's verdict depend on the CI runner's locale.
+    mapfile -t cited < <(
+      sed -nE 's@^[[:space:]]*(//|#)[[:space:]]*Derivation:[[:space:]]+([^[:space:]]+)[[:space:]]+[^[:space:]].*$@\2@p' "$f"
+    )
+
+    if [[ ${#cited[@]} -eq 0 ]]; then
+      echo "cleanroom-gate: $f is under the clean-room gate and carries no 'Derivation:' marker" >&2
+      bad=1
+      continue
+    fi
+
+    local unresolved=0
+    for id in "${cited[@]}"; do
+      if ! resolves "$id"; then
+        echo "cleanroom-gate: $f cites '$id', which is in neither CAPTURES.md nor SPECS.md" >&2
+        unresolved=1
+      fi
+    done
+    if [[ $unresolved -ne 0 ]]; then
+      bad=1
+      continue
+    fi
+
+    echo "cleanroom-gate: $f cites ${cited[*]}"
+  done
+
+  if [[ $bad -ne 0 ]]; then
+    cat >&2 <<'EOF'
+
+CLEANROOM.md rule 3: every non-obvious terminal behavior names the permitted
+source it came from, immediately above the derived construct:
+
+  // Derivation: ECMA-48 §8.3.14 — cursor save/restore semantics
+  // Derivation: CAP-001 — the wrap-at-column-N behavior this observes
+
+The citation is an ID registered in docs/derivation/SPECS.md (public
+specifications) or docs/derivation/CAPTURES.md (observed captures). Never a file
+path — rule 4's `references` check bans citing a capture by path.
+EOF
+    return 1
+  fi
+}
+
 touched=()
 while IFS= read -r f; do
   [[ -n "$f" ]] || continue
@@ -65,12 +174,20 @@ while IFS= read -r f; do
 done
 
 if [[ ${#touched[@]} -eq 0 ]]; then
-  [[ "$mode" == "--subject" ]] && {
+  # Both non-default modes are fed a deliberate input by their caller. An empty
+  # gated set means that input missed, so the run proved nothing — say so rather
+  # than reporting the clean-diff success, which is a different fact.
+  if [[ "$mode" == "--subject" || "$mode" == "--markers" ]]; then
     echo "cleanroom-gate: no engine-adjacent paths in the input" >&2
     exit 1
-  }
+  fi
   echo "cleanroom-gate: clean — no engine-adjacent paths touched"
   exit 0
+fi
+
+if [[ "$mode" == "--markers" ]]; then
+  check_markers "${touched[@]}"
+  exit $?
 fi
 
 # The subject: every touched gated path paired with its blob hash at HEAD, sorted
@@ -134,3 +251,5 @@ for check in citations framing references leak; do
 done
 
 echo "cleanroom-gate: second-reader record present at $record"
+
+check_markers "${touched[@]}"

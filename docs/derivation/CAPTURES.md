@@ -6,6 +6,11 @@ live in-repo as test fixtures in a text-safe encoding; unscrubbed ones are retai
 privately and can be produced against their hash if a derivation is ever questioned.
 Rows carry only the ID, hash, and an observable description — never storage paths.
 
+IDs are `CAP-<nnn>`, allocated in order and never reused: a `Derivation:` marker in
+shipped code cites one, so a recycled ID would silently re-point an existing citation at
+a different observation. `cleanroom-gate` resolves every cited ID against this table or
+`SPECS.md` and fails the build on one that is in neither.
+
 | ID | sha256 | What it observably shows |
 |---|---|---|
 | — | — | (none yet — first entries land with the PTY engine) |
