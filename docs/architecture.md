@@ -4,16 +4,23 @@ The implementation contract behind the roadmap: what owns truth, what the
 pieces are, and which decisions are locked versus deliberately deferred.
 Locked decisions change only by a recorded amendment, not by drift.
 
-> **Read this as a design contract, not a description of running code.** It is
+> **Read this as a design contract, not a description of running code** — it is
 > written in the present tense throughout because it specifies what the pieces
-> must do — but the socket, projections, blobs, the PTY engine, the
-> adapters, and the TUI are today all zero lines of code. What exists
-> today is the contract itself — `gwk-domain`, `gwk-cert`, `gwk-theme`, the SQL
-> DDL, and the generated TypeScript — plus `gwk-kernel`'s PostgreSQL storage
-> layer, which is certified against the conformance suite on a real server.
-> `docs/security/THREAT_MODEL.md` labels each
-> stance **in force** / **partial** / **designed, not yet built**; when this file
-> and that one disagree about status, that one is right.
+> must do, and some of them do not exist yet.
+>
+> **Built:** the contract (`gwk-domain`, `gwk-cert`, `gwk-theme`, the SQL DDL,
+> the generated TypeScript), `gwk-kernel`'s PostgreSQL event store and
+> projections, the blob store, the daemon and its Unix socket, and `gw` — the
+> CLI half of the protocol. All of it certified against a real PostgreSQL 16,
+> with the performance envelope measured rather than asserted.
+>
+> **Not built:** the PTY engine, the agent adapters, and the TUI — the whole
+> human surface. Anything this file says about rendering, attaching, replaying,
+> or an engine is specification.
+>
+> `docs/security/THREAT_MODEL.md` labels each security stance **in force** /
+> **partial** / **designed, not yet built**; when this file and that one disagree
+> about status, that one is right.
 
 ## Truth ownership
 

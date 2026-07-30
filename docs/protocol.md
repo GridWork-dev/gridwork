@@ -4,9 +4,11 @@ The client↔kernel contract. Semantics and byte-level framing are locked by
 [ADR 0001](decisions/0001-wire-codec.md). The UDS-only authentication boundary
 is locked by [ADR 0002](decisions/0002-listener-before-auth.md).
 
-> **Nothing here is implemented.** There is no kernel, no socket, and no
-> framing code in the tree — write a client against these semantics if you want
-> to be ready, but you cannot connect to anything today.
+> **This is implemented.** The daemon, the socket, the framing, the handshake,
+> the request surface and event subscriptions are all in the tree and certified
+> against a real PostgreSQL — `gw` is a client of exactly what is described
+> below. Build it with a clone (`cargo run -p gridwork -- daemon`); it is not on
+> crates.io yet.
 
 ## Connection and hello
 

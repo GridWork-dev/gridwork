@@ -35,13 +35,18 @@ allowed to do that. GridWork is an operating layer for a fleet of terminal agent
 
 ## Where it actually is
 
-Pre-alpha, stage 2 of 5. **Stage 1 — the contract — shipped** and is published on
-crates.io. Stage 2, the kernel, is being built now and none of it has merged.
+Pre-alpha, at stage 3 of 5. **Stage 1 — the contract — shipped** and is published on
+crates.io. **Stage 2 — the kernel — is built**: a daemon owning an append-only event
+store, projections written in the same transaction as their events, content-addressed
+encrypted blobs, authority evaluation that leaves a receipt, event subscriptions, and
+`gw` — the headless CLI over the same protocol the TUI will use. Certified against a
+real PostgreSQL 16 and its performance envelope measured, not asserted.
 
-Be clear about what that means before you clone: there is **no daemon, no socket, no PTY
-engine, no adapters and no TUI in this tree**. The four bullets above describe what
-GridWork is being built to be. What exists today is the contract those pieces must agree
-on, and the gates that keep it honest — which is exactly what stage 1 was for.
+Be clear about what that leaves before you clone: there is **no PTY engine, no adapters
+and no TUI in this tree**. The whole human surface is stage 3 and later — so the
+terminal-native and engine-agnostic bullets above are still describing what GridWork is
+being built to be, and the daemon you can run today has a JSON command line as its only
+face.
 
 The build order — contract → kernel → engines → console → workspace — with what each
 stage delivers, is in [ROADMAP.md](ROADMAP.md). For per-boundary status, the threat
@@ -49,7 +54,7 @@ model labels every stance *in force*, *partial*, or *designed, not yet built*.
 
 ## What you can run today
 
-One thing, and it works:
+Two things. The first needs nothing but a Rust toolchain:
 
 ```bash
 git clone https://github.com/GridWork-dev/gridwork
@@ -77,6 +82,41 @@ stream inspection.
 `cargo install gwk-cert` installs the same checker without a clone. The sample stream
 ships inside the published crate too, under `fixtures/` in the unpacked source.
 
+The second is the kernel. It needs a PostgreSQL 16, an EMPTY database it can own, and
+**two separate roles** — that separation is load-bearing rather than tidy, so the
+commands below are split the same way:
+
+```bash
+createuser --login gridwork                         # init GRANTS to this role; it never creates one
+createdb --owner postgres gridwork
+
+export GWK_BLOB_ROOT=$HOME/.local/share/gridwork/blobs
+export GWK_BLOB_KEK=$(openssl rand -base64 32) GWK_BLOB_KEK_ID=dev
+export GWK_SOCKET_PATH=$XDG_RUNTIME_DIR/gridwork/gwk.sock
+export GWK_PUBLIC_REVISION=$(git rev-parse HEAD)
+mkdir -m 700 -p "$(dirname "$GWK_SOCKET_PATH")"     # a group- or world-reachable one is refused
+
+# One shot, and the only command that ever sees the schema-owner credential.
+GWK_ADMIN_DATABASE_URL=postgres://postgres@localhost/gridwork \
+GWK_RUNTIME_ROLE=gridwork \
+  cargo run -p gridwork -- admin init               # schema, grants, genesis — all or nothing
+
+# The daemon connects as the RUNTIME role. It refuses to start if it can see the
+# admin credential in its environment, and refuses again if the credential it was
+# given holds SUPERUSER, CREATEROLE, or UPDATE/DELETE on the log. Both are the
+# point, not friction: the sole writer must not be able to rewrite history.
+export GWK_DATABASE_URL=postgres://gridwork@localhost/gridwork
+cargo run -p gridwork -- daemon &
+cargo run -p gridwork -- kernel health              # {"ready":true,"sealed":true}
+```
+
+A freshly initialized kernel is **sealed**: it answers questions, and refuses every
+business command until `gw kernel activate` records the cutover. That boundary is
+irreversible, so a quickstart deliberately stops short of it. `gw --help` lists the rest
+of the surface; every answer is JSON on stdout, and the exit codes are stable (`0` ok,
+`2` usage, `3` refused, `4` not found, `5` unavailable, `6` does not verify, `10` a fault
+in `gw`).
+
 ## Built by the thing it builds
 
 GridWork is not a cold start. It is the open rebuild of an internal agent OS that has
@@ -101,7 +141,7 @@ code.
 | [`gwk`](https://docs.rs/gwk) | Namespace root for the `gwk-*` crates. **No API** | name only |
 | [`gridwork`](https://docs.rs/gridwork) | Will ship the `gw` binary. **No API yet** | name only |
 | `xtask` | Codegen and release glue. Not published | in-tree |
-| `gwk-kernel` | Daemon: event store, projections, attention, authority | planned |
+| `gwk-kernel` | Daemon: event store, projections, blobs, attention, authority, the wire | in-tree, unpublished |
 | `gwk-pty` | PTY engine: server-side VT, render-state deltas, reattach | planned |
 | `gwk-adapter-*` | Per-engine ACP + hooks adapters | planned |
 | `gwk-tui` | The client: modes, lenses, palette | planned |
@@ -109,15 +149,16 @@ code.
 `gridwork` and `gwk` are published deliberately as **name reservations with no API** —
 a module doc block each, pointing at the crates that do the work.
 They are not libraries and are not padded into looking like libraries.
-`cargo install gridwork` gets you nothing today; it becomes the install command when
-that crate ships the binary.
+`cargo install gridwork` still gets you nothing: the `gw` binary and `gwk-kernel` behind
+it are in this tree and not yet on crates.io, so building them means a clone. That
+install command starts working when the kernel is published, not when it is written.
 
 Library crates are prefixed `gwk-` (the crates.io name `gw` belongs to an unrelated
 tool). **The binary is `gw`** — from the first build, permanently.
 
 ## Where to start reading
 
-The contract is the whole of stage 1, and it reads in this order:
+The contract first, then the one place that enforces it:
 
 1. [`crates/gwk-domain/src/fsm.rs`](crates/gwk-domain/src/fsm.rs) — the four state
    machines. Each is an enum plus a fixed `EDGES` table, and the table *is* the
@@ -129,7 +170,14 @@ The contract is the whole of stage 1, and it reads in this order:
 3. [`schema/0001_contract.sql`](schema/0001_contract.sql) — the same guarantees as
    database constraints. CI applies it to a pinned PostgreSQL and then attacks it:
    truncating a state table must fail, and clearing a set lease fence must fail.
-4. [`docs/security/THREAT_MODEL.md`](docs/security/THREAT_MODEL.md) — the honest
+4. [`crates/gwk-kernel/src/store.rs`](crates/gwk-kernel/src/store.rs) — the writer. One
+   row locked for the length of an append, which is what makes sequence order equal
+   commit order; the sequence is allocated from that row rather than a `BIGSERIAL`, so a
+   rolled-back append gives its number back.
+5. [`crates/gwk-kernel/src/recover.rs`](crates/gwk-kernel/src/recover.rs) — what a
+   restart is allowed to *claim*. A checkpoint is evidence, not a restore point, and
+   after a crash recovery says "unverified" instead of implying a check it did not run.
+6. [`docs/security/THREAT_MODEL.md`](docs/security/THREAT_MODEL.md) — the honest
    per-boundary status of everything above.
 
 ## Docs
@@ -138,7 +186,8 @@ The contract is the whole of stage 1, and it reads in this order:
 |---|---|
 | [ROADMAP.md](ROADMAP.md) | The five stages and what each delivers |
 | [docs/architecture.md](docs/architecture.md) | What owns truth, what the pieces are, which decisions are locked |
-| [docs/protocol.md](docs/protocol.md) | The client↔kernel contract (semantics locked, nothing implemented) |
+| [docs/protocol.md](docs/protocol.md) | The client↔kernel contract — framing, hello, requests, subscriptions |
+| [docs/operations.md](docs/operations.md) | Running the daemon: deployment, backup, recovery, key rotation |
 | [docs/contract/NAMING.md](docs/contract/NAMING.md) | The casing and wire-shape rules the contract is frozen under |
 | [docs/security/THREAT_MODEL.md](docs/security/THREAT_MODEL.md) | What GridWork defends against, and what it deliberately does not |
 | [CLEANROOM.md](CLEANROOM.md) | The independent-implementation policy for terminal-engine work |
@@ -147,8 +196,9 @@ The contract is the whole of stage 1, and it reads in this order:
 
 ## Building
 
-Stable Rust, MSRV 1.94. This builds the contract crates and their gates — not a usable
-product yet (see [ROADMAP.md](ROADMAP.md)).
+Stable Rust, MSRV 1.94. This builds the contract crates, the kernel, and the `gw` binary
+— but not a usable product: there is no human surface yet (see
+[ROADMAP.md](ROADMAP.md)).
 
 ```bash
 cargo build --workspace
@@ -168,7 +218,24 @@ cargo deny check bans licenses sources
 `cargo deny check` on its own also runs `advisories`, which CI deliberately keeps
 non-blocking so a newly published advisory can't redden an unchanged PR.
 
-CI also checks the generated TypeScript, the SQL DDL, the site image, and two
+The kernel's own suites need a live PostgreSQL and are `#[ignore]`d so that a clone
+without one still passes. With a server, they are the ones worth running:
+
+```bash
+export GWK_TEST_ADMIN_DATABASE_URL=postgres://postgres@localhost:5432/postgres
+cargo test -p gwk-kernel --locked -- --ignored \
+  --skip the_phase_performance_envelope_holds        # crash, race and wire cases
+cargo test -p gridwork --locked -- --ignored         # a real daemon on a temp socket
+cargo test --release -p gwk-kernel --test perf -- --ignored --nocapture
+```
+
+Each case creates and initializes its **own** database — the log is append-only, so
+there is no truncate-and-reuse path and sharing one would make an ordering-critical
+suite order-dependent. The last line is the performance envelope; it refuses to run in a
+debug profile, spends about two minutes measuring, and writes a receipt naming every
+bound beside the method that produced it.
+
+CI also checks the generated TypeScript, the SQL DDL, the site image, macOS, and two
 publication gates. [CONTRIBUTING.md](CONTRIBUTING.md) has the rest of the list, the
 tools you need installed, and the two gates most likely to surprise you.
 

@@ -25,17 +25,29 @@ Apache-2.0, all five crates with live docs.rs pages.
 - A SQL DDL that CI applies to a pinned PostgreSQL and then attacks: truncating a state
   table must fail, and clearing a set lease fence must fail
 
-## 2 · Kernel *(current)*
+## 2 · Kernel *(shipped)*
 
-In flight — nothing merged yet.
-
-- A daemon owning an append-only event store — the sole writer; every other view is a
-  projection
+- A daemon owning an append-only event store — the sole writer. One writer row, locked
+  for the length of each append, so sequence order *is* commit order across processes;
+  a fence token deposes a previous writer and omitting it is refused, not skipped
+- Projections written in the same transaction as their events, so a committed log and
+  its projections cannot disagree. Rebuildable — into a scratch database, compared by
+  hash, never swapped as a side effect
+- Content-addressed blobs: a chunked AEAD container sealed against truncation, envelope
+  encryption, and pin / unpin / sweep / crypto-shred retention
 - The attention queue: one prioritized feed of everything that needs a human
-- Authority policy as data: what agents may do unattended, what always pages
-- Headless CLI verbs over the same protocol the TUI will use
+- Authority policy as data — evaluated under the writer lock, every decision leaving an
+  immutable receipt; a page raises attention and changes nothing
+- A framed protocol over a Unix socket: strict decoding, bounded frames, bounded queues,
+  per-connection byte rates, and event subscriptions that tell a cut-off consumer the
+  cursor it actually received
+- `gw`, the headless CLI over that same protocol — the one the TUI will use — with
+  stable exit codes and canonical JSON on stdout
 
-## 3 · Engines
+Certified against a real PostgreSQL 16, including crash, race and process-boundary
+cases, with the performance envelope measured and receipted per run.
+
+## 3 · Engines *(current)*
 
 - PTY engine: authoritative server-side virtual terminal, render-state deltas,
   detach/reattach, recording
