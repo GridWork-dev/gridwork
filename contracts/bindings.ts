@@ -691,8 +691,8 @@ export type IdempotencyKey = string;
  * 
  *  Immutable like [`Evidence`] — no `version`, no `state`, written once. Its
  *  `kind` is the CLOSED [`IngestionKind`] set, unlike the open classification
- *  strings elsewhere in this contract: ADR 0026 makes the absence of an import
- *  path load-bearing, and an open string here would be that door.
+ *  strings elsewhere in this contract: the absence of an import path is
+ *  load-bearing here, and an open string would be that door.
  * 
  *  `payload` and `payload_ref` are not exclusive. The inline half is bounded
  *  (the append path enforces
@@ -717,8 +717,8 @@ export type IngestedRecordId = string;
  * 
  *  Immutable like [`Evidence`] — no `version`, no `state`, written once. Its
  *  `kind` is the CLOSED [`IngestionKind`] set, unlike the open classification
- *  strings elsewhere in this contract: ADR 0026 makes the absence of an import
- *  path load-bearing, and an open string here would be that door.
+ *  strings elsewhere in this contract: the absence of an import path is
+ *  load-bearing here, and an open string would be that door.
  * 
  *  `payload` and `payload_ref` are not exclusive. The inline half is bounded
  *  (the append path enforces
@@ -747,8 +747,8 @@ export type IngestedRecord_Deserialize = {
  * 
  *  Immutable like [`Evidence`] — no `version`, no `state`, written once. Its
  *  `kind` is the CLOSED [`IngestionKind`] set, unlike the open classification
- *  strings elsewhere in this contract: ADR 0026 makes the absence of an import
- *  path load-bearing, and an open string here would be that door.
+ *  strings elsewhere in this contract: the absence of an import path is
+ *  load-bearing here, and an open string would be that door.
  * 
  *  `payload` and `payload_ref` are not exclusive. The inline half is bounded
  *  (the append path enforces
@@ -1098,7 +1098,7 @@ public_revision: string }) & { address?: never; code?: never; command_id?: never
 watermark?: string | null }) & { address?: never; code?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; sealed?: never; sequence?: never; upload_id?: never; writer_epoch?: never } | 
 /**
  *  The fresh-epoch proof. `genesis_watermark` is DATABASE-ASSIGNED and is
- *  never assumed to be `1` (ADR 0026).
+ *  never assumed to be `1`.
  */
 ({ type: "sealed_verification"; sealed: boolean; genesis_event_id: EventId; genesis_watermark: string; 
 /**
@@ -1145,7 +1145,7 @@ public_revision: string }) & { address?: never; code?: never; command_id?: never
 watermark?: string | null }) & { address?: never; code?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; sealed?: never; sequence?: never; upload_id?: never; writer_epoch?: never } | 
 /**
  *  The fresh-epoch proof. `genesis_watermark` is DATABASE-ASSIGNED and is
- *  never assumed to be `1` (ADR 0026).
+ *  never assumed to be `1`.
  */
 ({ type: "sealed_verification"; sealed: boolean; genesis_event_id: EventId; genesis_watermark: string; 
 /**

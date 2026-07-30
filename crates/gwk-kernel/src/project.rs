@@ -1098,7 +1098,7 @@ mod tests {
     #[test]
     fn the_closed_ingestion_set_is_the_same_one_in_the_ddl_and_the_contract() {
         // `gwk.ingested_record.kind` is the one CLOSED classification column in
-        // the schema, and the reason is ADR 0026: the absence of an import path
+        // the schema, and the reason is that the absence of an import path
         // has to be a property of the DATABASE, not a convention the writing
         // process happens to honor. That only holds while the CHECK and
         // `IngestionKind` name the same twelve values, and nothing else here
@@ -1120,7 +1120,7 @@ mod tests {
             .collect();
         assert_eq!(listed, contract);
 
-        // The door ADR 0026 closes, checked against the DDL rather than only
+        // The door that closes, checked against the DDL rather than only
         // against the enum: a CHECK that admits it would let the row in even
         // though the contract type cannot name it.
         for forbidden in ["import", "migrate", "backfill", "legacy"] {

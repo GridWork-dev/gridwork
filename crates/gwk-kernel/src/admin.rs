@@ -6,8 +6,8 @@
 //! grants the already-created runtime role the narrow set of privileges the
 //! daemon needs.
 //!
-//! It refuses anything that is not an empty database (ADR 0026: a fresh epoch
-//! starts on an empty target — no import, no backfill, no adoption), with one
+//! It refuses anything that is not an empty database (a fresh epoch starts on
+//! an empty target — no import, no backfill, no adoption), with one
 //! exception: re-running against a database this same contract already
 //! initialized is a no-op, so a retried operator command is safe.
 //!
@@ -141,7 +141,7 @@ pub fn classify(
         (true, Some(contract_sha256)) => TargetState::Initialized { contract_sha256 },
         // Half a kernel. A crashed initialization and a stranger who happens
         // to have named a schema `gwk` look identical from here, and either
-        // way ADR 0026 wants an empty target.
+        // way initialization wants an empty target.
         (true, None) => TargetState::Foreign {
             objects: vec!["schema gwk (without a gwk_internal.schema_fingerprint row)".to_owned()],
         },

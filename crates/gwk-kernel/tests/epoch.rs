@@ -90,7 +90,7 @@ async fn genesis_is_exactly_one_event_and_calling_again_appends_nothing() {
         serde_json::json!({ "contract_version": 1, "public_revision": TEST_REVISION })
     );
 
-    // The sequence is DATABASE-assigned and never asserted to be 1 (ADR 0026);
+    // The sequence is DATABASE-assigned and never asserted to be 1;
     // what is asserted is that genesis is the whole log.
     assert_eq!(total_event_count(&store).await, 1);
 

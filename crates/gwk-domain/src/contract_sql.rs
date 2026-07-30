@@ -708,8 +708,8 @@ ALTER TABLE gwk.orchestrator_checkpoint ENABLE ALWAYS TRIGGER orchestrator_check
 --
 -- `kind` is the one CLOSED classification column in this file. Everywhere else
 -- an open bounded string is preferred so a new label is additive; here the
--- closed set IS the property — ADR 0026 makes the absence of an import path
--- load-bearing, and an open column would let `import` in as data. The CHECK
+-- closed set IS the property — the absence of an import path is load-bearing,
+-- and an open column would let `import` in as data. The CHECK
 -- lists the twelve accepted kinds so the refusal happens in the database and
 -- not only in the process that wrote the row.
 --
@@ -763,4 +763,4 @@ COMMIT;
 // unwrapped 64-hex line lands past 100 columns — the generator and
 // rustfmt would then fight, showing up as permanent contract drift.
 pub const CONTRACT_SQL_SHA256: &str =
-    "bc495756b2833bca75d9cd7c9a7d2b02a5dc96af351c77f028058d579757e852";
+    "158da24f2d5b24dd82128db463512b5a7672f1849817779fdea4a11676e5ec30";

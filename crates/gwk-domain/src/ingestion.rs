@@ -2,10 +2,9 @@
 //!
 //! Ingestion is how non-aggregate records (memory, cost, health, …) enter the
 //! log. The set is CLOSED in v1 — unlike the open classification strings
-//! elsewhere in this contract — because ADR 0026 makes the absence of an
-//! import path a load-bearing property, not a convention: a fresh epoch starts
-//! empty and stays that way. An open string here would let `import` in as
-//! data.
+//! elsewhere in this contract — because the absence of an import path is a
+//! load-bearing property, not a convention: a fresh epoch starts empty and
+//! stays that way. An open string here would let `import` in as data.
 
 /// What kind of record is being ingested. Closed set; wire values are the
 /// snake_case variant names.
@@ -104,7 +103,7 @@ mod tests {
 
     #[test]
     fn there_is_no_import_path_into_a_fresh_epoch() {
-        // ADR 0026: no legacy row, history, or outcome enters the new log.
+        // No legacy row, history, or outcome enters the new log.
         // A kind named for it would be exactly that door.
         for forbidden in ["import", "migrate", "migration", "backfill", "legacy"] {
             assert!(

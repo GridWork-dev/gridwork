@@ -329,7 +329,7 @@ test("server control: refusals are values, cursors survive a disconnect", async 
   expect(sealedResult["type"]).toBe("sealed_verification");
   expect(sealedResult["event_count"]).toBe("1");
   // The genesis sequence is DATABASE-assigned: certification must never
-  // assume the numeral 1 (ADR 0026).
+  // assume the numeral 1.
   expect(sealedResult["genesis_watermark"]).toMatch(DECIMAL);
   expect(sealedResult["genesis_watermark"]).not.toBe("1");
 

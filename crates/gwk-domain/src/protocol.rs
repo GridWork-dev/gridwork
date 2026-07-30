@@ -188,7 +188,7 @@ pub enum FrameKind {
     Json = 0x01,
 }
 
-/// Reserved for the 5′ terminal engine's raw bytes. It is neither advertised
+/// Reserved for the terminal engine's raw bytes. It is neither advertised
 /// nor accepted in v1 — reserving the number here is what stops v1 from
 /// spending it on something else.
 pub const FRAME_KIND_RESERVED_STREAM: u8 = 0x02;
@@ -198,7 +198,7 @@ impl FrameKind {
         self as u8
     }
 
-    /// Decode a kind byte. The reserved 5′ kind and every unknown byte are the
+    /// Decode a kind byte. The reserved engine kind and every unknown byte are the
     /// same answer: `None`, refused before any body is parsed.
     pub const fn from_u8(value: u8) -> Option<Self> {
         match value {
@@ -718,7 +718,7 @@ pub enum KernelResult {
         watermark: Option<Seq>,
     },
     /// The fresh-epoch proof. `genesis_watermark` is DATABASE-ASSIGNED and is
-    /// never assumed to be `1` (ADR 0026).
+    /// never assumed to be `1`.
     SealedVerification {
         sealed: bool,
         genesis_event_id: EventId,
@@ -909,10 +909,10 @@ mod tests {
     }
 
     #[test]
-    fn frame_kind_admits_json_only_and_reserves_the_5p_byte() {
+    fn frame_kind_admits_json_only_and_reserves_the_engine_byte() {
         assert_eq!(FrameKind::Json.as_u8(), 0x01);
         assert_eq!(FrameKind::from_u8(0x01), Some(FrameKind::Json));
-        // Reserved for 5′: refused in v1 exactly like an unknown byte.
+        // Reserved for the engine stage: refused in v1 like an unknown byte.
         assert_eq!(FrameKind::from_u8(FRAME_KIND_RESERVED_STREAM), None);
         assert_eq!(FrameKind::from_u8(0x00), None);
         assert_eq!(FrameKind::from_u8(0xFF), None);

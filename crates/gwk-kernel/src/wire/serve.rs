@@ -563,7 +563,7 @@ impl Daemon {
             .try_get("seq_text")
             .map_err(|e| KernelError::Config(format!("genesis seq: {e}")))?;
         // Never assumed to be 1: the sequence is database-assigned, and a
-        // restored or re-created log can legitimately start higher (ADR 0026).
+        // restored or re-created log can legitimately start higher.
         let genesis_watermark = crate::numeric::from_numeric_text(&seq_text)
             .map(Seq::new)
             .map_err(|e| KernelError::Config(format!("genesis seq: {e}")))?;

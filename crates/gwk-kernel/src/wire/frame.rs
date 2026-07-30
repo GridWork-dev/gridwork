@@ -220,7 +220,7 @@ where
     let kind_byte = body.remove(0);
     let kind = FrameKind::from_u8(kind_byte).ok_or_else(|| {
         let detail = if kind_byte == FRAME_KIND_RESERVED_STREAM {
-            " (reserved for 5′ and not accepted in v1)"
+            " (reserved for the terminal engine and not accepted in v1)"
         } else {
             ""
         };
@@ -361,7 +361,7 @@ mod tests {
         }
 
         /// Every byte that is not the one legal kind is refused, including the
-        /// reserved 5′ stream kind. Enumerated rather than reasoned about: a
+        /// reserved engine stream kind. Enumerated rather than reasoned about: a
         /// `match` arm that accidentally admits one byte is exactly the kind of
         /// mistake that reads correctly.
         #[test]
@@ -424,14 +424,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_reserved_5p_kind_is_refused_by_name() {
+    async fn the_reserved_engine_kind_is_refused_by_name() {
         let mut raw = 1u32.to_be_bytes().to_vec();
         raw.push(FRAME_KIND_RESERVED_STREAM);
         let error = read_bytes(&raw, FRAME_BODY_MAX_BYTES)
             .await
             .expect_err("reserved kind accepted");
         assert_eq!(error.code, KernelErrorCode::Handshake);
-        assert!(error.message.contains("5′"), "{error}");
+        assert!(error.message.contains("terminal engine"), "{error}");
     }
 
     #[tokio::test]

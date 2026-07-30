@@ -323,8 +323,8 @@ pub struct Evidence {
 ///
 /// Immutable like [`Evidence`] — no `version`, no `state`, written once. Its
 /// `kind` is the CLOSED [`IngestionKind`] set, unlike the open classification
-/// strings elsewhere in this contract: ADR 0026 makes the absence of an import
-/// path load-bearing, and an open string here would be that door.
+/// strings elsewhere in this contract: the absence of an import path is
+/// load-bearing here, and an open string would be that door.
 ///
 /// `payload` and `payload_ref` are not exclusive. The inline half is bounded
 /// (the append path enforces

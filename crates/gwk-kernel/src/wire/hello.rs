@@ -26,11 +26,11 @@ use super::{WireError, strict};
 
 /// What this kernel offers to negotiate.
 ///
-/// Empty, and that is the honest answer for 4′: every request in the contract
-/// is served by every 4′ daemon, so there is no optional surface to advertise.
+/// Empty, and that is the honest answer for v1: every request in the contract
+/// is served by every v1 daemon, so there is no optional surface to advertise.
 /// A name here would be something a client branches on, and once branched on it
-/// is owed forever — including by the 5′ daemon that would have to keep meaning
-/// the same thing by it.
+/// is owed forever — including by the terminal-engine daemon that would have to
+/// keep meaning the same thing by it.
 pub const OFFERED_CAPABILITIES: &[&str] = &[];
 
 /// What a completed handshake settled.
@@ -333,7 +333,7 @@ mod tests {
     #[tokio::test]
     async fn capabilities_intersect_and_this_kernel_offers_none() {
         // The machinery is live — a client may ask for anything and gets back
-        // what both sides have, which in 4′ is nothing. Answering with what was
+        // what both sides have, which in v1 is nothing. Answering with what was
         // asked would be a promise no code keeps.
         let (session, _) = handshake(
             r#"{"type":"hello","protocol_major":1,"protocol_minor":0,"capabilities":["event_subscribe","blob_transfer"]}"#,

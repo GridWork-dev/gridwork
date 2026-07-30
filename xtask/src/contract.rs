@@ -431,7 +431,7 @@ fn golden_server_control() -> Vec<ServerControl> {
             result: KernelResult::SealedVerification {
                 sealed: true,
                 genesis_event_id: EventId::new("evt-genesis"),
-                // NOT 1: the sequence is database-assigned (ADR 0026).
+                // NOT 1: the sequence is database-assigned.
                 genesis_watermark: Seq::new(9_007_199_254_740_993),
                 event_count: EventCount::new(1),
             },

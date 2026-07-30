@@ -1,6 +1,6 @@
 //! The phase performance envelope, measured.
 //!
-//! Seven numbers were accepted for 4′, and every one of them is a claim about a
+//! Seven numbers were accepted for this stage, and every one is a claim about a
 //! real PostgreSQL 16 under a release build. This suite produces them, writes
 //! them to a receipt, and fails naming every bound that missed — all of them,
 //! not the first, because a run that stops at the first miss costs a second run

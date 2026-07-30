@@ -9,8 +9,8 @@
 //! when the bytes are identical, which is what a stream of health or cost
 //! samples needs.
 //!
-//! The closed kind set is the other half. ADR 0026 makes the absence of an
-//! import path load-bearing, so `import`/`migrate`/`backfill` must be refused
+//! The closed kind set is the other half. The absence of an import path is
+//! load-bearing, so `import`/`migrate`/`backfill` must be refused
 //! by the DATABASE and not only by the enum that failed to name them.
 
 mod common;
