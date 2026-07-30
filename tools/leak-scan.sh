@@ -75,7 +75,12 @@ trap 'rm -f "$scan_err"' EXIT
 # Empty files report encoding "binary" but are trivially safe.
 # One reviewed binary asset is exempt: site/og.png (the share card — tool-generated
 # from public copy + the public palette, never hand-edited).
-binaries=$( { git ls-files -z ':!site/og.png' | xargs -0 -r file --mime-encoding \
+# `-L` because the per-crate LICENSE files are symlinks to the root one: without
+# it file(1) types the LINK as binary and the guard flags a text file it can read
+# perfectly well. Following also keeps this agreeing with the pattern scan below,
+# which reads through symlinks whether this one does or not — and a dangling link
+# makes file(1) write to stderr, which fails the gate closed.
+binaries=$( { git ls-files -z ':!site/og.png' | xargs -0 -r file -L --mime-encoding \
   | grep -Ev ': *(us-ascii|utf-8|ascii)$' \
   | while IFS=: read -r f _; do [[ -s "$f" ]] && echo "$f: non-text encoding"; done; } 2>"$scan_err" || true)
 if [[ -s "$scan_err" ]]; then
