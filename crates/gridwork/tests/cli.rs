@@ -393,12 +393,35 @@ async fn the_admin_door_initializes_a_database_and_the_daemon_serves_it() {
         ("GWK_BLOB_KEK_ID", "kek-test"),
     ];
 
+    // The override rule, pinned in both directions rather than assumed to be in
+    // one of them: a STAMPED build states a fact about the bytes compiled and
+    // refuses the environment, an unstamped one has no fact to state and takes
+    // it. Which case this is depends on whether the tree was clean when
+    // `build.rs` last ran — so a case that hardcoded `revision` here passed on a
+    // developer's tree and failed on CI, where the checkout is clean and the
+    // stamp is the merge commit. `build-info` reports the STAMP ONLY, by design;
+    // it is the oracle for which case we are in, not for the resolved value.
+    let stamp = json(&gw_env("build-info", &admin_env))["public_revision"]
+        .as_str()
+        .map(str::to_owned);
+    let reported = stamp.clone().unwrap_or_else(|| revision.clone());
+    assert!(
+        reported.len() == 40 && reported.bytes().all(|b| b.is_ascii_hexdigit()),
+        "a reported revision is a full hex revision, got {reported:?}"
+    );
+    if let Some(stamped) = &stamp {
+        assert_ne!(
+            stamped, &revision,
+            "this case can only prove the override rule if the two differ"
+        );
+    }
+
     let init = gw_env("admin init", &admin_env);
     assert_eq!(code(&init), 0, "{}", String::from_utf8_lossy(&init.stdout));
     let answer = json(&init);
     assert_eq!(answer["type"], "admin_initialized");
     assert_eq!(answer["outcome"], "initialized");
-    assert_eq!(answer["public_revision"], revision);
+    assert_eq!(answer["public_revision"], reported);
 
     // Again, unchanged: the contract is already installed and genesis is
     // idempotent under its own key, so a second run is a no-op and not a second
@@ -488,9 +511,10 @@ async fn the_admin_door_initializes_a_database_and_the_daemon_serves_it() {
     let status = gw(&socket, "kernel status");
     assert_eq!(code(&status), 0);
     let answer = json(&status);
-    // The revision it was told, reported back — the comparison `build-info` and
-    // genesis exist for.
-    assert_eq!(answer["public_revision"], revision);
+    // The revision the daemon resolved, reported back — the comparison
+    // `build-info` and genesis exist for. `reported`, not `revision`: a stamped
+    // build ignores the environment on purpose (see above).
+    assert_eq!(answer["public_revision"], reported);
     assert_eq!(answer["sealed"], true);
 
     // Retention, through the admin door rather than the socket — which is the
@@ -706,7 +730,7 @@ async fn the_admin_door_initializes_a_database_and_the_daemon_serves_it() {
     // past the crashed daemon's, because claiming write authority bumps it.
     let status = gw(&socket, "kernel status");
     assert_eq!(code(&status), 0);
-    assert_eq!(json(&status)["public_revision"], revision);
+    assert_eq!(json(&status)["public_revision"], reported);
 
     // SIGTERM is how a service manager asks. The socket goes with it, or the
     // next start would take the stale-takeover path for no reason.
