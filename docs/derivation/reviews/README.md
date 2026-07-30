@@ -35,17 +35,23 @@ cp docs/derivation/reviews/TEMPLATE.md "docs/derivation/reviews/$subject.md"
 
 Fill in `subject:`, `reviewer:`, and tick all four checks. Commit it in the same
 branch. The gate verifies the file exists, that it declares the matching subject, that
-it names a reviewer, and that all four checks are ticked.
+it names a reviewer, and that all four checks are ticked — and, separately, that every
+gated source file in the change carries a resolving `Derivation:` marker.
 
 ## What the reviewer does
 
 Read the gated diff cold — without the implementing session's context — and check
 exactly the four things rule 4 names:
 
-1. **citations** — every non-obvious terminal behavior carries a derivation citation:
-   a public specification (ECMA-48, XTerm ctlseqs, the Kitty keyboard protocol, ACP, …)
-   or a capture registered in [`../CAPTURES.md`](../CAPTURES.md) by ID and SHA-256. Each
-   citation must resolve — a dead ID is a failed check, not a nit.
+1. **citations** — every non-obvious terminal behavior carries a `Derivation:` marker
+   naming a permitted source by ID, from [`../SPECS.md`](../SPECS.md) (public
+   specifications) or [`../CAPTURES.md`](../CAPTURES.md) (registered observations).
+
+   The gate already proved every cited ID resolves and that no gated source file is
+   unmarked, so do not re-check that by hand. **Check what the gate cannot:** that each
+   marker sits on the behavior it describes, and that the cited source actually says what
+   the code does. A marker citing a real spec for the wrong behavior passes the gate and
+   fails this check — that is the case you are here for.
 2. **framing** — no source-derived framing: no comment, name, or structure that reads as
    transcribed from another implementation rather than from a specification.
 3. **references** — no other project named as a comparand, and no capture cited by path.

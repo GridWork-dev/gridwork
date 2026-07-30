@@ -383,6 +383,49 @@ jobs:
             exit 1
           fi
           echo "cleanroom-gate: seeded violation correctly rejected ($seed)"
+      - name: prove the marker check can fail (CLEANROOM.md rule 3)
+        run: |
+          set -euo pipefail
+          # The step above seeds a path that does not exist at HEAD, so it exercises
+          # the record lookup and never reaches the source. These seed REAL files
+          # under a gated prefix — the only way to reach the marker parser at all.
+          prefix="$(grep -Ev '^[[:space:]]*(#|$)' .github/cleanroom-paths.txt | head -n1)"
+          dir="${prefix}-seed/src"
+          mkdir -p "$dir"
+
+          printf 'fn seeded() {}\n' > "$dir/no-marker.rs"
+          if echo "$dir/no-marker.rs" | ./tools/cleanroom-gate.sh --markers; then
+            echo 'marker check accepted a gated source file with no Derivation: marker' >&2
+            exit 1
+          fi
+          echo "cleanroom-gate: missing marker correctly rejected"
+
+          # Half two: a marker that cites a source registered nowhere. Without this
+          # seed, resolution could be deleted outright and the step above would
+          # still pass — any string would count as a citation.
+          printf '// Derivation: NOT-A-REAL-SPEC — seeded\nfn seeded() {}\n' > "$dir/unresolved.rs"
+          if echo "$dir/unresolved.rs" | ./tools/cleanroom-gate.sh --markers; then
+            echo 'marker check accepted a citation registered in neither CAPTURES.md nor SPECS.md' >&2
+            exit 1
+          fi
+          echo "cleanroom-gate: unresolved citation correctly rejected"
+
+          # Half three: a path citation, which rule 4's `references` check bans.
+          # This is the shape a well-meaning author reaches for first.
+          printf '// Derivation: docs/derivation/SPECS.md — seeded\nfn seeded() {}\n' > "$dir/by-path.rs"
+          if echo "$dir/by-path.rs" | ./tools/cleanroom-gate.sh --markers; then
+            echo 'marker check accepted a source cited by path' >&2
+            exit 1
+          fi
+          echo "cleanroom-gate: path citation correctly rejected"
+
+          # The positive control. Seeds that can only ever fail would also pass with
+          # the whole parser replaced by `exit 1`, which is the failure this job
+          # exists to make impossible.
+          printf '// Derivation: ECMA-48 §8.3.14 — seeded\nfn seeded() {}\n' > "$dir/ok.rs"
+          echo "$dir/ok.rs" | ./tools/cleanroom-gate.sh --markers
+          echo "cleanroom-gate: registered citation correctly accepted"
+          rm -rf "${prefix}-seed"
 
   # Hosted CI enforces the GENERIC pattern set only — the estate-specific extension
   # (tools/leak-scan.local) is untracked by design and exists solely on operator
