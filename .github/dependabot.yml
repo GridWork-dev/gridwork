@@ -1,0 +1,31 @@
+# Dependency bump PRs. Monthly, because this repo pins deliberately and a weekly
+# stream of bumps against thirteen required contexts is noise, not maintenance.
+#
+# Every pin here is a SHA or an exact version — actions by commit, crates by
+# `=x.y.z`. Pinning without a bump path is how a repo ends up two years stale on
+# an action nobody remembers pinning, so the pins and this file are one decision,
+# not two.
+#
+# A cargo bump of `libghostty-vt` will turn the `pty` job RED rather than merge:
+# its version lives in BOTH Cargo.toml and crates/gwk-pty/pins.env, alongside the
+# ghostty revision and the Zig version it has to move with, and
+# tools/pty-toolchain.sh asserts the two agree. That is the intended outcome — a
+# re-pin is a phase decision (R3 budgets one per phase), so the bot is allowed to
+# propose it and not allowed to land it quietly.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: chore(ci)
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: chore(deps)
+    open-pull-requests-limit: 5

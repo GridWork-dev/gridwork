@@ -185,6 +185,30 @@ jobs:
           persist-credentials: false
       - name: load the pins
         run: grep -E '^[A-Z_]+=' crates/gwk-pty/pins.env >> "$GITHUB_ENV"
+      # Always, cache hit or not — the point is to catch a Cargo.toml edit that
+      # never reaches the materialize step below. `--env` does no work and needs
+      # no toolchain; it sources the pins and runs their assertions.
+      - name: the libghostty-vt pin agrees with Cargo.toml
+        run: ./tools/pty-toolchain.sh --env > /dev/null
+      - name: prove the pin check can fail
+        run: |
+          set -euo pipefail
+          trap 'git checkout -- Cargo.toml' EXIT
+          sed -i 's/^libghostty-vt = "=.*"$/libghostty-vt = "=0.0.0-seeded"/' Cargo.toml
+          if ./tools/pty-toolchain.sh --env > /dev/null 2>&1; then
+            echo "pty-toolchain: accepted a desynced pin — the check is decoration" >&2
+            exit 1
+          fi
+          sed -i 's/^libghostty-vt = "=.*"$/libghostty-vt = "^0.2.0"/' Cargo.toml
+          if ./tools/pty-toolchain.sh --env > /dev/null 2>&1; then
+            echo "pty-toolchain: accepted a caret range where an exact pin is required" >&2
+            exit 1
+          fi
+          # Positive control: both seeds above would also "fail correctly" against
+          # a script that simply always exited non-zero.
+          git checkout -- Cargo.toml
+          ./tools/pty-toolchain.sh --env > /dev/null
+          echo "pin check rejects a desynced version and a relaxed range, and accepts the real one"
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: ${{ env.ZIG_VERSION }}
