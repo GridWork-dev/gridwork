@@ -46,13 +46,24 @@ pub struct Session {
     pty: Pty,
     child: tokio::process::Child,
     grid: Grid,
-    /// The size both halves are agreed on, so [`resize`](Self::resize) has
-    /// something infallible to roll back to.
+    /// The size the PTY was last successfully set to.
     ///
-    /// `Grid::size()` would answer this, but it answers with an `Option` — and
-    /// a rollback that can be skipped because the question failed is not a
-    /// rollback. Two `u16`s that were validated on the way in cannot fail to be
-    /// read on the way out.
+    /// Deliberately NOT "the size both halves agree on", which is what this
+    /// field was first called and is not true: the child can change the grid's
+    /// width from the byte stream. `\x1b[?3h` under DECCOLM takes an 80-column
+    /// grid to 132 without [`resize`](Self::resize) being called at all, and
+    /// then the grid, the PTY and this field are three different numbers.
+    ///
+    /// It is still the right rollback target, because it is exactly the value
+    /// the PTY is holding when a `tcsetwinsize()` call fails. What it is not is
+    /// a record of what the grid was doing, so restoring it can discard a width
+    /// the child chose — a real loss, but strictly smaller than the divergence
+    /// it prevents, and the only bound available without asking a grid whose
+    /// answer is fallible.
+    ///
+    /// `Grid::size()` would answer that question, but it answers with an
+    /// `Option`, and a rollback skippable because the question failed is not a
+    /// rollback.
     size: (u16, u16),
 }
 

@@ -288,6 +288,13 @@ mod tests {
     fn replaying_the_whole_stream_rebuilds_the_session_from_nothing() {
         // The strongest form of the claim: no snapshot at all, just the
         // recording, and the result has to match cell for cell.
+        //
+        // Derivation: ECMA-48 §8.3.21 — CUP takes a 1-based line then column,
+        // so the writes below place text at known absolute positions rather
+        // than wherever the previous write happened to leave the cursor. That
+        // matters here: a replay that reordered or dropped an entry would
+        // otherwise still land plausible-looking text, and this test would pass
+        // on a broken replay.
         let mut session = Session::new(24, 6, 50, 500);
         session.write(b"\x1b[1;1Halpha");
         session.write(b"\x1b[3;5Hbravo");

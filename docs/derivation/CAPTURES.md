@@ -7,7 +7,8 @@ privately and can be produced against their hash if a derivation is ever questio
 
 Rows carry only the ID, hash, and an observable description. A storage path may be named
 elsewhere in-tree for a capture of **public source**, and only while all of these hold:
-the repository and path are already a build input; the revision they are pinned at is an
+the artifact lives in a tree this repository already materializes by pin, so naming its
+path discloses no location the build does not; the revision that tree is pinned at is an
 **immutable identifier** — a full commit hash, never a branch or a movable tag; the
 license is named **and permits the use** (a named but disqualifying license fails this,
 which is rule 1's business, not a formality this clause discharges); and the hash — never

@@ -22,7 +22,15 @@ so the encoding is verified rather than trusted.
 | Revision | `a887df42c56f6de86c0fe6da9c4eeca37931e083` (`GHOSTTY_COMMIT` in `../pins.env`) |
 | Path | `test/fuzz-libghostty/corpus/stream-initial/` |
 | Files | 24, unmodified (hex-encoded for storage, see above) |
-| License | MIT |
+| License | MIT — notice retained verbatim in [`LICENSE-ghostty`](LICENSE-ghostty) |
+
+MIT requires its copyright and permission notice to travel with "all copies or
+substantial portions of the Software", and 24 files copied byte for byte is not
+obviously the small side of that line. Naming the license in a table is not the
+same as discharging the condition it attaches, so the notice is vendored beside
+the files it covers rather than cited from a distance. The repository's own
+`LICENSE` at the root governs this crate; `LICENSE-ghostty` governs these
+fixtures, and neither is a statement about the other.
 
 These are the **seed** inputs for ghostty's own VT stream fuzzer, not fuzzer
 output. The distinction is the whole reason this directory holds these and not

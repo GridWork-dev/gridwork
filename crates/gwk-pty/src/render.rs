@@ -296,6 +296,11 @@ mod tests {
         // not.
         let mut grid = Grid::new(10, 1).expect("10x1");
         let mut renderer = Renderer::new().expect("render state");
+        // Derivation: ECMA-48 §8.3.9 — CHA moves the active position to the
+        // n-th character position on the current line, 1-based, so `\x1b[5G`
+        // lands on column index 4 and leaves columns 1..4 untouched. That gap
+        // of never-written cells is the case under test; writing spaces into
+        // it would exercise a different thing entirely.
         grid.write(b"a\x1b[5Gb");
 
         let frame = renderer.frame(&grid, 0).expect("frame");
