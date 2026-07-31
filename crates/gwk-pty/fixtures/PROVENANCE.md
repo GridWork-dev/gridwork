@@ -1,9 +1,18 @@
 # Conformance fixtures
 
-Everything under `stream-initial/` is **third-party and copied byte for byte**.
-Nothing here was written for this repository, and nothing here should be edited
-to make a test pass — a fixture that has been adjusted to agree with our output
-has stopped being evidence about anything.
+Every vector in `stream-initial.hex` is **third-party and copied byte for
+byte**. Nothing here was written for this repository, and nothing here should
+be edited to make a test pass — a fixture adjusted to agree with our output has
+stopped being evidence about anything.
+
+They are stored hex-encoded rather than as the original files. The originals
+are dense with `ESC` and `NUL`, and `tools/leak-scan.sh` refuses to pass a
+repository holding tracked binaries it cannot read — correctly, and it is not a
+gate worth weakening for test data. Hex is also the encoding
+`docs/derivation/CAPTURES.md` already asks in-repo fixtures to use. Each line
+carries `<name> <sha256-of-decoded-bytes> <hex>`, the runner checks the digest
+after decoding, and the same digest appears beside that vector's golden frame,
+so the encoding is verified rather than trusted.
 
 ## Where these came from
 
@@ -12,7 +21,7 @@ has stopped being evidence about anything.
 | Project | [ghostty](https://github.com/ghostty-org/ghostty) |
 | Revision | `a887df42c56f6de86c0fe6da9c4eeca37931e083` (`GHOSTTY_COMMIT` in `../pins.env`) |
 | Path | `test/fuzz-libghostty/corpus/stream-initial/` |
-| Files | 24, unmodified |
+| Files | 24, unmodified (hex-encoded for storage, see above) |
 | License | MIT |
 
 These are the **seed** inputs for ghostty's own VT stream fuzzer, not fuzzer

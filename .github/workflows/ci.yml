@@ -293,12 +293,13 @@ jobs:
           git checkout -- crates/gwk-pty/fixtures
 
           # The direction a frame comparison alone cannot see: making the INPUT
-          # agree with a frame rather than the other way round.
-          printf 'x' >> crates/gwk-pty/fixtures/stream-initial/23-empty
-          seed "a fixture edited after its frame was captured"
+          # agree with a frame rather than the other way round. Appending to the
+          # hex payload leaves the digest on that line describing something else.
+          sed -i 's/^\(23-empty [0-9a-f]* [0-9a-f]*\)$/\178/' crates/gwk-pty/fixtures/stream-initial.hex
+          seed "a vector edited after its frame was captured"
           git checkout -- crates/gwk-pty/fixtures
 
-          rm crates/gwk-pty/fixtures/stream-initial/01-plain-text-slice
+          sed -i '/^01-plain-text-slice /d' crates/gwk-pty/fixtures/stream-initial.hex
           seed "a vector missing from the corpus"
           git checkout -- crates/gwk-pty/fixtures
 

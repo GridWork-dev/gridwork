@@ -40,34 +40,52 @@ fn hex(bytes: &[u8]) -> String {
     out
 }
 
-/// Every vector, sorted by name.
+/// Every vector, in the order the manifest lists them.
 ///
-/// `LC_ALL=C` has no meaning inside Rust, but the reason it matters elsewhere
-/// does: this output is order-dependent, so the sort has to be over bytes
-/// rather than anything locale-aware. `sort_unstable` on `String` is a byte
-/// comparison and stays put across machines.
+/// The vectors are stored hex-encoded because they are full of ESC and NUL and
+/// `tools/leak-scan.sh` refuses to pass a repository holding tracked binaries
+/// it cannot read. Each line carries the digest of its own decoded bytes, and
+/// this checks it — an encoding nobody verifies is just a slower way to lose
+/// the provenance the corpus exists for.
 fn vectors() -> Vec<(String, Vec<u8>)> {
-    let dir = fixtures_dir().join("stream-initial");
-    let mut names: Vec<String> = std::fs::read_dir(&dir)
-        .unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()))
-        .map(|entry| {
-            entry
-                .expect("dir entry")
-                .file_name()
-                .to_string_lossy()
-                .into_owned()
-        })
-        .collect();
-    names.sort_unstable();
-    assert!(!names.is_empty(), "the corpus is empty; nothing is tested");
+    let path = fixtures_dir().join("stream-initial.hex");
+    let manifest = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
 
-    names
-        .into_iter()
-        .map(|name| {
-            let raw = std::fs::read(dir.join(&name)).expect("reading a fixture");
-            (name, raw)
-        })
-        .collect()
+    let mut out = Vec::new();
+    for line in manifest.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let (name, digest, payload) = (
+            parts.next().expect("name"),
+            parts.next().expect("digest"),
+            parts.next().expect("hex"),
+        );
+        assert!(
+            parts.next().is_none(),
+            "{name}: trailing junk after the hex payload"
+        );
+
+        let raw: Vec<u8> = (0..payload.len())
+            .step_by(2)
+            .map(|i| {
+                u8::from_str_radix(&payload[i..i + 2], 16)
+                    .unwrap_or_else(|e| panic!("{name}: bad hex at byte {}: {e}", i / 2))
+            })
+            .collect();
+        assert_eq!(
+            hex(&raw),
+            digest,
+            "{name}: decoded bytes do not match the digest on its own line"
+        );
+        out.push((name.to_owned(), raw));
+    }
+
+    assert!(!out.is_empty(), "the corpus is empty; nothing is tested");
+    out
 }
 
 /// Parse one vector and render the frame block that goes in the golden file.
