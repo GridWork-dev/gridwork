@@ -215,7 +215,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       # Keyed on the ghostty revision, so a re-pin invalidates it and nothing
       # else does. Restoring beats a 71 MB clone plus a ~560 MB package fetch.
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: ghostty-cache
         with:
           path: |
