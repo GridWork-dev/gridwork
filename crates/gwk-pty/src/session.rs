@@ -46,25 +46,6 @@ pub struct Session {
     pty: Pty,
     child: tokio::process::Child,
     grid: Grid,
-    /// The size the PTY was last successfully set to.
-    ///
-    /// Deliberately NOT "the size both halves agree on", which is what this
-    /// field was first called and is not true: the child can change the grid's
-    /// width from the byte stream. `\x1b[?3h` under DECCOLM takes an 80-column
-    /// grid to 132 without [`resize`](Self::resize) being called at all, and
-    /// then the grid, the PTY and this field are three different numbers.
-    ///
-    /// It is still the right rollback target, because it is exactly the value
-    /// the PTY is holding when a `tcsetwinsize()` call fails. What it is not is
-    /// a record of what the grid was doing, so restoring it can discard a width
-    /// the child chose — a real loss, but strictly smaller than the divergence
-    /// it prevents, and the only bound available without asking a grid whose
-    /// answer is fallible.
-    ///
-    /// `Grid::size()` would answer that question, but it answers with an
-    /// `Option`, and a rollback skippable because the question failed is not a
-    /// rollback.
-    size: (u16, u16),
 }
 
 impl Session {
@@ -78,12 +59,7 @@ impl Session {
         let (pty, pts): (Pty, Pts) = pty_process::open()?;
         pty.resize(Size::new(rows, cols))?;
         let child = command.spawn(pts)?;
-        Ok(Self {
-            pty,
-            child,
-            grid,
-            size: (cols, rows),
-        })
+        Ok(Self { pty, child, grid })
     }
 
     /// Read whatever the child has written and feed it to the parser.
@@ -108,15 +84,24 @@ impl Session {
                 self.grid.write(&buf[..n]);
                 Ok(n)
             }
-            // Reading a PTY master whose slave has closed is EIO on Linux, not
-            // end-of-file — the child exiting is normal, so reporting it as an
-            // I/O error would make every clean exit look like a failure.
+            // Derivation: CAP-002 — reading a PTY master whose slave has closed
+            // fails with EIO on Linux instead of reporting end-of-file. The
+            // child exiting is the normal case, so surfacing that errno would
+            // make every clean exit look like an I/O failure.
             //
-            // This is a platform behavior and NOT a POSIX guarantee: macOS
-            // returns 0 here instead, which the `Ok(0)` arm already covers.
+            // A capture rather than a spec citation because there is no spec to
+            // cite. POSIX gives `read` an EIO for a background process group
+            // reading its controlling terminal — a different condition, and
+            // citing it would be a false citation wearing a real one's clothes.
+            // No man page installed here documents the slave-closed case at all.
+            //
             // Deleting this arm was tried: both PTY tests below fail on Linux,
-            // so it is load-bearing here and the `Ok(0)` arm is what carries
-            // the same case elsewhere.
+            // so it is load-bearing here. Whether any other platform needs it is
+            // NOT established by this repository, and an earlier version of this
+            // comment asserted that macOS returns 0 instead — nothing checks
+            // that. The macOS job builds the default members, which do not
+            // include this crate. If a platform does report end-of-file, the
+            // `Ok(0)` arm already carries it.
             Err(e) if e.raw_os_error() == Some(rustix::io::Errno::IO.raw_os_error()) => Ok(0),
             Err(e) => Err(e),
         }
@@ -130,16 +115,22 @@ impl Session {
     /// Tell both the grid and the child about a new window size.
     ///
     /// The grid goes first because it is the half that can refuse cheaply, and
-    /// a PTY failure rolls it back — so on either single failure the two halves
-    /// still agree.
+    /// a PTY failure rolls it back to the size the PTY is still holding — so on
+    /// either single failure the two halves agree.
     ///
     /// Not all-or-nothing in general, and the difference is worth stating
-    /// rather than rounding off. Restoring the grid is a real reflow, not a
-    /// saved buffer put back, so it can fail on its own; that needs a second
-    /// independent failure, and if it happens the halves are left disagreeing
-    /// and the PTY's error is what surfaces, because it is the cause. Claiming
-    /// atomicity here would be the same defect this method has already carried
-    /// once: a comment asserting a property the code does not have.
+    /// rather than rounding off. Rolling back is two fallible steps — a syscall
+    /// to ask what to restore to, then a real reflow to get there — and either
+    /// can fail on its own. That needs a second independent failure, and if it
+    /// happens the halves are left disagreeing and the PTY's error is what
+    /// surfaces, because it is the cause. Claiming atomicity here would be the
+    /// same defect this method has already carried once: a comment asserting a
+    /// property the code does not have.
+    ///
+    /// Note the scope: this is about the two halves *this method* moves. A
+    /// child that resizes its own terminal desynchronizes them without going
+    /// through here at all, and nothing in this type notices — see
+    /// `a_child_can_move_the_pty_size_behind_the_grids_back`.
     // Derivation: POSIX-WINSIZE — `tcsetwinsize()` delivers SIGWINCH to the
     // foreground process group when the terminal size WAS CHANGED, and
     // explicitly delivers nothing when it is set to the value it already had.
@@ -162,25 +153,37 @@ impl Session {
             .resize(cols, rows)
             .ok_or(SpawnError::Dimensions { cols, rows })?;
         if let Err(e) = self.pty.resize(Size::new(rows, cols)) {
-            // Rolling back to `self.size` rather than to `grid.size()`: the
-            // latter is an `Option`, and a rollback that gets skipped because
-            // reading the old size failed is not a rollback.
+            // Ask the kernel what to roll back to rather than remembering it.
             //
-            // The result is discarded because there is nothing left to do with
-            // it — the grid is already at the new size, the PTY is at the old,
-            // and if the restore fails they stay that way whatever we return.
-            // The PTY error is what propagates because it is the cause.
+            // This restored a field updated after every successful resize, and
+            // that field is the same number as the PTY's right up until it is
+            // not: `tcsetwinsize()` is available to the child too, and `stty
+            // rows 50 cols 100` is an ordinary line in a shell script. After
+            // one of those, a remembered value names a size nothing is at, and
+            // rolling back to it would move the grid away from the PTY rather
+            // than onto it — turning the one case this branch exists to prevent
+            // into the case it causes. The kernel is the only party here that
+            // cannot be stale.
+            //
+            // `tcgetwinsize` is the right question because a failed
+            // `tcsetwinsize` leaves the size unchanged, so what it reports is
+            // what the PTY was holding when the call above failed.
+            //
+            // Both results are discarded because nothing is left to do with
+            // either: if the read or the reflow fails, the grid stays at the
+            // new size against a PTY at the old one whatever we return, and the
+            // PTY error propagates because it is the cause.
             //
             // ponytail: no test seeds this. `tcsetwinsize()` fails on EBADF,
             // ENOTTY, EIO (orphaned process group) or EINVAL, none of which is
             // reachable from safe code holding a live `Session` — the fd is
             // owned and known to be a terminal. Written anyway because EIO is
             // reachable in production even if not from here.
-            let (cols, rows) = self.size;
-            let _ = self.grid.resize(cols, rows);
+            if let Ok(held) = rustix::termios::tcgetwinsize(&self.pty) {
+                let _ = self.grid.resize(held.ws_col, held.ws_row);
+            }
             return Err(e.into());
         }
-        self.size = (cols, rows);
         Ok(())
     }
 
@@ -318,5 +321,44 @@ mod tests {
             "resize put the axes on the pty the wrong way round"
         );
         assert_eq!(session.grid().size(), Some((100, 30)));
+    }
+
+    #[tokio::test]
+    async fn a_child_can_move_the_pty_size_behind_the_grids_back() {
+        // Why `resize` asks the kernel what to roll back to instead of keeping
+        // its own copy. `tcsetwinsize()` is not reserved to whoever opened the
+        // pty, and `stty` is an unremarkable thing for a child to run, so a
+        // remembered size can be stale through no fault of this type's.
+        //
+        // Asserted rather than left as a remark in a comment, because it is the
+        // premise the rollback rests on: if the child ever stopped being able to
+        // do this, the simpler bookkeeping would be correct again and this test
+        // is what would say so.
+        let mut session = Session::spawn(
+            pty_process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg("stty rows 50 cols 100"),
+            80,
+            24,
+        )
+        .expect("spawning /bin/sh on a pty");
+
+        drain(&mut session).await;
+
+        let size = rustix::termios::tcgetwinsize(&session.pty).expect("reading the pty size");
+        assert_eq!(
+            (size.ws_col, size.ws_row),
+            (100, 50),
+            "the child's own tcsetwinsize should have moved the pty"
+        );
+
+        // And the other half of the divergence: nothing propagated it. The grid
+        // is still where `spawn` left it, which is exactly why a stale
+        // remembered size would have been indistinguishable from a live one.
+        assert_eq!(
+            session.grid().size(),
+            Some((80, 24)),
+            "a child-initiated resize should not have reached the grid"
+        );
     }
 }

@@ -19,6 +19,16 @@ and a path is not a stable identifier, so a claim resting on one can come to poi
 different bytes without saying so. The immutability condition is that second reason
 spelled out — a path plus a branch name is a moving target wearing a pin's clothes.
 
+Captures **this repository made itself**, of behavior it is willing to publish, are
+committed under `docs/derivation/captures/` and that directory is named here. Neither
+reason above applies to one: there is no private location to disclose, and the second is
+answered rather than waived — the hash in the row stays the citation of record, so a file
+edited under the same name stops matching and the claim fails loudly instead of quietly
+re-pointing. The gain is that a reader can check the observation instead of asking us for
+it, which is the entire point of registering a hash. Whether a recording can be published
+is judged per capture, not assumed: anything carrying a real session's contents is not
+covered by this and takes the private path.
+
 IDs are `CAP-<nnn>`, allocated in order and never reused: a `Derivation:` marker in
 shipped code cites one, so a recycled ID would silently re-point an existing citation at
 a different observation. `cleanroom-gate` resolves every cited ID against this table or
@@ -27,10 +37,22 @@ a different observation. `cleanroom-gate` resolves every cited ID against this t
 | ID | sha256 | What it observably shows |
 |---|---|---|
 | `CAP-001` | `efb1138c4730af0cea8a0aa8e9a558c8c642227fa20ef529346c777cb4f2a043` | A public third-party VT fuzz harness. Its first input byte selects a parser code path and is not terminal input, and it drives a terminal built at 80×24 with 100 lines of scrollback. Both facts decide how the conformance corpus has to be replayed for its frames to describe the same terminal upstream tests. |
+| `CAP-002` | `9cf4c0478be69f618838964da0d483fbb02dc45394c9ca9968e041c958c9adf4` | On Linux, a `read` of a pseudoterminal master after the last descriptor for its slave has closed fails with `EIO` rather than reporting end-of-file. A terminal treating that errno as an error reports every clean child exit as a failure. |
 
 `CAP-001` takes the public-source clause: `crates/gwk-pty/fixtures/PROVENANCE.md` names
-its repository, revision, license and path. The repository, revision and path are already
-build inputs — `pins.env` pins them and the soak test reads the corpus through them — and
-the license is named there because the clause requires it, not because the build consults
-it. The hash above stays the citation of record, so "the harness says this" remains
-falsifiable against bytes rather than against a location.
+its repository, revision, license and path. What that clause requires is that the tree is
+materialized by pin, and it is — `pins.env` fixes the repository at a full commit hash and
+`tools/pty-toolchain.sh` checks it out — so naming a path inside it discloses no location
+the build does not. It does **not** require that the artifact itself is read: nothing in
+this build or its tests opens the harness file, and an earlier version of this note
+claimed otherwise, justifying the row on the very ground the clause was amended to
+abandon. The corpus beside it is read; the harness is not. The hash above stays the
+citation of record either way, so "the harness says this" remains falsifiable against
+bytes rather than against a location.
+
+`CAP-002` takes the own-observation clause: the capture is this repository's, committed
+under `docs/derivation/captures/`, and it carries the probe that produced it so the
+observation can be re-run rather than believed. It is registered because the behavior has
+no permitted spec to cite — POSIX gives `read` an `EIO` for a background process group
+reading its controlling terminal, which is a different condition entirely, and citing it
+would be a false citation dressed as a real one.

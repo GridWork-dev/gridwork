@@ -28,9 +28,14 @@ MIT requires its copyright and permission notice to travel with "all copies or
 substantial portions of the Software", and 24 files copied byte for byte is not
 obviously the small side of that line. Naming the license in a table is not the
 same as discharging the condition it attaches, so the notice is vendored beside
-the files it covers rather than cited from a distance. The repository's own
-`LICENSE` at the root governs this crate; `LICENSE-ghostty` governs these
-fixtures, and neither is a statement about the other.
+the files it covers rather than cited from a distance.
+
+That makes `gwk-pty` the only crate here with two license files under it, so be
+exact about which governs what: `../LICENSE` is this crate's own — Apache-2.0,
+the same per-crate copy every other crate carries — and it governs the code.
+`LICENSE-ghostty` governs the vendored fixtures in this directory and nothing
+else. Neither is a statement about the other, and the one a reader standing in
+this crate meets first is the Apache-2.0 one directly above.
 
 These are the **seed** inputs for ghostty's own VT stream fuzzer, not fuzzer
 output. The distinction is the whole reason this directory holds these and not
@@ -44,15 +49,24 @@ under test come from one tree rather than two that happen to be near each other.
 ## The first byte is not terminal input
 
 `test/fuzz-libghostty/src/fuzz_stream.zig` reads byte 0 as a mode selector and
-feeds only `input[1..]` to the parser:
+feeds only `input[1..]` to the parser. Quoted verbatim, indentation and all —
+an earlier version of this file collapsed the braces and dropped the two
+per-branch comments, which changed nothing about the meaning and made the block
+something other than what it claimed to be:
 
 ```zig
-// Use the first byte to decide between the scalar and slice paths
-// so both code paths get exercised by the fuzzer.
-const mode = input[0];
-const data = input[1..];
-if (mode & 1 == 0) { stream.nextSlice(data); }
-else { for (data) |byte| stream.next(byte); }
+    // Use the first byte to decide between the scalar and slice paths
+    // so both code paths get exercised by the fuzzer.
+    const mode = input[0];
+    const data = input[1..];
+
+    if (mode & 1 == 0) {
+        // Slice path — exercises SIMD fast-path if enabled
+        stream.nextSlice(data);
+    } else {
+        // Scalar path — exercises byte-at-a-time UTF-8 decoding
+        for (data) |byte| stream.next(byte);
+    }
 ```
 
 So the corpus runner here strips byte 0 as well. Skipping that step would feed

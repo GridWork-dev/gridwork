@@ -25,10 +25,11 @@ pty-process.workspace = true
 # failure. Spelling it `5` inline would need the same comment and would not
 # survive someone reading it on a platform where it is not 5.
 #
-# `termios` is for one test, which reads the PTY's window size back out of the
-# kernel to prove a refused resize never reached the child. Asking our own
-# struct instead would agree with us no matter which order `resize` ran in,
-# which is the whole thing the test exists to catch.
+# `termios` reads the PTY's window size back out of the kernel. `resize` needs
+# it to know what to roll a refused resize back to — the child can move that
+# size itself, so a copy we kept would be stale without warning — and the tests
+# need it because a field we set ourselves would agree with us no matter which
+# order `resize` ran its two halves in, which is the thing they exist to catch.
 rustix = { workspace = true, features = ["std", "termios"] }
 sha2.workspace = true
 thiserror.workspace = true
