@@ -231,4 +231,37 @@ mod tests {
 
         assert_eq!(session.grid().size(), Some((80, 24)));
     }
+
+    #[tokio::test]
+    async fn the_child_is_told_the_size_on_the_axes_we_meant() {
+        // `Session` takes (cols, rows) and `Size::new` takes (rows, cols), so
+        // every call site flips the pair by hand. That conversion appears twice
+        // — once in `spawn`, once in `resize` — and until this test nothing
+        // checked either against the kernel. A transposition gives the child a
+        // 24-column terminal while the grid is 80 wide: every full-screen
+        // program wraps at 24, and the grid faithfully records the wrapped
+        // output, so the screens still agree and the bug reads as the child's.
+        //
+        // The numbers are deliberately unequal and unequal AGAIN after the
+        // resize; a square terminal would pass this test transposed.
+        let mut session = Session::spawn(pty_process::Command::new("/bin/cat"), 80, 24)
+            .expect("spawning /bin/cat on a pty");
+
+        let spawned = rustix::termios::tcgetwinsize(&session.pty).expect("reading the pty size");
+        assert_eq!(
+            (spawned.ws_col, spawned.ws_row),
+            (80, 24),
+            "spawn put the axes on the pty the wrong way round"
+        );
+
+        session.resize(100, 30).expect("resizing to a valid size");
+
+        let resized = rustix::termios::tcgetwinsize(&session.pty).expect("reading the pty size");
+        assert_eq!(
+            (resized.ws_col, resized.ws_row),
+            (100, 30),
+            "resize put the axes on the pty the wrong way round"
+        );
+        assert_eq!(session.grid().size(), Some((100, 30)));
+    }
 }
