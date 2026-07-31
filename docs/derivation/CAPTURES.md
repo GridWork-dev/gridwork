@@ -20,14 +20,22 @@ different bytes without saying so. The immutability condition is that second rea
 spelled out — a path plus a branch name is a moving target wearing a pin's clothes.
 
 Captures **this repository made itself**, of behavior it is willing to publish, are
-committed under `docs/derivation/captures/` and that directory is named here. Neither
-reason above applies to one: there is no private location to disclose, and the second is
-answered rather than waived — the hash in the row stays the citation of record, so a file
-edited under the same name stops matching and the claim fails loudly instead of quietly
-re-pointing. The gain is that a reader can check the observation instead of asking us for
-it, which is the entire point of registering a hash. Whether a recording can be published
-is judged per capture, not assumed: anything carrying a real session's contents is not
-covered by this and takes the private path.
+committed under `docs/derivation/captures/` — everything in that directory is one — and
+that directory is named here. Neither reason above applies: there is no private location
+to disclose, and the second is answered rather than waived, because `cleanroom-gate`
+verifies that every file in that directory hashes to something a row carries. Edit the
+bytes and the gate rejects the change. That check deliberately does not consult the
+changed-path list, since `docs/` is not a gated prefix and a change touching only a
+capture would otherwise never be looked at.
+
+An earlier version of this paragraph asserted that same guarantee before anything
+implemented it, and the reviewer who caught it was right to treat a rule amendment written
+in response to a review finding as the likeliest place for one. The rule is the same; what
+changed is that it is now true.
+
+Whether a recording can be published is judged per capture, not assumed: anything carrying
+a real session's contents is not covered by this and takes the private path, where the
+hash is still the citation and the retention is ours to honor.
 
 IDs are `CAP-<nnn>`, allocated in order and never reused: a `Derivation:` marker in
 shipped code cites one, so a recycled ID would silently re-point an existing citation at

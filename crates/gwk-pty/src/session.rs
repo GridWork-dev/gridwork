@@ -95,8 +95,13 @@ impl Session {
             // citing it would be a false citation wearing a real one's clothes.
             // No man page installed here documents the slave-closed case at all.
             //
-            // Deleting this arm was tried: both PTY tests below fail on Linux,
-            // so it is load-bearing here. Whether any other platform needs it is
+            // Deleting this arm was tried: every test below that drains a child
+            // to EOF fails on Linux, three of them at the time of writing. The
+            // mechanism rather than the count, because the count was written as
+            // "both" and was stale within the same commit that added a third
+            // such test two screens further down.
+            //
+            // So it is load-bearing here. Whether any other platform needs it is
             // NOT established by this repository, and an earlier version of this
             // comment asserted that macOS returns 0 instead — nothing checks
             // that. The macOS job builds the default members, which do not
@@ -165,9 +170,14 @@ impl Session {
             // into the case it causes. The kernel is the only party here that
             // cannot be stale.
             //
-            // `tcgetwinsize` is the right question because a failed
-            // `tcsetwinsize` leaves the size unchanged, so what it reports is
-            // what the PTY was holding when the call above failed.
+            // Derivation: POSIX-WINSIZE — on failure `tcsetwinsize()` returns -1
+            // and the terminal window size SHALL NOT be changed. That is what
+            // makes `tcgetwinsize` the right question here rather than a guess:
+            // the call above failed, so the size it reports is the one the PTY
+            // was holding when it did. The fact is on the same page as the
+            // SIGWINCH rule cited above the method, but it is a different
+            // sentence doing different work, so it gets its own marker instead
+            // of leaning on that one's proximity.
             //
             // Both results are discarded because nothing is left to do with
             // either: if the read or the reflow fails, the grid stays at the

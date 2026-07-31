@@ -162,6 +162,51 @@ EOF
   fi
 }
 
+# Every capture this repository publishes is registered under its own digest.
+#
+# CAPTURES.md names no paths, so this cannot map a row to a file. It asserts the
+# weaker and sufficient thing: each committed capture's sha256 appears as some
+# row. Edit the bytes and the digest stops appearing, and that is the entire
+# reason a self-made capture is allowed to have its location named at all — the
+# registry's objection to paths is that a claim resting on one can come to point
+# at different bytes without saying so, and this is what makes it say so.
+#
+# Deliberately NOT driven by the changed-path list. A capture lives under docs/,
+# which is not a gated prefix, so a change touching only a capture file reaches
+# the early exit below and is never looked at. That is precisely the edit worth
+# catching, so this runs on every invocation of the real gate.
+#
+# ponytail: everything in the directory is treated as a capture. If it ever needs
+# a README, give this an extension allowlist rather than a skip-list of names.
+check_captures() {
+  local dir="docs/derivation/captures" reg="docs/derivation/CAPTURES.md"
+  local f sum bad=0
+  [[ -d "$dir" ]] || return 0
+  for f in "$dir"/*; do
+    [[ -f "$f" ]] || continue
+    sum="$(sha256sum "$f" | cut -d' ' -f1)"
+    if ! grep -qE "^\|.*${sum}.*\|" "$reg"; then
+      echo "cleanroom-gate: $f is not registered in $reg under its own sha256" >&2
+      echo "cleanroom-gate:   the file hashes to $sum, which no row carries" >&2
+      bad=1
+    fi
+  done
+  if [[ $bad -ne 0 ]]; then
+    cat >&2 <<'EOF'
+
+A capture is cited by digest, never by path, so its bytes and its row have to
+stay the same thing. Either the file was edited after it was registered — in
+which case it is no longer the observation anything cites, and re-registering it
+means a new row, not an edited hash — or it was added without a row.
+EOF
+    return 1
+  fi
+}
+
+if [[ "$mode" == "check" ]]; then
+  check_captures
+fi
+
 touched=()
 while IFS= read -r f; do
   [[ -n "$f" ]] || continue

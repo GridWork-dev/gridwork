@@ -621,6 +621,22 @@ jobs:
             exit 1
           fi
           echo "cleanroom-gate: seeded violation correctly rejected ($seed)"
+      - name: prove an unregistered capture is rejected (seeded violation)
+        run: |
+          set -euo pipefail
+          # The capture check is the one part of this gate that is NOT driven by
+          # the changed-path list, because captures live under docs/ and a change
+          # touching only one reaches no gated prefix. So it is seeded with an
+          # EMPTY path list: if that still rejects, the check really does run
+          # independently of what the diff happened to contain.
+          printf 'not a registered capture\n' > docs/derivation/captures/seeded-violation.txt
+          if : | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate accepted an unregistered capture — the gate is broken' >&2
+            rm -f docs/derivation/captures/seeded-violation.txt
+            exit 1
+          fi
+          rm -f docs/derivation/captures/seeded-violation.txt
+          echo "cleanroom-gate: unregistered capture correctly rejected"
       - name: the subject digest does not depend on the locale
         run: |
           set -euo pipefail
