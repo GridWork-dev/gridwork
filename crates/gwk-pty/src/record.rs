@@ -52,11 +52,12 @@ pub enum Event {
     // child never wrote.
     /// Bytes the child wrote, exactly as they were read.
     Output(Vec<u8>),
-    // Derivation: POSIX-TERM §11 — the window size is a terminal attribute
-    // with its own call (`tcsetwinsize`), not something carried in the data a
-    // process writes. So it cannot be recovered from the byte stream and has
-    // to ride the recording as its own event; a replay that dropped it would
-    // reflow every later line against the wrong width.
+    // Derivation: POSIX-WINSIZE — the window size lives in a `winsize` struct
+    // set by `tcsetwinsize()` against a file descriptor, which is a channel
+    // separate from the bytes a process writes to that same descriptor. So it
+    // cannot be recovered from the byte stream and has to ride the recording as
+    // its own event; a replay that dropped it would reflow every later line
+    // against the wrong width.
     /// The window changed size.
     Resize { cols: u16, rows: u16 },
 }

@@ -105,15 +105,20 @@ impl Session {
 
     /// Tell both the grid and the child about a new window size.
     ///
-    /// Both halves matter, and in this order — but not for the reason it looks
-    /// like. The grid goes first because it is the half that can REFUSE: a zero
-    /// axis returns `None` and `?` leaves below without touching the PTY.
-    // Derivation: POSIX-TERM §11 — setting the window size through the terminal
-    // interface delivers SIGWINCH to the foreground process group on success.
-    // That signal is the child's cue to re-read the size and repaint, so the
-    // second line below is a commitment: once it runs, the child has been told.
-    // Reversed, a size the grid rejects would already have gone to the child,
-    // and nothing later reconciles the two — the divergence is permanent.
+    /// Either both halves take the new size or neither does. The grid goes
+    /// first because it is the half that can refuse cheaply; the PTY can also
+    /// fail, so that half rolls the grid back rather than leaving the two
+    /// disagreeing about how wide the world is.
+    // Derivation: POSIX-WINSIZE — `tcsetwinsize()` delivers SIGWINCH to the
+    // foreground process group when the terminal size WAS CHANGED, and
+    // explicitly delivers nothing when it is set to the value it already had.
+    // Changed, not merely successful: a no-op resize returns success and wakes
+    // nobody, so "the call returned Ok" is not the same claim as "the child has
+    // been told" and this comment must not conflate them.
+    //
+    // That signal is the child's only cue to re-read the size and repaint, so a
+    // size the two halves disagree about is not self-correcting — whichever one
+    // is wrong stays wrong until something resizes again. Hence the rollback.
     //
     // It is NOT an interleaving hazard, which is what the first version of this
     // comment claimed. `pump` and `resize` both take `&mut self` and `resize`
@@ -122,10 +127,26 @@ impl Session {
     // returns. Stating a mechanism that can't fire is worse than stating none:
     // the next reader checks it, finds it inapplicable, and reorders the lines.
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<(), SpawnError> {
+        let previous = self.grid.size();
         self.grid
             .resize(cols, rows)
             .ok_or(SpawnError::Dimensions { cols, rows })?;
-        self.pty.resize(Size::new(rows, cols))?;
+        if let Err(e) = self.pty.resize(Size::new(rows, cols)) {
+            // Restoring to dimensions the grid was already holding, so this
+            // cannot itself be a rejected size. Ignored rather than `?`-ed
+            // because the caller wants the error that actually happened.
+            //
+            // ponytail: no test seeds this. `tcsetwinsize()` fails on EBADF,
+            // ENOTTY, EIO (orphaned process group) or EINVAL, and none of the
+            // four is reachable from safe code holding a live `Session` — the
+            // fd is owned and known to be a terminal. Written anyway because
+            // the alternative is a comment claiming an atomicity the code does
+            // not have, and EIO is reachable in production even if not here.
+            if let Some((cols, rows)) = previous {
+                let _ = self.grid.resize(cols, rows);
+            }
+            return Err(e.into());
+        }
         Ok(())
     }
 

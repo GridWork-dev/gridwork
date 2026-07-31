@@ -7,12 +7,16 @@ privately and can be produced against their hash if a derivation is ever questio
 
 Rows carry only the ID, hash, and an observable description. A storage path may be named
 elsewhere in-tree for a capture of **public source**, and only while all of these hold:
-the repository, revision and path are already a build input, the license is named, and
-the hash — never the path — remains the citation of record. For anything else, and for
-private recordings above all, the location is not written down. Two reasons, and the
-second survives even where the first does not: a citation must not disclose where a
-private capture is kept, and a path is not a stable identifier, so a claim resting on one
-can come to point at different bytes without saying so.
+the repository and path are already a build input; the revision they are pinned at is an
+**immutable identifier** — a full commit hash, never a branch or a movable tag; the
+license is named **and permits the use** (a named but disqualifying license fails this,
+which is rule 1's business, not a formality this clause discharges); and the hash — never
+the path — remains the citation of record. For anything else, and for private recordings
+above all, the location is not written down. Two reasons, and the second survives even
+where the first does not: a citation must not disclose where a private capture is kept,
+and a path is not a stable identifier, so a claim resting on one can come to point at
+different bytes without saying so. The immutability condition is that second reason
+spelled out — a path plus a branch name is a moving target wearing a pin's clothes.
 
 IDs are `CAP-<nnn>`, allocated in order and never reused: a `Derivation:` marker in
 shipped code cites one, so a recycled ID would silently re-point an existing citation at

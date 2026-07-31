@@ -99,14 +99,23 @@ impl Renderer {
                     let mut text = String::new();
                     let mut cell_iter = self.cells.update(row).ok()?;
                     while let Some(cell) = cell_iter.next() {
-                        // Derivation: UAX-11 — an East Asian Wide character
-                        // occupies two terminal columns. libghostty-vt models
-                        // that as the character in one cell followed by a
-                        // spacer cell marked do-not-render, so the spacer
-                        // contributes nothing here and a row's char count is
-                        // NOT its column count. Width is the consumer's to
-                        // compute from the text, not something to fake here by
-                        // padding.
+                        // Derivation: UAX-11 — East Asian Wide (W) and
+                        // Fullwidth (F) characters take one Em in a fixed-pitch
+                        // font against half an Em for the narrow classes, i.e.
+                        // twice the advance. The annex stops there, and says so
+                        // itself: the property is not intended for use by
+                        // modern terminal emulators without tailoring. So "two
+                        // columns" is this crate reading that ratio into a cell
+                        // grid, NOT a sentence UAX-11 contains — cite it for
+                        // the ratio, not for the conclusion.
+                        //
+                        // What the shape below needs is only that some
+                        // characters take two cells: libghostty-vt models one
+                        // as the character followed by a spacer cell marked
+                        // do-not-render, so the spacer contributes nothing here
+                        // and a row's char count is NOT its column count. Width
+                        // stays the consumer's to compute from the text rather
+                        // than something faked here by padding.
                         if matches!(
                             cell.raw_cell().ok()?.wide().ok()?,
                             CellWide::SpacerTail | CellWide::SpacerHead
