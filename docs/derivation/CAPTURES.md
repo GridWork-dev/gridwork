@@ -24,6 +24,8 @@ a different observation. `cleanroom-gate` resolves every cited ID against this t
 | `CAP-001` | `efb1138c4730af0cea8a0aa8e9a558c8c642227fa20ef529346c777cb4f2a043` | A public third-party VT fuzz harness. Its first input byte selects a parser code path and is not terminal input, and it drives a terminal built at 80×24 with 100 lines of scrollback. Both facts decide how the conformance corpus has to be replayed for its frames to describe the same terminal upstream tests. |
 
 `CAP-001` takes the public-source clause: `crates/gwk-pty/fixtures/PROVENANCE.md` names
-its repository, revision, license and path, all four of which `pins.env` and the soak
-test already depend on to build. The hash above stays the citation of record, so "the
-harness says this" remains falsifiable against bytes rather than against a location.
+its repository, revision, license and path. The repository, revision and path are already
+build inputs — `pins.env` pins them and the soak test reads the corpus through them — and
+the license is named there because the clause requires it, not because the build consults
+it. The hash above stays the citation of record, so "the harness says this" remains
+falsifiable against bytes rather than against a location.

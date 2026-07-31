@@ -59,8 +59,9 @@ impl Attach {
 /// Feed recorded entries back into a grid, in order.
 ///
 /// Resizes are applied as resizes rather than written as bytes, because that is
-/// what they were: a resize reaches a terminal as an ioctl, never through the
-/// stream of characters, so there is no byte sequence that would reproduce one.
+/// what they were: a resize reaches a terminal through the terminal interface,
+/// never through the stream of characters, so there is no byte sequence that
+/// would reproduce one.
 pub fn replay<'a>(entries: impl Iterator<Item = &'a Entry>, grid: &mut Grid) -> Option<()> {
     for entry in entries {
         match &entry.event {

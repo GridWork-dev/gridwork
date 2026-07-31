@@ -105,12 +105,22 @@ impl Session {
 
     /// Tell both the grid and the child about a new window size.
     ///
-    /// Both halves matter, and in this order.
+    /// Both halves matter, and in this order — but not for the reason it looks
+    /// like. The grid goes first because it is the half that can REFUSE: a zero
+    /// axis returns `None` and `?` leaves below without touching the PTY.
     // Derivation: POSIX-TERM §11 — setting the window size through the terminal
     // interface delivers SIGWINCH to the foreground process group on success.
-    // So the second line below is what wakes the child, and a child that
-    // repaints on that signal would paint its new layout into a grid still
-    // holding the old size if the grid were resized after rather than before.
+    // That signal is the child's cue to re-read the size and repaint, so the
+    // second line below is a commitment: once it runs, the child has been told.
+    // Reversed, a size the grid rejects would already have gone to the child,
+    // and nothing later reconciles the two — the divergence is permanent.
+    //
+    // It is NOT an interleaving hazard, which is what the first version of this
+    // comment claimed. `pump` and `resize` both take `&mut self` and `resize`
+    // has no await point, so a repaint cannot land mid-resize; the child's
+    // bytes wait in the PTY buffer until a `pump` that cannot start until this
+    // returns. Stating a mechanism that can't fire is worse than stating none:
+    // the next reader checks it, finds it inapplicable, and reorders the lines.
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<(), SpawnError> {
         self.grid
             .resize(cols, rows)
@@ -192,5 +202,33 @@ mod tests {
             Session::spawn(pty_process::Command::new("/bin/true"), 0, 24),
             Err(SpawnError::Dimensions { cols: 0, rows: 24 })
         ));
+    }
+
+    #[tokio::test]
+    async fn a_refused_resize_does_not_reach_the_child() {
+        // The invariant the ordering in `resize` exists for, and the one a
+        // comment alone would not hold: when the grid rejects a size, the PTY
+        // must still be carrying the old one. Swapping the two lines leaves
+        // the child believing a size the grid never adopted, with nothing
+        // downstream to reconcile them — so this test is what makes that
+        // reorder fail rather than merely look wrong to a careful reader.
+        let mut session = Session::spawn(pty_process::Command::new("/bin/cat"), 80, 24)
+            .expect("spawning /bin/cat on a pty");
+
+        assert!(matches!(
+            session.resize(0, 24),
+            Err(SpawnError::Dimensions { cols: 0, rows: 24 })
+        ));
+
+        // Asked of the kernel rather than of our own bookkeeping: a field we
+        // set ourselves would agree with us whichever order the lines ran in.
+        let size = rustix::termios::tcgetwinsize(&session.pty).expect("reading the pty size");
+        assert_eq!(
+            (size.ws_col, size.ws_row),
+            (80, 24),
+            "the child was told a size the grid refused"
+        );
+
+        assert_eq!(session.grid().size(), Some((80, 24)));
     }
 }
