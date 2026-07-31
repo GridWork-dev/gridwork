@@ -105,9 +105,12 @@ impl Session {
 
     /// Tell both the grid and the child about a new window size.
     ///
-    /// Both halves matter and in this order: the PTY ioctl is what raises
-    /// `SIGWINCH` in the child, and a child that repaints on that signal would
-    /// otherwise paint its new layout into a grid still holding the old one.
+    /// Both halves matter, and in this order.
+    // Derivation: POSIX-TERM §11 — setting the window size through the terminal
+    // interface delivers SIGWINCH to the foreground process group on success.
+    // So the second line below is what wakes the child, and a child that
+    // repaints on that signal would paint its new layout into a grid still
+    // holding the old size if the grid were resized after rather than before.
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<(), SpawnError> {
         self.grid
             .resize(cols, rows)
