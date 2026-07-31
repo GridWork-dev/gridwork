@@ -185,34 +185,56 @@ jobs:
           persist-credentials: false
       - name: load the pins
         run: grep -E '^[A-Z_]+=' crates/gwk-pty/pins.env >> "$GITHUB_ENV"
-      # Always, cache hit or not — the point is to catch a Cargo.toml edit that
-      # never reaches the materialize step below. `--env` does no work and needs
-      # no toolchain; it sources the pins and runs their assertions.
-      - name: the libghostty-vt pin agrees with Cargo.toml
-        run: ./tools/pty-toolchain.sh --env > /dev/null
-      - name: prove the pin check can fail
-        run: |
-          set -euo pipefail
-          trap 'git checkout -- Cargo.toml' EXIT
-          sed -i 's/^libghostty-vt = "=.*"$/libghostty-vt = "=0.0.0-seeded"/' Cargo.toml
-          if ./tools/pty-toolchain.sh --env > /dev/null 2>&1; then
-            echo "pty-toolchain: accepted a desynced pin — the check is decoration" >&2
-            exit 1
-          fi
-          sed -i 's/^libghostty-vt = "=.*"$/libghostty-vt = "^0.2.0"/' Cargo.toml
-          if ./tools/pty-toolchain.sh --env > /dev/null 2>&1; then
-            echo "pty-toolchain: accepted a caret range where an exact pin is required" >&2
-            exit 1
-          fi
-          # Positive control: both seeds above would also "fail correctly" against
-          # a script that simply always exited non-zero.
-          git checkout -- Cargo.toml
-          ./tools/pty-toolchain.sh --env > /dev/null
-          echo "pin check rejects a desynced version and a relaxed range, and accepts the real one"
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: ${{ env.ZIG_VERSION }}
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      # Registry crates come down here, with the network, exactly as every other
+      # job gets them. Populating a package cache is not a build.
+      #
+      # BEFORE the pin checks, not after: one of them reads the resolved
+      # libghostty-vt-sys out of the dependency graph, and the graph is not
+      # readable until its crates are on disk.
+      - name: fetch registry dependencies
+        run: cargo fetch --locked
+      # Always, cache hit or not — the point is to catch a Cargo.toml edit that
+      # never reaches the materialize step below, and to refuse to materialize a
+      # ghostty tree whose revision has not been checked against the bindings that
+      # will be compiled against it. `--env` does no work; it runs the assertions.
+      - name: the pins agree with Cargo.toml and with libghostty-vt-sys
+        run: ./tools/pty-toolchain.sh --env > /dev/null
+      - name: prove the pin checks can fail
+        run: |
+          set -euo pipefail
+          trap 'git checkout -- Cargo.toml crates/gwk-pty/pins.env' EXIT
+
+          seed() { # seed <label>; expects the tree already edited
+            if ./tools/pty-toolchain.sh --env > /dev/null 2>&1; then
+              echo "pty-toolchain: accepted $1 — the check is decoration" >&2
+              exit 1
+            fi
+            echo "  rejected: $1"
+          }
+
+          sed -i 's/^libghostty-vt = "=.*"$/libghostty-vt = "=0.0.0-seeded"/' Cargo.toml
+          seed "a desynced wrapper version"
+          git checkout -- Cargo.toml
+
+          sed -i 's/^libghostty-vt = "=.*"$/libghostty-vt = "^0.2.0"/' Cargo.toml
+          seed "a caret range where an exact pin is required"
+          git checkout -- Cargo.toml
+
+          # The realistic drift, not an invented one: fdbf9ff3 is the revision
+          # libghostty-vt-sys 0.2.0 pins, so this is the tree we would be building
+          # if resolution had landed one version earlier.
+          sed -i 's/^GHOSTTY_COMMIT=.*/GHOSTTY_COMMIT=fdbf9ff3a31d7531b691cb49c98fc465a1a503a0/' crates/gwk-pty/pins.env
+          seed "a real but WRONG ghostty revision"
+          git checkout -- crates/gwk-pty/pins.env
+
+          # Positive control: every seed above would also "fail correctly" against
+          # a script that simply always exited non-zero.
+          ./tools/pty-toolchain.sh --env > /dev/null
+          echo "the pin checks reject each seed and accept the real pins"
       # Keyed on the ghostty revision, so a re-pin invalidates it and nothing
       # else does. Restoring beats a 71 MB clone plus a ~560 MB package fetch.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -227,10 +249,6 @@ jobs:
       - name: materialize the pinned ghostty tree and its Zig package graph
         if: steps.ghostty-cache.outputs.cache-hit != 'true'
         run: ./tools/pty-toolchain.sh
-      # Registry crates come down here, with the network, exactly as every other
-      # job gets them. Populating a package cache is not a build.
-      - name: fetch registry dependencies
-        run: cargo fetch --locked
       # The actual proof that the build reaches no network. `tools/no-network.sh`
       # runs its argument in a namespace with no interfaces and REFUSES to run it
       # at all if it cannot make one — see the header there for why `--offline`
