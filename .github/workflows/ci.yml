@@ -262,6 +262,50 @@ jobs:
             cargo test -p gwk-pty --all-targets --locked --offline
             cargo test -p gwk-pty --doc --locked --offline
           '
+      # The conformance corpus is only a gate if it can fail. The step above
+      # already RAN it; these seeds show it says no to the three ways it could
+      # be hollowed out — a frame that stopped matching the parser, a fixture
+      # edited to agree with a doctored frame, and a corpus that quietly lost a
+      # vector.
+      #
+      # No network namespace here. The seeds are about the gate's judgement,
+      # not about where its bytes came from, and the build they need already
+      # happened above.
+      - name: prove the conformance gate can fail
+        run: |
+          set -euo pipefail
+          eval "$(./tools/pty-toolchain.sh --env)"
+          trap 'git checkout -- crates/gwk-pty/fixtures' EXIT
+
+          conformance() {
+            cargo test -p gwk-pty --test conformance --locked --offline > /dev/null 2>&1
+          }
+          seed() { # seed <label>; expects the tree already edited
+            if conformance; then
+              echo "conformance: accepted $1 — the gate is decoration" >&2
+              exit 1
+            fi
+            echo "  rejected: $1"
+          }
+
+          sed -i '0,/^cursor /s/^cursor .*/cursor 77,7/' crates/gwk-pty/fixtures/golden-frames.txt
+          seed "a golden frame that disagrees with the parser"
+          git checkout -- crates/gwk-pty/fixtures
+
+          # The direction a frame comparison alone cannot see: making the INPUT
+          # agree with a frame rather than the other way round.
+          printf 'x' >> crates/gwk-pty/fixtures/stream-initial/23-empty
+          seed "a fixture edited after its frame was captured"
+          git checkout -- crates/gwk-pty/fixtures
+
+          rm crates/gwk-pty/fixtures/stream-initial/01-plain-text-slice
+          seed "a vector missing from the corpus"
+          git checkout -- crates/gwk-pty/fixtures
+
+          # Positive control: all three seeds would also "fail correctly"
+          # against a test that could never pass at all.
+          conformance
+          echo "the conformance gate rejects each seed and accepts the real corpus"
 
   # Criterion 4, executable: `cargo install gridwork` has to work for someone who
   # has never heard of Zig. Every other job happens to run on a runner without

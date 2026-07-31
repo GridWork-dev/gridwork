@@ -1,0 +1,147 @@
+# Golden frames. Generated; do not hand-edit.
+# Provenance and how to regenerate: fixtures/PROVENANCE.md
+#
+# A diff here means the parser's behaviour moved. That is information,
+# not automatically a bug — read it before regenerating.
+
+== 01-plain-text-slice
+input-sha256 5461060c372d4da7f1cf01ec8b70b0b06f54764db8973569003e9c3d7bbe5a21
+cursor 0,1
+|Hello, World!|
+== end 01-plain-text-slice
+
+== 02-plain-text-scalar
+input-sha256 6576974548b8c55cddc0af50013339375350127d3e1ee5a07d2dc33aa112442d
+cursor 0,1
+|Hello, World!|
+== end 02-plain-text-scalar
+
+== 03-csi-cursor-sgr
+input-sha256 7d276ae8c7eacd8cc91b782dee2af6e672ae45e9b3deb8b75e7bd7dca39e5e89
+cursor 25,9
+||
+||
+||
+||
+||
+||
+||
+||
+||
+|                   foored|
+== end 03-csi-cursor-sgr
+
+== 04-csi-erase
+input-sha256 4eb647b07aa41f4203da50cb38908c047d1349a6568b49fa139323a93e5b7191
+cursor 4,0
+|line|
+== end 04-csi-erase
+
+== 05-osc-title-bel
+input-sha256 229131c2fe75decf89a0a34010ef2488aeebecbba99eae18008937b4bb44595e
+cursor 0,0
+== end 05-osc-title-bel
+
+== 06-osc-title-st
+input-sha256 c94ff35ea3af828994949a73deb76ae5cb31529e0b18061960d7a4f55bd32b81
+cursor 0,0
+== end 06-osc-title-st
+
+== 07-dcs-decrqss
+input-sha256 7dee77b6092058664ac990709cc6ea1f8149c0f48cd26a8292a40f948da8fa1e
+cursor 0,0
+== end 07-dcs-decrqss
+
+== 08-apc
+input-sha256 28fef10c659d56ed822de2c86e2d9cd758241796b661a446c56e83d8f2675eca
+cursor 0,0
+== end 08-apc
+
+== 09-mixed-text-csi
+input-sha256 01f822b8ea0918f9241f0a4eb7654ee0b997365d28c04adf0c18a382c14725db
+cursor 5,1
+|ABCDhello|
+|world|
+== end 09-mixed-text-csi
+
+== 10-sgr-256-rgb
+input-sha256 d61aa6090b99a219d2804a7018b770c1fa889589b2c420e76f67f7850c0b35b4
+cursor 11,0
+|redgreen bg|
+== end 10-sgr-256-rgb
+
+== 11-utf8-multibyte
+input-sha256 7ec30759aaf2e6ca1a28599980b513ecd02f910ffbf1c74c812cbcd4e3274144
+cursor 5,0
+|é中😀|
+== end 11-utf8-multibyte
+
+== 12-malformed-utf8
+input-sha256 902de3577cbb090a9e61151d27e379c1b84532853287cc6a7c7668ea9c542649
+cursor 8,0
+|��������|
+== end 12-malformed-utf8
+
+== 13-incomplete-csi
+input-sha256 6d064bd95b1cdf110d3c1a1a85c4c813f0a1e8e8d600c1a89ca7df5a2f06f3cf
+cursor 0,0
+== end 13-incomplete-csi
+
+== 14-decset-decrst
+input-sha256 2a2d684c3df577699e6a6a7315438a2aa63d4eb2f972c1032bb8b77ca0ca3147
+cursor 0,0
+== end 14-decset-decrst
+
+== 15-scroll-region
+input-sha256 54026cda8f393833d18cdd59281255aa7174734a75ee423ff3d3b0328ed4de2c
+cursor 0,0
+== end 15-scroll-region
+
+== 16-c1-controls
+input-sha256 511e14b602776ced5cd87d0ef050b18c16e57638b313cd4657201e1c685e5287
+cursor 14,0
+|�31m�My Title�|
+== end 16-c1-controls
+
+== 17-tab-backspace
+input-sha256 05467ab417a67721aae1a52d5a53da9d20cea02a50756ded434f62ab69166074
+cursor 23,0
+|        A       B       C|
+== end 17-tab-backspace
+
+== 18-insert-delete
+input-sha256 b2cdb3b50655b630c54451c805cd70c95746383428bbffbb6618cfed449e07c5
+cursor 0,0
+== end 18-insert-delete
+
+== 19-many-params
+input-sha256 2cafc44d23de6109c9ccb917c638a2f9c1ebce8f2c8b60ed661db96b1c28468d
+cursor 0,0
+== end 19-many-params
+
+== 20-csi-subparams
+input-sha256 f7817bbcab537e3e6bf3c3fee3dc23216ec8b0328fabdc0d6f9cacd9d2f822b3
+cursor 0,0
+== end 20-csi-subparams
+
+== 21-osc-hyperlink
+input-sha256 3a46deba5395b0f801a3d6edd0d9af74747c99af69a1dbacd186f18aafa96ddc
+cursor 5,0
+|click|
+== end 21-osc-hyperlink
+
+== 22-osc-clipboard
+input-sha256 ef798c86ad3926a6abff53c13c3bdcf0e622db44ff6950b6a5d50c2403aaa40f
+cursor 0,0
+== end 22-osc-clipboard
+
+== 23-empty
+input-sha256 6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d
+cursor 0,0
+== end 23-empty
+
+== 24-esc-misc
+input-sha256 4f319b60188b01f1c8237c7ec811d4604d73a92d8d786113e64371eaa78005cb
+cursor 0,0
+== end 24-esc-misc
+

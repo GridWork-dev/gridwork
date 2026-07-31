@@ -130,15 +130,45 @@ impl Grid {
     /// and a comparison that could not tell them apart would pass on a real
     /// divergence.
     pub fn text(&self) -> Option<String> {
-        let mut formatter = Formatter::new(
-            &self.term,
-            FormatterOptions::new().with_format(Format::Plain),
-        )
-        .ok()?;
-        let mut buf = vec![0u8; formatter.format_len().ok()?];
-        let len = formatter.format_buf(&mut buf).ok()?;
-        buf.truncate(len);
-        String::from_utf8(buf).ok()
+        String::from_utf8(self.format(Format::Plain)?).ok()
+    }
+
+    /// Run the formatter and hand back its bytes.
+    ///
+    /// Two halves of libghostty-vt 0.2.1's sizing API are each broken in a way
+    /// the other covers, so both are used and neither alone would do.
+    ///
+    /// `format_len` cannot express zero. It asks by passing a null buffer and
+    /// reading the needed size out of the resulting out-of-space error, so when
+    /// the answer really is zero the call SUCCEEDS — and the function maps that
+    /// success to `InvalidValue`, its own comment reading "this should always
+    /// fail with OutOfSpace". Treating that one error as a length of zero is
+    /// therefore exact rather than a guess: it is the only way the wrapper can
+    /// produce it here.
+    ///
+    /// `format_buf` cannot report a size at all. Its out-of-space error is
+    /// built by a converter that hardcodes `required: 0`, so growing a buffer
+    /// in response to it shrinks the buffer to nothing and asks again, forever.
+    /// That is not a hypothetical — it is what the first version of this
+    /// function did, and it hung the test suite rather than failing it.
+    ///
+    /// The screens that reach the zero case are not exotic. Anything leaving
+    /// nothing on screen qualifies: an OSC that only sets a title, a
+    /// DECSET/DECRST pair, a scroll-region change, an empty stream. Thirteen of
+    /// the twenty-four conformance vectors land there, and every one of them
+    /// made `text()` return `None`, as though the screen were unreadable.
+    fn format(&self, format: Format) -> Option<Vec<u8>> {
+        let mut formatter =
+            Formatter::new(&self.term, FormatterOptions::new().with_format(format)).ok()?;
+        let len = match formatter.format_len() {
+            Ok(len) => len,
+            Err(libghostty_vt::error::Error::InvalidValue) => 0,
+            Err(_) => return None,
+        };
+        let mut buf = vec![0u8; len];
+        let written = formatter.format_buf(&mut buf).ok()?;
+        buf.truncate(written);
+        Some(buf)
     }
 
     /// One row of [`text`](Self::text), zero-based, or `None` past the end.
@@ -160,12 +190,7 @@ impl Grid {
     /// wherever the last cell put it, so without this a reattached client draws
     /// the right screen with the caret in the wrong place.
     pub fn snapshot_vt(&self) -> Option<Vec<u8>> {
-        let mut formatter =
-            Formatter::new(&self.term, FormatterOptions::new().with_format(Format::Vt)).ok()?;
-        let mut buf = vec![0u8; formatter.format_len().ok()?];
-        let len = formatter.format_buf(&mut buf).ok()?;
-        buf.truncate(len);
-
+        let mut buf = self.format(Format::Vt)?;
         let (x, y) = self.cursor()?;
         buf.extend_from_slice(format!("\x1b[{};{}H", y + 1, x + 1).as_bytes());
         Some(buf)
