@@ -51,6 +51,54 @@ declared="$(sed -nE 's/^libghostty-vt = "=([0-9][0-9A-Za-z.+-]*)"$/\1/p' Cargo.t
   exit 1
 }
 
+# GHOSTTY_COMMIT IS NOT OURS TO CHOOSE. It is the one pin here that decides an ABI
+# rather than a version string, and the check above does not protect it at all.
+#
+# The chain: we exact-pin the safe wrapper, the wrapper asks for
+# `libghostty-vt-sys = "0.2.0"` — a CARET range — and the resolved `-sys` crate is
+# what declares which ghostty revision its Rust `extern` declarations were written
+# against. So the ABI-critical revision is picked by version resolution, not by us,
+# while `pins.env` decides which tree actually gets built. Today they agree by
+# coincidence: the wrapper is 0.2.0 and the `-sys` it resolves to is 0.2.1.
+#
+# Let those diverge and the failure is the silent kind. `GHOSTTY_SOURCE_DIR` points
+# `zig build` at OUR tree, so the bindings compile — against a ghostty the
+# declarations were not written for. Nothing errors; the struct layouts are just
+# wrong. That is exactly what the header of this file warns about, and until now
+# nothing enforced it.
+#
+# Needs the registry populated, so `cargo fetch` has to have run. Refusing is the
+# right answer if it has not: materializing a tree we cannot prove is the right one
+# is the failure this check exists to prevent.
+sys_manifests="$(cargo metadata --format-version 1 --locked --offline 2> /dev/null \
+  | jq -r '.packages[] | select(.name == "libghostty-vt-sys") | .manifest_path')" || true
+if [[ -z "$sys_manifests" ]]; then
+  echo "pty-toolchain: cannot read libghostty-vt-sys from the dependency graph." >&2
+  echo "  Run \`cargo fetch --locked\` first. Refusing to materialize a ghostty tree" >&2
+  echo "  whose revision has not been checked against the bindings that use it." >&2
+  exit 2
+fi
+if [[ "$(wc -l <<< "$sys_manifests")" -ne 1 ]]; then
+  echo "pty-toolchain: the graph resolves more than one libghostty-vt-sys:" >&2
+  sed 's/^/  /' <<< "$sys_manifests" >&2
+  echo "  One of them decides the ABI and this check cannot tell which." >&2
+  exit 1
+fi
+sys_commit="$(sed -nE 's/^const GHOSTTY_COMMIT: &str = "([0-9a-f]{40})";$/\1/p' \
+  "$(dirname "$sys_manifests")/build.rs")"
+[[ -n "$sys_commit" ]] || {
+  echo "pty-toolchain: could not read GHOSTTY_COMMIT out of $(dirname "$sys_manifests")/build.rs" >&2
+  echo "  The crate changed how it names its pinned revision; this check needs updating," >&2
+  echo "  and until it is, nothing is verifying the ghostty tree against the bindings." >&2
+  exit 1
+}
+[[ "$sys_commit" == "$GHOSTTY_COMMIT" ]] || {
+  echo "pty-toolchain: pins.env builds ghostty $GHOSTTY_COMMIT," >&2
+  echo "  but libghostty-vt-sys generated its bindings against $sys_commit." >&2
+  echo "  Set GHOSTTY_COMMIT to the latter, or pin a -sys that wants the former." >&2
+  exit 1
+}
+
 root="$PWD"
 src="$root/.ghostty"
 pkgs="$root/.zig-packages"
