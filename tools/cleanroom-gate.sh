@@ -176,13 +176,26 @@ EOF
 # the early exit below and is never looked at. That is precisely the edit worth
 # catching, so this runs on every invocation of the real gate.
 #
-# ponytail: everything in the directory is treated as a capture. If it ever needs
-# a README, give this an extension allowlist rather than a skip-list of names.
+# ponytail: everything under the directory is treated as a capture. If it ever
+# needs a README, give this an extension allowlist rather than a skip-list of
+# names.
 check_captures() {
   local dir="docs/derivation/captures" reg="docs/derivation/CAPTURES.md"
   local f sum bad=0
   [[ -d "$dir" ]] || return 0
-  for f in "$dir"/*; do
+  # `find`, not `"$dir"/*`. The glob skips dotfiles under bash's default settings
+  # and does not descend, so a capture named `.x`, or one in a subdirectory, was
+  # invisible to a check whose entire claim is that nothing in here goes
+  # unregistered. The round-nine reader found it by dropping a dotfile in and
+  # watching the gate pass — the same defect this function was added to fix, one
+  # layer narrower, which is the argument for asking the filesystem what is there
+  # rather than describing it in a pattern.
+  #
+  # `! -type d` rather than `-type f`, so a symlink is followed and hashed rather
+  # than silently skipped; `-print0` so a newline in a filename cannot end the
+  # loop early. A dangling symlink has no bytes to smuggle and falls out at the
+  # `-f` test below.
+  while IFS= read -r -d '' f; do
     [[ -f "$f" ]] || continue
     sum="$(sha256sum "$f" | cut -d' ' -f1)"
     if ! grep -qE "^\|.*${sum}.*\|" "$reg"; then
@@ -190,7 +203,7 @@ check_captures() {
       echo "cleanroom-gate:   the file hashes to $sum, which no row carries" >&2
       bad=1
     fi
-  done
+  done < <(find "$dir" ! -type d -print0)
   if [[ $bad -ne 0 ]]; then
     cat >&2 <<'EOF'
 

@@ -23,7 +23,8 @@ Captures **this repository made itself**, of behavior it is willing to publish, 
 committed under `docs/derivation/captures/` — everything in that directory is one — and
 that directory is named here. Neither reason above applies: there is no private location
 to disclose, and the second is answered rather than waived, because `cleanroom-gate`
-verifies that every file in that directory hashes to something a row carries. Edit the
+verifies that every file **under** that directory — dotfiles and subdirectories included,
+which the first version of the check missed — hashes to something a row carries. Edit the
 bytes and the gate rejects the change. That check deliberately does not consult the
 changed-path list, since `docs/` is not a gated prefix and a change touching only a
 capture would otherwise never be looked at.

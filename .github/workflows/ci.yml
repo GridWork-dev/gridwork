@@ -629,13 +629,20 @@ jobs:
           # touching only one reaches no gated prefix. So it is seeded with an
           # EMPTY path list: if that still rejects, the check really does run
           # independently of what the diff happened to contain.
-          printf 'not a registered capture\n' > docs/derivation/captures/seeded-violation.txt
+          # The seed is a DOTFILE IN A SUBDIRECTORY, deliberately. The check was
+          # first written as `for f in "$dir"/*`, which silently skips both —
+          # bash does not glob dotfiles by default and a plain glob does not
+          # descend — so an unregistered capture sat there and the gate passed.
+          # A plain `seeded.txt` would not have caught that, and would not catch
+          # it coming back.
+          mkdir -p docs/derivation/captures/.seeded
+          printf 'not a registered capture\n' > docs/derivation/captures/.seeded/.violation.txt
           if : | ./tools/cleanroom-gate.sh; then
             echo 'cleanroom-gate accepted an unregistered capture — the gate is broken' >&2
-            rm -f docs/derivation/captures/seeded-violation.txt
+            rm -rf docs/derivation/captures/.seeded
             exit 1
           fi
-          rm -f docs/derivation/captures/seeded-violation.txt
+          rm -rf docs/derivation/captures/.seeded
           echo "cleanroom-gate: unregistered capture correctly rejected"
       - name: the subject digest does not depend on the locale
         run: |
