@@ -43,7 +43,7 @@ gwk-theme = { path = "crates/gwk-theme", version = "0.0.2" }
 # libghostty-vt is pre-1.0 and its own docs promise breaking changes — a caret
 # range would let a patch release move the C ABI under a green lockfile. Moves
 # only together with the two pins in crates/gwk-pty/pins.env.
-libghostty-vt = "=0.2.0"
+libghostty-vt = "=0.2.1"
 # Generative tests only, for the three invariants where a hand-picked example
 # cannot cover the input space: the frame codec, the u64-through-decimal-TEXT
 # conversion, and cursor paging. Default features off — `fork` and `timeout`
