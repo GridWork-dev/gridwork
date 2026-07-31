@@ -46,6 +46,14 @@ pub struct Session {
     pty: Pty,
     child: tokio::process::Child,
     grid: Grid,
+    /// The size both halves are agreed on, so [`resize`](Self::resize) has
+    /// something infallible to roll back to.
+    ///
+    /// `Grid::size()` would answer this, but it answers with an `Option` — and
+    /// a rollback that can be skipped because the question failed is not a
+    /// rollback. Two `u16`s that were validated on the way in cannot fail to be
+    /// read on the way out.
+    size: (u16, u16),
 }
 
 impl Session {
@@ -59,7 +67,12 @@ impl Session {
         let (pty, pts): (Pty, Pts) = pty_process::open()?;
         pty.resize(Size::new(rows, cols))?;
         let child = command.spawn(pts)?;
-        Ok(Self { pty, child, grid })
+        Ok(Self {
+            pty,
+            child,
+            grid,
+            size: (cols, rows),
+        })
     }
 
     /// Read whatever the child has written and feed it to the parser.
@@ -105,10 +118,17 @@ impl Session {
 
     /// Tell both the grid and the child about a new window size.
     ///
-    /// Either both halves take the new size or neither does. The grid goes
-    /// first because it is the half that can refuse cheaply; the PTY can also
-    /// fail, so that half rolls the grid back rather than leaving the two
-    /// disagreeing about how wide the world is.
+    /// The grid goes first because it is the half that can refuse cheaply, and
+    /// a PTY failure rolls it back — so on either single failure the two halves
+    /// still agree.
+    ///
+    /// Not all-or-nothing in general, and the difference is worth stating
+    /// rather than rounding off. Restoring the grid is a real reflow, not a
+    /// saved buffer put back, so it can fail on its own; that needs a second
+    /// independent failure, and if it happens the halves are left disagreeing
+    /// and the PTY's error is what surfaces, because it is the cause. Claiming
+    /// atomicity here would be the same defect this method has already carried
+    /// once: a comment asserting a property the code does not have.
     // Derivation: POSIX-WINSIZE — `tcsetwinsize()` delivers SIGWINCH to the
     // foreground process group when the terminal size WAS CHANGED, and
     // explicitly delivers nothing when it is set to the value it already had.
@@ -127,26 +147,29 @@ impl Session {
     // returns. Stating a mechanism that can't fire is worse than stating none:
     // the next reader checks it, finds it inapplicable, and reorders the lines.
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<(), SpawnError> {
-        let previous = self.grid.size();
         self.grid
             .resize(cols, rows)
             .ok_or(SpawnError::Dimensions { cols, rows })?;
         if let Err(e) = self.pty.resize(Size::new(rows, cols)) {
-            // Restoring to dimensions the grid was already holding, so this
-            // cannot itself be a rejected size. Ignored rather than `?`-ed
-            // because the caller wants the error that actually happened.
+            // Rolling back to `self.size` rather than to `grid.size()`: the
+            // latter is an `Option`, and a rollback that gets skipped because
+            // reading the old size failed is not a rollback.
+            //
+            // The result is discarded because there is nothing left to do with
+            // it — the grid is already at the new size, the PTY is at the old,
+            // and if the restore fails they stay that way whatever we return.
+            // The PTY error is what propagates because it is the cause.
             //
             // ponytail: no test seeds this. `tcsetwinsize()` fails on EBADF,
-            // ENOTTY, EIO (orphaned process group) or EINVAL, and none of the
-            // four is reachable from safe code holding a live `Session` — the
-            // fd is owned and known to be a terminal. Written anyway because
-            // the alternative is a comment claiming an atomicity the code does
-            // not have, and EIO is reachable in production even if not here.
-            if let Some((cols, rows)) = previous {
-                let _ = self.grid.resize(cols, rows);
-            }
+            // ENOTTY, EIO (orphaned process group) or EINVAL, none of which is
+            // reachable from safe code holding a live `Session` — the fd is
+            // owned and known to be a terminal. Written anyway because EIO is
+            // reachable in production even if not from here.
+            let (cols, rows) = self.size;
+            let _ = self.grid.resize(cols, rows);
             return Err(e.into());
         }
+        self.size = (cols, rows);
         Ok(())
     }
 
