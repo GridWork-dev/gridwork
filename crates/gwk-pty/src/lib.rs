@@ -34,10 +34,12 @@
 use libghostty_vt::fmt::{Format, Formatter, FormatterOptions};
 use libghostty_vt::terminal::{Options, Terminal};
 
+pub mod attach;
 pub mod record;
 pub mod render;
 pub mod session;
 
+pub use attach::{Attach, CaughtUp};
 pub use record::{Entry, Event, Recording};
 pub use render::{Frame, Renderer};
 pub use session::{Session, SpawnError};
@@ -60,13 +62,27 @@ impl Grid {
     /// Returns `None` if libghostty-vt rejects the dimensions, which it does for
     /// a zero in either axis.
     pub fn new(cols: u16, rows: u16) -> Option<Self> {
+        Self::with_scrollback(cols, rows, DEFAULT_SCROLLBACK)
+    }
+
+    /// A grid retaining `max_scrollback` lines of history rather than the
+    /// default.
+    ///
+    /// The knob exists because eviction is a behavior worth testing and
+    /// filling ten thousand lines to reach it is not a test, it is a wait.
+    pub fn with_scrollback(cols: u16, rows: u16, max_scrollback: usize) -> Option<Self> {
         let term = Terminal::new(Options {
             cols,
             rows,
-            max_scrollback: DEFAULT_SCROLLBACK,
+            max_scrollback,
         })
         .ok()?;
         Some(Self { term })
+    }
+
+    /// Lines of history above the viewport.
+    pub fn scrollback_rows(&self) -> Option<usize> {
+        self.term.scrollback_rows().ok()
     }
 
     /// Feed child-process output to the parser.
