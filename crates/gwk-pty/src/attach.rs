@@ -65,6 +65,10 @@ pub fn replay<'a>(entries: impl Iterator<Item = &'a Entry>, grid: &mut Grid) -> 
     for entry in entries {
         match &entry.event {
             Event::Output(bytes) => grid.write(bytes),
+            // Derivation: POSIX-TERM §11 — a terminal's window size is set
+            // through the terminal interface (`tcsetwinsize`), not by writing
+            // to it, so there is no byte sequence a replay could emit that
+            // would have the same effect. It has to be performed as a resize.
             Event::Resize { cols, rows } => grid.resize(*cols, *rows)?,
         }
     }

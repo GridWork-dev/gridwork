@@ -184,14 +184,16 @@ impl Grid {
     /// back that far — after eviction it does not, and a snapshot has no such
     /// horizon.
     ///
-    /// Derivation: ECMA-48 §8.3.21 — CUP sets the active position to a line and
-    /// column given as 1-based parameters. The trailing CUP is not decoration:
-    /// libghostty-vt's VT dump emits screen *contents*, which leaves the cursor
-    /// wherever the last cell put it, so without this a reattached client draws
-    /// the right screen with the caret in the wrong place.
+    /// Ends with an explicit cursor move — see the derivation note below.
     pub fn snapshot_vt(&self) -> Option<Vec<u8>> {
         let mut buf = self.format(Format::Vt)?;
         let (x, y) = self.cursor()?;
+        // Derivation: ECMA-48 §8.3.21 — CUP sets the active position to a line
+        // and column given as 1-based parameters. This trailing CUP is not
+        // decoration: the VT dump above emits screen *contents*, which leaves
+        // the cursor wherever the last cell put it, so without this a
+        // reattached client draws the right screen with the caret in the wrong
+        // place.
         buf.extend_from_slice(format!("\x1b[{};{}H", y + 1, x + 1).as_bytes());
         Some(buf)
     }

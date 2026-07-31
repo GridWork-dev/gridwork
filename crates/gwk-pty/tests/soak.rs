@@ -90,12 +90,12 @@ fn the_whole_fuzz_corpus_parses_without_taking_the_process_down() {
                 continue;
             }
             let raw = std::fs::read(&path).expect("reading a corpus file");
-            // Byte 0 is upstream's harness mode selector, not terminal input.
-            // See crates/gwk-pty/fixtures/PROVENANCE.md.
+            // Derivation: CAP-001 — the harness that produced this corpus reads
+            // byte 0 as a code-path selector rather than terminal input, and
+            // builds its terminal at 80x24 with 100 lines of scrollback. Both
+            // are matched here so a crash found in this run is one that could
+            // happen in the run these inputs were minimised against.
             let input = raw.split_first().map_or(&[][..], |(_, rest)| rest);
-
-            // Same geometry as upstream's harness, so a crash here is one that
-            // could happen there.
             let mut grid = Grid::with_scrollback(80, 24, 100).expect("valid grid");
             grid.write(input);
 

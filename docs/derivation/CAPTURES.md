@@ -13,4 +13,11 @@ a different observation. `cleanroom-gate` resolves every cited ID against this t
 
 | ID | sha256 | What it observably shows |
 |---|---|---|
-| — | — | (none yet — first entries land with the PTY engine) |
+| `CAP-001` | `efb1138c4730af0cea8a0aa8e9a558c8c642227fa20ef529346c777cb4f2a043` | A public third-party VT fuzz harness. Its first input byte selects a parser code path and is not terminal input, and it drives a terminal built at 80×24 with 100 lines of scrollback. Both facts decide how the conformance corpus has to be replayed for its frames to describe the same terminal upstream tests. |
+
+`CAP-001` is a departure from the paragraph above in one respect worth naming: it is
+public source, not a private recording, and `crates/gwk-pty/fixtures/PROVENANCE.md`
+names its repository, revision and path openly. The no-paths rule exists so a citation
+cannot leak where a private capture is kept; a file anyone can fetch has nothing to
+leak, and hiding its location would make the claim harder to check rather than safer.
+The hash is here for the usual reason — so "the harness says this" stays falsifiable.

@@ -67,17 +67,20 @@ impl Session {
     /// Returns the number of bytes taken; `0` means the child hung up and no
     /// further call will return more.
     ///
-    /// Derivation: ECMA-48 §5.4 — a control sequence is CSI, then parameter
-    /// bytes, then intermediate bytes, then a final byte. A read boundary can
-    /// fall anywhere inside that, so a chunk goes to the parser exactly as it
-    /// arrived. Splitting on what looks like a sequence edge, or holding a
-    /// partial one back to "complete" it, is how a reader corrupts input the
-    /// parser would have handled correctly.
+    /// A chunk reaches the parser exactly as it arrived — see the derivation
+    /// note on the write below.
     pub async fn pump(&mut self) -> io::Result<usize> {
         let mut buf = [0u8; READ_CHUNK];
         match self.pty.read(&mut buf).await {
             Ok(0) => Ok(0),
             Ok(n) => {
+                // Derivation: ECMA-48 §5.4 — a control sequence is CSI, then
+                // parameter bytes, then intermediate bytes, then a final byte.
+                // A read boundary can fall anywhere inside that, so the chunk
+                // goes to the parser exactly as it arrived. Splitting on what
+                // looks like a sequence edge, or holding a partial one back to
+                // "complete" it, is how a reader corrupts input the parser
+                // would have handled correctly on its own.
                 self.grid.write(&buf[..n]);
                 Ok(n)
             }

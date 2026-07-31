@@ -16,9 +16,13 @@ use std::path::{Path, PathBuf};
 use gwk_pty::Grid;
 use sha2::{Digest, Sha256};
 
-/// Upstream's fuzz harness builds its terminal at these dimensions. Matching
-/// them is what makes a frame here describe the same terminal ghostty's own
-/// fuzzer drives.
+// Derivation: CAP-001 — the harness these vectors were written for builds its
+// terminal at 80x24 with 100 lines of scrollback, and reads the first input
+// byte as a code-path selector rather than as terminal input. Both are honoured
+// here: matching the geometry is what makes a frame captured here describe the
+// same terminal upstream drives, and dropping byte 0 is what keeps a stray NUL
+// or SOH out of every vector.
+/// The geometry the corpus was written against.
 const COLS: u16 = 80;
 const ROWS: u16 = 24;
 const SCROLLBACK: usize = 100;

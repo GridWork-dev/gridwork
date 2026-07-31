@@ -44,14 +44,20 @@ const MAGIC: &[u8; 8] = b"GWKREC\0\x01";
 /// Something that changed the terminal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
+    // Derivation: ECMA-48 §5.4 — a control sequence runs from CSI through its
+    // final byte and a read can end anywhere inside one, so a chunk is stored
+    // whole and replayed in order rather than normalised, re-split, or joined
+    // with its neighbours. The parser is the state machine that spans those
+    // boundaries; a recording that tidied them would be replaying a stream the
+    // child never wrote.
     /// Bytes the child wrote, exactly as they were read.
     Output(Vec<u8>),
+    // Derivation: POSIX-TERM §11 — the window size is a terminal attribute
+    // with its own call (`tcsetwinsize`), not something carried in the data a
+    // process writes. So it cannot be recovered from the byte stream and has
+    // to ride the recording as its own event; a replay that dropped it would
+    // reflow every later line against the wrong width.
     /// The window changed size.
-    ///
-    /// Carried as its own event rather than folded into the byte stream
-    /// because a resize does not arrive *through* the PTY — it is an ioctl the
-    /// terminal performs. A replay that skipped it would reflow every
-    /// subsequent line against the wrong width.
     Resize { cols: u16, rows: u16 },
 }
 
