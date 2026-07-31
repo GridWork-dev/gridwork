@@ -30,6 +30,26 @@ source <(grep -E '^[A-Z_]+=' "$pins")
 
 : "${ZIG_VERSION:?pins.env defines no ZIG_VERSION}"
 : "${GHOSTTY_COMMIT:?pins.env defines no GHOSTTY_COMMIT}"
+: "${LIBGHOSTTY_VT_VERSION:?pins.env defines no LIBGHOSTTY_VT_VERSION}"
+
+# The third pin is the one cargo owns, so unlike the other two it cannot be READ
+# from pins.env — Cargo.toml has to carry the literal. That makes it the single
+# number with two homes, which is the shape that drifts: any dependency bump edits
+# Cargo.toml and leaves pins.env stating a version nothing checks. Until this
+# assertion existed, LIBGHOSTTY_VT_VERSION was a comment wearing a pin's name.
+#
+# The pattern also holds the pin's SHAPE. A caret range does not match it, so
+# relaxing `=0.2.0` to `^0.2.0` fails here rather than quietly letting a patch
+# release move the C ABI under a green lockfile.
+declared="$(sed -nE 's/^libghostty-vt = "=([0-9][0-9A-Za-z.+-]*)"$/\1/p' Cargo.toml)"
+[[ -n "$declared" ]] || {
+  echo 'pty-toolchain: Cargo.toml carries no exact libghostty-vt pin (expected: libghostty-vt = "=<version>")' >&2
+  exit 1
+}
+[[ "$declared" == "$LIBGHOSTTY_VT_VERSION" ]] || {
+  echo "pty-toolchain: Cargo.toml pins libghostty-vt $declared, pins.env says $LIBGHOSTTY_VT_VERSION" >&2
+  exit 1
+}
 
 root="$PWD"
 src="$root/.ghostty"
