@@ -31,7 +31,16 @@
 //!
 //! [libghostty-vt]: https://crates.io/crates/libghostty-vt
 
+use libghostty_vt::fmt::{Format, Formatter, FormatterOptions};
 use libghostty_vt::terminal::{Options, Terminal};
+
+pub mod record;
+pub mod render;
+pub mod session;
+
+pub use record::{Entry, Event, Recording};
+pub use render::{Frame, Renderer};
+pub use session::{Session, SpawnError};
 
 /// How much scrollback a grid retains before evicting the oldest rows.
 ///
@@ -72,6 +81,83 @@ impl Grid {
     /// Cursor position as a zero-based `(column, row)`.
     pub fn cursor(&self) -> Option<(u16, u16)> {
         Some((self.term.cursor_x().ok()?, self.term.cursor_y().ok()?))
+    }
+
+    /// Grid size as `(cols, rows)`.
+    pub fn size(&self) -> Option<(u16, u16)> {
+        Some((self.term.cols().ok()?, self.term.rows().ok()?))
+    }
+
+    /// Change the grid's dimensions, reflowing its contents.
+    ///
+    /// Returns `None` for a zero in either axis, matching [`Grid::new`].
+    ///
+    /// The two pixel arguments libghostty-vt takes are passed as zero on
+    /// purpose. They feed image protocols and pixel-unit size reports, and a
+    /// grid with no renderer attached has no cell size to report — inventing
+    /// one would put a number a child might act on into the terminal's state.
+    /// A grid starts at zero pixels too, so this keeps resize consistent with
+    /// construction rather than introducing a value halfway through.
+    pub fn resize(&mut self, cols: u16, rows: u16) -> Option<()> {
+        if cols == 0 || rows == 0 {
+            return None;
+        }
+        self.term.resize(cols, rows, 0, 0).ok()
+    }
+
+    /// The active screen as plain text, one line per row.
+    ///
+    /// This is the crate's canonical rendering: it is what golden frames are
+    /// captured as, and what two grids are compared through when a reattached
+    /// session has to prove it landed on the same screen. Whitespace is NOT
+    /// trimmed — a row of spaces and an empty row are different screen states,
+    /// and a comparison that could not tell them apart would pass on a real
+    /// divergence.
+    pub fn text(&self) -> Option<String> {
+        let mut formatter = Formatter::new(
+            &self.term,
+            FormatterOptions::new().with_format(Format::Plain),
+        )
+        .ok()?;
+        let mut buf = vec![0u8; formatter.format_len().ok()?];
+        let len = formatter.format_buf(&mut buf).ok()?;
+        buf.truncate(len);
+        String::from_utf8(buf).ok()
+    }
+
+    /// One row of [`text`](Self::text), zero-based, or `None` past the end.
+    pub fn row_text(&self, y: u16) -> Option<String> {
+        self.text()?.lines().nth(usize::from(y)).map(str::to_owned)
+    }
+
+    /// The screen as VT sequences that reproduce it when written to a fresh
+    /// grid of the same size.
+    ///
+    /// This is what a client attaching mid-session is sent. Replaying the whole
+    /// recording would work too, but only while the recording still reaches
+    /// back that far — after eviction it does not, and a snapshot has no such
+    /// horizon.
+    ///
+    /// Derivation: ECMA-48 §8.3.21 — CUP sets the active position to a line and
+    /// column given as 1-based parameters. The trailing CUP is not decoration:
+    /// libghostty-vt's VT dump emits screen *contents*, which leaves the cursor
+    /// wherever the last cell put it, so without this a reattached client draws
+    /// the right screen with the caret in the wrong place.
+    pub fn snapshot_vt(&self) -> Option<Vec<u8>> {
+        let mut formatter =
+            Formatter::new(&self.term, FormatterOptions::new().with_format(Format::Vt)).ok()?;
+        let mut buf = vec![0u8; formatter.format_len().ok()?];
+        let len = formatter.format_buf(&mut buf).ok()?;
+        buf.truncate(len);
+
+        let (x, y) = self.cursor()?;
+        buf.extend_from_slice(format!("\x1b[{};{}H", y + 1, x + 1).as_bytes());
+        Some(buf)
+    }
+
+    /// The parser, for the render path inside this crate.
+    pub(crate) fn terminal(&self) -> &Terminal<'static, 'static> {
+        &self.term
     }
 }
 

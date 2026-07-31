@@ -20,6 +20,25 @@ publish = false
 
 [dependencies]
 libghostty-vt.workspace = true
+pty-process.workspace = true
+# One constant: `EIO`, to tell "the child hung up" apart from a real read
+# failure. Spelling it `5` inline would need the same comment and would not
+# survive someone reading it on a platform where it is not 5.
+rustix = { workspace = true, features = ["std"] }
+sha2.workspace = true
+thiserror.workspace = true
+# `process` is for reaping the child, `io-util` for the reader's `read`. `rt`,
+# `macros` and `time` are only wanted by the tests, but a dev-dependency on the
+# same crate with different features unifies into one feature set anyway, so
+# splitting them here would buy a longer manifest and nothing else.
+tokio = { workspace = true, features = [
+  "io-util",
+  "macros",
+  "process",
+  "rt",
+  "sync",
+  "time",
+] }
 
 [lints]
 workspace = true

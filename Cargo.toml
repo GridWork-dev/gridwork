@@ -43,7 +43,15 @@ gwk-theme = { path = "crates/gwk-theme", version = "0.0.2" }
 # libghostty-vt is pre-1.0 and its own docs promise breaking changes — a caret
 # range would let a patch release move the C ABI under a green lockfile. Moves
 # only together with the two pins in crates/gwk-pty/pins.env.
-libghostty-vt = "=0.2.0"
+libghostty-vt = "=0.2.1"
+# PTY allocation and child spawn. Chosen over `portable-pty` because it needs
+# exactly two dependencies, `rustix` and `tokio`, and this workspace already
+# pins both — where `portable-pty` brings fifteen, including a second `nix` and
+# a `bitflags` one major behind ours. It also has to be a dependency rather
+# than our own code: allocating a PTY and putting the child in its own session
+# means `pre_exec` and `setsid`, and `unsafe_code` is FORBIDDEN in this
+# workspace, which is a lint level `#[allow]` cannot reach past.
+pty-process = { version = "0.5.3", default-features = false, features = ["async"] }
 # Generative tests only, for the three invariants where a hand-picked example
 # cannot cover the input space: the frame codec, the u64-through-decimal-TEXT
 # conversion, and cursor paging. Default features off — `fork` and `timeout`

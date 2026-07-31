@@ -578,6 +578,11 @@ name = "gwk-pty"
 version = "0.0.2"
 dependencies = [
  "libghostty-vt",
+ "pty-process",
+ "rustix",
+ "sha2 0.11.0",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -802,9 +807,9 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "libghostty-vt"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04c77176dd05b2b5718046d807e786473f463ea6d478d56f8c0105e2fe6f71f5"
+checksum = "6219ed1c364b3ef5815fb0fd2acc0662f792adc706dabf59b7ca89280ee6d066"
 dependencies = [
  "bitflags",
  "int-enum",
@@ -1013,6 +1018,16 @@ dependencies = [
  "rand_xorshift",
  "regex-syntax",
  "unarray",
+]
+
+[[package]]
+name = "pty-process"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71cec9e2670207c5ebb9e477763c74436af3b9091dd550b9fb3c1bec7f3ea266"
+dependencies = [
+ "rustix",
+ "tokio",
 ]
 
 [[package]]
