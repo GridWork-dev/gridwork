@@ -4,11 +4,17 @@
 //! What is modeled here is deliberately narrow. `docs/derivation/SPECS.md`'s
 //! `CLAUDE-HEADLESS` row scopes a citation to what
 //! `code.claude.com/docs/en/headless` actually says, and that page documents
-//! stream-json's *behavior* (what `system/init`, `result`, and subagent
-//! nesting mean) far more than it documents every message type's full field
-//! layout. Fields this module cannot cite stay reachable through
-//! [`Message::raw`] rather than being asserted as typed, spec-derived facts
-//! — see the dispatch report for the specific fields this escalates.
+//! stream-json's *behavior* far more than every message type's full field
+//! layout. `CLAUDE-AGENT-SDK` fills part of that gap: the TypeScript SDK
+//! reference publishes `SDKResultMessage`'s actual field-level type, which —
+//! being the typed surface over the same wire messages, not a separate
+//! protocol — is this module's basis for the `result`-message fields below.
+//! One field stays unresolved even so: a `tool_use` block's own JSON shape.
+//! Neither permitted page defines it (`CLAUDE-AGENT-SDK` explicitly punts to
+//! `MessageParam`, "From Anthropic SDK" — a third, uncited surface), so
+//! [`SubagentTree`] treats it as an escalation. Fields this module cannot
+//! cite at all stay reachable through [`Message::raw`] rather than being
+//! asserted as typed, spec-derived facts.
 
 use std::collections::BTreeMap;
 
@@ -51,6 +57,20 @@ pub struct Message {
     // the streaming transport.
     #[serde(default)]
     pub total_cost_usd: Option<f64>,
+    // Derivation: CLAUDE-AGENT-SDK — `SDKResultMessage`'s TypeScript type
+    // carries `duration_ms: number`, `duration_api_ms: number`, and
+    // `num_turns: number` as siblings of `subtype` on both arms of its
+    // union.
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    #[serde(default)]
+    pub duration_api_ms: Option<u64>,
+    #[serde(default)]
+    pub num_turns: Option<u64>,
+    // Derivation: CLAUDE-AGENT-SDK — `SDKResultMessage`'s union carries
+    // `is_error: boolean` on both arms.
+    #[serde(default)]
+    pub is_error: Option<bool>,
     #[serde(flatten)]
     pub raw: Value,
 }
@@ -73,6 +93,19 @@ impl Message {
     pub fn is_session_start(&self) -> bool {
         self.kind == "system" && self.subtype.as_deref() == Some("init")
     }
+
+    /// A `result` message that reached its success arm — the run completed
+    /// without an error. `false` for the error arm and for every non-`result`
+    /// message alike.
+    // Derivation: CLAUDE-AGENT-SDK — `SDKResultMessage`'s subtype union: the
+    // success arm's `subtype: "success"` versus the error arm's `subtype:
+    // "error_max_turns" | "error_during_execution" | "error_max_budget_usd"
+    // | "error_max_structured_output_retries"`. `is_error` (also typed on
+    // both arms) is the cheaper check when only success/failure matters and
+    // the exact subtype string does not.
+    pub fn is_successful_result(&self) -> bool {
+        self.is_result() && self.subtype.as_deref() == Some("success")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -94,10 +127,14 @@ pub fn parse_line(line: &[u8]) -> Result<Message, MessageParseError> {
 /// `parent_tool_use_id`.
 ///
 /// Finding *which* branch issued a given `tool_use` id needs one more fact
-/// than the page states outright: it names `tool_use` blocks as a thing the
-/// wire carries, but never states their JSON shape. `"type":"tool_use"`
-/// plus an `"id"` field is this crate's own inference — a plausible
-/// tagged-block shape, not a claim `CLAUDE-HEADLESS` itself makes about
+/// than either permitted page states outright. `CLAUDE-HEADLESS` names
+/// `tool_use` blocks as a thing the wire carries but never gives their JSON
+/// shape, and `CLAUDE-AGENT-SDK`'s own message types stop at
+/// `message: MessageParam; // From Anthropic SDK` — content blocks,
+/// `tool_use` included, are typed by a third surface neither of this
+/// crate's two rows names, so their shape stays out of citable reach.
+/// `"type":"tool_use"` plus an `"id"` field is this crate's own inference —
+/// a plausible tagged-block shape, not a claim either page makes about
 /// field names — so it is an escalation on that specific point, not a
 /// citation. A branch this walk cannot place is recorded as a root rather
 /// than dropped or guessed at (see
@@ -218,11 +255,51 @@ mod tests {
     }
 
     #[test]
+    fn a_success_result_carries_its_sdkresultmessage_fields_and_is_successful() {
+        let result = parse_line(
+            br#"{
+                "type": "result",
+                "subtype": "success",
+                "duration_ms": 4200,
+                "duration_api_ms": 3100,
+                "num_turns": 3,
+                "is_error": false,
+                "total_cost_usd": 0.42
+            }"#,
+        )
+        .expect("parse");
+        assert!(result.is_successful_result());
+        assert_eq!(result.duration_ms, Some(4200));
+        assert_eq!(result.duration_api_ms, Some(3100));
+        assert_eq!(result.num_turns, Some(3));
+        assert_eq!(result.is_error, Some(false));
+    }
+
+    #[test]
+    fn an_error_result_is_not_a_successful_result() {
+        for subtype in [
+            "error_max_turns",
+            "error_during_execution",
+            "error_max_budget_usd",
+            "error_max_structured_output_retries",
+        ] {
+            let line = format!(r#"{{"type":"result","subtype":"{subtype}","is_error":true}}"#);
+            let result = parse_line(line.as_bytes()).expect("parse");
+            assert!(
+                !result.is_successful_result(),
+                "{subtype} must not be success"
+            );
+            assert_eq!(result.is_error, Some(true));
+        }
+    }
+
+    #[test]
     fn unmodeled_fields_survive_in_raw() {
-        let message =
-            parse_line(br#"{"type":"assistant","duration_ms":1234,"num_turns":3}"#).expect("parse");
-        assert_eq!(message.raw["duration_ms"], 1234);
-        assert_eq!(message.raw["num_turns"], 3);
+        // `stop_reason` and `permission_denials` are real SDKResultMessage
+        // fields this crate does not (yet) type — proving the catch-all
+        // still works for fields genuinely left unmodeled.
+        let message = parse_line(br#"{"type":"result","stop_reason":"end_turn"}"#).expect("parse");
+        assert_eq!(message.raw["stop_reason"], "end_turn");
     }
 
     #[test]

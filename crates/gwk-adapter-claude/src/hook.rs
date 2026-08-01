@@ -1,21 +1,31 @@
 //! The `PreToolUse` contract: the ask Claude Code hands the relay on stdin,
 //! and the decision the relay must hand back on stdout.
 //!
-//! `docs/PARITY.md` (this phase's own design contract, not one of the three
-//! permitted pages) further calls `PreToolUse`'s stdout the *only*
-//! decision-returning channel available in interactive-TUI mode — the mode
-//! [`crate::spawn_tui`] renders — naming an SDK-hosted `canUseTool`
-//! callback as the alternative that is unavailable there. None of the three
-//! permitted `CLAUDE-*` pages states that `canUseTool` claim (this crate's
-//! own fetch of the hooks page came back "not mentioned in provided
-//! documentation"), so it is recorded here as context this crate was
-//! *told*, not a fact it can cite — an escalation, not a citation.
+//! `docs/PARITY.md` (this phase's own design contract) further calls
+//! `PreToolUse`'s stdout the *only* decision-returning channel available in
+//! interactive-TUI mode — the mode [`crate::spawn_tui`] renders — naming an
+//! SDK-hosted `canUseTool` callback as the alternative that is unavailable
+//! there. Neither `CLAUDE-STREAM-JSON`, `CLAUDE-HEADLESS`, nor
+//! `CLAUDE-HOOKS` states that `canUseTool` claim (an earlier draft of this
+//! comment cited `CLAUDE-HOOKS` for it, which this crate's own fetch of
+//! that exact page had already contradicted — a false citation caught
+//! before it shipped). `CLAUDE-AGENT-SDK`, added to the registry after that
+//! round, resolves it: `canUseTool` is documented there as "the SDK
+//! replacement for the interactive permission prompt," invoked only when
+//! permission evaluation "resolves to a prompt" — i.e. it substitutes for
+//! the terminal's own interactive prompt for an SDK caller, which is
+//! exactly why an external process controlling an interactive-TUI session
+//! (no SDK, no `canUseTool` registered) has no channel into that decision
+//! except `PreToolUse`'s own stdout.
 // Derivation: CLAUDE-HOOKS — `PreToolUse` is "the first enforcement point in
 // Claude Code's permission system", and hooks "run in all permission modes
 // including... Bypass mode (--bypass-permissions)" — "Step 1 of permission
 // evaluation: 1. PreToolUse hook (first decision point)... The hook runs
 // regardless of mode, making it the primary enforcement point before any
 // other permission check."
+// Derivation: CLAUDE-AGENT-SDK — `CanUseTool`: "The function is the SDK
+// replacement for the interactive permission prompt: it's invoked only
+// when the permission evaluation flow resolves to a prompt."
 
 use gwk_domain::{AttemptId, GateId, KernelCommand};
 use serde::{Deserialize, Serialize};

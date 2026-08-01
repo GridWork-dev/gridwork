@@ -19,15 +19,19 @@
 //! This crate is under `CLEANROOM.md`'s second-review gate
 //! (`.github/cleanroom-paths.txt`). Every non-obvious protocol behavior
 //! carries a `Derivation:` marker citing a row in `docs/derivation/SPECS.md`
-//! — `CLAUDE-STREAM-JSON`, `CLAUDE-HEADLESS`, or `CLAUDE-HOOKS`, each scoped
-//! to exactly what its named page states. Several fields this crate's own
-//! design contract (`docs/PARITY.md`) names — `result.usage`'s key names,
-//! `duration_ms`, `num_turns`, `result.subtype`'s exact string values, and
-//! the "list-rate estimate" characterization of `total_cost_usd` — are not
-//! stated on any of the three permitted pages; those are escalations
-//! (CLEANROOM.md rule 3: "a behavior with no citable permitted source is an
-//! escalation, not a guess"), not citations, and are called out at their
-//! use sites in [`message`] and [`cost`] plus the dispatch report.
+//! — `CLAUDE-STREAM-JSON`, `CLAUDE-HEADLESS`, `CLAUDE-HOOKS`, or
+//! `CLAUDE-AGENT-SDK`, each scoped to exactly what its named page states.
+//! The fourth row resolved a round of escalations this crate first shipped
+//! honestly unresolved: `result.usage`'s key names, `duration_ms`,
+//! `num_turns`, `result.subtype`'s exact string values, and the "estimate"
+//! characterization of `total_cost_usd` are now cited against
+//! `code.claude.com/docs/en/agent-sdk/typescript`'s own published
+//! `SDKResultMessage`/`Usage` types — the typed surface over the same wire
+//! messages, not a separate protocol. One escalation survives: a
+//! `tool_use` content block's own JSON shape, which that page explicitly
+//! delegates to `MessageParam`, "From Anthropic SDK" — a third, uncited
+//! surface. See [`message`] and [`cost`] for exactly where each citation
+//! and each remaining escalation sits.
 
 pub mod cost;
 pub mod hook;
