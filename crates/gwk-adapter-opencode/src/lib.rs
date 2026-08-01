@@ -10,10 +10,22 @@
 //! role machinery (the `Agent` role behind a connection), which this crate
 //! reaches over the real wire; the sibling adapters implement the same role
 //! over their own vendor protocols.
+//!
+//! Lifecycle, status, and approval do not ride that ACP connection at all —
+//! per `docs/PARITY.md`, they ride the engine's own server event bus
+//! (`GET /event`) and REST surface instead. [`event`] normalizes that bus
+//! into gwk's own event enum and the kernel-side commands it warrants;
+//! [`cost`] turns per-child session usage into the spend ledger's command.
+//! Neither module opens a connection or decides an approval — both produce
+//! typed values only, for whatever host component owns the opencode HTTP
+//! client to act on.
 
 use agent_client_protocol::AcpAgentConfig;
 use gwk_domain::EngineId;
 use gwk_pty::{Session, SpawnError};
+
+pub mod cost;
+pub mod event;
 
 /// The engine CLI this adapter drives.
 pub const ENGINE: &str = "opencode";
