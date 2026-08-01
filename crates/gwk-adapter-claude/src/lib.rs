@@ -2,15 +2,33 @@
 //!
 //! Control and rendering are separate channels by design. The engine's native
 //! TUI is spawned under a [`gwk_pty::Session`] and only ever *rendered*;
-//! control travels the engine's bidirectional stream-json interface, and the
-//! approval channel is the engine's own hook mechanism — the one
-//! decision-returning path that exists when the engine draws its own TUI.
-//! Control never rides synthetic keystrokes.
+//! control travels the engine's bidirectional stream-json interface
+//! ([`stream::StreamClient`], parsed by [`message`]). Control never rides
+//! synthetic keystrokes; nothing in [`stream`] ever reaches [`spawn_tui`].
 //!
 //! The normalization surface all three adapters converge on is the ACP SDK's
 //! role machinery: this crate implements the `Agent` role server-side over
 //! the vendor protocol, so the kernel side sees the same shape the real ACP
 //! adapter presents.
+//!
+//! # Clean-room scope
+//!
+//! This crate is under `CLEANROOM.md`'s second-review gate
+//! (`.github/cleanroom-paths.txt`). Every non-obvious protocol behavior
+//! carries a `Derivation:` marker citing a row in `docs/derivation/SPECS.md`
+//! — `CLAUDE-STREAM-JSON` or `CLAUDE-HEADLESS`, each scoped to exactly what
+//! its named page states. Several fields this crate's own design contract
+//! (`docs/PARITY.md`) names — `result.usage`'s key names, `duration_ms`,
+//! `num_turns`, `result.subtype`'s exact string values, and a `tool_use`
+//! block's JSON shape — are not stated on either permitted page; those are
+//! escalations (CLEANROOM.md rule 3: "a behavior with no citable permitted
+//! source is an escalation, not a guess"), not citations, and are called
+//! out at their use sites in [`message`] plus the dispatch report.
+
+pub mod message;
+pub mod stream;
+
+mod io_util;
 
 use gwk_domain::EngineId;
 use gwk_pty::{Session, SpawnError};
