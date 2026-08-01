@@ -191,6 +191,7 @@ The contract first, then the one place that enforces it:
 | [docs/architecture.md](docs/architecture.md) | What owns truth, what the pieces are, which decisions are locked |
 | [docs/protocol.md](docs/protocol.md) | The client↔kernel contract — framing, hello, requests, subscriptions |
 | [docs/operations.md](docs/operations.md) | Running the daemon: deployment, backup, recovery, key rotation |
+| [docs/PARITY.md](docs/PARITY.md) | The engine parity matrix — four axes, per-engine acceptance tests, pinned versions |
 | [docs/contract/NAMING.md](docs/contract/NAMING.md) | The casing and wire-shape rules the contract is frozen under |
 | [docs/security/THREAT_MODEL.md](docs/security/THREAT_MODEL.md) | What GridWork defends against, and what it deliberately does not |
 | [CLEANROOM.md](CLEANROOM.md) | The independent-implementation policy for terminal-engine work |

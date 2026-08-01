@@ -1,0 +1,189 @@
+# Engine parity
+
+What "done" means for the agent adapters — the parity matrix the roadmap promises
+for stage 3, defined before any adapter exists to measure. Four axes, each with an
+acceptance test concrete enough to implement without interpretation, each answered
+per engine. A matrix cell is green when its test passes against the live kernel;
+the matrix is green when all twelve cells are.
+
+> Like `docs/architecture.md`, this is a design contract written in the present
+> tense: it specifies what the adapters must prove, and none of them exist yet.
+> The per-engine inventory at the bottom is the exception — it records what each
+> engine's control surface actually exposes, captured live on 2026-08-01 against
+> the pinned versions below, because an acceptance test against an unstated
+> capability is unfalsifiable.
+
+The matrix runs **locally, never in public CI**. Its tests need three logged-in
+engine CLIs; public CI proves the adapter crates build and their protocol handling
+is correct against recorded frames, and must never acquire an engine binary, an
+engine login, or a network path to either. That split is deliberate: a public gate
+that can only half-execute is not a gate.
+
+## Version pins
+
+Adapters are built against, and the matrix is demonstrated against, exactly these
+versions. The harness asserts each version before any axis runs; a cell filled
+against an unpinned version is void.
+
+| Engine | CLI reports | Protocol driven |
+| --- | --- | --- |
+| Claude Code | `2.1.220 (Claude Code)` | bidirectional stream-json (`--input-format stream-json --output-format stream-json`) for the transcript; lifecycle/permission hooks for control |
+| Codex | `codex-cli 0.146.0` | `codex app-server` — JSON-RPC 2.0, newline-delimited over stdio; schemas emitted by `codex app-server generate-json-schema` and vendored in-repo |
+| opencode | `1.18.3` | ACP wire v1 (`opencode acp`, JSON-RPC over stdio) for the agent loop; the server event bus (SSE `/event`) for lifecycle and approval |
+
+Three engines, three protocols — one true ACP client and two unrelated vendor
+protocols. The internal `Agent` trait is the normalization layer the three
+converge on, not the wire any of them speaks.
+
+## The bound: D
+
+Status claims are useless without a clock. Every "within D" below means:
+
+**D = `SUBSCRIPTION_POLL_SECS` + 5 seconds** — expressed against the constant
+(`crates/gwk-domain/src/protocol.rs`), never as a literal. Today that is 10
+seconds. The first term is the kernel's own ceiling on how stale a subscriber's
+view of a committed event can be; the added margin covers adapter processing and
+engine event latency. If the poll ceiling moves, D moves with it, which is why no
+document or test may write the number.
+
+## Axis 1 — lifecycle
+
+An adapter observes session start, idle, error, and end through the engine's
+control surface. Never by reading the screen: the terminal is for rendering,
+the protocol and hooks are for control.
+
+Per engine, the facts that must be observed and the surface that carries them:
+
+| Engine | start | idle | error | end |
+| --- | --- | --- | --- | --- |
+| Claude Code | `system`/`init` stream message | `Stop` hook (turn finished) | `result` with subtype `error` | `result` message; `SessionEnd` hook on termination |
+| Codex | `thread/started` notification | `thread/status/changed` → `idle` | `turn/completed` carrying `error`, or the `error` notification | `thread/closed` |
+| opencode | `session.created` event | `session.idle` event | `session.error` event | `session.deleted` event |
+
+**Acceptance, per engine:** start a session and observe start; complete a turn and
+observe idle; kill the engine process mid-turn and observe error — each surfaced
+as the adapter's normalized state within D of the underlying fact.
+
+## Axis 2 — status truth
+
+The supervisor's belief about an engine — working, idle, or waiting on approval —
+matches the engine's actual state, within D. Skew is measured from the engine
+state change to the adapter's normalized status report.
+
+| Engine | working / idle | waiting on approval |
+| --- | --- | --- |
+| Claude Code | stream events as they occur; `Stop` hook for idle | `Notification` hook, matcher `permission_prompt` (notify-only — the decision channel is axis 4) |
+| Codex | `thread/status/changed` push: `ThreadStatus` = `notLoaded` \| `idle` \| `systemError` \| `active{activeFlags}` | `activeFlags` contains `waitingOnApproval` — first-class in the status push; `thread/read` as poll fallback |
+| opencode | `session.status` push: `idle` \| `busy` \| `retry`; `GET /session/status` as poll fallback | `permission.asked` push; `GET /permission` (pending list) as poll fallback |
+
+**Acceptance, per engine:** drive the engine into each of the three states; the
+adapter's reported status converges within D each time. The harness ships a
+seeded negative for the clock itself: a status report artificially delayed past D
+must fail the axis — a bound nobody can miss is decoration.
+
+## Axis 3 — transcript ingestion
+
+Everything the engine says lands in the kernel as typed events through the
+ingestion surface (`IngestRecord`) — ordered, attributed to its session, never a
+side file. Engine-internal fan-out is visible where the engine exposes it, and
+per-child cost and status are ingested where the engine exposes them. "Where the
+engine exposes them" is fixed by the inventory below, so each engine's cell
+requires exactly what its surface can honestly deliver:
+
+- **Claude Code** — the full stream-json message set (`system`, `assistant`,
+  `user`, `result`), with subagent fan-out reconstructed by `parent_tool_use_id`
+  chaining (subagent text requires `--forward-subagent-text`). Cost is
+  per-invocation aggregate: `result.usage` token counts plus `total_cost_usd`,
+  which the vendor documents as a list-rate client-side estimate. **The cell
+  requires fan-out linkage and aggregate spend — there is no machine-readable
+  per-child cost to demand.**
+- **Codex** — the typed `ThreadItem` stream via `item/started`/`item/completed`.
+  Child agents are first-class threads (`parentThreadId`), with per-child status
+  explicit on the parent's transcript (`collabAgentToolCall` → `agentsStates`).
+  Token usage arrives per thread and turn (`thread/tokenUsage/updated`) as
+  counts — no currency exists anywhere in the protocol. **The cell requires
+  typed items, per-child status, and per-thread token counts.** Whether a child
+  thread's usage notifications reach a parent-attached client is not settled by
+  the schemas; the harness settles it live and this file records the answer.
+- **opencode** — the message stream with per-message cost and token breakdown
+  (`AssistantMessage.cost`/`.tokens`), and child sessions as first-class rows
+  (`parentID`, `GET /session/{id}/children`) each carrying its own cost and
+  tokens. **The cell requires per-child cost and status — the engine exposes
+  both.**
+
+Spend lands in the contract's append-only spend ledger, not as an untyped
+convention inside an ingested payload. One consequence the inventory forces on
+that ledger's shape: **token counts are the universal fact; currency is not.**
+Codex denominates in tokens only, Claude Code in tokens plus an estimated dollar
+figure, opencode in both. The ledger records what the engine reports and never
+invents a conversion.
+
+**Acceptance, per engine:** run a scripted session with a known shape — at least
+one tool call, one fan-out where the engine supports it, one completed turn.
+Every message lands as a typed event in order; fan-out linkage survives the trip;
+spend lands in the ledger in the engine's native denomination.
+
+## Axis 4 — approval relay
+
+A permission prompt raised by the engine becomes a kernel Gate: `OpenGate`
+carrying the question and its options, `DecideGate` carrying the chosen option,
+and the decision returns to the engine **through the same channel that raised
+it**. The engine then demonstrably acts on it. Control never rides synthetic
+keystrokes, and the relay only transports prompts — deciding them stays
+kernel-side under the Gate machinery and the authority policy.
+
+| Engine | prompt surfaces as | decision returns as |
+| --- | --- | --- |
+| Claude Code | `PreToolUse` hook invocation (stdin JSON: `tool_name`, `tool_input`, …) | stdout `hookSpecificOutput.permissionDecision`: `allow` \| `deny` \| `ask` — the **only** decision-returning channel that exists in interactive-TUI mode; `canUseTool` is SDK-hosted only and never available there |
+| Codex | server-initiated JSON-RPC requests: `item/commandExecution/requestApproval`, `item/fileChange/requestApproval` | the JSON-RPC response to that same request id, carrying the decision; `serverRequest/resolved` confirms clearance |
+| opencode | `permission.asked` event (id, session, tool call, patterns) | `POST /session/{id}/permission/{requestID}/reply` with `once` \| `always` \| `reject`; `permission.replied` confirms |
+
+**Acceptance, per engine:** induce a real permission prompt (a tool call the
+engine's own policy asks about). Observe `OpenGate` with the engine's question
+and options. In one run decide allow and observe the engine proceed; in another
+decide deny and observe it refuse. Both directions, per engine — a relay proven
+in one direction is half a relay.
+
+## The harness
+
+The matrix is filled by a local runner that drives all four axes per engine and
+emits the filled table. Its ground rules, so the numbers mean something: CLI
+versions asserted against the pins above before anything runs; D read from the
+constant; every axis check paired with a seeded negative that proves the check
+can fail. For Claude Code the harness exercises both control channels the
+adapter depends on — the stream-json transcript and the PreToolUse decision
+path — since the two can regress independently.
+
+## What the matrix does not measure
+
+Style truth — colors, attributes, animation cadence, wide-glyph rendering. The
+PTY layer asserts structural truth (text, cursor, size) through its conformance
+gates; no axis here requires cell-attribute assertions, and none may quietly
+acquire one. And the matrix measures **adapter fidelity per engine**, not engine
+equivalence: engines differ in what they expose, the inventory records those
+differences, and a cell is judged against its own engine's column only.
+
+## Inventory notes (captured 2026-08-01)
+
+Facts from the live capture that bound what the adapters may assume, kept here
+because each one either shaped an acceptance test above or will shape the
+adapter that meets it:
+
+- **Claude Code** exposes no machine-readable per-child cost anywhere; the only
+  per-subagent attribution is an interactive-terminal percentage view. Hooks are
+  step one of a single permission-evaluation order and run in every mode,
+  including modes that bypass interactive prompting. `total_cost_usd` is a
+  client-side list-rate estimate with no stated error bound — the ledger stores
+  it as reported and treats the token counts as the accounting fact.
+- **Codex** build 0.146.0 ships two protocol generations in one schema bundle
+  (a legacy surface and the thread/turn/item surface). The adapter speaks the
+  thread/turn/item generation; the vendored schemas record exactly which
+  definitions it derives from, and a freshness check regenerates them against
+  the pinned CLI so drift is a build failure, not a surprise. Multi-agent
+  fan-out is enabled by default at this pin.
+- **opencode** carries a deprecated approval endpoint
+  (`POST /session/{id}/permissions/{permissionID}`) alongside the current
+  reply endpoint — the adapter uses the current one and treats the deprecated
+  one as absent. The server's event stream opens with `server.connected`
+  before any session event; the harness treats that frame as stream liveness,
+  not session state.

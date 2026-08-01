@@ -220,6 +220,25 @@ nobody was listening on. Capabilities are explicit in the hello and the
 unknown-`schema_version` refusal in the contract types is unchanged. Permission
 relay stays designed: adapters are stage 3.
 
+### 10. Self-asserted actor identity
+
+Every command carries an `actor`; nothing verifies that a connecting process is
+who its `actor` string claims. One local process could submit commands under
+another's name.
+**Stance:** accepted and disclosed — `actor` is **provenance, not
+authorization**. The authentication boundary is the socket itself: same-EUID
+peer validation (threat 3) admits exactly the operator's own processes, and
+within one uid there is one trust domain. `actor` exists for attribution and
+audit; authority policy governs what may happen and never treats an actor
+string as proof of identity. Threading verified peer identity through command
+submission — a pid-to-adapter registry — is deliberately deferred to the
+stages where multi-process trust actually appears (console and workspace),
+rather than half-built now and mistaken for a boundary.
+
+**Status: in force** — the stance *is* the disclosure plus the EUID check,
+and both exist today. This entry is the recorded decision; a security review
+that flags self-asserted `actor` has found this paragraph, not a gap.
+
 ## Non-goals
 
 Defending the host from its own operator; sandboxing arbitrary code the

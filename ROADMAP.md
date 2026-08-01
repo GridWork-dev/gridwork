@@ -54,7 +54,8 @@ cases, with the performance envelope measured and receipted per run.
   detach/reattach, recording
 - Agent adapters for Claude Code, Codex, and opencode over ACP + engine hooks —
   control never rides synthetic keystrokes
-- A parity matrix per engine, including permission-prompt relay
+- A parity matrix per engine, including permission-prompt relay — defined in
+  [docs/PARITY.md](docs/PARITY.md)
 
 ## 4 · Console
 
