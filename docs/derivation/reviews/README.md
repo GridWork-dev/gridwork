@@ -19,7 +19,7 @@ docs/derivation/reviews/<subject>.md
 Get it for the current branch:
 
 ```bash
-git diff --name-only origin/main...HEAD | ./tools/cleanroom-gate.sh --subject
+git diff --no-renames --name-only origin/main...HEAD | ./tools/cleanroom-gate.sh --subject
 ```
 
 (If the branch also edits `SPECS.md` or `CAPTURES.md`, the gate needs a base to diff
@@ -39,10 +39,17 @@ diffs registry rows against `CLEANROOM_BASE` and treats the citing files as touc
 and it refuses a registry edit it has no base to judge. A row nothing cites stays free
 to add or fix — pre-seeding is meant to be cheap, and stays so.
 
+Two scope notes, said plainly. The diff feeding the gate must be produced with
+`--no-renames` (CI's is): default rename detection folds a modify-plus-rename into one
+line naming only the new path, which is exactly how a registry edit would vanish from
+the input — the reviewer of this mechanism defeated its first version that way. And the
+binding covers table rows, not the prose around them: the sentences that govern how a
+row is read stay rule 4's reader's job, like every other claim in this repository.
+
 ## Writing one
 
 ```bash
-subject=$(git diff --name-only origin/main...HEAD | ./tools/cleanroom-gate.sh --subject)
+subject=$(git diff --no-renames --name-only origin/main...HEAD | ./tools/cleanroom-gate.sh --subject)
 cp docs/derivation/reviews/TEMPLATE.md "docs/derivation/reviews/$subject.md"
 ```
 

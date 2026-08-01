@@ -601,7 +601,13 @@ jobs:
           else
             base="$(git rev-parse HEAD^1)"
           fi
-          git diff --name-only "$base" HEAD > /tmp/changed-paths
+          # --no-renames IS LOAD-BEARING. Default rename detection folds a
+          # modify-plus-rename into ONE line naming only the new path, so a
+          # commit that renames a registry while tampering a cited row would
+          # put no registry path in this list at all — the reviewer of the
+          # row binding defeated the first version exactly that way. With
+          # renames off, the canonical path always appears as a deletion.
+          git diff --no-renames --name-only "$base" HEAD > /tmp/changed-paths
           # Fail CLOSED. An empty set from a diff that failed would otherwise read
           # as "nothing engine-adjacent was touched" — the gate passing because it
           # could not look, which is the failure mode this whole job exists for.
@@ -729,7 +735,25 @@ jobs:
           echo 'docs/derivation/CAPTURES.md' | CLEANROOM_BASE="$orig" ./tools/cleanroom-gate.sh \
             || fail 'pre-seeding an uncited row was blocked — the trigger over-fires'
           git reset -q --hard "$orig"
-          echo "cleanroom-gate: cited-row binding, trigger, and free pre-seed all hold"
+          # (4) the rename bypass: renaming a registry while tampering its
+          # rows must not collapse the canonical path out of the diff. The
+          # reviewer of this mechanism defeated the first version exactly that
+          # way — rename detection folded modify+rename into one line naming
+          # only the new path, and the gate saw no registry at all. The
+          # --no-renames diff (the same shape the real step above uses) keeps
+          # the canonical path visible as a deletion, which reads as
+          # every-cited-row-removed and demands the review.
+          git mv docs/derivation/SPECS.md docs/derivation/SPECS-moved.md
+          sed -i -E "/^\|/ s/\|[[:space:]]*\$/| seeded rename tamper |/" docs/derivation/SPECS-moved.md
+          git -c user.name=seed -c user.email=seed@invalid commit -qam 'seed: rename a registry and tamper its rows'
+          out=0
+          msg="$(git diff --no-renames --name-only "$orig" HEAD \
+            | CLEANROOM_BASE="$orig" ./tools/cleanroom-gate.sh 2>&1)" || out=$?
+          [ "$out" -ne 0 ] || fail 'a renamed-and-tampered registry passed — the rename bypass is back'
+          echo "$msg" | grep -q 'no second-reader record' \
+            || fail 'the rename+tamper failed for a reason other than the missing record'
+          git reset -q --hard "$orig"
+          echo "cleanroom-gate: cited-row binding, trigger, free pre-seed, and rename bypass all hold"
       - name: the subject digest does not depend on the locale
         run: |
           set -euo pipefail

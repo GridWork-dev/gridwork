@@ -283,7 +283,7 @@ cleanroom-gate: the change touches a citation registry and there is no
 CLEANROOM_BASE to diff its rows against — refusing to pass. CI exports the
 merge base; locally:
 
-  git diff --name-only main...HEAD | CLEANROOM_BASE="$(git merge-base main HEAD)" ./tools/cleanroom-gate.sh
+  git diff --no-renames --name-only main...HEAD | CLEANROOM_BASE="$(git merge-base main HEAD)" ./tools/cleanroom-gate.sh
 
 A registry edit judged without a base would be waved through blind, and a row
 a past review vouched for is exactly the thing that must not move in silence.
@@ -292,6 +292,18 @@ EOF
   fi
   if ! git rev-parse --verify --quiet "${CLEANROOM_BASE}^{commit}" > /dev/null; then
     echo "cleanroom-gate: CLEANROOM_BASE '$CLEANROOM_BASE' is not a commit — refusing to pass" >&2
+    exit 2
+  fi
+  # A floor, not caller-proofing: CI computes its own merge base, so this
+  # guards the local invocation. Any resolvable commit used to pass — HEAD
+  # itself included, which makes the row diff vacuously empty. The base must
+  # be a PROPER ancestor: strictly behind HEAD, on its history.
+  if [[ "$(git rev-parse "${CLEANROOM_BASE}^{commit}")" == "$(git rev-parse HEAD)" ]]; then
+    echo "cleanroom-gate: CLEANROOM_BASE is HEAD itself — an empty row diff proves nothing; refusing to pass" >&2
+    exit 2
+  fi
+  if ! git merge-base --is-ancestor "$CLEANROOM_BASE" HEAD; then
+    echo "cleanroom-gate: CLEANROOM_BASE '$CLEANROOM_BASE' is not an ancestor of HEAD — refusing to pass" >&2
     exit 2
   fi
   for reg in "${touched_registries[@]}"; do
