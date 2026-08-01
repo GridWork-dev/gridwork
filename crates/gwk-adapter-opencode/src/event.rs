@@ -9,13 +9,14 @@
 //! Two permitted sources cover this module: `OPENCODE-PLUGINS`
 //! (opencode.ai/docs/plugins) for the typed event-bus names, and
 //! `OPENCODE-SERVER` (opencode.ai/docs/server) for everything shaped by the
-//! OpenAPI 3.1 schema that page's server publishes at `GET /doc` — the
-//! `{ "type", "properties" }` envelope, `permission.asked`'s property
-//! fields, `SessionStatus`'s three values, and the current permission-reply
-//! endpoint's path and body. Residual honestly kept: this crate never talks
-//! to a live engine, so these field-level shapes are this dispatch's best
-//! reading of the schema, not an independent re-derivation against a running
-//! server — the parity harness settles that live, per `docs/PARITY.md`.
+//! OpenAPI 3.1 schema that page's server publishes at `GET /doc`. The
+//! field-level shapes below were read directly out of that schema — fetched
+//! from a local `opencode 1.18.3` instance (`opencode serve` on a loopback
+//! port, `curl .../doc`, then killed; no session was ever created) rather
+//! than assumed. Residual honestly kept: a schema describes what the wire
+//! *can* carry, not that a real running engine exercises every shape this
+//! crate normalizes — that is what the parity harness proves live, per
+//! `docs/PARITY.md`.
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -44,7 +45,9 @@ pub enum EventParseError {
 /// One `data:` payload off the bus, before this crate narrows it to an
 /// [`Event`] it normalizes.
 // Derivation: OPENCODE-SERVER §Events (OpenAPI schema at `GET /doc`) — every
-// bus event arrives as a `{ "type": string, "properties": object }` envelope.
+// bus event's schema (`EventSessionCreated`, `EventPermissionAsked`, …) is
+// `{ "id": string, "type": string, "properties": object }`; this crate reads
+// `type` and `properties`, the two fields it needs.
 #[derive(Debug, Clone, Deserialize)]
 struct BusEnvelope {
     r#type: String,
@@ -54,34 +57,52 @@ struct BusEnvelope {
 
 /// A session's live status: pushed as `session.status` and polled at
 /// `GET /session/status`.
-// Derivation: OPENCODE-SERVER §Sessions — `GET /session/status` returns
-// `{ [sessionID]: SessionStatus }`, confirming the endpoint and its
-// per-session map shape; the `SessionStatus` schema's three values
-// (`idle`/`busy`/`retry`) are the OpenAPI schema `GET /doc` publishes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
+// Derivation: OPENCODE-SERVER §Sessions (OpenAPI schema at `GET /doc`) —
+// `GET /session/status` returns `{ [sessionID]: SessionStatus }`; the
+// `SessionStatus` schema is a `type`-tagged union of three objects: `{type:
+// "idle"}`, `{type: "busy"}`, and `{type: "retry", attempt, message, next}`
+// (`retry` also carries an optional `action`, not modeled here).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionStatus {
     Idle,
     Busy,
-    Retry,
+    Retry {
+        attempt: u64,
+        message: String,
+        next: u64,
+    },
+}
+
+/// The tool call a `permission.asked` event is about — two correlation ids,
+/// never a human-readable name.
+// Derivation: OPENCODE-SERVER §Permissions (OpenAPI schema at `GET /doc`) —
+// `PermissionRequest.tool`: `{ messageID, callID }`, both required when
+// `tool` itself is present.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ToolRef {
+    #[serde(rename = "messageID")]
+    pub message_id: String,
+    #[serde(rename = "callID")]
+    pub call_id: String,
 }
 
 /// What a `permission.asked` event reported. There is no `question` field on
-/// the wire — the adapter builds one from the tool call and patterns the
-/// engine named, in [`PermissionAsk::question`].
+/// the wire — the adapter builds one from `permission` and `patterns`, in
+/// [`PermissionAsk::question`].
 // Derivation: OPENCODE-SERVER §Permissions (OpenAPI schema at `GET /doc`) —
-// the `permission.asked` event's property fields: an `id`, a `sessionID`,
-// and the tool call being asked about (`tool`, `patterns`).
+// `PermissionRequest`'s fields: `id`, `sessionID`, `permission` (what is
+// being asked about, e.g. `bash`), `patterns`, and an optional `tool`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct PermissionAsk {
     #[serde(rename = "id")]
     pub request_id: String,
     #[serde(rename = "sessionID")]
     pub session_id: String,
-    #[serde(default)]
-    pub tool: Option<String>,
-    #[serde(default)]
+    pub permission: String,
     pub patterns: Vec<String>,
+    #[serde(default)]
+    pub tool: Option<ToolRef>,
 }
 
 impl PermissionAsk {
@@ -89,13 +110,36 @@ impl PermissionAsk {
     /// as `OpenGate`'s `question` — the relay transports the engine's own
     /// words nowhere on the wire, so this is where they come from.
     pub fn question(&self) -> String {
-        match (self.tool.as_deref(), self.patterns.is_empty()) {
-            (Some(tool), false) => format!("Allow `{tool}` matching {}?", self.patterns.join(", ")),
-            (Some(tool), true) => format!("Allow `{tool}`?"),
-            (None, false) => format!("Allow an action matching {}?", self.patterns.join(", ")),
-            (None, true) => "Allow this action?".to_owned(),
+        if self.patterns.is_empty() {
+            format!("Allow `{}`?", self.permission)
+        } else {
+            format!(
+                "Allow `{}` matching {}?",
+                self.permission,
+                self.patterns.join(", ")
+            )
         }
     }
+}
+
+/// One of opencode's eight typed session-error shapes, reduced to what every
+/// one of them can carry.
+// Derivation: OPENCODE-SERVER §Sessions (OpenAPI schema at `GET /doc`) —
+// every `session.error` variant (`ProviderAuthError`, `UnknownError`,
+// `MessageOutputLengthError`, `MessageAbortedError`, `StructuredOutputError`,
+// `ContextOverflowError`, `ContentFilterError`, `APIError`) is `{ name,
+// data }`; `data.message` is present on seven of the eight and absent only
+// on `MessageOutputLengthError`, whose `data` has no properties at all.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct SessionErrorInfo {
+    pub name: String,
+    pub data: SessionErrorData,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+pub struct SessionErrorData {
+    #[serde(default)]
+    pub message: Option<String>,
 }
 
 /// The normalized fact one bus frame carries, attributable to the session it
@@ -115,7 +159,7 @@ pub enum Event {
     },
     SessionError {
         session_id: String,
-        message: Option<String>,
+        error: Option<SessionErrorInfo>,
     },
     SessionDeleted {
         session_id: String,
@@ -128,6 +172,7 @@ pub enum Event {
     PermissionReplied {
         session_id: String,
         request_id: String,
+        reply: PermissionDecision,
     },
     /// A bus event this adapter does not normalize further (opencode's set
     /// is open and covers far more than lifecycle/status/permission — file,
@@ -146,32 +191,48 @@ fn require_str(props: &Value, key: &'static str) -> Result<String, EventParseErr
         .ok_or_else(|| EventParseError::Malformed(format!("missing `{key}`")))
 }
 
-fn optional_str(props: &Value, key: &'static str) -> Option<String> {
-    props.get(key).and_then(Value::as_str).map(str::to_owned)
-}
-
 // Derivation: OPENCODE-PLUGINS — the event-bus type names matched below
 // (`session.created`, `session.idle`, `session.error`, `session.deleted`,
 // `session.status`, `permission.asked`, `permission.replied`) are drawn from
 // the Session Events and Permission Events lists.
 // Derivation: OPENCODE-SERVER §Sessions/Permissions (OpenAPI schema at
-// `GET /doc`) — each matched event's property field names (`sessionID`,
-// `parentID`, `message`, `status`, `id`) come from that schema.
+// `GET /doc`) — each matched event's property shape: `session.created` and
+// `session.deleted` carry `{ sessionID, info: Session }` (`parent_id` reads
+// `info.parentID`, since `Session` has no top-level `parentID` on the event
+// itself); `session.error` carries `{ sessionID, error? }`; `session.status`
+// carries `{ sessionID, status: SessionStatus }`; `permission.replied`
+// carries `{ sessionID, requestID, reply }`.
 fn normalize(envelope: BusEnvelope) -> Result<Event, EventParseError> {
     let props = envelope.properties;
     match envelope.r#type.as_str() {
         "server.connected" => Ok(Event::StreamConnected),
-        "session.created" => Ok(Event::SessionCreated {
-            session_id: require_str(&props, "sessionID")?,
-            parent_id: optional_str(&props, "parentID"),
-        }),
+        "session.created" => {
+            let parent_id = props
+                .get("info")
+                .and_then(|info| info.get("parentID"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            Ok(Event::SessionCreated {
+                session_id: require_str(&props, "sessionID")?,
+                parent_id,
+            })
+        }
         "session.idle" => Ok(Event::SessionIdle {
             session_id: require_str(&props, "sessionID")?,
         }),
-        "session.error" => Ok(Event::SessionError {
-            session_id: require_str(&props, "sessionID")?,
-            message: optional_str(&props, "message"),
-        }),
+        "session.error" => {
+            let error = match props.get("error") {
+                Some(value) if !value.is_null() => Some(
+                    serde_json::from_value(value.clone())
+                        .map_err(|e| EventParseError::Malformed(e.to_string()))?,
+                ),
+                _ => None,
+            };
+            Ok(Event::SessionError {
+                session_id: require_str(&props, "sessionID")?,
+                error,
+            })
+        }
         "session.deleted" => Ok(Event::SessionDeleted {
             session_id: require_str(&props, "sessionID")?,
         }),
@@ -189,10 +250,16 @@ fn normalize(envelope: BusEnvelope) -> Result<Event, EventParseError> {
                 .map_err(|e| EventParseError::Malformed(e.to_string()))?;
             Ok(Event::PermissionAsked(ask))
         }
-        "permission.replied" => Ok(Event::PermissionReplied {
-            session_id: require_str(&props, "sessionID")?,
-            request_id: require_str(&props, "id")?,
-        }),
+        "permission.replied" => {
+            let reply = require_str(&props, "reply")?
+                .parse::<PermissionDecision>()
+                .map_err(|e| EventParseError::Malformed(e.to_string()))?;
+            Ok(Event::PermissionReplied {
+                session_id: require_str(&props, "sessionID")?,
+                request_id: require_str(&props, "requestID")?,
+                reply,
+            })
+        }
         other => Ok(Event::Other {
             r#type: other.to_owned(),
         }),
@@ -227,8 +294,8 @@ pub fn parse_frame(frame: &[u8]) -> Result<Event, EventParseError> {
 
 /// The three replies the reply endpoint accepts.
 // Derivation: OPENCODE-SERVER §Permissions (OpenAPI schema at `GET /doc`) —
-// the permission-reply endpoint's request body accepts exactly `once`,
-// `always`, or `reject`.
+// `POST /permission/{requestID}/reply`'s request body: `reply` is one of
+// `once`, `always`, `reject`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionDecision {
     Once,
@@ -302,25 +369,27 @@ pub struct PermissionReply {
     pub body: Value,
 }
 
-/// Build the reply for a decided gate. `session_id`/`request_id` come off
-/// the [`PermissionAsk`] that raised it — the relay answers through the same
+/// Build the reply for a decided gate. `request_id` comes off the
+/// [`PermissionAsk`] that raised it — the relay answers through the same
 /// channel that asked, per this adapter's own contract.
 // Derivation: OPENCODE-SERVER §Permissions (OpenAPI schema at `GET /doc`) —
-// the current permission-reply endpoint: `POST
-// /session/{id}/permission/{requestID}/reply`, body `{ "response":
-// <decision> }`. The endpoint table on that same page also documents an
-// older `POST /session/:id/permissions/:permissionID` (body `{ response,
-// remember? }`); this adapter targets only the current shape and treats the
-// other as absent, per `docs/PARITY.md`.
-pub fn reply_action(
-    session_id: &str,
-    request_id: &str,
-    decision: PermissionDecision,
-) -> PermissionReply {
+// the current, non-deprecated permission-reply endpoint is `POST
+// /permission/{requestID}/reply` (operation `permission.reply`), body `{
+// "reply": <decision> }`, no `sessionID` in its path. The schema separately
+// documents `POST /session/{sessionID}/permissions/{permissionID}`
+// (operation `permission.respond`, body `{ "response": <decision> }`)
+// explicitly flagged `deprecated: true`, and a `/api/session/{sessionID}
+// /permission/{requestID}/reply` v2 surface (body `{ "reply": <decision> }`)
+// this adapter does not use: the events it normalizes above are the v1 pair
+// `permission.asked`/`permission.replied` — v2's are separately named
+// `permission.v2.asked`/`permission.v2.replied` in the same schema, and
+// mixing a v1 ask with a v2 reply route would answer through a channel that
+// never raised it.
+pub fn reply_action(request_id: &str, decision: PermissionDecision) -> PermissionReply {
     PermissionReply {
         method: "POST",
-        path: format!("/session/{session_id}/permission/{request_id}/reply"),
-        body: serde_json::json!({ "response": decision.as_wire_str() }),
+        path: format!("/permission/{request_id}/reply"),
+        body: serde_json::json!({ "reply": decision.as_wire_str() }),
     }
 }
 
@@ -341,7 +410,7 @@ mod tests {
     #[test]
     fn every_lifecycle_event_normalizes_and_attributes_its_session() {
         let created = parse_frame(&frame(
-            r#"{"type":"session.created","properties":{"sessionID":"ses_1","parentID":"ses_0"}}"#,
+            r#"{"type":"session.created","properties":{"sessionID":"ses_1","info":{"id":"ses_1","parentID":"ses_0"}}}"#,
         ))
         .expect("parses");
         assert_eq!(
@@ -364,19 +433,41 @@ mod tests {
         );
 
         let error = parse_frame(&frame(
-            r#"{"type":"session.error","properties":{"sessionID":"ses_1","message":"boom"}}"#,
+            r#"{"type":"session.error","properties":{"sessionID":"ses_1","error":{"name":"UnknownError","data":{"message":"boom"}}}}"#,
         ))
         .expect("parses");
         assert_eq!(
             error,
             Event::SessionError {
                 session_id: "ses_1".to_owned(),
-                message: Some("boom".to_owned()),
+                error: Some(SessionErrorInfo {
+                    name: "UnknownError".to_owned(),
+                    data: SessionErrorData {
+                        message: Some("boom".to_owned())
+                    },
+                }),
+            }
+        );
+
+        // MessageOutputLengthError's `data` carries no `message` at all —
+        // the one variant the schema does not require it on.
+        let no_message = parse_frame(&frame(
+            r#"{"type":"session.error","properties":{"sessionID":"ses_1","error":{"name":"MessageOutputLengthError","data":{}}}}"#,
+        ))
+        .expect("parses");
+        assert_eq!(
+            no_message,
+            Event::SessionError {
+                session_id: "ses_1".to_owned(),
+                error: Some(SessionErrorInfo {
+                    name: "MessageOutputLengthError".to_owned(),
+                    data: SessionErrorData { message: None },
+                }),
             }
         );
 
         let deleted = parse_frame(&frame(
-            r#"{"type":"session.deleted","properties":{"sessionID":"ses_1"}}"#,
+            r#"{"type":"session.deleted","properties":{"sessionID":"ses_1","info":{"id":"ses_1"}}}"#,
         ))
         .expect("parses");
         assert_eq!(
@@ -389,29 +480,51 @@ mod tests {
 
     #[test]
     fn session_status_push_carries_the_three_states() {
-        for (wire, expected) in [
-            ("idle", SessionStatus::Idle),
-            ("busy", SessionStatus::Busy),
-            ("retry", SessionStatus::Retry),
-        ] {
-            let event = parse_frame(&frame(&format!(
-                r#"{{"type":"session.status","properties":{{"sessionID":"ses_1","status":"{wire}"}}}}"#
-            )))
-            .expect("parses");
-            assert_eq!(
-                event,
-                Event::SessionStatusChanged {
-                    session_id: "ses_1".to_owned(),
-                    status: expected,
-                }
-            );
-        }
+        let idle = parse_frame(&frame(
+            r#"{"type":"session.status","properties":{"sessionID":"ses_1","status":{"type":"idle"}}}"#,
+        ))
+        .expect("parses");
+        assert_eq!(
+            idle,
+            Event::SessionStatusChanged {
+                session_id: "ses_1".to_owned(),
+                status: SessionStatus::Idle,
+            }
+        );
+
+        let busy = parse_frame(&frame(
+            r#"{"type":"session.status","properties":{"sessionID":"ses_1","status":{"type":"busy"}}}"#,
+        ))
+        .expect("parses");
+        assert_eq!(
+            busy,
+            Event::SessionStatusChanged {
+                session_id: "ses_1".to_owned(),
+                status: SessionStatus::Busy,
+            }
+        );
+
+        let retry = parse_frame(&frame(
+            r#"{"type":"session.status","properties":{"sessionID":"ses_1","status":{"type":"retry","attempt":2,"message":"rate limited","next":5000}}}"#,
+        ))
+        .expect("parses");
+        assert_eq!(
+            retry,
+            Event::SessionStatusChanged {
+                session_id: "ses_1".to_owned(),
+                status: SessionStatus::Retry {
+                    attempt: 2,
+                    message: "rate limited".to_owned(),
+                    next: 5000,
+                },
+            }
+        );
     }
 
     #[test]
     fn permission_asked_becomes_open_gate_with_the_engines_question_and_the_reply_options() {
         let event = parse_frame(&frame(
-            r#"{"type":"permission.asked","properties":{"id":"perm_1","sessionID":"ses_1","tool":"bash","patterns":["rm -rf *"]}}"#,
+            r#"{"type":"permission.asked","properties":{"id":"perm_1","sessionID":"ses_1","permission":"bash","patterns":["rm -rf *"],"tool":{"messageID":"msg_1","callID":"call_1"}}}"#,
         ))
         .expect("parses");
         let Event::PermissionAsked(ask) = event else {
@@ -419,6 +532,13 @@ mod tests {
         };
         assert_eq!(ask.request_id, "perm_1");
         assert_eq!(ask.session_id, "ses_1");
+        assert_eq!(
+            ask.tool,
+            Some(ToolRef {
+                message_id: "msg_1".to_owned(),
+                call_id: "call_1".to_owned(),
+            })
+        );
 
         let command = open_gate_command(&ask, GateId::new("gate-1"), Some(AttemptId::new("att-1")));
         let KernelCommand::OpenGate {
@@ -439,9 +559,22 @@ mod tests {
     }
 
     #[test]
-    fn permission_replied_carries_the_request_it_answers() {
+    fn a_permission_ask_without_a_tool_call_still_parses() {
         let event = parse_frame(&frame(
-            r#"{"type":"permission.replied","properties":{"id":"perm_1","sessionID":"ses_1"}}"#,
+            r#"{"type":"permission.asked","properties":{"id":"perm_1","sessionID":"ses_1","permission":"webfetch","patterns":[]}}"#,
+        ))
+        .expect("parses");
+        let Event::PermissionAsked(ask) = event else {
+            panic!("expected PermissionAsked");
+        };
+        assert_eq!(ask.tool, None);
+        assert_eq!(ask.question(), "Allow `webfetch`?");
+    }
+
+    #[test]
+    fn permission_replied_carries_the_request_and_the_decision_it_answered() {
+        let event = parse_frame(&frame(
+            r#"{"type":"permission.replied","properties":{"sessionID":"ses_1","requestID":"perm_1","reply":"once"}}"#,
         ))
         .expect("parses");
         assert_eq!(
@@ -449,6 +582,7 @@ mod tests {
             Event::PermissionReplied {
                 session_id: "ses_1".to_owned(),
                 request_id: "perm_1".to_owned(),
+                reply: PermissionDecision::Once,
             }
         );
     }
@@ -478,11 +612,11 @@ mod tests {
     }
 
     #[test]
-    fn reply_action_targets_the_current_endpoint_with_the_decided_response() {
-        let reply = reply_action("ses_1", "perm_1", PermissionDecision::Once);
+    fn reply_action_targets_the_v1_reply_endpoint_with_the_reply_body_key() {
+        let reply = reply_action("perm_1", PermissionDecision::Once);
         assert_eq!(reply.method, "POST");
-        assert_eq!(reply.path, "/session/ses_1/permission/perm_1/reply");
-        assert_eq!(reply.body, serde_json::json!({ "response": "once" }));
+        assert_eq!(reply.path, "/permission/perm_1/reply");
+        assert_eq!(reply.body, serde_json::json!({ "reply": "once" }));
     }
 
     #[test]
@@ -493,6 +627,12 @@ mod tests {
         ));
         assert!(matches!(
             parse_frame(&frame(r#"{"type":"session.idle","properties":{}}"#)),
+            Err(EventParseError::Malformed(_))
+        ));
+        assert!(matches!(
+            parse_frame(&frame(
+                r#"{"type":"permission.asked","properties":{"id":"perm_1","sessionID":"ses_1","tool":"bash"}}"#
+            )),
             Err(EventParseError::Malformed(_))
         ));
     }
