@@ -234,7 +234,19 @@ pub struct Gate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[specta(optional)]
     pub kind: Option<String>,
+    /// A relayed permission prompt is a gate: the engine's question and its
+    /// offered options arrive on open, the chosen option on decide. All three
+    /// absent for gates that are not prompts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub question: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub options: Option<Vec<String>>,
     pub verdict: GateVerdict,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub chosen_option: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[specta(optional)]
     pub evidence_ref: Option<String>,

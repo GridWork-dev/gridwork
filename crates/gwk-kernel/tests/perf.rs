@@ -654,6 +654,8 @@ fn mixed_command(n: u64) -> KernelCommand {
             attempt_id: None,
             phase_ref: Some("4p-kernel".into()),
             kind: Some("review".into()),
+            question: None,
+            options: None,
         },
     }
 }

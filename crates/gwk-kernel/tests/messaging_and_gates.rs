@@ -295,6 +295,8 @@ async fn a_gate_is_decided_by_verdict_under_a_version_cas() {
     let maintenance = maintenance_pool().await;
     let (name, store) = fresh_store(&maintenance, "gate", 64).await;
 
+    // A relayed permission prompt: the engine's question and options travel
+    // verbatim on open.
     apply(
         &store,
         "open",
@@ -302,7 +304,9 @@ async fn a_gate_is_decided_by_verdict_under_a_version_cas() {
             gate_id: GateId::new("g-1"),
             attempt_id: None,
             phase_ref: Some("4p-kernel".into()),
-            kind: Some("review".into()),
+            kind: Some("approval".into()),
+            question: Some("Run `cargo test` in the worktree?".into()),
+            options: Some(vec!["allow".into(), "allow-always".into(), "deny".into()]),
         },
     )
     .await;
@@ -315,6 +319,20 @@ async fn a_gate_is_decided_by_verdict_under_a_version_cas() {
         .await,
         ("pending".to_owned(), 1)
     );
+    let (question, options): (Option<String>, Option<serde_json::Value>) =
+        sqlx::query_as("SELECT question, options FROM gwk.gate WHERE id = $1")
+            .bind("g-1")
+            .fetch_one(store.pool())
+            .await
+            .expect("gate prompt columns");
+    assert_eq!(
+        question.as_deref(),
+        Some("Run `cargo test` in the worktree?")
+    );
+    assert_eq!(
+        options,
+        Some(serde_json::json!(["allow", "allow-always", "deny"]))
+    );
 
     // A stale CAS is refused with the number a retrier needs.
     let (code, text) = refuse(
@@ -324,6 +342,7 @@ async fn a_gate_is_decided_by_verdict_under_a_version_cas() {
             gate_id: GateId::new("g-1"),
             expected_version: 7,
             verdict: GateVerdict::Pass,
+            chosen_option: None,
             evidence_ref: None,
         },
     )
@@ -337,14 +356,16 @@ async fn a_gate_is_decided_by_verdict_under_a_version_cas() {
             gate_id: GateId::new("g-1"),
             expected_version: 1,
             verdict: GateVerdict::Fail,
+            chosen_option: Some("deny".into()),
             evidence_ref: Some("ev-1".into()),
         },
     )
     .await;
 
-    // A verdict is a value, not an edge: re-deciding is legal, and the
-    // evidence reference the first decision carried is not erased by a second
-    // that names none.
+    // A verdict is a value, not an edge: re-deciding is legal. The evidence
+    // reference coalesces — a second decision naming none does not erase it —
+    // but the chosen option REPLACES, like the verdict beside it: a stale
+    // choice under a fresh verdict would misreport what the relay answered.
     apply(
         &store,
         "pass",
@@ -352,22 +373,31 @@ async fn a_gate_is_decided_by_verdict_under_a_version_cas() {
             gate_id: GateId::new("g-1"),
             expected_version: 2,
             verdict: GateVerdict::Pass,
+            chosen_option: Some("allow".into()),
             evidence_ref: None,
         },
     )
     .await;
-    let row = sqlx::query("SELECT verdict, evidence_ref, version FROM gwk.gate WHERE id = $1")
-        .bind("g-1")
-        .fetch_one(store.pool())
-        .await
-        .expect("gate row");
+    let row = sqlx::query(
+        "SELECT verdict, chosen_option, evidence_ref, version FROM gwk.gate WHERE id = $1",
+    )
+    .bind("g-1")
+    .fetch_one(store.pool())
+    .await
+    .expect("gate row");
     assert_eq!(
         (
             row.get::<String, _>("verdict"),
+            row.get::<Option<String>, _>("chosen_option"),
             row.get::<Option<String>, _>("evidence_ref"),
             row.get::<i64, _>("version"),
         ),
-        ("pass".to_owned(), Some("ev-1".to_owned()), 3)
+        (
+            "pass".to_owned(),
+            Some("allow".to_owned()),
+            Some("ev-1".to_owned()),
+            3
+        )
     );
 
     drop_database(&maintenance, &name).await;

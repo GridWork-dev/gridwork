@@ -484,18 +484,24 @@ ALTER TABLE gwk.command ENABLE ALWAYS TRIGGER command_no_delete;
 ALTER TABLE gwk.command ENABLE ALWAYS TRIGGER command_no_truncate;
 
 CREATE TABLE gwk.gate (
-  id           text PRIMARY KEY,
-  version      bigint NOT NULL DEFAULT 1 CHECK (version BETWEEN 1 AND 4294967295),
-  attempt_id   text REFERENCES gwk.attempt(id),
-  phase_ref    text,
+  id            text PRIMARY KEY,
+  version       bigint NOT NULL DEFAULT 1 CHECK (version BETWEEN 1 AND 4294967295),
+  attempt_id    text REFERENCES gwk.attempt(id),
+  phase_ref     text,
   -- OPEN kind (verify/review/security/eval/cert/...): new gate kinds are
   -- additive, never a schema change
-  kind         text,
-  verdict      text NOT NULL DEFAULT 'pending'
-                 CHECK (verdict IN ('pending', 'pass', 'fail', 'partial')),
-  evidence_ref text,
-  created_at   timestamptz NOT NULL DEFAULT now(),
-  updated_at   timestamptz NOT NULL DEFAULT now()
+  kind          text,
+  -- A relayed permission prompt is a gate: the engine's question and its
+  -- offered options travel on open, the chosen option on decide. All three
+  -- absent for gates that are not prompts.
+  question      text,
+  options       jsonb,
+  verdict       text NOT NULL DEFAULT 'pending'
+                  CHECK (verdict IN ('pending', 'pass', 'fail', 'partial')),
+  chosen_option text,
+  evidence_ref  text,
+  created_at    timestamptz NOT NULL DEFAULT now(),
+  updated_at    timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE TABLE gwk.authority_grant (
@@ -819,4 +825,4 @@ COMMIT;
 // unwrapped 64-hex line lands past 100 columns — the generator and
 // rustfmt would then fight, showing up as permanent contract drift.
 pub const CONTRACT_SQL_SHA256: &str =
-    "782ea2e5b9cc77d137b7835956f47e1cd067204526e12d782522616ed3721398";
+    "54084768d27b82e241674d8ef35fc1f9c898a97da34f8af09b2df4bf69851184";

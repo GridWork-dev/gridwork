@@ -275,11 +275,26 @@ pub enum KernelCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[specta(optional)]
         kind: Option<String>,
+        /// A relayed permission prompt travels as a gate: the engine's
+        /// question and its offered options, verbatim. Absent for gates that
+        /// are not prompts.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[specta(optional)]
+        question: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[specta(optional)]
+        options: Option<Vec<String>>,
     },
     DecideGate {
         gate_id: GateId,
         expected_version: u32,
         verdict: GateVerdict,
+        /// Which offered option the decision took — the value the relay
+        /// returns to the engine. Replaces on a re-decide, like the verdict
+        /// beside it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[specta(optional)]
+        chosen_option: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[specta(optional)]
         evidence_ref: Option<String>,
@@ -808,12 +823,15 @@ mod tests {
                 gate_id: GateId::new("gate-1"),
                 attempt_id: Some(AttemptId::new("att-1")),
                 phase_ref: None,
-                kind: Some("review".into()),
+                kind: Some("approval".into()),
+                question: Some("Run `cargo test` in the worktree?".into()),
+                options: Some(vec!["allow".into(), "deny".into()]),
             },
             KernelCommand::DecideGate {
                 gate_id: GateId::new("gate-1"),
                 expected_version: 1,
                 verdict: GateVerdict::Pass,
+                chosen_option: Some("allow".into()),
                 evidence_ref: None,
             },
             KernelCommand::GrantAuthority {

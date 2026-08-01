@@ -791,17 +791,23 @@ pub(crate) async fn apply_event(
             attempt_id,
             phase_ref,
             kind,
+            question,
+            options,
         } => {
             sqlx::query(
                 "INSERT INTO gwk.gate \
-                   (id, version, attempt_id, phase_ref, kind, verdict, created_at, updated_at) \
-                 VALUES ($1, $2, $3, $4, $5, 'pending', $6::timestamptz, $6::timestamptz)",
+                   (id, version, attempt_id, phase_ref, kind, question, options, verdict, \
+                    created_at, updated_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8::timestamptz, \
+                         $8::timestamptz)",
             )
             .bind(gate_id.as_str())
             .bind(version)
             .bind(attempt_id.as_ref().map(|a| a.as_str()))
             .bind(phase_ref.as_deref())
             .bind(kind.as_deref())
+            .bind(question.as_deref())
+            .bind(json_opt(options.as_ref())?)
             .bind(at)
             .execute(&mut *conn)
             .await
@@ -810,17 +816,24 @@ pub(crate) async fn apply_event(
         KernelCommand::DecideGate {
             gate_id,
             verdict,
+            chosen_option,
             evidence_ref,
             ..
         } => {
+            // `chosen_option` replaces rather than coalesces, exactly like the
+            // verdict beside it: a re-decide is a whole new decision, and a
+            // stale choice under a fresh verdict would misreport what was
+            // answered back to the engine.
             let done = sqlx::query(
                 "UPDATE gwk.gate \
-                 SET verdict = $2, version = $3, updated_at = $4::timestamptz, \
-                     evidence_ref = COALESCE($5, evidence_ref) \
+                 SET verdict = $2, chosen_option = $3, version = $4, \
+                     updated_at = $5::timestamptz, \
+                     evidence_ref = COALESCE($6, evidence_ref) \
                  WHERE id = $1",
             )
             .bind(gate_id.as_str())
             .bind(wire_str(verdict)?)
+            .bind(chosen_option.as_deref())
             .bind(version)
             .bind(at)
             .bind(evidence_ref.as_deref())

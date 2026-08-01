@@ -618,7 +618,9 @@ pub async fn populate(store: &PgEventStore) {
             gate_id: GateId::new("g-1"),
             attempt_id: None,
             phase_ref: Some("4p-kernel".into()),
-            kind: Some("review".into()),
+            kind: Some("approval".into()),
+            question: Some("Run `cargo test` in the worktree?".into()),
+            options: Some(vec!["allow".into(), "deny".into()]),
         },
     )
     .await;
