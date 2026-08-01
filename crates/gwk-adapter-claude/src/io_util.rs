@@ -1,16 +1,20 @@
-//! One bounded, newline-delimited read for the async stream-json framing
-//! this crate's control channel uses (`stream.rs`). A sync twin joins this
-//! module once the `PreToolUse` relay's blocking hook-side client needs one.
+//! One bounded, newline-delimited read, in both the async flavor (the
+//! stream-json child and the relay's server half both run on Tokio) and the
+//! sync flavor (the relay's hook-side client is a plain blocking process, on
+//! purpose — see `relay::relay_ask`).
 //!
-//! `tokio::io::AsyncBufReadExt::read_until` takes no size cap: it grows its
-//! buffer until it sees the delimiter or the peer hangs up, which turns a
-//! runaway or malicious peer into unbounded memory growth. Scanning each
-//! fill of the reader's own internal buffer for `\n` and erroring once the
-//! accumulated line crosses `max_bytes` bounds that at `max_bytes` plus one
-//! buffer's worth of overshoot, never further.
+//! Neither `tokio::io::AsyncBufReadExt::read_until` nor
+//! `std::io::BufRead::read_until` takes a size cap: both grow their buffer
+//! until they see the delimiter or the peer hangs up, which turns a runaway
+//! or malicious peer into unbounded memory growth. Scanning each fill of the
+//! reader's own internal buffer for `\n` and erroring once the accumulated
+//! line crosses `max_bytes` bounds that at `max_bytes` plus one buffer's
+//! worth of overshoot, never further.
 // Derivation: CLAUDE-HEADLESS — "stream-json: newline-delimited JSON for
 // real-time streaming" is the framing this reader implements: one JSON
-// value per `\n`-terminated line.
+// value per `\n`-terminated line, for both the engine's own output and
+// (`relay.rs`) this crate's internal relay wire, which is framed the same
+// way on purpose so one reader serves both.
 
 use std::io;
 
@@ -29,6 +33,37 @@ where
     let mut out = Vec::new();
     loop {
         let buf = reader.fill_buf().await?;
+        if buf.is_empty() {
+            return Ok(if out.is_empty() { None } else { Some(out) });
+        }
+        if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+            out.extend_from_slice(&buf[..pos]);
+            let consumed = pos + 1;
+            reader.consume(consumed);
+            return if out.len() > max_bytes {
+                Err(too_long(max_bytes))
+            } else {
+                Ok(Some(out))
+            };
+        }
+        let n = buf.len();
+        out.extend_from_slice(buf);
+        reader.consume(n);
+        if out.len() > max_bytes {
+            return Err(too_long(max_bytes));
+        }
+    }
+}
+
+/// The blocking twin of [`read_bounded_line_async`], for the relay client
+/// that deliberately never touches a Tokio runtime.
+pub(crate) fn read_bounded_line_sync<R: io::BufRead>(
+    reader: &mut R,
+    max_bytes: usize,
+) -> io::Result<Option<Vec<u8>>> {
+    let mut out = Vec::new();
+    loop {
+        let buf = reader.fill_buf()?;
         if buf.is_empty() {
             return Ok(if out.is_empty() { None } else { Some(out) });
         }
@@ -110,6 +145,31 @@ mod tests {
         let error = read_bounded_line_async(&mut reader, 100)
             .await
             .expect_err("oversized terminated line must still be refused");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn sync_reader_matches_the_async_one() {
+        let mut reader = std::io::BufReader::new(std::io::Cursor::new(b"a\nbb\n".to_vec()));
+        assert_eq!(
+            read_bounded_line_sync(&mut reader, 1024).expect("read"),
+            Some(b"a".to_vec())
+        );
+        assert_eq!(
+            read_bounded_line_sync(&mut reader, 1024).expect("read"),
+            Some(b"bb".to_vec())
+        );
+        assert_eq!(
+            read_bounded_line_sync(&mut reader, 1024).expect("read"),
+            None
+        );
+    }
+
+    #[test]
+    fn sync_reader_bounds_a_line_with_no_terminator() {
+        let mut reader = std::io::BufReader::new(std::io::Cursor::new(vec![b'y'; 5_000]));
+        let error = read_bounded_line_sync(&mut reader, 64)
+            .expect_err("oversized line with no terminator must be refused");
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 }
