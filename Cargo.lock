@@ -910,6 +910,9 @@ dependencies = [
  "gwk-domain",
  "gwk-pty",
  "pty-process",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
