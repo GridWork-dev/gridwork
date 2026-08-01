@@ -15,9 +15,13 @@
 use gwk_domain::EngineId;
 use gwk_pty::{Session, SpawnError};
 
+pub mod event;
 pub mod schema;
 pub mod wire;
 
+pub use event::{
+    ApprovalRequest, CodexEvent, NormalizeError, normalize_notification, normalize_request,
+};
 pub use wire::{Frame, JsonRpcId, WireClient, WireError};
 
 /// The engine CLI this adapter drives.
