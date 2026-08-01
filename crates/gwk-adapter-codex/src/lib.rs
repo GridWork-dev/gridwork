@@ -15,6 +15,10 @@
 use gwk_domain::EngineId;
 use gwk_pty::{Session, SpawnError};
 
+pub mod wire;
+
+pub use wire::{Frame, JsonRpcId, WireClient, WireError};
+
 /// The engine CLI this adapter drives.
 pub const ENGINE: &str = "codex";
 
