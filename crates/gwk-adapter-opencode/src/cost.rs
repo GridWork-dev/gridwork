@@ -8,15 +8,15 @@
 //! — never invents a conversion the engine did not report, per the ledger's
 //! own contract (`docs/PARITY.md`, Axis 3).
 //!
-//! ESCALATION: the same gap `event.rs` discloses applies here. Session
-//! listing (`GET /session/:id/children` → `Session[]`, with `parentID` on
-//! creation) and the message envelope shape (`GET /session/:id/message` →
-//! `{ info: Message, parts: Part[] }[]`) are literally on the one permitted
-//! page, `OPENCODE-SERVER` (opencode.ai/docs/server), and carry `Derivation:`
-//! markers below. The `cost`/`tokens` field names inside that `info` object
-//! are not shown on that page — they are the dispatch brief's
-//! (`AssistantMessage.cost`/`.tokens`) and `docs/PARITY.md`'s, encoded here
-//! without a marker for the same reason `event.rs` gives.
+//! Every shape here — session listing, the message envelope, and the
+//! `cost`/`tokens` fields inside it — comes from `OPENCODE-SERVER`
+//! (opencode.ai/docs/server): the endpoint table for the two calls, and the
+//! OpenAPI 3.1 schema that page's server publishes at `GET /doc` for the
+//! field names inside `Message`. Residual honestly kept: this crate never
+//! talks to a live engine, so the schema-derived field names are this
+//! dispatch's best reading, not an independent re-derivation against a
+//! running server — the parity harness settles that live, per
+//! `docs/PARITY.md`.
 
 use serde::Deserialize;
 
@@ -39,6 +39,9 @@ pub struct ChildSession {
 /// Token counts as opencode breaks them down on one assistant message.
 /// Absent fields are simply not reported — never coerced to zero, since
 /// zero is a real count a caller must not confuse with "unknown."
+// Derivation: OPENCODE-SERVER §Messages (OpenAPI schema at `GET /doc`) —
+// `AssistantMessage.tokens`' breakdown: `input`, `output`, `reasoning`, and
+// a `cache` pair (`cacheRead`, `cacheWrite` on the wire).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenUsage {
@@ -57,6 +60,8 @@ pub struct TokenUsage {
 /// One assistant message's reported spend — the ledger's atom. `cost` is
 /// dollars (opencode's own unit); [`dollars_to_micros`] is where it becomes
 /// the ledger's micro-USD integer.
+// Derivation: OPENCODE-SERVER §Messages (OpenAPI schema at `GET /doc`) —
+// `AssistantMessage.cost` (dollars) and `.tokens` (the breakdown above).
 #[derive(Debug, Clone, Copy, PartialEq, Default, Deserialize)]
 pub struct AssistantMessageUsage {
     #[serde(default)]
@@ -70,7 +75,7 @@ pub struct AssistantMessageUsage {
 /// ignores unknown fields by default, so it is simply not modeled here.
 // Derivation: OPENCODE-SERVER §Messages — `GET /session/:id/message` returns
 // `{ info: Message, parts: Part[] }[]`; this crate reads `info` for its cost
-// and token facts (field names past that: see the module ESCALATION note).
+// and token facts (field names: see the `AssistantMessageUsage` citation).
 #[derive(Debug, Clone, Deserialize)]
 struct MessageEnvelope {
     info: AssistantMessageUsage,

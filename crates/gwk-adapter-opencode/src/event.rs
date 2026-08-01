@@ -6,25 +6,16 @@
 //! component drives the HTTP client hands this frames, and this is where
 //! frames become typed facts the kernel side can act on.
 //!
-//! ESCALATION (see the Implementer clause on this dispatch): the only
-//! citable permitted source for the opencode server's HTTP + SSE surface is
-//! `OPENCODE-SERVER` (opencode.ai/docs/server), and that page names exactly
-//! one bus event — `server.connected`, "the first event, then bus events."
-//! Every other event name below (`session.created`, `session.idle`,
-//! `session.error`, `session.deleted`, `session.status`, `permission.asked`,
-//! `permission.replied`), the envelope shape each frame's `data:` carries
-//! (`{ "type", "properties" }`), and the property field names inside
-//! `PermissionAsk` are documented on opencode.ai/docs/plugins (the plugin
-//! Events list) and opencode.ai/docs/sdk (the `event.subscribe()` example)
-//! instead — two pages this dispatch's permitted-source list does not name a
-//! SPECS.md row for. They are encoded here per the dispatch brief and
-//! `docs/PARITY.md`'s 2026-08-01 capture, extrapolating the camelCase
-//! identifier convention `OPENCODE-SERVER` itself confirms elsewhere
-//! (`parentID`, `messageID`, `providerID`, `modelID`, `partID`) to the
-//! `sessionID`/`requestID` keys used here. This is a citation-scope gap for
-//! the second reviewer and the operator to close — a new `OPENCODE-PLUGINS`
-//! row, most likely — not a guess dressed as a derivation: no `Derivation:`
-//! marker below claims either page.
+//! Two permitted sources cover this module: `OPENCODE-PLUGINS`
+//! (opencode.ai/docs/plugins) for the typed event-bus names, and
+//! `OPENCODE-SERVER` (opencode.ai/docs/server) for everything shaped by the
+//! OpenAPI 3.1 schema that page's server publishes at `GET /doc` — the
+//! `{ "type", "properties" }` envelope, `permission.asked`'s property
+//! fields, `SessionStatus`'s three values, and the current permission-reply
+//! endpoint's path and body. Residual honestly kept: this crate never talks
+//! to a live engine, so these field-level shapes are this dispatch's best
+//! reading of the schema, not an independent re-derivation against a running
+//! server — the parity harness settles that live, per `docs/PARITY.md`.
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -52,6 +43,8 @@ pub enum EventParseError {
 
 /// One `data:` payload off the bus, before this crate narrows it to an
 /// [`Event`] it normalizes.
+// Derivation: OPENCODE-SERVER §Events (OpenAPI schema at `GET /doc`) — every
+// bus event arrives as a `{ "type": string, "properties": object }` envelope.
 #[derive(Debug, Clone, Deserialize)]
 struct BusEnvelope {
     r#type: String,
@@ -63,8 +56,8 @@ struct BusEnvelope {
 /// `GET /session/status`.
 // Derivation: OPENCODE-SERVER §Sessions — `GET /session/status` returns
 // `{ [sessionID]: SessionStatus }`, confirming the endpoint and its
-// per-session map shape. The three variant names are not this page's own
-// text; see the module-level ESCALATION note.
+// per-session map shape; the `SessionStatus` schema's three values
+// (`idle`/`busy`/`retry`) are the OpenAPI schema `GET /doc` publishes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionStatus {
@@ -76,6 +69,9 @@ pub enum SessionStatus {
 /// What a `permission.asked` event reported. There is no `question` field on
 /// the wire — the adapter builds one from the tool call and patterns the
 /// engine named, in [`PermissionAsk::question`].
+// Derivation: OPENCODE-SERVER §Permissions (OpenAPI schema at `GET /doc`) —
+// the `permission.asked` event's property fields: an `id`, a `sessionID`,
+// and the tool call being asked about (`tool`, `patterns`).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct PermissionAsk {
     #[serde(rename = "id")]
@@ -154,6 +150,13 @@ fn optional_str(props: &Value, key: &'static str) -> Option<String> {
     props.get(key).and_then(Value::as_str).map(str::to_owned)
 }
 
+// Derivation: OPENCODE-PLUGINS — the event-bus type names matched below
+// (`session.created`, `session.idle`, `session.error`, `session.deleted`,
+// `session.status`, `permission.asked`, `permission.replied`) are drawn from
+// the Session Events and Permission Events lists.
+// Derivation: OPENCODE-SERVER §Sessions/Permissions (OpenAPI schema at
+// `GET /doc`) — each matched event's property field names (`sessionID`,
+// `parentID`, `message`, `status`, `id`) come from that schema.
 fn normalize(envelope: BusEnvelope) -> Result<Event, EventParseError> {
     let props = envelope.properties;
     match envelope.r#type.as_str() {
@@ -200,9 +203,9 @@ fn normalize(envelope: BusEnvelope) -> Result<Event, EventParseError> {
 /// the fact it carries.
 ///
 /// SSE's `data:` line framing is the public wire format `GET /event` speaks
-/// and is not opencode-specific; the JSON envelope each `data:` payload
-/// carries, and every event name past `server.connected`, are the module's
-/// disclosed ESCALATION above.
+/// and is not opencode-specific — the JSON envelope each `data:` payload
+/// carries, and every event name this recognizes, are [`BusEnvelope`] and
+/// [`normalize`]'s citations above.
 pub fn parse_frame(frame: &[u8]) -> Result<Event, EventParseError> {
     if frame.len() > MAX_EVENT_FRAME_BYTES {
         return Err(EventParseError::TooLarge);
@@ -223,8 +226,9 @@ pub fn parse_frame(frame: &[u8]) -> Result<Event, EventParseError> {
 }
 
 /// The three replies the reply endpoint accepts.
-// ESCALATION: not `OPENCODE-SERVER`'s own text — see the module note. Named
-// per the dispatch brief's parity table.
+// Derivation: OPENCODE-SERVER §Permissions (OpenAPI schema at `GET /doc`) —
+// the permission-reply endpoint's request body accepts exactly `once`,
+// `always`, or `reject`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionDecision {
     Once,
@@ -301,11 +305,13 @@ pub struct PermissionReply {
 /// Build the reply for a decided gate. `session_id`/`request_id` come off
 /// the [`PermissionAsk`] that raised it — the relay answers through the same
 /// channel that asked, per this adapter's own contract.
-// ESCALATION: the path this targets (`/session/{id}/permission/{requestID}
-// /reply`) is the dispatch brief's, not `OPENCODE-SERVER`'s own text — that
-// page documents only the deprecated `/session/:id/permissions/:permissionID`
-// (body `{ response, remember? }`), which this adapter deliberately does not
-// call. See the module ESCALATION note.
+// Derivation: OPENCODE-SERVER §Permissions (OpenAPI schema at `GET /doc`) —
+// the current permission-reply endpoint: `POST
+// /session/{id}/permission/{requestID}/reply`, body `{ "response":
+// <decision> }`. The endpoint table on that same page also documents an
+// older `POST /session/:id/permissions/:permissionID` (body `{ response,
+// remember? }`); this adapter targets only the current shape and treats the
+// other as absent, per `docs/PARITY.md`.
 pub fn reply_action(
     session_id: &str,
     request_id: &str,

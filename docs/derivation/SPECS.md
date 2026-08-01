@@ -37,7 +37,8 @@ leaked, or copyleft-licensed is a rule 1 violation.
 | `CLAUDE-HOOKS` | Claude Code hooks reference: lifecycle events, PreToolUse `permissionDecision` contract | code.claude.com/docs/en/hooks |
 | `CODEX-APP-SERVER` | Codex `app-server` JSON-RPC protocol: README plus the schemas emitted by `codex app-server generate-json-schema` | github.com/openai/codex/blob/main/codex-rs/app-server/README.md |
 | `OPENCODE-ACP` | opencode as an ACP agent: the `acp` subcommand, JSON-RPC over stdio | opencode.ai/docs/acp |
-| `OPENCODE-SERVER` | opencode server HTTP + SSE surface: session, permission, and question events and their reply endpoints | opencode.ai/docs/server |
+| `OPENCODE-PLUGINS` | opencode plugin events reference: the typed event-bus names (`session.*`, `permission.asked`/`permission.replied`, `message.*`, `server.connected`) | opencode.ai/docs/plugins |
+| `OPENCODE-SERVER` | opencode server HTTP + SSE surface: the endpoint table plus the OpenAPI 3.1 schema the server publishes at `GET /doc` ("use the spec to generate clients or inspect request and response types") — request/response/event shapes derive from that schema | opencode.ai/docs/server |
 | `POSIX-TERM` | POSIX.1-2024 (Issue 8) XBD §11, General Terminal Interface | pubs.opengroup.org/onlinepubs/9799919799/basedefs/V1_chap11.html |
 | `POSIX-WINSIZE` | POSIX.1-2024 (Issue 8) XSH, `tcsetwinsize()` | pubs.opengroup.org/onlinepubs/9799919799/functions/tcsetwinsize.html |
 | `UAX-11` | Unicode Standard Annex #11, East Asian Width | unicode.org/reports/tr11/ |
