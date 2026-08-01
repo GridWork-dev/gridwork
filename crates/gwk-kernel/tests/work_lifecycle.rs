@@ -1123,6 +1123,80 @@ async fn an_outcome_records_without_erasing_what_an_earlier_one_established() {
 
 #[tokio::test]
 #[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
+async fn the_runtime_handle_is_a_start_time_fact_under_the_attempt_cas() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "runtime", 64).await;
+
+    apply(&store, "task", task("t-1")).await;
+    apply(&store, "attempt", attempt("a-1", "t-1")).await;
+
+    apply(
+        &store,
+        "runtime-1",
+        KernelCommand::RecordAttemptRuntime {
+            attempt_id: AttemptId::new("a-1"),
+            expected_version: 1,
+            runtime_ref: "pid:4242".into(),
+            runtime_started_at: Timestamp::new("2026-08-01T12:00:00Z"),
+        },
+    )
+    .await;
+
+    let row = sqlx::query(
+        "SELECT runtime_ref, runtime_started_at::text, version \
+         FROM gwk.attempt WHERE id = $1",
+    )
+    .bind("a-1")
+    .fetch_one(store.pool())
+    .await
+    .expect("attempt row");
+    assert_eq!(
+        row.get::<Option<String>, _>("runtime_ref").as_deref(),
+        Some("pid:4242")
+    );
+    assert!(row.get::<Option<String>, _>(1).is_some());
+    assert_eq!(row.get::<i64, _>("version"), 2);
+
+    // A resumed attempt is a NEW process: the handle replaces, it does not
+    // coalesce — that is the difference from the outcome command above.
+    apply(
+        &store,
+        "runtime-2",
+        KernelCommand::RecordAttemptRuntime {
+            attempt_id: AttemptId::new("a-1"),
+            expected_version: 2,
+            runtime_ref: "pid:5000".into(),
+            runtime_started_at: Timestamp::new("2026-08-01T12:30:00Z"),
+        },
+    )
+    .await;
+    let runtime_ref: Option<String> =
+        sqlx::query_scalar("SELECT runtime_ref FROM gwk.attempt WHERE id = 'a-1'")
+            .fetch_one(store.pool())
+            .await
+            .expect("runtime_ref");
+    assert_eq!(runtime_ref.as_deref(), Some("pid:5000"));
+
+    // And it rides the same CAS every attempt write rides: a stale version is
+    // a refusal, not a blind overwrite.
+    let (code, _) = refuse(
+        &store,
+        "runtime-stale",
+        KernelCommand::RecordAttemptRuntime {
+            attempt_id: AttemptId::new("a-1"),
+            expected_version: 1,
+            runtime_ref: "pid:6000".into(),
+            runtime_started_at: Timestamp::new("2026-08-01T13:00:00Z"),
+        },
+    )
+    .await;
+    assert_eq!(code, KernelErrorCode::StaleVersion);
+
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
 async fn an_engine_session_opens_and_closes_without_a_version_of_its_own() {
     let maintenance = maintenance_pool().await;
     let (name, store) = fresh_store(&maintenance, "session", 64).await;

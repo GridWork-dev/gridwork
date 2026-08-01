@@ -299,6 +299,32 @@ pub(crate) async fn apply_event(
             .map_err(|e| db("update budget", e))?;
             require_one(done, "attempt", attempt_id.as_str())?;
         }
+        KernelCommand::RecordAttemptRuntime {
+            attempt_id,
+            runtime_ref,
+            runtime_started_at,
+            ..
+        } => {
+            // No coalesce: the runtime handle is a start-time fact, and a
+            // resumed attempt legitimately replaces the handle of the process
+            // it no longer is.
+            let done = sqlx::query(
+                "UPDATE gwk.attempt SET \
+                   runtime_ref = $2, \
+                   runtime_started_at = $3::timestamptz, \
+                   version = $4, updated_at = $5::timestamptz \
+                 WHERE id = $1",
+            )
+            .bind(attempt_id.as_str())
+            .bind(runtime_ref)
+            .bind(runtime_started_at.as_str())
+            .bind(version)
+            .bind(at)
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| db("record attempt runtime", e))?;
+            require_one(done, "attempt", attempt_id.as_str())?;
+        }
         KernelCommand::RecordAttemptOutcome {
             attempt_id,
             exit_code,
@@ -829,6 +855,51 @@ pub(crate) async fn apply_event(
             .execute(&mut *conn)
             .await
             .map_err(|e| db("insert evidence", e))?;
+        }
+
+        // ---- cost ----
+        KernelCommand::RecordCostEntry {
+            cost_entry_id,
+            attempt_id,
+            engine_session_id,
+            dispatch_node_id,
+            engine,
+            model,
+            input_tokens,
+            cached_input_tokens,
+            cache_write_tokens,
+            output_tokens,
+            reasoning_tokens,
+            cost_micros,
+            cost_is_estimate,
+        } => {
+            // Ledger row like evidence: written once, never moves. Totals are
+            // a rollup query, so no accumulator column advances here.
+            sqlx::query(
+                "INSERT INTO gwk.cost_entry \
+                   (id, attempt_id, engine_session_id, dispatch_node_id, engine, model, \
+                    input_tokens, cached_input_tokens, cache_write_tokens, output_tokens, \
+                    reasoning_tokens, cost_micros, cost_is_estimate, recorded_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7::numeric, $8::numeric, $9::numeric, \
+                         $10::numeric, $11::numeric, $12::numeric, $13, $14::timestamptz)",
+            )
+            .bind(cost_entry_id.as_str())
+            .bind(attempt_id.as_ref().map(|id| id.as_str()))
+            .bind(engine_session_id.as_ref().map(|id| id.as_str()))
+            .bind(dispatch_node_id.as_ref().map(|id| id.as_str()))
+            .bind(engine.as_str())
+            .bind(model.as_deref())
+            .bind(input_tokens.map(|t| to_numeric_text(t.value())))
+            .bind(cached_input_tokens.map(|t| to_numeric_text(t.value())))
+            .bind(cache_write_tokens.map(|t| to_numeric_text(t.value())))
+            .bind(output_tokens.map(|t| to_numeric_text(t.value())))
+            .bind(reasoning_tokens.map(|t| to_numeric_text(t.value())))
+            .bind(cost_micros.map(|c| to_numeric_text(c.value())))
+            .bind(*cost_is_estimate)
+            .bind(at)
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| db("insert cost entry", e))?;
         }
 
         // ---- authority ----

@@ -14,9 +14,10 @@ use crate::fsm::{
     TaskState,
 };
 use crate::ids::{
-    AttemptId, AttentionItemId, AuthorityGrantId, ByteCount, CommandId, CorrelationId, CostMicros,
-    DispatchNodeId, EngineId, EngineSessionId, EvidenceId, FenceToken, GateId, IdempotencyKey,
-    IngestedRecordId, LeaseId, MessageId, ReceiptId, Seq, TaskId, Timestamp, WorktreeId,
+    AttemptId, AttentionItemId, AuthorityGrantId, ByteCount, CommandId, CorrelationId, CostEntryId,
+    CostMicros, DispatchNodeId, EngineId, EngineSessionId, EvidenceId, FenceToken, GateId,
+    IdempotencyKey, IngestedRecordId, LeaseId, MessageId, ReceiptId, Seq, TaskId, Timestamp,
+    TokenCount, WorktreeId,
 };
 use crate::ingestion::IngestionKind;
 
@@ -102,9 +103,6 @@ pub struct Attempt {
     pub budget: Option<Budget>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[specta(optional)]
-    pub result_schema_ref: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[specta(optional)]
     pub provider_session_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[specta(optional)]
@@ -124,9 +122,6 @@ pub struct Attempt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[specta(optional)]
     pub evidence_manifest_ref: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[specta(optional)]
-    pub gate_result: Option<String>,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
 }
@@ -316,6 +311,54 @@ pub struct Evidence {
     #[specta(optional)]
     pub byte_size: Option<ByteCount>,
     pub created_at: Timestamp,
+}
+
+/// One engine cost report — an append-only fact in the spend ledger, never an
+/// accumulator. Totals are a rollup query, so a token report never rides the
+/// CAS version an FSM transition uses.
+///
+/// Token counts are the universal fact; currency is optional and
+/// engine-reported (`cost_is_estimate` qualifies it), never derived by
+/// conversion. At least one of the three subject refs is present.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
+#[serde(deny_unknown_fields)]
+pub struct CostEntry {
+    pub id: CostEntryId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub attempt_id: Option<AttemptId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub engine_session_id: Option<EngineSessionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub dispatch_node_id: Option<DispatchNodeId>,
+    pub engine: EngineId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub input_tokens: Option<TokenCount>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub cached_input_tokens: Option<TokenCount>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub cache_write_tokens: Option<TokenCount>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub output_tokens: Option<TokenCount>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub reasoning_tokens: Option<TokenCount>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub cost_micros: Option<CostMicros>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub cost_is_estimate: Option<bool>,
+    pub recorded_at: Timestamp,
 }
 
 /// One record that entered the log through ingestion rather than through an

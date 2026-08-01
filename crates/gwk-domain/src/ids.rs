@@ -122,6 +122,7 @@ string_id!(DispatchNodeId);
 string_id!(AttentionItemId);
 string_id!(AuthorityGrantId);
 string_id!(EvidenceId);
+string_id!(CostEntryId);
 string_id!(
     /// One ingested record. Kernel-derived rather than caller-named: the
     /// command carries no id, so the identity is minted from the
@@ -179,6 +180,11 @@ u64_decimal_string!(
     /// the log holds exactly ONE event, which says nothing about the sequence
     /// the database assigned it.
     EventCount
+);
+u64_decimal_string!(
+    /// A count of tokens, as an engine reported it. Never converted to money:
+    /// the ledger records counts and currency as separate engine-reported facts.
+    TokenCount
 );
 u64_decimal_string!(
     /// A cost amount in micro-USD (1_000_000 = $1).

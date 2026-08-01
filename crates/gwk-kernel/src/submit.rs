@@ -325,6 +325,11 @@ fn route_of(envelope: &CommandEnvelope, command: &KernelCommand) -> Result<Route
             attempt_id.as_str().to_owned(),
             "attempt_transitioned",
         ),
+        C::RecordAttemptRuntime { attempt_id, .. } => (
+            "attempt",
+            attempt_id.as_str().to_owned(),
+            "attempt_runtime_recorded",
+        ),
         C::RecordAttemptOutcome { attempt_id, .. } => (
             "attempt",
             attempt_id.as_str().to_owned(),
@@ -426,6 +431,30 @@ fn route_of(envelope: &CommandEnvelope, command: &KernelCommand) -> Result<Route
             evidence_id.as_str().to_owned(),
             "evidence_recorded",
         ),
+        // Its own aggregate on purpose: a spend fact must never contend with
+        // the FSM CAS of the attempt it describes.
+        C::RecordCostEntry {
+            cost_entry_id,
+            attempt_id,
+            engine_session_id,
+            dispatch_node_id,
+            ..
+        } => {
+            // The table constrains this too; refusing here keeps the storage
+            // layer's CHECK a backstop instead of the error path.
+            if attempt_id.is_none() && engine_session_id.is_none() && dispatch_node_id.is_none() {
+                return Err(Refusal::validation(
+                    "a cost entry that names no attempt, engine session, or dispatch node \
+                     accrues to nothing"
+                        .to_owned(),
+                ));
+            }
+            (
+                "cost_entry",
+                cost_entry_id.as_str().to_owned(),
+                "cost_entry_recorded",
+            )
+        }
 
         C::GrantAuthority {
             authority_grant_id, ..
@@ -846,6 +875,7 @@ async fn decide(
         | C::IssueCommand { .. }
         | C::OpenGate { .. }
         | C::RecordEvidence { .. }
+        | C::RecordCostEntry { .. }
         | C::GrantAuthority { .. }
         | C::RaiseAttention { .. } => 0,
 
@@ -946,6 +976,9 @@ async fn decide(
         }
 
         C::UpdateBudget {
+            expected_version, ..
+        }
+        | C::RecordAttemptRuntime {
             expected_version, ..
         }
         | C::RecordAttemptOutcome {

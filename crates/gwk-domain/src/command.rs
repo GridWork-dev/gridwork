@@ -18,9 +18,9 @@ use crate::fsm::{
     AttemptState, CommandState, GateVerdict, LeaseMode, MessageState, Outcome, TaskState,
 };
 use crate::ids::{
-    AttemptId, AttentionItemId, AuthorityGrantId, ByteCount, CommandId, CorrelationId,
-    DispatchNodeId, EngineId, EngineSessionId, EvidenceId, GateId, LeaseId, MessageId, ReceiptId,
-    TaskId, Timestamp, WorktreeId,
+    AttemptId, AttentionItemId, AuthorityGrantId, ByteCount, CommandId, CorrelationId, CostEntryId,
+    CostMicros, DispatchNodeId, EngineId, EngineSessionId, EvidenceId, GateId, LeaseId, MessageId,
+    ReceiptId, TaskId, Timestamp, TokenCount, WorktreeId,
 };
 use crate::ingestion::IngestionKind;
 use crate::inherited::{FindingAction, OrchestratorCheckpoint, RoundFindingSummary};
@@ -117,6 +117,16 @@ pub enum KernelCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[specta(optional)]
         receipt_id: Option<ReceiptId>,
+    },
+    /// The runtime handle, written at start. Distinct from
+    /// [`Self::RecordAttemptOutcome`] on purpose: the outcome command's
+    /// coalesce semantics are about a terminal act, and a start-time fact
+    /// pushed through a terminal-act command would blur which is which.
+    RecordAttemptRuntime {
+        attempt_id: AttemptId,
+        expected_version: u32,
+        runtime_ref: String,
+        runtime_started_at: Timestamp,
     },
     RecordAttemptOutcome {
         attempt_id: AttemptId,
@@ -329,6 +339,49 @@ pub enum KernelCommand {
         byte_size: Option<ByteCount>,
     },
 
+    // ---- cost ----
+    /// Append one engine cost report to the spend ledger. Its own aggregate,
+    /// no expected version: a spend fact must never contend with the FSM CAS
+    /// of the attempt it describes. At least one subject ref is required
+    /// (refused otherwise), matching the table's own constraint.
+    RecordCostEntry {
+        cost_entry_id: CostEntryId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[specta(optional)]
+        attempt_id: Option<AttemptId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[specta(optional)]
+        engine_session_id: Option<EngineSessionId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[specta(optional)]
+        dispatch_node_id: Option<DispatchNodeId>,
+        engine: EngineId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[specta(optional)]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[specta(optional)]
+        input_tokens: Option<TokenCount>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[specta(optional)]
+        cached_input_tokens: Option<TokenCount>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[specta(optional)]
+        cache_write_tokens: Option<TokenCount>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[specta(optional)]
+        output_tokens: Option<TokenCount>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[specta(optional)]
+        reasoning_tokens: Option<TokenCount>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[specta(optional)]
+        cost_micros: Option<CostMicros>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[specta(optional)]
+        cost_is_estimate: Option<bool>,
+    },
+
     // ---- worktree ----
     RegisterWorktree {
         worktree_id: WorktreeId,
@@ -448,6 +501,7 @@ impl KernelCommand {
             Self::UpdateBudget { .. } => "update_budget",
             Self::CreateAttempt { .. } => "create_attempt",
             Self::TransitionAttempt { .. } => "transition_attempt",
+            Self::RecordAttemptRuntime { .. } => "record_attempt_runtime",
             Self::RecordAttemptOutcome { .. } => "record_attempt_outcome",
             Self::OpenEngineSession { .. } => "open_engine_session",
             Self::CloseEngineSession { .. } => "close_engine_session",
@@ -467,6 +521,7 @@ impl KernelCommand {
             Self::RaiseAttention { .. } => "raise_attention",
             Self::ResolveAttention { .. } => "resolve_attention",
             Self::RecordEvidence { .. } => "record_evidence",
+            Self::RecordCostEntry { .. } => "record_cost_entry",
             Self::RegisterWorktree { .. } => "register_worktree",
             Self::UpdateWorktree { .. } => "update_worktree",
             Self::ReleaseWorktree { .. } => "release_worktree",
@@ -544,7 +599,7 @@ mod tests {
         // slip in `command_type()` would silently route the wrong handler. Walk
         // the serialized tag of a value from EVERY variant instead.
         let all = all_variants();
-        assert_eq!(all.len(), 34, "the v1 command set is 34 variants");
+        assert_eq!(all.len(), 36, "the v1 command set is 36 variants");
         for command in &all {
             let json = serde_json::to_value(command).expect("serialize");
             let tag = json["type"].as_str().expect("tagged with a string type");
@@ -668,6 +723,12 @@ mod tests {
                 expected_version: 3,
                 receipt_id: Some(ReceiptId::new("r-1")),
             },
+            KernelCommand::RecordAttemptRuntime {
+                attempt_id: AttemptId::new("att-1"),
+                expected_version: 3,
+                runtime_ref: "pid:4242".into(),
+                runtime_started_at: ts(),
+            },
             KernelCommand::RecordAttemptOutcome {
                 attempt_id: AttemptId::new("att-1"),
                 expected_version: 4,
@@ -786,6 +847,21 @@ mod tests {
                 r#ref: "blob://transcript".into(),
                 digest: None,
                 byte_size: Some(ByteCount::new(4096)),
+            },
+            KernelCommand::RecordCostEntry {
+                cost_entry_id: CostEntryId::new("cost-1"),
+                attempt_id: Some(AttemptId::new("att-1")),
+                engine_session_id: None,
+                dispatch_node_id: None,
+                engine: EngineId::new("engine-a"),
+                model: Some("model-x".into()),
+                input_tokens: Some(TokenCount::new(1200)),
+                cached_input_tokens: Some(TokenCount::new(800)),
+                cache_write_tokens: None,
+                output_tokens: Some(TokenCount::new(300)),
+                reasoning_tokens: None,
+                cost_micros: Some(CostMicros::new(125_000)),
+                cost_is_estimate: Some(true),
             },
             KernelCommand::RegisterWorktree {
                 worktree_id: WorktreeId::new("wt-1"),

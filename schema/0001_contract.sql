@@ -349,7 +349,6 @@ CREATE TABLE gwk.attempt (
   worktree_lease_id       text REFERENCES gwk.lease(id),
   base_sha                text,
   budget                  jsonb,
-  result_schema_ref       text,
   provider_session_ref    text,
   runtime_ref             text,
   runtime_started_at      timestamptz,
@@ -357,7 +356,6 @@ CREATE TABLE gwk.attempt (
   provider_terminal_event text,
   result_valid            boolean,
   evidence_manifest_ref   text,
-  gate_result             text,
   created_at              timestamptz NOT NULL DEFAULT now(),
   updated_at              timestamptz NOT NULL DEFAULT now()
 );
@@ -745,5 +743,63 @@ CREATE TRIGGER ingested_record_no_truncate
 
 ALTER TABLE gwk.ingested_record ENABLE ALWAYS TRIGGER ingested_record_append_only;
 ALTER TABLE gwk.ingested_record ENABLE ALWAYS TRIGGER ingested_record_no_truncate;
+
+-- Append-only spend ledger (no version, no state, no updated_at: a cost
+-- report is a fact). Rows rather than accumulator columns, so a token report
+-- never rides the CAS version an FSM transition uses; totals are a rollup
+-- query over this table.
+--
+-- Token counts are the universal fact — every engine reports them. Currency
+-- is not: an engine that reports a figure reports it here as micro-USD with
+-- its own estimate flag, and an engine that reports none leaves both NULL.
+-- The ledger never converts tokens into money on an engine's behalf.
+CREATE TABLE gwk.cost_entry (
+  id                  text PRIMARY KEY,
+  attempt_id          text REFERENCES gwk.attempt(id),
+  engine_session_id   text REFERENCES gwk.engine_session(id),
+  dispatch_node_id    text REFERENCES gwk.dispatch_node(id),
+  engine              text NOT NULL,
+  model               text,
+  input_tokens        numeric(20,0)
+                        CHECK (input_tokens >= 0 AND input_tokens <= 18446744073709551615),
+  cached_input_tokens numeric(20,0)
+                        CHECK (cached_input_tokens >= 0 AND cached_input_tokens <= 18446744073709551615),
+  cache_write_tokens  numeric(20,0)
+                        CHECK (cache_write_tokens >= 0 AND cache_write_tokens <= 18446744073709551615),
+  output_tokens       numeric(20,0)
+                        CHECK (output_tokens >= 0 AND output_tokens <= 18446744073709551615),
+  reasoning_tokens    numeric(20,0)
+                        CHECK (reasoning_tokens >= 0 AND reasoning_tokens <= 18446744073709551615),
+  cost_micros         numeric(20,0)
+                        CHECK (cost_micros >= 0 AND cost_micros <= 18446744073709551615),
+  cost_is_estimate    boolean,
+  recorded_at         timestamptz NOT NULL DEFAULT now(),
+  -- A spend fact about nothing is noise: every entry names at least one
+  -- subject it accrues to.
+  CONSTRAINT cost_entry_attributed
+    CHECK (num_nonnulls(attempt_id, engine_session_id, dispatch_node_id) >= 1),
+  -- The estimate flag qualifies a currency figure; without one it asserts
+  -- nothing, so the pair travels together.
+  CONSTRAINT cost_entry_estimate_qualifies_cost
+    CHECK (cost_is_estimate IS NULL OR cost_micros IS NOT NULL)
+);
+
+CREATE FUNCTION gwk.forbid_cost_entry_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'gwk.cost_entry is append-only (% refused)', TG_OP;
+END $$;
+
+CREATE TRIGGER cost_entry_append_only
+  BEFORE UPDATE OR DELETE ON gwk.cost_entry
+  FOR EACH ROW EXECUTE FUNCTION gwk.forbid_cost_entry_mutation();
+
+-- Statement-level TRUNCATE cover, as on gwk.event and gwk.receipt.
+CREATE TRIGGER cost_entry_no_truncate
+  BEFORE TRUNCATE ON gwk.cost_entry
+  FOR EACH STATEMENT EXECUTE FUNCTION gwk.forbid_cost_entry_mutation();
+
+ALTER TABLE gwk.cost_entry ENABLE ALWAYS TRIGGER cost_entry_append_only;
+ALTER TABLE gwk.cost_entry ENABLE ALWAYS TRIGGER cost_entry_no_truncate;
 
 COMMIT;
