@@ -18,6 +18,15 @@ publish = false
 gwk-domain.workspace = true
 gwk-pty.workspace = true
 pty-process.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# `process` spawns the `codex app-server` child and its `/bin/cat`
+# stand-in in tests; `io-util` is the buffered line reader/writer over its
+# piped stdio. `rt`/`macros` are for the async tests themselves — a
+# dev-only need, but a second feature set on the same crate would just
+# unify back into one anyway (see gwk-pty's own manifest for the same call).
+tokio = { workspace = true, features = ["io-util", "macros", "process", "rt"] }
 
 [lints]
 workspace = true
