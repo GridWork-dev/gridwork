@@ -198,9 +198,16 @@ check_captures() {
   while IFS= read -r -d '' f; do
     [[ -f "$f" ]] || continue
     sum="$(sha256sum "$f" | cut -d' ' -f1)"
-    if ! grep -qE "^\|.*${sum}.*\|" "$reg"; then
+    # Anchored to the hash column, the way resolves() anchors to the ID column
+    # and for the same reason: a mention is not a registration. The lookup was
+    # once `^\|.*${sum}.*\|` — the digest appearing anywhere in a table row —
+    # and the round-ten reader registered an unregistered capture against it
+    # twice: the real digest quoted in a row's description while the hash cell
+    # held a placeholder, and a hash cell padded around the real digest. The
+    # row's hash field has to BE the hash, not contain it.
+    if ! grep -qE "^\|[^|]*\|[[:space:]]*\`?${sum}\`?[[:space:]]*\|" "$reg"; then
       echo "cleanroom-gate: $f is not registered in $reg under its own sha256" >&2
-      echo "cleanroom-gate:   the file hashes to $sum, which no row carries" >&2
+      echo "cleanroom-gate:   the file hashes to $sum, which no row's hash cell carries" >&2
       bad=1
     fi
   done < <(find "$dir" ! -type d -print0)

@@ -644,6 +644,33 @@ jobs:
           fi
           rm -rf docs/derivation/captures/.seeded
           echo "cleanroom-gate: unregistered capture correctly rejected"
+      - name: prove a hash outside the hash cell does not register a capture (seeded violation)
+        run: |
+          set -euo pipefail
+          # The registry lookup was once `^\|.*${sum}.*\|` — the digest
+          # appearing anywhere in a table row. The round-ten reader registered
+          # an unregistered capture against it two ways: the real digest quoted
+          # in a row's description while the hash cell held a placeholder, and
+          # a hash cell padded around the real digest. Both rows are seeded
+          # here at once — if either shape ever satisfies the lookup again, the
+          # capture reads as registered and this step fails. A row's hash field
+          # has to BE the hash, not contain it.
+          seed="docs/derivation/captures/seeded-cell-anchor.txt"
+          printf 'not a registered capture\n' > "$seed"
+          sum="$(sha256sum "$seed" | cut -d' ' -f1)"
+          {
+            printf '| `CAP-997` | `0000000000000000000000000000000000000000000000000000000000000000` | seeded: the digest %s appears only in this description |\n' "$sum"
+            printf '| `CAP-996` | `aaaa%sbbbb` | seeded: the hash cell merely contains the digest |\n' "$sum"
+          } >> docs/derivation/CAPTURES.md
+          if : | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate accepted a capture registered outside the hash cell — the gate is broken' >&2
+            rm -f "$seed"
+            git checkout -- docs/derivation/CAPTURES.md
+            exit 1
+          fi
+          rm -f "$seed"
+          git checkout -- docs/derivation/CAPTURES.md
+          echo "cleanroom-gate: hash-outside-the-cell registration correctly rejected"
       - name: the subject digest does not depend on the locale
         run: |
           set -euo pipefail
