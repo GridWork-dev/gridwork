@@ -36,6 +36,7 @@ leaked, or copyleft-licensed is a rule 1 violation.
 | `CLAUDE-HEADLESS` | Claude Code headless mode: the stream-json message stream's shapes and semantics | code.claude.com/docs/en/headless |
 | `CLAUDE-AGENT-SDK` | Claude Code Agent SDK (TypeScript) reference: result-message field shapes (usage token keys, `total_cost_usd` as an estimate, `duration_ms`, `num_turns`), the `tool_use` content-block shape, `canUseTool` as SDK-hosted-only (absent in interactive/TUI mode) | code.claude.com/docs/en/agent-sdk/typescript |
 | `CLAUDE-HOOKS` | Claude Code hooks reference: lifecycle events, PreToolUse `permissionDecision` contract | code.claude.com/docs/en/hooks |
+| `CLAUDE-SDK-PERMISSIONS` | Claude Code SDK permissions reference: the six-step evaluation order with hooks run first, a hook deny applying even in `bypassPermissions` mode | code.claude.com/docs/en/agent-sdk/permissions |
 | `CODEX-APP-SERVER` | Codex `app-server` JSON-RPC protocol: README plus the schemas emitted by `codex app-server generate-json-schema` | github.com/openai/codex/blob/main/codex-rs/app-server/README.md |
 | `OPENCODE-ACP` | opencode as an ACP agent: the `acp` subcommand, JSON-RPC over stdio | opencode.ai/docs/acp |
 | `OPENCODE-PLUGINS` | opencode plugin events reference: the typed event-bus names (`session.*`, `permission.asked`/`permission.replied`, `message.*`, `server.connected`) | opencode.ai/docs/plugins |

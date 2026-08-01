@@ -17,12 +17,18 @@
 //! exactly why an external process controlling an interactive-TUI session
 //! (no SDK, no `canUseTool` registered) has no channel into that decision
 //! except `PreToolUse`'s own stdout.
-// Derivation: CLAUDE-HOOKS — `PreToolUse` is "the first enforcement point in
-// Claude Code's permission system", and hooks "run in all permission modes
-// including... Bypass mode (--bypass-permissions)" — "Step 1 of permission
-// evaluation: 1. PreToolUse hook (first decision point)... The hook runs
-// regardless of mode, making it the primary enforcement point before any
-// other permission check."
+// Derivation: CLAUDE-SDK-PERMISSIONS — the six-step evaluation order's own
+// step 1: "Run hooks first. A hook can deny the call outright or pass it
+// on." Restated later on the same page: "hooks run before every other
+// step, and a hook deny applies even in `bypassPermissions` mode" — and
+// the `bypassPermissions` mode's own section: "Auto-approves all tool uses
+// without prompts. Hooks still execute and can block operations if
+// needed." (`bypassPermissions` is the mode name the page uses throughout;
+// it names no CLI flag.) An earlier draft of this comment cited
+// `CLAUDE-HOOKS` for a version of these claims with a fabricated
+// `--bypass-permissions` flag and two paraphrases inflated into
+// quotations — a false citation a fresh-context second review caught,
+// exactly the failure CLEANROOM.md rule 4 exists to find.
 // Derivation: CLAUDE-AGENT-SDK — `CanUseTool`: "The function is the SDK
 // replacement for the interactive permission prompt: it's invoked only
 // when the permission evaluation flow resolves to a prompt."
