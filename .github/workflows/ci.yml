@@ -609,7 +609,10 @@ jobs:
             echo "cleanroom-gate: empty diff against $base — refusing to pass" >&2
             exit 2
           fi
-          ./tools/cleanroom-gate.sh < /tmp/changed-paths
+          # The base also feeds the registry-row trigger: an edit to a row a
+          # gated file cites re-opens review of the citing files, and the gate
+          # refuses to judge a registry edit it has no base to diff against.
+          CLEANROOM_BASE="$base" ./tools/cleanroom-gate.sh < /tmp/changed-paths
       - name: prove the gate can fail (seeded violation)
         run: |
           set -euo pipefail
@@ -671,6 +674,62 @@ jobs:
           rm -f "$seed"
           git checkout -- docs/derivation/CAPTURES.md
           echo "cleanroom-gate: hash-outside-the-cell registration correctly rejected"
+      - name: a registry edit with no base is refused (seeded violation)
+        run: |
+          set -euo pipefail
+          # The row trigger needs a base to diff the registries against. Without
+          # one, an edit to a cited row would be judged blind — so the gate must
+          # refuse rather than pass. CI always exports CLEANROOM_BASE; this
+          # proves the refusal actually fires when it is missing.
+          if echo 'docs/derivation/CAPTURES.md' | env -u CLEANROOM_BASE ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate judged a registry edit with no base — the gate is broken' >&2
+            exit 1
+          fi
+          echo "cleanroom-gate: baseless registry edit correctly refused"
+      - name: a cited registry row is part of the reviewed surface (seeded violations)
+        run: |
+          set -euo pipefail
+          # Three proofs in one temp-commit dance, because they share a setup:
+          # (1) editing a row a gated file cites moves the subject the citing
+          # files compute — the binding; (2) a registry-only diff editing that
+          # row demands a second-reader record it does not have — the trigger
+          # that closes the empty-touched fast path; (3) a row nothing cites
+          # stays free to add — the registries' own pre-seeding design goal,
+          # which the two rules above must not break.
+          orig="$(git rev-parse HEAD)"
+          fail() { git reset -q --hard "$orig"; echo "$1" >&2; exit 1; }
+          # Any cited ID will do; discovered rather than hardcoded, so a future
+          # rename of a citing file cannot quietly turn this step into a no-op.
+          # No cited ID anywhere gated would itself be news worth breaking on.
+          mapfile -t pfx < <(grep -Ev '^[[:space:]]*(#|$)' .github/cleanroom-paths.txt)
+          id="$(git grep -hE 'Derivation:[[:space:]]+[A-Za-z0-9._-]+[[:space:]]' HEAD -- "${pfx[@]/%/*}" \
+            | sed -nE 's@.*Derivation:[[:space:]]+([A-Za-z0-9._-]+)[[:space:]].*@\1@p' \
+            | LC_ALL=C sort -u | head -n1)"
+          [ -n "$id" ] || fail 'no Derivation: marker found under any gated prefix — the discovery is broken'
+          citing="$(git grep -lE "Derivation:[[:space:]]+${id}[[:space:]]" HEAD -- "${pfx[@]/%/*}" | sed 's/^HEAD://')"
+          before="$(printf '%s\n' "$citing" | ./tools/cleanroom-gate.sh --subject)"
+          # Append a cell to the ID's row — cells 1 and 2 stay intact, so the
+          # ID and capture checks still pass and ONLY the row binding changes.
+          sed -i -E "/^\|[[:space:]]*\`?${id}\`?[[:space:]]*\|/ s/\|[[:space:]]*\$/| seeded row edit |/" \
+            docs/derivation/CAPTURES.md docs/derivation/SPECS.md
+          git diff --quiet -- docs/derivation/ && fail 'the seeded row edit changed nothing — the seed is broken'
+          git -c user.name=seed -c user.email=seed@invalid commit -qam 'seed: edit a cited row'
+          after="$(printf '%s\n' "$citing" | ./tools/cleanroom-gate.sh --subject)"
+          [ "$before" != "$after" ] || fail 'editing a cited row did not move the subject — the binding is broken'
+          out=0
+          msg="$(printf 'docs/derivation/CAPTURES.md\ndocs/derivation/SPECS.md\n' \
+            | CLEANROOM_BASE="$orig" ./tools/cleanroom-gate.sh 2>&1)" || out=$?
+          [ "$out" -ne 0 ] || fail 'a registry-only edit of a cited row passed with no record — the trigger is broken'
+          echo "$msg" | grep -q 'no second-reader record' \
+            || fail 'the registry-only edit failed for a reason other than the missing record'
+          git reset -q --hard "$orig"
+          # (3) the positive control: an UNCITED row stays free.
+          printf '| `CAP-990` | `0000000000000000000000000000000000000000000000000000000000000000` | seeded: a pre-seeded row nothing cites |\n' >> docs/derivation/CAPTURES.md
+          git -c user.name=seed -c user.email=seed@invalid commit -qam 'seed: pre-seed an uncited row'
+          echo 'docs/derivation/CAPTURES.md' | CLEANROOM_BASE="$orig" ./tools/cleanroom-gate.sh \
+            || fail 'pre-seeding an uncited row was blocked — the trigger over-fires'
+          git reset -q --hard "$orig"
+          echo "cleanroom-gate: cited-row binding, trigger, and free pre-seed all hold"
       - name: the subject digest does not depend on the locale
         run: |
           set -euo pipefail

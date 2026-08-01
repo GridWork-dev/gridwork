@@ -29,6 +29,13 @@ bytes and the gate rejects the change. That check deliberately does not consult 
 changed-path list, since `docs/` is not a gated prefix and a change touching only a
 capture would otherwise never be looked at.
 
+The rows themselves get the mirror-image guarantee. Once a `Derivation:` marker cites a
+row, the row is part of the reviewed surface: the gate folds cited row text into the
+review subject and treats an edit to a cited row — even in a change touching no gated
+path — as touching every gated file that cites it, so rewriting what a past review
+vouched for re-opens that review instead of passing in silence. An uncited row carries
+no such weight and stays free to add or amend.
+
 An earlier version of this paragraph asserted that same guarantee before anything
 implemented it, and the reviewer who caught it was right to treat a rule amendment written
 in response to a review finding as the likeliest place for one. The rule is the same; what

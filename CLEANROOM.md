@@ -51,7 +51,9 @@ public record of that procedure, in force before any engine code exists.
    reviewer is a fresh-context session with no exposure to the implementing session —
    **not a second human**: this repository has one maintainer, and claiming a control it
    cannot deliver would be worse than stating the narrower one plainly. The review is
-   recorded in `docs/derivation/reviews/`, bound by digest to the exact content it read,
+   recorded in `docs/derivation/reviews/`, bound by digest to the exact content it read —
+   the gated files and the registry rows their markers cite, so neither half of a
+   citation can be rewritten under a standing record —
    and the `cleanroom-gate` check enforces that the record exists and matches.
 
 ## What this proves
