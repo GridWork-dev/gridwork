@@ -8,9 +8,11 @@
 #
 # WHY A CONTENT DIGEST AND NOT THE HEAD SHA. A record naming the PR head cannot
 # exist: committing the record changes the head. The subject digest is computed
-# only from GATED files, so adding the record — which is not itself gated — does
-# not move it, while any later edit to a gated file does. That is what stops a
-# review from being recycled across a rewrite of the thing it reviewed.
+# from GATED files plus the registry rows their markers cite, so adding the
+# record — which is neither — does not move it, while a later edit to a gated
+# file, or to a row a past review vouched for, does. That is what stops a review
+# from being recycled across a rewrite of the thing it reviewed — including the
+# registry half of a citation, which is half of what the reviewer checked.
 #
 # WHAT THIS PROVES. That a review ran against exactly this content, that its
 # record was written at commit time rather than reconstructed later, and that
@@ -81,6 +83,18 @@ owes_marker() {
   esac
 }
 
+# The two registries a citation may resolve in (CLEANROOM.md rule 3). The order
+# is fixed because row text feeds the subject digest below.
+registries=(docs/derivation/CAPTURES.md docs/derivation/SPECS.md)
+
+# The table-cell match for an ID, dots escaped so `CAP.001` cannot match a
+# `CAP-001` row. Cell match, so a passing mention in prose does not register an
+# ID. Backticks optional — a markdown table reads better with them and the
+# registries should not have to choose between legible and matchable.
+cell_regex() {
+  printf '^\\|[[:space:]]*`?%s`?[[:space:]]*\\|' "${1//./\\.}"
+}
+
 # Does this citation resolve? Rule 3 admits exactly two kinds of permitted source
 # — a public specification or a registered observation — so a citation resolves
 # iff it is an ID in one of the two registries.
@@ -95,16 +109,23 @@ resolves() {
   # An ID is alphanumerics, dashes, dots and underscores. Without this, the
   # em-dash placeholder in an empty registry table is itself a matchable ID.
   [[ "$id" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
-  for reg in docs/derivation/CAPTURES.md docs/derivation/SPECS.md; do
+  for reg in "${registries[@]}"; do
     [[ -f "$reg" ]] || continue
-    # Table-cell match, so a passing mention in prose does not register an ID.
-    # Backticks optional — a markdown table reads better with them and the
-    # registries should not have to choose between legible and matchable.
-    if grep -qE "^\|[[:space:]]*\`?${id}\`?[[:space:]]*\|" "$reg"; then
+    if grep -qE "$(cell_regex "$id")" "$reg"; then
       return 0
     fi
   done
   return 1
+}
+
+# `<comment> Derivation: <ID>[ §section] — <what was taken>` on stdin → the IDs.
+# One sed shared by the marker check and the subject computation, so the two can
+# never disagree about what counts as a marker. The description is required
+# (that trailing `[^[:space:]]`), so a bare ID is not a marker. The separator
+# before it is deliberately unconstrained: pinning an em-dash would make the
+# gate's verdict depend on the CI runner's locale.
+cited_ids() {
+  sed -nE 's@^[[:space:]]*(//|#)[[:space:]]*Derivation:[[:space:]]+([^[:space:]]+)[[:space:]]+[^[:space:]].*$@\2@p'
 }
 
 # CLEANROOM.md rule 3, made mechanical. Derived code names its permitted source in
@@ -116,13 +137,7 @@ check_markers() {
   for f in "$@"; do
     owes_marker "$f" || continue
 
-    # `<comment> Derivation: <ID>[ §section] — <what was taken>`. The description
-    # is required (that trailing `[^[:space:]]`), so a bare ID is not a marker.
-    # The separator before it is deliberately unconstrained: pinning an em-dash
-    # would make the gate's verdict depend on the CI runner's locale.
-    mapfile -t cited < <(
-      sed -nE 's@^[[:space:]]*(//|#)[[:space:]]*Derivation:[[:space:]]+([^[:space:]]+)[[:space:]]+[^[:space:]].*$@\2@p' "$f"
-    )
+    mapfile -t cited < <(cited_ids < "$f")
 
     if [[ ${#cited[@]} -eq 0 ]]; then
       echo "cleanroom-gate: $f is under the clean-room gate and carries no 'Derivation:' marker" >&2
@@ -227,9 +242,14 @@ if [[ "$mode" == "check" ]]; then
   check_captures
 fi
 
-touched=()
+input_paths=()
 while IFS= read -r f; do
   [[ -n "$f" ]] || continue
+  input_paths+=("$f")
+done
+
+touched=()
+for f in "${input_paths[@]}"; do
   for p in "${prefixes[@]}"; do
     if [[ "$f" == "$p"* ]]; then
       touched+=("$f")
@@ -237,6 +257,85 @@ while IFS= read -r f; do
     fi
   done
 done
+
+# A registry edit is an edit to the reviewed surface. The subject below folds in
+# the rows a change's markers cite, but a change touching ONLY a registry would
+# reach the empty-touched exit and never be asked for anything — which is
+# exactly how a row a past review vouched for would be rewritten in silence
+# (the round-ten record demonstrated the shape). So when the input names a
+# registry, diff that registry's ROW LINES against CLEANROOM_BASE and treat
+# every gated file at HEAD citing a changed row's ID as touched. A row nothing
+# cites expands nothing: pre-seeding stays as cheap as the registries promise.
+touched_registries=()
+for f in "${input_paths[@]}"; do
+  for reg in "${registries[@]}"; do
+    if [[ "$f" == "$reg" ]]; then
+      touched_registries+=("$reg")
+      break
+    fi
+  done
+done
+
+if [[ ${#touched_registries[@]} -gt 0 ]]; then
+  if [[ -z "${CLEANROOM_BASE:-}" ]]; then
+    cat >&2 <<'EOF'
+cleanroom-gate: the change touches a citation registry and there is no
+CLEANROOM_BASE to diff its rows against — refusing to pass. CI exports the
+merge base; locally:
+
+  git diff --no-renames --name-only main...HEAD | CLEANROOM_BASE="$(git merge-base main HEAD)" ./tools/cleanroom-gate.sh
+
+A registry edit judged without a base would be waved through blind, and a row
+a past review vouched for is exactly the thing that must not move in silence.
+EOF
+    exit 2
+  fi
+  if ! git rev-parse --verify --quiet "${CLEANROOM_BASE}^{commit}" > /dev/null; then
+    echo "cleanroom-gate: CLEANROOM_BASE '$CLEANROOM_BASE' is not a commit — refusing to pass" >&2
+    exit 2
+  fi
+  # A floor, not caller-proofing: CI computes its own merge base, so this
+  # guards the local invocation. Any resolvable commit used to pass — HEAD
+  # itself included, which makes the row diff vacuously empty. The base must
+  # be a PROPER ancestor: strictly behind HEAD, on its history.
+  if [[ "$(git rev-parse "${CLEANROOM_BASE}^{commit}")" == "$(git rev-parse HEAD)" ]]; then
+    echo "cleanroom-gate: CLEANROOM_BASE is HEAD itself — an empty row diff proves nothing; refusing to pass" >&2
+    exit 2
+  fi
+  if ! git merge-base --is-ancestor "$CLEANROOM_BASE" HEAD; then
+    echo "cleanroom-gate: CLEANROOM_BASE '$CLEANROOM_BASE' is not an ancestor of HEAD — refusing to pass" >&2
+    exit 2
+  fi
+  for reg in "${touched_registries[@]}"; do
+    while IFS= read -r id; do
+      [[ -n "$id" ]] || continue
+      while IFS= read -r hit; do
+        f="${hit#HEAD:}"
+        for p in "${prefixes[@]}"; do
+          if [[ "$f" == "$p"* ]]; then
+            echo "cleanroom-gate: $reg row '$id' changed against $CLEANROOM_BASE — $f cites it, treating it as touched" >&2
+            touched+=("$f")
+            break
+          fi
+        done
+      done < <(git grep -lE "Derivation:[[:space:]]+${id//./\\.}([[:space:]]|\$)" HEAD -- 2>/dev/null || true)
+    done < <(
+      # Row lines present on exactly one side of the base..HEAD pair are the
+      # changed set — an edited row shows up once per side, its ID once after
+      # the sort. A registry absent at the base is all-new rows, which is the
+      # pre-seed case and expands nothing unless something already cites them.
+      LC_ALL=C comm -3 \
+        <(git show "$CLEANROOM_BASE:$reg" 2>/dev/null | grep -E '^\|' | LC_ALL=C sort -u || true) \
+        <(git show "HEAD:$reg" 2>/dev/null | grep -E '^\|' | LC_ALL=C sort -u || true) |
+        sed -e 's/^\t//' |
+        sed -nE 's@^\|[[:space:]]*`?([A-Za-z0-9._-]+)`?[[:space:]]*\|.*@\1@p' |
+        LC_ALL=C sort -u
+    )
+  done
+  if [[ ${#touched[@]} -gt 0 ]]; then
+    mapfile -t touched < <(printf '%s\n' "${touched[@]}" | LC_ALL=C sort -u)
+  fi
+fi
 
 if [[ ${#touched[@]} -eq 0 ]]; then
   # Both non-default modes are fed a deliberate input by their caller. An empty
@@ -256,9 +355,13 @@ if [[ "$mode" == "--markers" ]]; then
 fi
 
 # The subject: every touched gated path paired with its blob hash at HEAD, sorted
-# so input order cannot change the digest. A path that no longer exists at HEAD
-# was deleted by this change and still needs review, so it contributes a marker
-# rather than being dropped.
+# so input order cannot change the digest, followed by the registry half of every
+# citation those files make — the row text, at HEAD, for each ID their markers
+# cite. A review checks that a marker and its row AGREE; binding only the file
+# half would leave the row free to move under a record that vouched for the pair.
+# A path that no longer exists at HEAD was deleted by this change and still needs
+# review, so it contributes a marker rather than being dropped; an ID whose row
+# has gone missing contributes one the same way.
 #
 # LC_ALL=C IS LOAD-BEARING. `sort` is locale-collated, and the digest is
 # order-dependent, so without a fixed collation the same content hashes to two
@@ -268,13 +371,31 @@ fi
 # (`R` 0x52 < `p` 0x70), and the record written from one was rejected by the
 # other. A gate whose verdict depends on $LANG is not a gate.
 subject="$(
-  for f in $(printf '%s\n' "${touched[@]}" | LC_ALL=C sort -u); do
-    if obj="$(git rev-parse --verify --quiet "HEAD:$f")"; then
-      printf '%s %s\n' "$obj" "$f"
-    else
-      printf 'deleted %s\n' "$f"
-    fi
-  done | sha256sum | cut -d' ' -f1
+  {
+    for f in $(printf '%s\n' "${touched[@]}" | LC_ALL=C sort -u); do
+      if obj="$(git rev-parse --verify --quiet "HEAD:$f")"; then
+        printf '%s %s\n' "$obj" "$f"
+      else
+        printf 'deleted %s\n' "$f"
+      fi
+    done
+    for id in $(
+      for f in $(printf '%s\n' "${touched[@]}" | LC_ALL=C sort -u); do
+        git show "HEAD:$f" 2>/dev/null || true
+      done | cited_ids | LC_ALL=C sort -u
+    ); do
+      rows="$(
+        for reg in "${registries[@]}"; do
+          git show "HEAD:$reg" 2>/dev/null || true
+        done | grep -E "$(cell_regex "$id")" || true
+      )"
+      if [[ -n "$rows" ]]; then
+        sed 's/^/row /' <<< "$rows"
+      else
+        printf 'unresolved-row %s\n' "$id"
+      fi
+    done
+  } | sha256sum | cut -d' ' -f1
 )"
 
 if [[ "$mode" == "--subject" ]]; then

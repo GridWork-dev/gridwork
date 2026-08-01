@@ -46,3 +46,8 @@ rule 3 is that the permitted set is decided before the implementation reaches fo
 Nothing here is load-bearing until a marker cites it. A row nothing cites costs nothing;
 a missing row blocks a PR until someone justifies the source, which is the correct
 direction for that friction to run.
+
+Once a marker does cite a row, the row is load-bearing and `cleanroom-gate` treats it
+that way: cited row text is folded into the review subject, and editing a cited row
+re-opens review of the files citing it (`CAPTURES.md` describes the mechanism; it covers
+both registries).

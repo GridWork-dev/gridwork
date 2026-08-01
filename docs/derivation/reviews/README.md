@@ -9,7 +9,8 @@ visible.
 ## The subject digest
 
 A record is named after its **subject** — a SHA-256 over every gated path the change
-touches, paired with that file's blob hash at `HEAD`:
+touches paired with that file's blob hash at `HEAD`, plus the text of every registry
+row those files' `Derivation:` markers cite:
 
 ```
 docs/derivation/reviews/<subject>.md
@@ -18,18 +19,37 @@ docs/derivation/reviews/<subject>.md
 Get it for the current branch:
 
 ```bash
-git diff --name-only origin/main...HEAD | ./tools/cleanroom-gate.sh --subject
+git diff --no-renames --name-only origin/main...HEAD | ./tools/cleanroom-gate.sh --subject
 ```
 
-The digest covers only gated files, so committing the record does not change it — but
-editing any gated file afterwards does, and the gate goes red again. That is the point:
-a review is bound to the content it actually read, and cannot be carried across a
-rewrite of that content.
+(If the branch also edits `SPECS.md` or `CAPTURES.md`, the gate needs a base to diff
+their rows against: prepend `CLEANROOM_BASE="$(git merge-base origin/main HEAD)"` to
+the `cleanroom-gate.sh` end of the pipe. CI exports it on every run.)
+
+The digest covers gated files and the rows they cite, so committing the record does not
+change it — but editing any gated file afterwards does, and the gate goes red again.
+That is the point: a review is bound to the content it actually read, and cannot be
+carried across a rewrite of that content.
+
+The registry half of a citation gets the same treatment, because a review checks that a
+marker and its row *agree* — binding only the file half would leave the row free to move
+under a record that vouched for the pair. Editing a row a gated file cites, even in a
+change that touches no gated path, re-opens review of the files citing it: the gate
+diffs registry rows against `CLEANROOM_BASE` and treats the citing files as touched,
+and it refuses a registry edit it has no base to judge. A row nothing cites stays free
+to add or fix — pre-seeding is meant to be cheap, and stays so.
+
+Two scope notes, said plainly. The diff feeding the gate must be produced with
+`--no-renames` (CI's is): default rename detection folds a modify-plus-rename into one
+line naming only the new path, which is exactly how a registry edit would vanish from
+the input — the reviewer of this mechanism defeated its first version that way. And the
+binding covers table rows, not the prose around them: the sentences that govern how a
+row is read stay rule 4's reader's job, like every other claim in this repository.
 
 ## Writing one
 
 ```bash
-subject=$(git diff --name-only origin/main...HEAD | ./tools/cleanroom-gate.sh --subject)
+subject=$(git diff --no-renames --name-only origin/main...HEAD | ./tools/cleanroom-gate.sh --subject)
 cp docs/derivation/reviews/TEMPLATE.md "docs/derivation/reviews/$subject.md"
 ```
 
