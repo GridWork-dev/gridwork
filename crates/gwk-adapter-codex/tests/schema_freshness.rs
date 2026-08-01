@@ -26,6 +26,8 @@ const PINNED_CODEX_VERSION: &str = "codex-cli 0.146.0";
 /// catch, so the count below is asserted against the directory listing.
 const VENDORED_FILES: &[&str] = &[
     "JSONRPCMessage.json",
+    "ServerNotification.json",
+    "ServerRequest.json",
     "CommandExecutionRequestApprovalParams.json",
     "CommandExecutionRequestApprovalResponse.json",
     "FileChangeRequestApprovalParams.json",

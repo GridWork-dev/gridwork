@@ -107,8 +107,8 @@ pub struct TurnCompletedNotification {
 
 // Derivation: CODEX-APP-SERVER `schemas/v2/TurnCompletedNotification.json`
 // `#/definitions/Turn` — `id`, `status`, `error` (populated only when
-// `status` is `failed`), and `items` (the `ThreadItem`s this turn payload
-// carries; empty unless the caller asked for them).
+// `status` is `failed`), and `items`, described verbatim as "Thread items
+// currently included in this turn payload."
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Turn {
@@ -143,9 +143,11 @@ pub struct TurnError {
     pub additional_details: Option<String>,
 }
 
-// Derivation: CODEX-APP-SERVER `schemas/v2/ErrorNotification.json` — the
-// `error` notification (bare method name, per `_server_notif_methods.txt`:
-// `ErrorNotification -> method: error`), `{ threadId, turnId, error, willRetry }`.
+// Derivation: CODEX-APP-SERVER `schemas/v2/ErrorNotification.json` for the
+// body shape, `{ threadId, turnId, error, willRetry }`; the bare method
+// name `error` itself is `schemas/ServerNotification.json`'s
+// `ErrorNotification` branch (`method: ["error"]`, `params: $ref
+// ErrorNotification`) — this type's own file has no `method` field to read.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ErrorNotification {
@@ -181,16 +183,19 @@ pub struct ItemCompletedNotification {
     pub item: ThreadItem,
 }
 
-/// The subset of `ThreadItem`'s fourteen `type`-tagged variants this adapter
-/// reads a shape from. `CollabAgentToolCall` is the one axis 3 names
-/// explicitly (`docs/PARITY.md`: "per-child status explicit on the parent's
-/// transcript (`collabAgentToolCall` → `agentsStates`)") — every other kind
-/// this adapter has no reason to inspect (plan, webSearch, imageView, sleep,
-/// imageGeneration, the review-mode markers, contextCompaction,
-/// hookPrompt, dynamicToolCall) falls into `Other` via `#[serde(other)]`
-/// rather than failing to decode: the item stream must survive a variant
-/// this adapter has not been taught yet, the same non_exhaustive posture as
-/// every other type in this module.
+/// The subset of `ThreadItem`'s eighteen `type`-tagged variants this adapter
+/// reads a shape from — eight modeled below (`UserMessage`, `AgentMessage`,
+/// `Reasoning`, `CommandExecution`, `FileChange`, `McpToolCall`,
+/// `CollabAgentToolCall`, `SubAgentActivity`), ten not. `CollabAgentToolCall`
+/// is the one axis 3 names explicitly (`docs/PARITY.md`: "per-child status
+/// explicit on the parent's transcript (`collabAgentToolCall` →
+/// `agentsStates`)") — every other kind this adapter has no reason to
+/// inspect (`hookPrompt`, `plan`, `dynamicToolCall`, `webSearch`,
+/// `imageView`, `sleep`, `imageGeneration`, `enteredReviewMode`,
+/// `exitedReviewMode`, `contextCompaction` — ten) falls into `Other` via
+/// `#[serde(other)]` rather than failing to decode: the item stream must
+/// survive a variant this adapter has not been taught yet, the same
+/// non_exhaustive posture as every other type in this module.
 // Derivation: CODEX-APP-SERVER `schemas/v2/ItemCompletedNotification.json`
 // `#/definitions/ThreadItem` — internally tagged on `type`, one variant per
 // item kind. Variant tag strings and field names below are quoted from that

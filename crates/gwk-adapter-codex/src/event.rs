@@ -22,11 +22,14 @@ use crate::schema::{
 };
 use crate::wire::JsonRpcId;
 
-// Derivation: CODEX-APP-SERVER `schemas/v2/*.json` filenames plus
-// `_server_notif_methods.txt` (captured alongside the schema bundle by the
-// same `generate-json-schema` run) — the exact `method` string each
-// notification carries. Quoted here because `schema.rs`'s types decode a
-// notification's `params`; nothing in that module names the method itself.
+// Derivation: CODEX-APP-SERVER `schemas/ServerNotification.json` — its
+// `oneOf` pairs each notification's `method` string enum with the
+// `#/definitions/...` its `params` `$ref`s (e.g. the `ErrorNotification`
+// branch: `method: ["error"]`, `params: $ref ErrorNotification`; the
+// `Thread/startedNotification` branch: `method: ["thread/started"]`,
+// `params: $ref ThreadStartedNotification`). Quoted here because
+// `schema.rs`'s types decode a notification's `params`; nothing in that
+// module names the method string itself.
 const METHOD_THREAD_STARTED: &str = "thread/started";
 const METHOD_THREAD_STATUS_CHANGED: &str = "thread/status/changed";
 const METHOD_THREAD_CLOSED: &str = "thread/closed";
@@ -37,8 +40,10 @@ const METHOD_ITEM_COMPLETED: &str = "item/completed";
 const METHOD_TOKEN_USAGE_UPDATED: &str = "thread/tokenUsage/updated";
 const METHOD_SERVER_REQUEST_RESOLVED: &str = "serverRequest/resolved";
 
-// Derivation: CODEX-APP-SERVER `schemas/ServerRequest.json` — the `method`
-// enum values for the two approval-relay request kinds this adapter relays.
+// Derivation: CODEX-APP-SERVER `schemas/ServerRequest.json` — the
+// `Item/commandExecution/requestApprovalRequest` and
+// `Item/fileChange/requestApprovalRequest` branches' `method` enum values,
+// the two approval-relay request kinds this adapter relays.
 const METHOD_COMMAND_EXECUTION_REQUEST_APPROVAL: &str = "item/commandExecution/requestApproval";
 const METHOD_FILE_CHANGE_REQUEST_APPROVAL: &str = "item/fileChange/requestApproval";
 

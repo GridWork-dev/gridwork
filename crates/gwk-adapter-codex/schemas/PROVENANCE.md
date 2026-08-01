@@ -37,6 +37,8 @@ names in a `Derivation:` marker:
 | File | What it's for |
 |---|---|
 | `JSONRPCMessage.json` | The wire envelope: request / notification / response / error, and the `id` union type. Root-level in the generator's own output — shared by both generations, not v2-specific. |
+| `ServerNotification.json` | The `method` ⇄ params-type mapping for every notification the app-server can send — where `event.rs`'s method-string constants and the `error`/`thread/started`/etc. citations in `schema.rs` come from. Root-level, same reason as `JSONRPCMessage.json`. |
+| `ServerRequest.json` | The same mapping for server-initiated requests — where the two approval-relay method strings come from. |
 | `v2/ThreadStartedNotification.json` | `thread/started` — lifecycle: start |
 | `v2/ThreadStatusChangedNotification.json` | `thread/status/changed` — status truth, including `waitingOnApproval` |
 | `v2/ThreadClosedNotification.json` | `thread/closed` — lifecycle: end |
