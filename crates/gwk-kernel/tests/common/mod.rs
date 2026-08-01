@@ -25,9 +25,9 @@ use gwk_domain::envelope::{
 };
 use gwk_domain::fsm::LeaseMode;
 use gwk_domain::ids::{
-    AttemptId, AttentionItemId, AuthorityGrantId, ByteCount, CommandId, DispatchNodeId, EngineId,
-    EngineSessionId, EvidenceId, GateId, IdempotencyKey, LeaseId, MessageId, ProjectId, Seq,
-    TaskId, Timestamp, WorktreeId,
+    AttemptId, AttentionItemId, AuthorityGrantId, ByteCount, CommandId, CostEntryId, CostMicros,
+    DispatchNodeId, EngineId, EngineSessionId, EvidenceId, GateId, IdempotencyKey, LeaseId,
+    MessageId, ProjectId, Seq, TaskId, Timestamp, TokenCount, WorktreeId,
 };
 use gwk_domain::ingestion::IngestionKind;
 use gwk_domain::inherited::OrchestratorCheckpoint;
@@ -618,7 +618,9 @@ pub async fn populate(store: &PgEventStore) {
             gate_id: GateId::new("g-1"),
             attempt_id: None,
             phase_ref: Some("4p-kernel".into()),
-            kind: Some("review".into()),
+            kind: Some("approval".into()),
+            question: Some("Run `cargo test` in the worktree?".into()),
+            options: Some(vec!["allow".into(), "deny".into()]),
         },
     )
     .await;
@@ -711,6 +713,28 @@ pub async fn populate(store: &PgEventStore) {
                 retention_class: None,
                 evidence_pin: None,
             }),
+        },
+    )
+    .await;
+    // `u64::MAX` in a token count for the same reason as evidence's
+    // `byte_size`: the columns are numeric(20,0) and canonicalize to text.
+    apply(
+        store,
+        "cost",
+        KernelCommand::RecordCostEntry {
+            cost_entry_id: CostEntryId::new("ce-1"),
+            attempt_id: Some(AttemptId::new("a-1")),
+            engine_session_id: Some(EngineSessionId::new("s-1")),
+            dispatch_node_id: None,
+            engine: EngineId::new("engine-a"),
+            model: Some("model-x".into()),
+            input_tokens: Some(TokenCount::new(u64::MAX)),
+            cached_input_tokens: Some(TokenCount::new(800)),
+            cache_write_tokens: None,
+            output_tokens: Some(TokenCount::new(300)),
+            reasoning_tokens: None,
+            cost_micros: Some(CostMicros::new(125_000)),
+            cost_is_estimate: Some(true),
         },
     )
     .await;

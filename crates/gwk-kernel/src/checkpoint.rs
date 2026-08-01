@@ -199,6 +199,31 @@ const PROJECTIONS: &[Projection] = &[
          ORDER BY t.id COLLATE \"C\" LIMIT $3",
     ),
     derived(
+        "cost_entry",
+        "id",
+        "SELECT jsonb_build_object('projection_type', 'cost_entry', 'cost_entry', \
+           to_jsonb(t) || jsonb_build_object( \
+             'input_tokens', t.input_tokens::text, \
+             'cached_input_tokens', t.cached_input_tokens::text, \
+             'cache_write_tokens', t.cache_write_tokens::text, \
+             'output_tokens', t.output_tokens::text, \
+             'reasoning_tokens', t.reasoning_tokens::text, \
+             'cost_micros', t.cost_micros::text))::text \
+         FROM gwk.cost_entry t ORDER BY t.id",
+        "SELECT jsonb_build_object('projection_type', 'cost_entry', 'cost_entry', \
+           to_jsonb(t) || jsonb_build_object( \
+             'input_tokens', t.input_tokens::text, \
+             'cached_input_tokens', t.cached_input_tokens::text, \
+             'cache_write_tokens', t.cache_write_tokens::text, \
+             'output_tokens', t.output_tokens::text, \
+             'reasoning_tokens', t.reasoning_tokens::text, \
+             'cost_micros', t.cost_micros::text))::text \
+         FROM gwk.cost_entry t \
+         WHERE ($1::text IS NULL OR t.id COLLATE \"C\" > $1) \
+           AND ($2::text IS NULL OR t.id = $2) \
+         ORDER BY t.id COLLATE \"C\" LIMIT $3",
+    ),
+    derived(
         "dispatch_node",
         "id",
         "SELECT jsonb_build_object('projection_type', 'dispatch_node', 'dispatch_node', \

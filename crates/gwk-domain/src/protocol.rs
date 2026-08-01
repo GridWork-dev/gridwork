@@ -24,8 +24,8 @@
 
 use crate::blob::{BlobAddress, BlobDescriptor};
 use crate::entity::{
-    Attempt, AttentionItem, AuthorityGrant, Command, DispatchNode, EngineSession, Evidence, Gate,
-    IngestedRecord, Lease, Message, Receipt, Task, Worktree,
+    Attempt, AttentionItem, AuthorityGrant, Command, CostEntry, DispatchNode, EngineSession,
+    Evidence, Gate, IngestedRecord, Lease, Message, Receipt, Task, Worktree,
 };
 use crate::envelope::{CommandEnvelope, EventEnvelope, JsonValue};
 use crate::ids::{
@@ -457,6 +457,7 @@ pub enum ProjectionKind {
     DispatchNode,
     OrchestratorCheckpoint,
     IngestedRecord,
+    CostEntry,
 }
 
 impl ProjectionKind {
@@ -477,6 +478,7 @@ impl ProjectionKind {
         Self::DispatchNode,
         Self::OrchestratorCheckpoint,
         Self::IngestedRecord,
+        Self::CostEntry,
     ];
 
     /// The wire name — the same string `serde` writes, and the same one that
@@ -501,6 +503,7 @@ impl ProjectionKind {
             Self::DispatchNode => "dispatch_node",
             Self::OrchestratorCheckpoint => "orchestrator_checkpoint",
             Self::IngestedRecord => "ingested_record",
+            Self::CostEntry => "cost_entry",
         }
     }
 }
@@ -566,6 +569,9 @@ pub enum ProjectionRecord {
     IngestedRecord {
         ingested_record: IngestedRecord,
     },
+    CostEntry {
+        cost_entry: CostEntry,
+    },
 }
 
 impl ProjectionRecord {
@@ -588,6 +594,7 @@ impl ProjectionRecord {
             Self::DispatchNode { .. } => ProjectionKind::DispatchNode,
             Self::OrchestratorCheckpoint { .. } => ProjectionKind::OrchestratorCheckpoint,
             Self::IngestedRecord { .. } => ProjectionKind::IngestedRecord,
+            Self::CostEntry { .. } => ProjectionKind::CostEntry,
         }
     }
 }
@@ -1097,9 +1104,9 @@ mod tests {
             AttemptState, CommandState, GateVerdict, LeaseMode, LeaseState, MessageState, TaskState,
         };
         use crate::ids::{
-            AttemptId, AttentionItemId, AuthorityGrantId, DispatchNodeId, EngineId,
+            AttemptId, AttentionItemId, AuthorityGrantId, CostEntryId, DispatchNodeId, EngineId,
             EngineSessionId, EvidenceId, GateId, IdempotencyKey, IngestedRecordId, LeaseId,
-            MessageId, ReceiptId, TaskId, Timestamp, WorktreeId,
+            MessageId, ReceiptId, TaskId, Timestamp, TokenCount, WorktreeId,
         };
 
         let ts = || Timestamp::new("2026-07-28T00:00:00Z");
@@ -1137,7 +1144,6 @@ mod tests {
                     worktree_lease_id: None,
                     base_sha: None,
                     budget: None,
-                    result_schema_ref: None,
                     provider_session_ref: None,
                     runtime_ref: None,
                     runtime_started_at: None,
@@ -1145,7 +1151,6 @@ mod tests {
                     provider_terminal_event: None,
                     result_valid: None,
                     evidence_manifest_ref: None,
-                    gate_result: None,
                     created_at: ts(),
                     updated_at: ts(),
                 },
@@ -1201,8 +1206,11 @@ mod tests {
                     version: 1,
                     attempt_id: None,
                     phase_ref: None,
-                    kind: None,
+                    kind: Some("approval".into()),
+                    question: Some("Run `cargo test` in the worktree?".into()),
+                    options: Some(vec!["allow".into(), "deny".into()]),
                     verdict: GateVerdict::Pending,
+                    chosen_option: None,
                     evidence_ref: None,
                     created_at: ts(),
                     updated_at: ts(),
@@ -1329,6 +1337,24 @@ mod tests {
                     ingested_by: None,
                     event_seq: Seq::new(7),
                     ingested_at: ts(),
+                },
+            },
+            ProjectionRecord::CostEntry {
+                cost_entry: CostEntry {
+                    id: CostEntryId::new("cost-1"),
+                    attempt_id: Some(AttemptId::new("att-1")),
+                    engine_session_id: None,
+                    dispatch_node_id: None,
+                    engine: EngineId::new("engine-a"),
+                    model: Some("model-x".into()),
+                    input_tokens: Some(TokenCount::new(1200)),
+                    cached_input_tokens: None,
+                    cache_write_tokens: None,
+                    output_tokens: Some(TokenCount::new(300)),
+                    reasoning_tokens: None,
+                    cost_micros: None,
+                    cost_is_estimate: None,
+                    recorded_at: ts(),
                 },
             },
         ]
