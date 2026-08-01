@@ -307,6 +307,53 @@ jobs:
           # against a test that could never pass at all.
           conformance
           echo "the conformance gate rejects each seed and accepts the real corpus"
+      # The reattach gate gets the same treatment. Its assertions live in the
+      # attach unit tests rather than a fixture file, so the seeds edit the code
+      # under test — which adds a failure mode fixtures don't have: a seed that
+      # breaks the BUILD also exits non-zero, proving compilation and nothing
+      # about the gate's judgement. So each seed must fail through the named
+      # test, not merely fail.
+      #
+      # Two seeds, one per assertion family: replay fidelity (the resize is the
+      # case a byte-only stream gets wrong) and snapshot fidelity (the fallback
+      # branch a client past the retention horizon takes). The protocol-choice
+      # asserts (`CaughtUp` variants) ride the same tests these seeds prove can
+      # fail.
+      - name: prove the reattach gate can fail
+        run: |
+          set -euo pipefail
+          eval "$(./tools/pty-toolchain.sh --env)"
+          trap 'git checkout -- crates/gwk-pty/src' EXIT
+
+          attach_tests() {
+            cargo test -p gwk-pty --lib --locked --offline attach:: 2>&1
+          }
+          seed() { # seed <label> <test that must catch it>; expects the tree already edited
+            local out
+            if out=$(attach_tests); then
+              echo "reattach: accepted $1 — the gate is decoration" >&2
+              exit 1
+            fi
+            if ! printf '%s' "$out" | grep -q "$2"; then
+              echo "reattach: rejected $1, but not through $2:" >&2
+              printf '%s\n' "$out" | tail -25 >&2
+              exit 1
+            fi
+            echo "  rejected: $1 (caught by $2)"
+          }
+
+          sed -i 's/Event::Resize { cols, rows } => grid\.resize(\*cols, \*rows)?,/Event::Resize { .. } => {},/' crates/gwk-pty/src/attach.rs
+          seed "a replay that drops resizes" "a_returning_client_replays_the_gap_including_a_resize"
+          git checkout -- crates/gwk-pty/src
+
+          sed -i 's/snapshot: grid\.snapshot_vt()?,/snapshot: Vec::new(),/' crates/gwk-pty/src/attach.rs
+          seed "a snapshot that stopped carrying the screen" "a_second_client_attaches_to_the_screen_already_on_show"
+          git checkout -- crates/gwk-pty/src
+
+          # Positive control: both seeds would also "fail correctly" against a
+          # suite that no longer compiles or never passed.
+          attach_tests > /dev/null
+          echo "the reattach gate rejects each seed and accepts the real code"
 
   # Criterion 4, executable: `cargo install gridwork` has to work for someone who
   # has never heard of Zig. Every other job happens to run on a runner without
