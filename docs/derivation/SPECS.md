@@ -32,6 +32,10 @@ leaked, or copyleft-licensed is a rule 1 violation.
 | `KITTY-KBD` | Kitty keyboard protocol | sw.kovidgoyal.net/kitty/keyboard-protocol/ |
 | `KITTY-GRAPHICS` | Kitty graphics protocol | sw.kovidgoyal.net/kitty/graphics-protocol/ |
 | `ACP-1` | Agent Client Protocol, wire version 1 | agentclientprotocol.com |
+| `CLAUDE-STREAM-JSON` | Claude Code headless interface: stream-json input/output message shapes | code.claude.com/docs/en/headless |
+| `CLAUDE-HOOKS` | Claude Code hooks reference: lifecycle events, PreToolUse `permissionDecision` contract | code.claude.com/docs/en/hooks |
+| `CODEX-APP-SERVER` | Codex `app-server` JSON-RPC protocol: README plus the schemas emitted by `codex app-server generate-json-schema` | github.com/openai/codex/blob/main/codex-rs/app-server/README.md |
+| `OPENCODE-SERVER` | opencode server HTTP + SSE surface: session, permission, and question events and their reply endpoints | opencode.ai/docs/server |
 | `POSIX-TERM` | POSIX.1-2024 (Issue 8) XBD §11, General Terminal Interface | pubs.opengroup.org/onlinepubs/9799919799/basedefs/V1_chap11.html |
 | `POSIX-WINSIZE` | POSIX.1-2024 (Issue 8) XSH, `tcsetwinsize()` | pubs.opengroup.org/onlinepubs/9799919799/functions/tcsetwinsize.html |
 | `UAX-11` | Unicode Standard Annex #11, East Asian Width | unicode.org/reports/tr11/ |
