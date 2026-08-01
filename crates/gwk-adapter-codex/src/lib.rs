@@ -15,10 +15,15 @@
 use gwk_domain::EngineId;
 use gwk_pty::{Session, SpawnError};
 
+pub mod command;
 pub mod event;
 pub mod schema;
 pub mod wire;
 
+pub use command::{
+    DecisionMappingError, command_execution_response, file_change_response,
+    open_gate_for_command_execution, open_gate_for_file_change, record_cost_entry,
+};
 pub use event::{
     ApprovalRequest, CodexEvent, NormalizeError, normalize_notification, normalize_request,
 };
