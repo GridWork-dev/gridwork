@@ -257,10 +257,17 @@ jobs:
         run: |
           set -euo pipefail
           eval "$(./tools/pty-toolchain.sh --env)"
+          # The adapter crates ride this job, not `test`: depending on gwk-pty
+          # makes them need the same Zig toolchain, and their tests must hold
+          # inside the same no-network namespace — an adapter that reached for
+          # an engine or a network here would be exactly the dependency this
+          # phase's public CI must never acquire.
           ./tools/no-network.sh bash -euo pipefail -c '
-            cargo clippy -p gwk-pty --all-targets --locked --offline -- -D warnings
-            cargo test -p gwk-pty --all-targets --locked --offline
-            cargo test -p gwk-pty --doc --locked --offline
+            for crate in gwk-pty gwk-adapter-opencode gwk-adapter-claude gwk-adapter-codex; do
+              cargo clippy -p "$crate" --all-targets --locked --offline -- -D warnings
+              cargo test -p "$crate" --all-targets --locked --offline
+              cargo test -p "$crate" --doc --locked --offline
+            done
           '
       # The conformance corpus is only a gate if it can fail. The step above
       # already RAN it; these seeds show it says no to the three ways it could
@@ -453,7 +460,9 @@ jobs:
           # which for this crate means Zig and a 71 MB ghostty tree. The derived
           # loops below DO filter on `publish`, so they need no exclusion; this
           # line does. Verified by observation, not by reading the flag's name.
-          cargo package --workspace --exclude gwk-pty --locked
+          cargo package --workspace --exclude gwk-pty \
+            --exclude gwk-adapter-opencode --exclude gwk-adapter-claude \
+            --exclude gwk-adapter-codex --locked
 
           # Every publishable member, straight from the manifest graph:
           # `publish = false` shows up as an empty array, so xtask drops out and
