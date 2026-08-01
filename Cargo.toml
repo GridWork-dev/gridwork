@@ -32,11 +32,19 @@ repository = "https://github.com/GridWork-dev/gridwork"
 [workspace.dependencies]
 aead = "0.6.1"
 aead-stream = "0.6.0"
+# The ACP SDK. One adapter speaks its wire (opencode); all three converge on
+# its Agent trait as the internal normalization surface. The WIRE version pin
+# (v1) lives in adapter code as the negotiated protocol version, not here —
+# the crate serves several wire versions from one release.
+agent-client-protocol = "2.0.0"
 base64 = "0.23.0"
 chacha20poly1305 = "0.11.0"
 gwk-cert = { path = "crates/gwk-cert", version = "0.0.2" }
 gwk-domain = { path = "crates/gwk-domain", version = "0.0.2" }
 gwk-kernel = { path = "crates/gwk-kernel", version = "0.0.2" }
+# Path-only, no version: unpublished (`publish = false`), like the adapter
+# crates that depend on it.
+gwk-pty = { path = "crates/gwk-pty" }
 gwk-theme = { path = "crates/gwk-theme", version = "0.0.2" }
 # The SAFE wrapper, not the raw `-sys` bindings: this workspace forbids
 # `unsafe_code`, so raw FFI would not compile here at all. Exact-pinned because

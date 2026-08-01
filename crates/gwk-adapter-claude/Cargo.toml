@@ -1,0 +1,23 @@
+[package]
+name = "gwk-adapter-claude"
+version = "0.0.2"
+description = "claude-code engine adapter: bidirectional stream-json, PreToolUse approval, native TUI through gwk-pty"
+homepage = "https://gridwork.dev"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Not published, same reason as gwk-pty: the dependency on it makes this crate
+# need Zig and a pinned ghostty checkout to build, and it is meaningless
+# without a logged-in engine CLI besides. The `package` job excludes it by
+# name, like gwk-pty.
+publish = false
+
+[dependencies]
+gwk-domain.workspace = true
+gwk-pty.workspace = true
+pty-process.workspace = true
+
+[lints]
+workspace = true
