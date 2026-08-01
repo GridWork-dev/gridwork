@@ -4,7 +4,39 @@ Observed-behavior captures cited by clean-room derivation notes (CLEANROOM.md ru
 Each capture has a stable ID and the SHA-256 of the raw capture. Scrubbed captures may
 live in-repo as test fixtures in a text-safe encoding; unscrubbed ones are retained
 privately and can be produced against their hash if a derivation is ever questioned.
-Rows carry only the ID, hash, and an observable description — never storage paths.
+
+Rows carry only the ID, hash, and an observable description. A storage path may be named
+elsewhere in-tree for a capture of **public source**, and only while all of these hold:
+the artifact lives in a tree this repository already materializes by pin, so naming its
+path discloses no location the build does not; the revision that tree is pinned at is an
+**immutable identifier** — a full commit hash, never a branch or a movable tag; the
+license is named **and permits the use** (a named but disqualifying license fails this,
+which is rule 1's business, not a formality this clause discharges); and the hash — never
+the path — remains the citation of record. For anything else, and for private recordings
+above all, the location is not written down. Two reasons, and the second survives even
+where the first does not: a citation must not disclose where a private capture is kept,
+and a path is not a stable identifier, so a claim resting on one can come to point at
+different bytes without saying so. The immutability condition is that second reason
+spelled out — a path plus a branch name is a moving target wearing a pin's clothes.
+
+Captures **this repository made itself**, of behavior it is willing to publish, are
+committed under `docs/derivation/captures/` — everything in that directory is one — and
+that directory is named here. Neither reason above applies: there is no private location
+to disclose, and the second is answered rather than waived, because `cleanroom-gate`
+verifies that every file **under** that directory — dotfiles and subdirectories included,
+which the first version of the check missed — hashes to something a row carries. Edit the
+bytes and the gate rejects the change. That check deliberately does not consult the
+changed-path list, since `docs/` is not a gated prefix and a change touching only a
+capture would otherwise never be looked at.
+
+An earlier version of this paragraph asserted that same guarantee before anything
+implemented it, and the reviewer who caught it was right to treat a rule amendment written
+in response to a review finding as the likeliest place for one. The rule is the same; what
+changed is that it is now true.
+
+Whether a recording can be published is judged per capture, not assumed: anything carrying
+a real session's contents is not covered by this and takes the private path, where the
+hash is still the citation and the retention is ours to honor.
 
 IDs are `CAP-<nnn>`, allocated in order and never reused: a `Derivation:` marker in
 shipped code cites one, so a recycled ID would silently re-point an existing citation at
@@ -13,4 +45,23 @@ a different observation. `cleanroom-gate` resolves every cited ID against this t
 
 | ID | sha256 | What it observably shows |
 |---|---|---|
-| — | — | (none yet — first entries land with the PTY engine) |
+| `CAP-001` | `efb1138c4730af0cea8a0aa8e9a558c8c642227fa20ef529346c777cb4f2a043` | A public third-party VT fuzz harness. Its first input byte selects a parser code path and is not terminal input, and it drives a terminal built at 80×24 with 100 lines of scrollback. Both facts decide how the conformance corpus has to be replayed for its frames to describe the same terminal upstream tests. |
+| `CAP-002` | `9cf4c0478be69f618838964da0d483fbb02dc45394c9ca9968e041c958c9adf4` | On Linux, a `read` of a pseudoterminal master after the last descriptor for its slave has closed fails with `EIO` rather than reporting end-of-file. A terminal treating that errno as an error reports every clean child exit as a failure. |
+
+`CAP-001` takes the public-source clause: `crates/gwk-pty/fixtures/PROVENANCE.md` names
+its repository, revision, license and path. What that clause requires is that the tree is
+materialized by pin, and it is — `pins.env` fixes the repository at a full commit hash and
+`tools/pty-toolchain.sh` checks it out — so naming a path inside it discloses no location
+the build does not. It does **not** require that the artifact itself is read: nothing in
+this build or its tests opens the harness file, and an earlier version of this note
+claimed otherwise, justifying the row on the very ground the clause was amended to
+abandon. The corpus beside it is read; the harness is not. The hash above stays the
+citation of record either way, so "the harness says this" remains falsifiable against
+bytes rather than against a location.
+
+`CAP-002` takes the own-observation clause: the capture is this repository's, committed
+under `docs/derivation/captures/`, and it carries the probe that produced it so the
+observation can be re-run rather than believed. It is registered because the behavior has
+no permitted spec to cite — POSIX gives `read` an `EIO` for a background process group
+reading its controlling terminal, which is a different condition entirely, and citing it
+would be a false citation dressed as a real one.

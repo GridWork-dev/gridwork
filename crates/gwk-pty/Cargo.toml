@@ -20,6 +20,31 @@ publish = false
 
 [dependencies]
 libghostty-vt.workspace = true
+pty-process.workspace = true
+# One constant: `EIO`, to tell "the child hung up" apart from a real read
+# failure. Spelling it `5` inline would need the same comment and would not
+# survive someone reading it on a platform where it is not 5.
+#
+# `termios` reads the PTY's window size back out of the kernel. `resize` needs
+# it to know what to roll a refused resize back to — the child can move that
+# size itself, so a copy we kept would be stale without warning — and the tests
+# need it because a field we set ourselves would agree with us no matter which
+# order `resize` ran its two halves in, which is the thing they exist to catch.
+rustix = { workspace = true, features = ["std", "termios"] }
+sha2.workspace = true
+thiserror.workspace = true
+# `process` is for reaping the child, `io-util` for the reader's `read`. `rt`,
+# `macros` and `time` are only wanted by the tests, but a dev-dependency on the
+# same crate with different features unifies into one feature set anyway, so
+# splitting them here would buy a longer manifest and nothing else.
+tokio = { workspace = true, features = [
+  "io-util",
+  "macros",
+  "process",
+  "rt",
+  "sync",
+  "time",
+] }
 
 [lints]
 workspace = true

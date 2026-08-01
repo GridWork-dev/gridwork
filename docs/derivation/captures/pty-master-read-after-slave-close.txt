@@ -1,0 +1,20 @@
+capture: pseudoterminal master read after the last slave descriptor closes
+platform: Linux 7.0.10-arch1-1 x86_64
+
+probe (python3, standard library only):
+
+    import errno
+    import os
+    import pty
+
+    master, slave = pty.openpty()
+    os.close(slave)
+    try:
+        data = os.read(master, 64)
+        print("read returned {} byte(s)".format(len(data)))
+    except OSError as e:
+        print("read failed with errno {} ({})".format(e.errno, errno.errorcode[e.errno]))
+
+observed:
+
+    read failed with errno 5 (EIO)

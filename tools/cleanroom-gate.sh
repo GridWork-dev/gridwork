@@ -162,6 +162,71 @@ EOF
   fi
 }
 
+# Every capture this repository publishes is registered under its own digest.
+#
+# CAPTURES.md names no paths, so this cannot map a row to a file. It asserts the
+# weaker and sufficient thing: each committed capture's sha256 appears as some
+# row. Edit the bytes and the digest stops appearing, and that is the entire
+# reason a self-made capture is allowed to have its location named at all — the
+# registry's objection to paths is that a claim resting on one can come to point
+# at different bytes without saying so, and this is what makes it say so.
+#
+# Deliberately NOT driven by the changed-path list. A capture lives under docs/,
+# which is not a gated prefix, so a change touching only a capture file reaches
+# the early exit below and is never looked at. That is precisely the edit worth
+# catching, so this runs on every invocation of the real gate.
+#
+# ponytail: everything under the directory is treated as a capture. If it ever
+# needs a README, give this an extension allowlist rather than a skip-list of
+# names.
+check_captures() {
+  local dir="docs/derivation/captures" reg="docs/derivation/CAPTURES.md"
+  local f sum bad=0
+  [[ -d "$dir" ]] || return 0
+  # `find`, not `"$dir"/*`. The glob skips dotfiles under bash's default settings
+  # and does not descend, so a capture named `.x`, or one in a subdirectory, was
+  # invisible to a check whose entire claim is that nothing in here goes
+  # unregistered. The round-nine reader found it by dropping a dotfile in and
+  # watching the gate pass — the same defect this function was added to fix, one
+  # layer narrower, which is the argument for asking the filesystem what is there
+  # rather than describing it in a pattern.
+  #
+  # `! -type d` rather than `-type f`, so a symlink is followed and hashed rather
+  # than silently skipped; `-print0` so a newline in a filename cannot end the
+  # loop early. A dangling symlink has no bytes to smuggle and falls out at the
+  # `-f` test below.
+  while IFS= read -r -d '' f; do
+    [[ -f "$f" ]] || continue
+    sum="$(sha256sum "$f" | cut -d' ' -f1)"
+    # Anchored to the hash column, the way resolves() anchors to the ID column
+    # and for the same reason: a mention is not a registration. The lookup was
+    # once `^\|.*${sum}.*\|` — the digest appearing anywhere in a table row —
+    # and the round-ten reader registered an unregistered capture against it
+    # twice: the real digest quoted in a row's description while the hash cell
+    # held a placeholder, and a hash cell padded around the real digest. The
+    # row's hash field has to BE the hash, not contain it.
+    if ! grep -qE "^\|[^|]*\|[[:space:]]*\`?${sum}\`?[[:space:]]*\|" "$reg"; then
+      echo "cleanroom-gate: $f is not registered in $reg under its own sha256" >&2
+      echo "cleanroom-gate:   the file hashes to $sum, which no row's hash cell carries" >&2
+      bad=1
+    fi
+  done < <(find "$dir" ! -type d -print0)
+  if [[ $bad -ne 0 ]]; then
+    cat >&2 <<'EOF'
+
+A capture is cited by digest, never by path, so its bytes and its row have to
+stay the same thing. Either the file was edited after it was registered — in
+which case it is no longer the observation anything cites, and re-registering it
+means a new row, not an edited hash — or it was added without a row.
+EOF
+    return 1
+  fi
+}
+
+if [[ "$mode" == "check" ]]; then
+  check_captures
+fi
+
 touched=()
 while IFS= read -r f; do
   [[ -n "$f" ]] || continue
