@@ -64,6 +64,10 @@ pub fn spawn_tui(cols: u16, rows: u16) -> Result<Session, SpawnError> {
 /// The control half's invocation: the headless bidirectional stream.
 // Derivation: CLAUDE-STREAM-JSON — print mode accepts `--input-format
 // stream-json` (stdin) and `--output-format stream-json` (stdout).
+// Derivation: CAP-003 — with `--print`, `--output-format stream-json` is
+// refused unless `--verbose` is present ("Error: When using --print,
+// --output-format=stream-json requires --verbose", pinned CLI 2.1.220,
+// exit 1).
 pub fn control_command() -> std::process::Command {
     let mut command = std::process::Command::new(ENGINE);
     command.args([
@@ -72,6 +76,7 @@ pub fn control_command() -> std::process::Command {
         "stream-json",
         "--output-format",
         "stream-json",
+        "--verbose",
     ]);
     command
 }
@@ -92,7 +97,8 @@ mod tests {
                 "--input-format",
                 "stream-json",
                 "--output-format",
-                "stream-json"
+                "stream-json",
+                "--verbose"
             ]
         );
         // No environment scrubbing: the rendering spike recorded that the

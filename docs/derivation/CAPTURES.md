@@ -54,6 +54,7 @@ a different observation. `cleanroom-gate` resolves every cited ID against this t
 |---|---|---|
 | `CAP-001` | `efb1138c4730af0cea8a0aa8e9a558c8c642227fa20ef529346c777cb4f2a043` | A public third-party VT fuzz harness. Its first input byte selects a parser code path and is not terminal input, and it drives a terminal built at 80×24 with 100 lines of scrollback. Both facts decide how the conformance corpus has to be replayed for its frames to describe the same terminal upstream tests. |
 | `CAP-002` | `9cf4c0478be69f618838964da0d483fbb02dc45394c9ca9968e041c958c9adf4` | On Linux, a `read` of a pseudoterminal master after the last descriptor for its slave has closed fails with `EIO` rather than reporting end-of-file. A terminal treating that errno as an error reports every clean child exit as a failure. |
+| `CAP-003` | `f387911b368f608bbdbc332981ef7a70db99fffebb42affaa00174c33288b2c7` | The pinned Claude Code CLI (2.1.220), invoked in print mode with `--input-format stream-json --output-format stream-json` and no `--verbose`, refuses at flag validation before either format flag takes effect: stderr `Error: When using --print, --output-format=stream-json requires --verbose`, exit status 1. |
 
 `CAP-001` takes the public-source clause: `crates/gwk-pty/fixtures/PROVENANCE.md` names
 its repository, revision, license and path. What that clause requires is that the tree is
@@ -72,3 +73,15 @@ observation can be re-run rather than believed. It is registered because the beh
 no permitted spec to cite — POSIX gives `read` an `EIO` for a background process group
 reading its controlling terminal, which is a different condition entirely, and citing it
 would be a false citation dressed as a real one.
+
+`CAP-003` also takes the own-observation clause. `CLAUDE-STREAM-JSON`'s cli-reference page
+documents `--verbose` and `--output-format` as independent flags and states no dependency
+between them; `CLAUDE-HEADLESS` pairs them only inside an example ("Use `--output-format
+stream-json` with `--verbose` to see...") without ever saying one requires the other.
+Neither page states that `--print` plus `--output-format stream-json` is refused absent
+`--verbose`, so citing either for that requirement would be the same false-citation-dressed-
+as-real shape `CAP-002`'s note names. The capture records only the refusal: a probe with
+`--verbose` added was also run, and is deliberately not recorded here — it launched a real,
+live session against this repository's own project configuration and its output carried
+this operator's local session state, not stable, publishable protocol behavior. The negative
+probe alone is what this row cites.
