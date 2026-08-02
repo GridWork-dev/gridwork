@@ -1,0 +1,98 @@
+---
+title: Run GridWork today
+description: Certify a sample stream, install the gw CLI, initialize a PostgreSQL 16 kernel, and understand the current limits.
+---
+
+## Before you clone
+
+GridWork is pre-1.0, at stage 3 of 5. Stages 1 and 2 — the contract and the
+kernel — ship on crates.io. The kernel owns an append-only event store,
+transactional projections, encrypted content-addressed blobs, authority receipts,
+event subscriptions, and `gw`, the headless CLI over the protocol the future TUI
+will use.
+
+Stage 3 is current. The PTY and engine-adapter work is in progress, while the TUI
+and workspace do not ship yet. What you can run today is deliberately headless.
+The full order and status live in the [roadmap](/docs/roadmap).
+
+You need stable Rust (MSRV 1.94). The stream certifier needs nothing else. Running
+the kernel also needs PostgreSQL 16, an empty database it can own, and separate
+schema-owner and runtime roles. The repository's full contributor toolchain and
+gates are documented in [CONTRIBUTING.md](https://github.com/GridWork-dev/gridwork/blob/main/CONTRIBUTING.md).
+
+## Certify a stream
+
+Clone the repository and run the contract certifier against its valid fixture:
+
+```bash
+git clone https://github.com/GridWork-dev/gridwork
+cd gridwork
+cargo run -p gwk-cert -- crates/gwk-cert/fixtures/valid-stream.json
+```
+
+```text
+[]
+gwk-cert: certified — 16 events, 0 findings
+```
+
+`gwk-cert` replays an exported event stream against the contract: envelope
+structure, sequence monotonicity, legal state-machine edges, version discipline,
+terminal immutability, and payload bounds. Findings are typed JSON on stdout; the
+human summary is written to stderr. Exit `0` means certified, `1` means findings,
+and `2` means usage error. It takes one file path and has no flags, so `--help` is
+read as a filename.
+
+**Explicit non-claim:** certification proves *contract conformance*, not
+authenticity. A coherent forged stream passes. Tamper evidence belongs to the
+storage layer, not stream inspection.
+
+Install the same checker without a clone with `cargo install gwk-cert`; its sample
+stream is included under `fixtures/` in the unpacked published crate.
+
+## Install the CLI
+
+```bash
+cargo install gridwork
+```
+
+That installs the headless `gw` binary. Library crates use the `gwk-` prefix because
+the crates.io name `gw` belongs to an unrelated tool; the GridWork binary itself is
+permanently named `gw`. It still needs PostgreSQL 16 and the two-role initialization
+below before it can run a kernel.
+
+## Run the kernel
+
+Create an empty database and a runtime role. Initialization grants that role its
+permissions; it never creates the role for you.
+
+```bash
+createuser --login gridwork
+createdb --owner postgres gridwork
+
+export GWK_BLOB_ROOT=$HOME/.local/share/gridwork/blobs
+export GWK_BLOB_KEK=$(openssl rand -base64 32) GWK_BLOB_KEK_ID=dev
+export GWK_SOCKET_PATH=$XDG_RUNTIME_DIR/gridwork/gwk.sock
+export GWK_PUBLIC_REVISION=$(git rev-parse HEAD)
+mkdir -m 700 -p "$(dirname "$GWK_SOCKET_PATH")"
+
+# One shot, and the only command that sees the schema-owner credential.
+GWK_ADMIN_DATABASE_URL=postgres://postgres@localhost/gridwork \
+GWK_RUNTIME_ROLE=gridwork \
+  gw admin init
+
+# The daemon connects only as the runtime role.
+export GWK_DATABASE_URL=postgres://gridwork@localhost/gridwork
+gw daemon &
+gw kernel health
+```
+
+The runtime process refuses to start if it can see the admin credential. It also
+refuses a runtime role holding `SUPERUSER`, `CREATEROLE`, or `UPDATE`/`DELETE` on
+the log: the sole writer must not be able to rewrite history.
+
+A newly initialized kernel is **sealed**. It answers questions but refuses every
+business command until an explicit activation records the irreversible cutover with
+both a cutover ID and an archive-manifest SHA-256, so this quickstart intentionally
+stops before activation. `gw --help` lists the full headless surface. Responses are
+canonical JSON on stdout, with stable exits: `0` ok, `2` usage, `3` refused, `4` not
+found, `5` unavailable, `6` does not verify, and `10` a fault in `gw`.
