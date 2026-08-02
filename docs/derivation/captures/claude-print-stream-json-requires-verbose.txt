@@ -1,0 +1,11 @@
+capture: claude code CLI print-mode refuses stream-json output without --verbose
+platform: Linux 7.0.10-arch1-1 x86_64
+
+probe (shell, pinned CLI 2.1.220 on PATH):
+
+    env -u ANTHROPIC_API_KEY timeout 10 claude --print --input-format stream-json --output-format stream-json </dev/null
+
+observed:
+
+    stderr: Error: When using --print, --output-format=stream-json requires --verbose
+    exit status: 1
