@@ -968,6 +968,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "gwk-parity"
+version = "0.0.1"
+dependencies = [
+ "gwk-adapter-claude",
+ "gwk-adapter-codex",
+ "gwk-adapter-opencode",
+ "gwk-domain",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "gwk-pty"
 version = "0.0.2"
 dependencies = [

@@ -39,6 +39,13 @@ aead-stream = "0.6.0"
 agent-client-protocol = "2.0.0"
 base64 = "0.23.0"
 chacha20poly1305 = "0.11.0"
+# Path-only, no version, like `gwk-pty` below: unpublished (`publish = false`)
+# — building any of the three needs Zig and a pinned ghostty checkout through
+# their shared `gwk-pty` dependency, and none is meaningful without a
+# logged-in engine CLI besides.
+gwk-adapter-claude = { path = "crates/gwk-adapter-claude" }
+gwk-adapter-codex = { path = "crates/gwk-adapter-codex" }
+gwk-adapter-opencode = { path = "crates/gwk-adapter-opencode" }
 gwk-cert = { path = "crates/gwk-cert", version = "0.0.2" }
 gwk-domain = { path = "crates/gwk-domain", version = "0.0.2" }
 gwk-kernel = { path = "crates/gwk-kernel", version = "0.0.2" }

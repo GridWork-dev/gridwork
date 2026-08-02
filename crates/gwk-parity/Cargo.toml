@@ -1,0 +1,40 @@
+[package]
+name = "gwk-parity"
+version = "0.0.1"
+description = "local engine-parity harness: drives the three adapters end to end and fills docs/PARITY.md's matrix"
+homepage = "https://gridwork.dev"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Not published: it exists to be RUN on this box against logged-in engine
+# CLIs, and the three adapter crates it depends on are themselves unpublished
+# for the same reason (see their own manifests). The `pty` CI job builds,
+# lints, and runs its PURE tests; the `#[ignore]`d live runners never run
+# there — `docs/PARITY.md`'s own rule: "public CI proves the adapter crates
+# build ... and must never acquire an engine binary, an engine login, or a
+# network path to either."
+publish = false
+
+[dependencies]
+gwk-adapter-claude.workspace = true
+gwk-adapter-codex.workspace = true
+gwk-adapter-opencode.workspace = true
+gwk-domain.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# `process` spawns the three engine CLIs (and, for the Claude approval-relay
+# runner, the crate's own compiled hook binary) and the opencode HTTP calls'
+# `curl` subprocess (no HTTP client crate is pinned in this workspace, and a
+# harness dispatch does not get to add one — see the opencode runner's own
+# module doc for why a subprocess is the honest choice here, not a gap).
+# `time` is every runner's hard per-call timeout; `rt`/`macros` mirror
+# `gwk-adapter-claude`'s own choice of a plain `rt` (not `rt-multi-thread`) —
+# nothing here needs a real multi-core scheduler, only cooperative
+# concurrency between "drive the engine" and "answer its approval ask".
+tokio = { workspace = true, features = ["io-util", "macros", "process", "rt", "time"] }
+
+[lints]
+workspace = true
