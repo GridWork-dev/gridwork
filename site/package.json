@@ -5,7 +5,8 @@
   "scripts": {
     "assets:sync": "bun scripts/sync-public-assets.ts",
     "dev": "bun run assets:sync && next dev",
-    "build": "bun run assets:sync && next build",
+    "build": "bun run assets:sync && bun run check:docs && next build",
+    "check:docs": "bun scripts/check-doc-freshness.ts",
     "start": "node .next/standalone/server.js",
     "typecheck": "next typegen && tsc --noEmit",
     "postinstall": "fumadocs-mdx"
