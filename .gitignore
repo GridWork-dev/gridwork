@@ -12,3 +12,11 @@
 # packages, neither of which is ours.
 /.ghostty/
 /.zig-packages/
+/site/node_modules/
+/site/.next/
+/site/.source/
+/site/next-env.d.ts
+/site/*.tsbuildinfo
+/site/public/og.png
+/site/.env*
+!/site/.env.example
