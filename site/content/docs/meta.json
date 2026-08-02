@@ -1,4 +1,18 @@
 {
   "title": "GridWork",
-  "pages": ["index"]
+  "pages": [
+    "index",
+    "quickstart",
+    "---Core---",
+    "architecture",
+    "protocol",
+    "contract",
+    "security",
+    "---Engines---",
+    "parity",
+    "---Derivation---",
+    "derivation",
+    "---Project---",
+    "roadmap"
+  ]
 }
