@@ -1,0 +1,252 @@
+---
+title: Threat model
+description: Assets, trust boundaries, ten threat stances, implementation status, and explicit non-goals.
+---
+
+What GridWork defends against, what it deliberately does not, and where each
+mitigation lives. Written for contributors: if your change touches one of
+these boundaries, the relevant stance is review criteria, not background
+reading. Reporting: see `SECURITY.md`.
+
+GridWork is pre-alpha, at stage 3 of 5 (see `ROADMAP.md`): the kernel is built, the
+engines and the whole human surface are not — so several stances below are still
+design commitments whose enforcing code does not exist yet. Each stance therefore
+carries a status: **in force** (enforced at HEAD), **partial** (naming what is
+enforced versus designed), or **designed, not yet built**. A design stance is a
+commitment the build is held to, not a shipped mitigation.
+
+## Assets
+
+The event log (operational history + audit trail), payload blobs
+(transcripts, diffs — often sensitive), the authority policy (what agents may
+do unattended), credentials in the host environment, and the operator's
+repositories and working trees.
+
+## Trust boundaries
+
+1. **Agent ↔ kernel.** Agents are credentialed but NOT trusted: they process
+   untrusted content (web pages, issues, code) and can be prompt-injected.
+   Everything an agent asks for crosses the kernel's policy boundary.
+2. **Client ↔ kernel socket.** Local processes that can open the socket;
+   remote users via SSH.
+3. **Terminal output ↔ operator's terminal.** Bytes produced by agents and
+   arbitrary programs are rendered in the operator's terminal.
+4. **Stream import boundary.** Event streams and blobs can be exported and
+   re-imported (backup, migration, certification).
+
+## Threats and stances
+
+### 1. Prompt-injected agents (confused deputy)
+
+An agent reading attacker-controlled content can be steered to exfiltrate
+data or take destructive actions with its own credentials.
+**Stance:** agents never write platform state directly — every state change
+is a command through the kernel, subject to authority policy (policy as data:
+what runs unattended, what pages the operator). Dangerous action classes gate
+on explicit grants; every automated decision leaves a receipt in the log.
+Residual risk is real and disclosed: within its granted read surface, an
+injected agent can still read and egress — containment bounds the blast
+radius, it does not make injection impossible.
+
+**Status: partial.** The kernel evaluates authority as data and writes an
+immutable receipt for every gated decision, in the transaction that decided it;
+a page raises a deduplicated attention item and does NOT mutate the target — a
+refusal that leaves a trail, not a queued write. Grants are read under the same
+writer lock the command is decided under, and "unexpired" is measured against
+the command's own `issued_at`, so replaying the log reaches the verdict it
+reached live.
+
+What is narrow is the risk table: exactly one action class is gated today
+(`issue_command` → `stop`, the kill spine). Every other command is
+UNCLASSIFIED — not evaluated, no receipt. That is deliberate rather than
+unfinished. `action_class` is an open string, no accepted artifact maps the
+command surface onto it, and inventing classes would gate ordinary work behind
+grants nobody has issued. Two commands are excluded structurally, because a gate
+that cannot be opened is a deadlock and not a gate: `grant_authority` (the first
+grant would need a grant, on a kernel that has none) and `activate_kernel`
+(genesis precedes every grant — protected instead by exactly one append against
+a sealed allowlist, which does not depend on prior state). The residual risk
+above is unchanged and still disclosed.
+
+### 2. Terminal escape injection (ANSI/OSC)
+
+Malicious output can abuse escape sequences to spoof UI, alter the scrollback,
+or (in vulnerable terminals) trigger worse.
+**Stance:** raw agent/program bytes stay `[u8]` end to end internally; the
+TUI renders through a virtual-terminal model rather than replaying raw bytes
+to the host terminal, and anything echoed outside that model is
+escape-stripped. Control never rides synthetic keystrokes, so output cannot
+"type" into a session.
+
+**Status: designed, not yet built.** No terminal-handling code exists yet.
+
+### 3. Hostile or buggy socket clients
+
+Any local process with socket access can send arbitrary frames.
+**Stance:** filesystem permissions bound WHO connects (see
+`docs/protocol.md`); strict framing bounds and `deny_unknown_fields`
+decoding bound WHAT they can say; commands are CAS-guarded, idempotent, and
+policy-checked, so a misbehaving client can be refused but not corrupt
+order. Same-EUID peer validation reinforces socket permissions. No network listener
+exists before the authentication decision required by ADR 0002.
+
+**Status: in force.** The daemon binds a Unix socket inside a directory it
+resolves and checks the ownership and mode of, refuses a peer whose effective
+uid is not its own, and reads a length prefix before allocating anything —
+bodies bounded by `FRAME_BODY_MAX_BYTES`, the hello by a lower cap, and every
+control frame decoded with `deny_unknown_fields` plus duplicate-key and
+trailing-value rejection. Commands are CAS-guarded and idempotency-keyed in the
+storage layer, so a misbehaving client can be refused without reordering
+anything. A frame the codec refuses takes down ITS connection and no other.
+There is still no network listener of any kind, which is how ADR 0002's
+requirement is met rather than something implemented.
+
+### 4. Log tampering and projection poisoning
+
+An attacker (or bug) rewriting history, or feeding a poisoned projection.
+**Stance:** append-only is enforced at the contract level (triggers) and the
+storage level (privilege hardening in deployment); the append actor + fencing
+prevent write races; projections are rebuildable from the log, so a poisoned
+cache is recoverable by rebuild. **Explicit non-claim:** `gwk-cert` certifies
+internal consistency of a stream — it cannot detect a coherent FORGERY from
+stream input alone. Tamper *evidence* is a storage/provenance property
+(append-only enforcement, host controls), not a stream-inspection property.
+
+**Status: in force.** The database triggers cover the append-only event log, the
+receipt ledger and the ingestion ledger (UPDATE and DELETE refused) and the four
+FSM state tables (task, attempt, message, command — rows born at their initial
+state, deletes refused, every transition a legal edge). Across all of them
+TRUNCATE is refused at the statement level and each guard is `ENABLE ALWAYS`, so
+a replica-mode session cannot switch them off.
+
+Fencing is enforced behaviour now, not just a column: once a token has been
+granted, presenting the current one is mandatory and omitting it is refused —
+dropping the token is not a way around the check. A single writer row locked
+`FOR UPDATE` to commit serializes every append ACROSS processes, so sequence
+order is commit order.
+
+Projections exist, are written in the same transaction as their events, and are
+rebuildable — into a SCRATCH database, compared by hash, never swapped as a side
+effect, because replacing live state is an operator act with its own blast
+radius. The live tables refuse to be reset at all, which is what makes a
+projection row unforgeable by anything except a replay of the log. One
+consequence is deliberate and worth stating: a checkpoint cannot be restored, so
+recovery replays, and after a crash it answers "unverified" rather than implying
+a check it did not run. The `gwk-cert` non-claim still describes the shipped
+certifier exactly.
+
+### 5. Path traversal and symlink games
+
+Worktree, blob, and evidence paths cross the kernel boundary.
+**Stance:** kernel-side path resolution with containment asserts (resolve,
+then require the result inside the allowed root); worktree identity is by id
+and lease, not caller-supplied paths; blob access is by digest, never by
+client-named file path.
+
+**Status: partial.** Blob containment is by construction rather than by
+assertion: an address parses only as 64 lowercase hex characters, and the storage
+path is that digest sharded under the store's own root — there is no input
+through which a separator or a `..` could reach the path at all, so there is no
+canonicalize-and-compare step to get wrong. The socket's parent directory is
+resolved and checked before the bind, and a path that is a symlink is refused
+rather than followed. Worktree and evidence paths are still only RECORDED —
+no kernel code opens one yet — so for those the resolve-then-contain rule
+remains the rule code will be built to.
+
+### 6. Secret echo into transcripts and the log
+
+Agents and tools print environment values; transcripts become blobs; the log
+is long-lived.
+**Stance:** inline payloads are bounded metadata — bulk output goes to blobs
+with retention classes and crypto-shred deletion; a redaction pass gates
+transcript capture; CI leak-scans the public repository — the tracked tree
+plus the commit content across each pushed and pull-request range — with a
+seeded violation proving the gate can fail. Secrets never appear in contract
+types. ADR 0003 locks the chunked AEAD container, envelope encryption, and tombstone-first
+crypto-shred ordering.
+
+**Status: partial.** In force: the CI leak scan — the tracked tree plus commit
+content across each pushed and PR range, with its seeded proof of failure — the
+inline payload byte bound, and the blob store itself. The store is what ADR 0003
+specified: a chunked AEAD container whose final chunk is sealed AS final, so a
+truncated container is detected rather than read as a shorter blob; envelope
+encryption, with each blob's key wrapped under a KEK the store never writes
+down; and tombstone-first crypto-shred, where the key is destroyed only after
+the tombstone commits — so a read of a shredded blob is REFUSED rather than
+reported missing, permanently. Retention is pin / unpin / sweep, and a sweep
+reclaims only what nothing references, checkpoints included. The redaction pass
+gating transcript capture is designed, not yet built.
+
+### 7. Resource exhaustion
+
+Unbounded frames, unbounded payloads, runaway agents.
+**Stance:** hard frame and payload bounds at the protocol layer; per-attempt
+budgets (tokens, tool calls, wall clock, cost) as contract data with
+kill-and-alert semantics; bounded channels internally — backpressure over
+buffering.
+
+**Status: partial.** In force: the frame and inline-payload bounds, decided from
+the length prefix before anything is allocated; a per-connection byte RATE in
+each direction, which makes a peer that outruns its allowance WAIT rather than
+lose its connection; bounded queues inside a connection, with responses drained
+ahead of event batches; and a bounded admission count in front of the writer that
+REFUSES when full instead of queueing — overload becomes a typed answer the
+caller can act on rather than an unbounded pile of connections on one row. A
+consumer that stops reading loses its stream and is told the cursor it actually
+received, so resuming does not skip what it never got. Budgets remain contract
+data only: kill-and-alert needs an engine to kill, and stage 3 has not started.
+
+### 8. Provenance of agent-authored code
+
+Most commits are agent-authored; a poisoned suggestion is a supply-chain
+vector.
+**Stance:** disclosed provenance (`AI-Assisted-By` trailer, non-authorship),
+human direction and review on every merge, the same CI gates regardless of
+author, and a clean-room policy (`CLEANROOM.md`) with independent second
+review for terminal-engine-adjacent changes.
+
+**Status: in force.**
+
+### 9. Agent-protocol downgrade
+
+A hostile or broken agent endpoint negotiating weaker behavior (e.g. dropping
+permission relays).
+**Stance:** version negotiation is strict (unknown major = refusal, never
+best-effort); capabilities are explicit grants in the hello; the stable wire
+version is pinned per adapter; permission prompts relay through the kernel —
+an adapter that cannot relay them does not get write capabilities.
+
+**Status: partial.** Hello negotiation is in force: an unknown protocol major is
+refused rather than downgraded, and the refusal is a frame the client can read —
+a peer that guessed the version wrong must be able to tell that from a socket
+nobody was listening on. Capabilities are explicit in the hello and the
+unknown-`schema_version` refusal in the contract types is unchanged. Permission
+relay stays designed: adapters are stage 3.
+
+### 10. Self-asserted actor identity
+
+Every command carries an `actor`; nothing verifies that a connecting process is
+who its `actor` string claims. One local process could submit commands under
+another's name.
+**Stance:** accepted and disclosed — `actor` is **provenance, not
+authorization**. The authentication boundary is the socket itself: same-EUID
+peer validation (threat 3) admits exactly the operator's own processes, and
+within one uid there is one trust domain. `actor` exists for attribution and
+audit; authority policy governs what may happen and never treats an actor
+string as proof of identity. Threading verified peer identity through command
+submission — a pid-to-adapter registry — is deliberately deferred to the
+stages where multi-process trust actually appears (console and workspace),
+rather than half-built now and mistaken for a boundary.
+
+**Status: in force** — the stance *is* the disclosure plus the EUID check,
+and both exist today. This entry is the recorded decision; a security review
+that flags self-asserted `actor` has found this paragraph, not a gap.
+
+## Non-goals
+
+Defending the host from its own operator; sandboxing arbitrary code the
+operator chooses to run (that is the OS/container layer's job); detecting
+forged-but-coherent imported streams (see threat 4); multi-tenant isolation —
+GridWork is a single-operator system pre-1.0.
+
+Report vulnerabilities through the process in [SECURITY.md](https://github.com/GridWork-dev/gridwork/blob/main/SECURITY.md).
