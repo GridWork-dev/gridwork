@@ -135,7 +135,7 @@ samp {
 }
 
 .prose {
-  max-width: 70ch;
+  max-width: 68ch;
   font-size: 15px;
   line-height: 1.65;
 }
@@ -181,19 +181,11 @@ samp {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  html {
+  *, *::before, *::after {
     scroll-behavior: auto !important;
-  }
-
-  *,
-  *::before,
-  *::after {
-    animation-delay: 0ms !important;
-    animation-duration: 0.01ms !important;
+    animation-duration: .01ms !important;
     animation-iteration-count: 1 !important;
-    scroll-behavior: auto !important;
-    transition-delay: 0ms !important;
-    transition-duration: 0.01ms !important;
+    transition-duration: .01ms !important;
   }
 }
 
@@ -232,8 +224,11 @@ samp {
 }
 
 .landing-shell {
-  width: min(60rem, calc(100% - 2rem));
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 60rem;
   margin-inline: auto;
+  padding-inline: clamp(16px, 4vw, 32px);
 }
 
 .landing-status-bar {
@@ -251,9 +246,12 @@ samp {
   display: flex;
   align-items: center;
   gap: 0.75rem;
-  width: min(60rem, calc(100% - 1.5rem));
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 60rem;
   height: 100%;
   margin-inline: auto;
+  padding-inline: clamp(16px, 4vw, 32px);
   font-size: 0.6875rem;
   line-height: 1;
   white-space: nowrap;
@@ -263,7 +261,7 @@ samp {
   position: relative;
   color: inherit;
   text-decoration: none;
-  transition: color 140ms var(--ease);
+  transition: color 150ms var(--ease);
 }
 
 .landing-status-inner a::after {
@@ -274,6 +272,10 @@ samp {
 
 .landing-status-inner a:hover {
   color: var(--fg);
+}
+
+.landing-stage:hover {
+  color: var(--fg) !important;
 }
 
 .landing-brand {
@@ -319,7 +321,7 @@ samp {
 .landing-hero-grid {
   display: grid;
   gap: 3rem;
-  padding-block: clamp(3.5rem, 11vw, 5rem);
+  padding-block: clamp(60px, 9vw, 108px);
 }
 
 .landing-hero-copy {
@@ -343,10 +345,10 @@ samp {
   max-width: 13ch;
   margin: 1.5rem 0 0;
   color: var(--fg);
-  font-size: clamp(2.15rem, 9vw, 3.65rem);
-  font-weight: 600;
-  line-height: 1.03;
-  letter-spacing: -0.04em;
+  font-size: clamp(1.75rem, 1rem + 3.1vw, 3rem);
+  font-weight: 500;
+  line-height: 1.06;
+  letter-spacing: -0.035em;
   overflow-wrap: normal;
   text-wrap: balance;
 }
@@ -384,9 +386,9 @@ samp {
   line-height: 1;
   text-decoration: none;
   transition:
-    color 140ms var(--ease),
-    background-color 140ms var(--ease),
-    border-color 140ms var(--ease);
+    color 150ms var(--ease),
+    background-color 150ms var(--ease),
+    border-color 150ms var(--ease);
 }
 
 .landing-button::before {
@@ -482,7 +484,7 @@ samp {
 }
 
 .landing-install {
-  padding-block: clamp(3rem, 8vw, 4.5rem);
+  padding-block: clamp(60px, 9vw, 108px);
 }
 
 .landing-install-block {
@@ -536,9 +538,9 @@ samp {
   font-weight: 600;
   line-height: 1;
   transition:
-    color 140ms var(--ease),
-    background-color 140ms var(--ease),
-    border-color 140ms var(--ease);
+    color 150ms var(--ease),
+    background-color 150ms var(--ease),
+    border-color 150ms var(--ease);
 }
 
 .copy-command__button:hover,
@@ -568,6 +570,9 @@ samp {
   color: var(--hue-bright);
   text-decoration-color: var(--hue-dim);
   text-underline-offset: 0.2em;
+  transition:
+    color 150ms var(--ease),
+    text-decoration-color 150ms var(--ease);
 }
 
 .landing-install-warning a:hover,
@@ -577,7 +582,7 @@ samp {
 }
 
 .landing-truth {
-  padding-block: clamp(3.5rem, 10vw, 6rem);
+  padding-block: clamp(60px, 9vw, 108px);
   border-top: 1px solid var(--line);
 }
 
@@ -591,10 +596,10 @@ samp {
   max-width: 16ch;
   margin: 0;
   color: var(--fg);
-  font-size: clamp(1.75rem, 7vw, 2.75rem);
-  font-weight: 600;
-  line-height: 1.08;
-  letter-spacing: -0.035em;
+  font-size: clamp(1.2rem, 1rem + 0.85vw, 1.5rem);
+  font-weight: 500;
+  line-height: 1.2;
+  letter-spacing: -0.025em;
   text-wrap: balance;
 }
 
@@ -679,28 +684,10 @@ samp {
   color: var(--muted);
 }
 
-@media (min-width: 48rem) {
-  .landing-shell {
-    width: min(60rem, calc(100% - 4rem));
-  }
-
-  .landing-status-inner {
-    width: min(60rem, calc(100% - 3rem));
-  }
-
+@media (min-width: 47.5rem) {
   .landing-status-optional,
   .landing-nav-optional {
     display: inline;
-  }
-
-  .landing-hero-grid {
-    grid-template-columns: 55fr 45fr;
-    align-items: center;
-    gap: clamp(2rem, 5vw, 4rem);
-  }
-
-  .landing-hero h1 {
-    font-size: clamp(2.75rem, 5vw, 3.65rem);
   }
 
   .landing-spec-ledger dd span {
@@ -739,9 +726,11 @@ samp {
   }
 }
 
-@media (min-width: 64rem) {
+@media (min-width: 56.25rem) {
   .landing-hero-grid {
-    padding-block: 5.5rem;
+    grid-template-columns: 55fr 45fr;
+    align-items: center;
+    gap: clamp(2rem, 5vw, 4rem);
   }
 }
 
@@ -757,7 +746,7 @@ samp {
 .landing-provenance,
 .landing-cleanroom,
 .landing-crates {
-  padding-block: clamp(3.75rem, 10vw, 6.75rem);
+  padding-block: clamp(60px, 9vw, 108px);
   border-top: 1px solid var(--line);
 }
 
@@ -778,8 +767,8 @@ samp {
   text-decoration-thickness: 1px;
   text-underline-offset: 0.2em;
   transition:
-    color 140ms var(--ease),
-    text-decoration-color 140ms var(--ease);
+    color 150ms var(--ease),
+    text-decoration-color 150ms var(--ease);
 }
 
 .landing-section-route a,
@@ -841,6 +830,14 @@ samp {
   text-decoration: underline;
   text-decoration-color: var(--hue-dim);
   text-underline-offset: 0.2em;
+  transition:
+    color 150ms var(--ease),
+    text-decoration-color 150ms var(--ease);
+}
+
+.landing-architecture-ledger a:hover span {
+  color: var(--fg);
+  text-decoration-color: var(--hue);
 }
 
 .landing-stage-list {
@@ -976,7 +973,7 @@ samp {
 }
 
 .landing-provenance-disclosure {
-  max-width: 70ch;
+  max-width: 68ch;
   margin: 2rem 0 0;
   color: var(--muted);
   font-size: 0.875rem;
@@ -1209,7 +1206,7 @@ samp {
   line-height: 1.5;
 }
 
-@media (min-width: 48rem) {
+@media (min-width: 47.5rem) {
   .landing-architecture-ledger a {
     grid-template-columns: minmax(10rem, 0.75fr) minmax(0, 1.75fr) auto;
     gap: 2rem;
