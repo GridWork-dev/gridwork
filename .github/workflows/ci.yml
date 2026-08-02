@@ -261,9 +261,15 @@ jobs:
           # makes them need the same Zig toolchain, and their tests must hold
           # inside the same no-network namespace — an adapter that reached for
           # an engine or a network here would be exactly the dependency this
-          # phase's public CI must never acquire.
+          # phase's public CI must never acquire. gwk-parity depends on all
+          # three adapters (inheriting the same Zig need) and rides here for
+          # the same reason: its OWN pure library and seeded-negative tests
+          # must hold offline, and `--all-targets` compiles its `#[ignore]`d
+          # live runners (`tests/*.rs`) without ever running them — this loop
+          # never passes `--ignored`, so no engine binary or network path is
+          # acquired here, exactly `docs/PARITY.md`'s own split.
           ./tools/no-network.sh bash -euo pipefail -c '
-            for crate in gwk-pty gwk-adapter-opencode gwk-adapter-claude gwk-adapter-codex; do
+            for crate in gwk-pty gwk-adapter-opencode gwk-adapter-claude gwk-adapter-codex gwk-parity; do
               cargo clippy -p "$crate" --all-targets --locked --offline -- -D warnings
               cargo test -p "$crate" --all-targets --locked --offline
               cargo test -p "$crate" --doc --locked --offline
@@ -462,7 +468,7 @@ jobs:
           # line does. Verified by observation, not by reading the flag's name.
           cargo package --workspace --exclude gwk-pty \
             --exclude gwk-adapter-opencode --exclude gwk-adapter-claude \
-            --exclude gwk-adapter-codex --locked
+            --exclude gwk-adapter-codex --exclude gwk-parity --locked
 
           # Every publishable member, straight from the manifest graph:
           # `publish = false` shows up as an empty array, so xtask drops out and
