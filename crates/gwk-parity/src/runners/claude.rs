@@ -162,12 +162,28 @@ pub async fn status_truth() -> Cell {
     }
 }
 
+/// The dead-channel guard for axis 3: an empty (or result-less) message set
+/// makes [`check_fanout_linkage`] pass vacuously — same as a turn that
+/// really ran and fanned out nothing, which is exactly the false-pass shape
+/// this guard exists to tell apart from a channel that never delivered a
+/// turn at all (the child errored out at flag validation before writing a
+/// line, was killed early, or otherwise never got to the wire). Pure and
+/// adapter-normalized, so it takes the already-parsed message slice, never
+/// the live child.
+fn has_terminal_result(messages: &[Message]) -> bool {
+    messages.iter().any(Message::is_result)
+}
+
 /// Axis 3 — transcript ingestion (fan-out linkage). This scripted turn
 /// invokes no subagent, so [`SubagentTree::from_messages`] should reconstruct
 /// an EMPTY tree — the check passes vacuously on real, live-parsed output
 /// (proving the spawn → collect → reconstruct → check path end to end)
 /// rather than asserting a fan-out this bounded pass never triggers a real
-/// subagent to produce.
+/// subagent to produce. That vacuous-pass shape is only honest once the
+/// turn is known to have actually completed — [`has_terminal_result`] gates
+/// on it before the tree is even built, so a turn that produced NO messages
+/// (a dead channel) fails on that fact instead of reading as an empty,
+/// passing fan-out.
 pub async fn transcript_ingestion() -> Cell {
     if let Err(cell) = ensure_version(Axis::TranscriptIngestion).await {
         return cell;
@@ -175,6 +191,18 @@ pub async fn transcript_ingestion() -> Cell {
     match run_one_turn(RUNNER_TIMEOUT).await {
         Ok(observed) => {
             let messages: Vec<Message> = observed.into_iter().map(|(_, m)| m).collect();
+            if !has_terminal_result(&messages) {
+                return Cell::fail(
+                    ENGINE,
+                    Axis::TranscriptIngestion,
+                    format!(
+                        "the stream-json channel never delivered a terminal `result` \
+                         message ({} message(s) observed) — a dead channel, not an \
+                         empty fan-out",
+                        messages.len()
+                    ),
+                );
+            }
             let tree = SubagentTree::from_messages(&messages);
             let known: Vec<String> = tree.branches().map(str::to_owned).collect();
             let children: Vec<(String, Option<String>)> = tree
@@ -337,4 +365,29 @@ pub async fn approval_relay() -> Cell {
     drop(relay);
 
     cell
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn msg(json: &str) -> Message {
+        gwk_adapter_claude::message::parse_line(json.as_bytes()).expect("parse fixture")
+    }
+
+    #[test]
+    fn has_terminal_result_is_false_on_a_seeded_message_set_without_a_result() {
+        // Both shapes the dead channel actually produces: nothing at all,
+        // and a start with no matching end (killed or errored mid-turn).
+        assert!(!has_terminal_result(&[]));
+        let start_only = msg(r#"{"type":"system","subtype":"init"}"#);
+        assert!(!has_terminal_result(&[start_only]));
+    }
+
+    #[test]
+    fn has_terminal_result_is_true_once_a_terminal_result_is_present() {
+        let start = msg(r#"{"type":"system","subtype":"init"}"#);
+        let end = msg(r#"{"type":"result","subtype":"success"}"#);
+        assert!(has_terminal_result(&[start, end]));
+    }
 }
