@@ -43,7 +43,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
       style={{ colorScheme: "dark" }}
       suppressHydrationWarning
     >
-      <body className="flex min-h-screen flex-col">
+      <body className="flex min-h-screen flex-col font-mono">
         <RootProvider theme={{ enabled: false }} search={{ enabled: false }}>
           {children}
         </RootProvider>

@@ -1,3 +1,198 @@
 @import "tailwindcss";
 @import "fumadocs-ui/css/neutral.css";
 @import "fumadocs-ui/css/preset.css";
+
+:root {
+  --bg:#070B10;
+  --surface:#121A24;
+  --surface-2:#1F2B3A;
+  --hue:#6BDBFF;
+  --hue-dim:#3FA8CC;
+  --hue-bright:#9AE8FF;
+  --fg:#E4EDF5;
+  --faint:#526274;
+  --muted:#9AA5AF;
+  --warn:#F2C14E;
+  --fail:#FF6E6E;
+  --ok:#6EE7A8;
+
+  --line: rgba(82, 98, 116, 0.34);
+  --line-hi: rgba(82, 98, 116, 0.58);
+  --lift: inset 0 1px 0 rgba(154, 232, 255, 0.055);
+  --mono: var(--font-signal), ui-monospace, SFMono-Regular, "SF Mono", Menlo,
+    Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  --ease: cubic-bezier(.44, 0, .56, 1);
+  --r: 6px;
+  --r-sm: 4px;
+  --r-xs: 3px;
+
+  color-scheme: dark;
+
+  --radius-xs: var(--r-xs);
+  --radius-sm: var(--r-xs);
+  --radius-md: var(--r-sm);
+  --radius-lg: var(--r-sm);
+  --radius-xl: var(--r);
+  --radius-2xl: var(--r);
+  --radius-3xl: var(--r);
+  --radius-4xl: var(--r);
+
+  --shadow-2xs: none;
+  --shadow-xs: none;
+  --shadow-sm: none;
+  --shadow-md: none;
+  --shadow-lg: none;
+  --shadow-xl: none;
+  --shadow-2xl: none;
+}
+
+@theme inline {
+  --color-background: var(--bg);
+  --color-foreground: var(--fg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-accent: var(--hue);
+  --color-muted: var(--muted);
+  --font-mono: var(--mono);
+}
+
+/* Keep every Fumadocs color role inside the approved SIGNAL bridge. */
+:root,
+html.dark {
+  --color-fd-background: var(--bg);
+  --color-fd-foreground: var(--fg);
+  --color-fd-muted: var(--surface);
+  --color-fd-muted-foreground: var(--muted);
+  --color-fd-popover: var(--surface);
+  --color-fd-popover-foreground: var(--fg);
+  --color-fd-card: var(--surface);
+  --color-fd-card-foreground: var(--fg);
+  --color-fd-border: var(--line);
+  --color-fd-primary: var(--hue);
+  --color-fd-primary-foreground: var(--bg);
+  --color-fd-secondary: var(--surface-2);
+  --color-fd-secondary-foreground: var(--fg);
+  --color-fd-accent: var(--surface-2);
+  --color-fd-accent-foreground: var(--hue);
+  --color-fd-ring: var(--hue);
+  --color-fd-overlay: var(--bg);
+  --color-fd-info: var(--hue);
+  --color-fd-warning: var(--muted);
+  --color-fd-error: var(--fg);
+  --color-fd-success: var(--hue);
+  --color-fd-idea: var(--hue);
+  --color-fd-diff-remove: var(--surface-2);
+  --color-fd-diff-remove-symbol: var(--fg);
+  --color-fd-diff-add: var(--surface);
+  --color-fd-diff-add-symbol: var(--hue);
+}
+
+/* neutral.css gives this region a more specific local palette. */
+html.dark #nd-sidebar {
+  --color-fd-muted: var(--surface);
+  --color-fd-secondary: var(--surface-2);
+  --color-fd-muted-foreground: var(--muted);
+}
+
+html,
+body {
+  background-color: var(--bg);
+  color: var(--fg);
+  color-scheme: dark;
+}
+
+html {
+  font-variant-numeric: tabular-nums;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  font-family: var(--mono);
+  font-size: 15px;
+  font-weight: 400;
+  line-height: 1.65;
+  overflow-wrap: break-word;
+  text-rendering: optimizeLegibility;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+code,
+kbd,
+pre,
+samp {
+  font-family: var(--mono);
+  font-variant-ligatures: none;
+}
+
+:where(a, button, input, select, summary, textarea, [role="button"], [role="menuitem"]) {
+  transition-timing-function: var(--ease);
+}
+
+.prose {
+  max-width: 70ch;
+  font-size: 15px;
+  line-height: 1.65;
+}
+
+.prose :where(p, li, dd, td, th) {
+  line-height: 1.65;
+}
+
+.prose :where(h1, h2, h3) {
+  text-wrap: balance;
+}
+
+.prose :where(p, li) {
+  text-wrap: pretty;
+}
+
+.prose :where(hr) {
+  border-color: var(--line-hi);
+}
+
+:focus-visible {
+  border-radius: var(--r-xs);
+  outline: 2px solid var(--hue) !important;
+  outline-offset: 3px !important;
+}
+
+@media (width < 48rem), (pointer: coarse) {
+  :where(
+    button,
+    summary,
+    [role="button"],
+    [role="menuitem"],
+    [data-toc-popover-trigger],
+    #nd-nav a,
+    #nd-subnav a,
+    #nd-sidebar a,
+    #nd-sidebar-mobile a,
+    #nd-toc a
+  ) {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto !important;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-delay: 0ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-delay: 0ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
