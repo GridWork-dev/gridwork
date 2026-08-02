@@ -891,6 +891,11 @@ dependencies = [
  "gwk-domain",
  "gwk-pty",
  "pty-process",
+ "rustix",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

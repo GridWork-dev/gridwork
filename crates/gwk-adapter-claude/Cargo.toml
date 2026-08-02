@@ -18,6 +18,18 @@ publish = false
 gwk-domain.workspace = true
 gwk-pty.workspace = true
 pty-process.workspace = true
+# `process` spawns the bidirectional stream-json child; `net` is the
+# PreToolUse relay's Unix-domain listener; `io-util` is `AsyncBufReadExt` /
+# `AsyncWriteExt` on both; `macros` + `rt` are `#[tokio::test]` plus the
+# single-threaded runtime it needs — no `rt-multi-thread`, the blocking hook
+# client runs on a plain `std::thread`, never inside this crate's runtime.
+tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt"] }
+# One call: `geteuid`, for the relay's peer-uid check — the workspace pin
+# already carries the `process` feature this needs.
+rustix.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true
