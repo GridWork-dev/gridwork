@@ -1,9 +1,18 @@
 # Paths under the clean-room second-review gate (see CLEANROOM.md).
 # Prefix match; one entry per line; comments with '#'.
 #
-# No trailing slash on the crate-family prefixes: a `-sys` binding crate is
-# engine code by any reading, and `crates/gwk-pty/` would not have matched
-# `crates/gwk-pty-sys/`. The gate should over-cover a sibling, never miss one.
+# No trailing slash on ANY prefix: a `-sys` binding crate is engine code by any
+# reading, and `crates/gwk-pty/` would not have matched `crates/gwk-pty-sys/`.
+# The gate should over-cover a sibling, never miss one.
+#
+# The rule is stated for the crate-family prefixes and holds identically one
+# level down. `crates/gwk-tui/src/workspace/` was the one line that violated it,
+# and it was the line where it mattered most: multiplexer work split out of
+# `workspace/` into a `workspace-adjacent/` or `workspace-detach/` sibling would
+# have left the gate matching nothing, with no error and no diff to notice —
+# which is the same naming-coin-flip hole as `gwk-host` passing while
+# `gwk-pty-host` gates, one directory deeper. The seeded step in the
+# `cleanroom-gate` CI job feeds exactly that path and fails if it is not caught.
 crates/gwk-pty
 crates/gwk-adapter-
-crates/gwk-tui/src/workspace/
+crates/gwk-tui/src/workspace

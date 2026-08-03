@@ -51,6 +51,56 @@ jobs:
           # it must match, or the check above passes by not working.
           cargo tree -p gwk-pty --edges normal --prefix none | grep -q libghostty
           echo "gridwork is Zig-free; the grep that proves it is live"
+      # P6(a): the console is a THIN CLIENT. PTY sessions and engine adapters
+      # live server-side in their own host crate and the console consumes frames
+      # as wire data, which is what makes attach-from-anywhere fall out instead
+      # of needing to be built — a console owning its own PTY could only ever
+      # show the sessions on the box it runs on. That posture survives exactly
+      # as long as nobody adds the convenient direct dependency, so assert it.
+      - name: the console never links the PTY engine
+        run: |
+          set -euo pipefail
+          if cargo tree -p gwk-tui --edges normal --prefix none | grep -qE 'libghostty|gwk-pty'; then
+            echo 'gwk-tui depends on the PTY stack — the thin-client boundary is gone' >&2
+            exit 1
+          fi
+          # Same positive control as above, for the same reason: a grep that
+          # matches nothing anywhere would pass this check by not working.
+          cargo tree -p gwk-pty --edges normal --prefix none | grep -q gwk-pty
+          echo "gwk-tui is free of the PTY stack; the grep that proves it is live"
+      # ratatui 0.30 split the project into `ratatui-core` (the types) and the
+      # crates built on it. Every widget and effect crate in that ecosystem
+      # re-exports `ratatui_core::buffer::Buffer`, so TWO `ratatui-core`
+      # versions in one graph are two incompatible `Buffer` types: the failure
+      # is a wall of trait-mismatch errors at the seam between a widget crate
+      # and the frame it was handed, and it reads as our bug. The assertion is
+      # cheap and lands now, while `ratatui` is the only crate in the tree
+      # pulling `ratatui-core` — so the bump that brings a second one (an
+      # effects crate for the Hall, on its own release cadence) arrives at a
+      # named check instead of at that error.
+      - name: exactly one ratatui-core in the lockfile
+        run: |
+          set -euo pipefail
+          # One function over a file path, run against the real lockfile and
+          # then against a seeded copy, so the check and its negative cannot
+          # drift apart into two different greps.
+          cores() { grep -c '^name = "ratatui-core"$' "$1" || true; }
+          n="$(cores Cargo.lock)"
+          if [ "$n" != "1" ]; then
+            echo "Cargo.lock carries $n ratatui-core packages; exactly 1 is required" >&2
+            grep -n -A1 '^name = "ratatui-core"$' Cargo.lock >&2
+            exit 1
+          fi
+          # The seeded negative. A lockfile is the one input here, so the seed
+          # is a second package block in a copy of it — the exact shape a bump
+          # that fails to unify would produce.
+          cp Cargo.lock /tmp/seeded-two-cores.lock
+          printf '\n[[package]]\nname = "ratatui-core"\nversion = "0.0.0-seeded"\n' >> /tmp/seeded-two-cores.lock
+          if [ "$(cores /tmp/seeded-two-cores.lock)" = "1" ]; then
+            echo 'the count did not move with a second ratatui-core present — the check is broken' >&2
+            exit 1
+          fi
+          echo "cargo.lock carries exactly one ratatui-core; the seeded second one is counted"
 
   # The kernel's ignored integration suite needs a live PostgreSQL superuser:
   # each case creates and initializes its own database plus the runtime role.
@@ -736,6 +786,26 @@ jobs:
             exit 1
           fi
           echo "cleanroom-gate: seeded violation correctly rejected ($seed)"
+      - name: a gated module prefix reaches its siblings (seeded violation)
+        run: |
+          set -euo pipefail
+          # The prefixes are matched as strings, not as directories, and
+          # `crates/gwk-tui/src/workspace/` — with the trailing slash it carried
+          # until this branch — matched nothing outside that one directory. So
+          # multiplexer work split into a `workspace-adjacent/` sibling would
+          # have left the gate silent: no error, no diff, no review. Same hole
+          # as `gwk-host` passing while `gwk-pty-host` gates, one level down.
+          #
+          # Hardcoded rather than derived from the file, deliberately. Every
+          # other seed here reads `head -n1` so it keeps working as the list
+          # grows; this one is asserting a property of ONE line, and a derived
+          # seed would silently stop testing it the day that line moved.
+          seed="crates/gwk-tui/src/workspace-adjacent/pane.rs"
+          if echo "$seed" | ./tools/cleanroom-gate.sh; then
+            echo "cleanroom-gate passed $seed — a gated prefix is not reaching its siblings" >&2
+            exit 1
+          fi
+          echo "cleanroom-gate: sibling of a gated module correctly gated ($seed)"
       - name: prove an unregistered capture is rejected (seeded violation)
         run: |
           set -euo pipefail
