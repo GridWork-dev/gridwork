@@ -349,10 +349,10 @@ async fn acking_and_muting_quiet_an_item_without_resolving_it() {
     .await;
     apply(
         &store,
-        "unmute",
+        "mute-again",
         KernelCommand::MuteAttention {
             attention_item_id: AttentionItemId::new("att-1"),
-            muted_until: Timestamp::new("2026-08-03T00:00:00Z"),
+            muted_until: Timestamp::new("2026-08-09T00:00:00Z"),
         },
     )
     .await;
@@ -366,8 +366,8 @@ async fn acking_and_muting_quiet_an_item_without_resolving_it() {
     .expect("muted_until");
     assert_eq!(
         muted_until.as_deref(),
-        Some("2026-08-03"),
-        "the last write wins — unmuting is a stamp already past, not a second verb"
+        Some("2026-08-09"),
+        "the last write wins — re-muting moves the deadline rather than refusing"
     );
 
     // Naming an item that does not exist is the ONLY way these stamps fail,
@@ -376,6 +376,96 @@ async fn acking_and_muting_quiet_an_item_without_resolving_it() {
         &store,
         "ack-ghost",
         KernelCommand::AckAttention {
+            attention_item_id: AttentionItemId::new("att-nope"),
+        },
+    )
+    .await;
+    assert_eq!(code, KernelErrorCode::NotFound);
+
+    drop_database(&maintenance, &name).await;
+}
+
+/// Unmute clears the mute and touches nothing else.
+///
+/// The round trip is the point: `muted_until` set, then back to NULL, with
+/// `resolved_at` untouched at both ends and the dedup slot held throughout.
+/// Mute never resolved the item, so unmute has nothing to re-arm — and if it
+/// ever grew a `resolved_at` write, the re-raise below would stop being
+/// refused and a silenced problem would come back as a second row.
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
+async fn unmuting_clears_the_stamp_and_re_arms_nothing() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "attentionunmute", 64).await;
+
+    let raise = |id: &str| KernelCommand::RaiseAttention {
+        attention_item_id: AttentionItemId::new(id),
+        kind: "risk_tag".to_owned(),
+        summary: "data-migration pages".to_owned(),
+        subject_ref: Some("task/t-1".to_owned()),
+        raised_by: Some(actor("kernel")),
+        priority: Some(3),
+    };
+    apply(&store, "raise", raise("att-1")).await;
+
+    let unmute = || KernelCommand::UnmuteAttention {
+        attention_item_id: AttentionItemId::new("att-1"),
+    };
+    let row = |store: &PgEventStore| {
+        let pool = store.pool().clone();
+        async move {
+            sqlx::query(
+                "SELECT muted_until IS NOT NULL AS muted, \
+                        resolved_at IS NOT NULL AS resolved \
+                 FROM gwk.attention_item WHERE id = $1",
+            )
+            .bind("att-1")
+            .fetch_one(&pool)
+            .await
+            .expect("row")
+        }
+    };
+
+    apply(
+        &store,
+        "mute",
+        KernelCommand::MuteAttention {
+            attention_item_id: AttentionItemId::new("att-1"),
+            muted_until: Timestamp::new("2026-08-09T00:00:00Z"),
+        },
+    )
+    .await;
+    assert!(row(&store).await.get::<bool, _>("muted"), "mute sets it");
+
+    apply(&store, "unmute", unmute()).await;
+    let after = row(&store).await;
+    assert!(
+        !after.get::<bool, _>("muted"),
+        "unmute clears muted_until back to NULL — audible reads the same as \
+         never-muted, not as a deadline in the past"
+    );
+    assert!(
+        !after.get::<bool, _>("resolved"),
+        "unmute must not touch resolved_at — it is not a resolution any more \
+         than mute was"
+    );
+
+    // Still held: the item was never resolved, so the same problem still
+    // cannot raise a second row.
+    let (code, message) = refuse(&store, "raise-after-unmute", raise("att-2")).await;
+    assert_eq!(code, KernelErrorCode::Validation, "{message}");
+    assert!(message.contains("att-1"), "{message}");
+
+    // Same no-op convention as its siblings: unmuting an already-audible item
+    // is a write that changes nothing and succeeds, because the row exists.
+    apply(&store, "unmute-again", unmute()).await;
+    assert!(!row(&store).await.get::<bool, _>("muted"));
+
+    // And the one failure mode the convention does keep: an id with no row.
+    let (code, _) = refuse(
+        &store,
+        "unmute-ghost",
+        KernelCommand::UnmuteAttention {
             attention_item_id: AttentionItemId::new("att-nope"),
         },
     )

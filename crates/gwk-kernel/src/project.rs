@@ -1008,16 +1008,17 @@ pub(crate) async fn apply_event(
                 attention_item_id.as_str(),
             )?;
         }
-        // Both stamps predicate on the id ALONE — deliberately not on
+        // All three stamps predicate on the id ALONE — deliberately not on
         // `resolved_at IS NULL` the way resolve does. A stamp is
         // last-write-wins, so the only thing that can go wrong is naming an
         // item that does not exist, and `require_one` turns that into the
         // typed not-found. Adding an open-ness predicate here would make the
         // second press of an idempotent key a spurious error.
         //
-        // Neither writes `resolved_at`. That is the whole mechanism behind
+        // None of them writes `resolved_at`. That is the whole mechanism behind
         // "mute is never a resolve": the row keeps its (kind, subject_ref)
-        // dedup slot, so silencing a problem does not re-arm it.
+        // dedup slot, so silencing a problem does not re-arm it — and unmuting
+        // it does not re-arm it either, because there was nothing to re-arm.
         KernelCommand::AckAttention { attention_item_id } => {
             let done = sqlx::query(
                 "UPDATE gwk.attention_item SET acked_at = $2::timestamptz WHERE id = $1",
@@ -1043,6 +1044,19 @@ pub(crate) async fn apply_event(
             .execute(&mut *conn)
             .await
             .map_err(|e| db("mute attention item", e))?;
+            require_one(done, "attention_item", attention_item_id.as_str())?;
+        }
+        KernelCommand::UnmuteAttention { attention_item_id } => {
+            // Back to NULL rather than to a past timestamp: absent is what the
+            // column already means by "audible", so a cleared mute and a
+            // never-muted item read identically instead of leaving a stale
+            // deadline every reader has to compare against the clock.
+            let done =
+                sqlx::query("UPDATE gwk.attention_item SET muted_until = NULL WHERE id = $1")
+                    .bind(attention_item_id.as_str())
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(|e| db("unmute attention item", e))?;
             require_one(done, "attention_item", attention_item_id.as_str())?;
         }
 

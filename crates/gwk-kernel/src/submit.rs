@@ -502,6 +502,17 @@ fn route_of(envelope: &CommandEnvelope, command: &KernelCommand) -> Result<Route
             attention_item_id.as_str().to_owned(),
             "attention_muted",
         ),
+        // Its own event, not an `attention_muted` carrying a deadline already
+        // past. Both reach the same row state; only one of them SAYS what the
+        // operator meant, and in an append-only ledger that difference is the
+        // whole point of writing the event down.
+        C::UnmuteAttention {
+            attention_item_id, ..
+        } => (
+            "attention_item",
+            attention_item_id.as_str().to_owned(),
+            "attention_unmuted",
+        ),
 
         C::WriteOrchestratorCheckpoint { checkpoint } => (
             "orchestrator_checkpoint",
@@ -901,15 +912,16 @@ async fn decide(
         // and both projections refuse the second write themselves — the UPDATE
         // is predicated on the state it expects to find.
         //
-        // Ack and mute join them for a different reason worth keeping straight:
-        // they are idempotent last-write-wins stamps, so there is no second
-        // write to refuse. Pressing the key twice moves the stamp, and a CAS
-        // here would turn that into a stale-version error on an act the
-        // operator is entitled to repeat.
+        // The three quieting verbs join them for a different reason worth
+        // keeping straight: they are idempotent last-write-wins stamps, so
+        // there is no second write to refuse. Pressing the key twice moves the
+        // stamp, and a CAS here would turn that into a stale-version error on
+        // an act the operator is entitled to repeat.
         C::RevokeAuthority { .. }
         | C::ResolveAttention { .. }
         | C::AckAttention { .. }
-        | C::MuteAttention { .. } => {
+        | C::MuteAttention { .. }
+        | C::UnmuteAttention { .. } => {
             current_aggregate_version(conn, route.aggregate_type, &route.aggregate_id).await?
         }
 

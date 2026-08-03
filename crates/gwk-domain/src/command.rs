@@ -365,12 +365,24 @@ pub enum KernelCommand {
     /// likewise NOT a resolve — a mute that freed the dedup slot would let the
     /// muted problem raise itself again immediately, which is the opposite of
     /// what the operator asked for.
-    ///
-    /// Unmuting is this command with a `muted_until` already past; a second
-    /// verb would be a second way to spell the same last write.
     MuteAttention {
         attention_item_id: AttentionItemId,
         muted_until: Timestamp,
+    },
+    /// Make the item audible again by clearing `muted_until`.
+    ///
+    /// Its own verb rather than a `MuteAttention` carrying a deadline already
+    /// past, which would reach the same row state. In an event-sourced ledger
+    /// the trail is the product: "unmuted" said in its own words is a recorded
+    /// intent, where a mute-until-yesterday is an intent a reader has to
+    /// reconstruct by comparing a timestamp against the clock. Recoverable is
+    /// not the same as recorded.
+    ///
+    /// Clears the mute and NOTHING else — `acked_at` and `resolved_at` are
+    /// untouched, so an unmuted item is exactly as unresolved as it was while
+    /// silent and still holds its dedup slot.
+    UnmuteAttention {
+        attention_item_id: AttentionItemId,
     },
 
     // ---- evidence ----
@@ -570,6 +582,7 @@ impl KernelCommand {
             Self::ResolveAttention { .. } => "resolve_attention",
             Self::AckAttention { .. } => "ack_attention",
             Self::MuteAttention { .. } => "mute_attention",
+            Self::UnmuteAttention { .. } => "unmute_attention",
             Self::RecordEvidence { .. } => "record_evidence",
             Self::RecordCostEntry { .. } => "record_cost_entry",
             Self::RegisterWorktree { .. } => "register_worktree",
@@ -649,7 +662,7 @@ mod tests {
         // slip in `command_type()` would silently route the wrong handler. Walk
         // the serialized tag of a value from EVERY variant instead.
         let all = all_variants();
-        assert_eq!(all.len(), 38, "the v1 command set is 38 variants");
+        assert_eq!(all.len(), 39, "the v1 command set is 39 variants");
         for command in &all {
             let json = serde_json::to_value(command).expect("serialize");
             let tag = json["type"].as_str().expect("tagged with a string type");
@@ -687,15 +700,19 @@ mod tests {
             attention_item_id: id(),
             muted_until: Timestamp::new("2026-07-28T00:00:00Z"),
         };
+        let unmute = KernelCommand::UnmuteAttention {
+            attention_item_id: id(),
+        };
 
         assert_eq!(resolve.command_type(), "resolve_attention");
         assert_eq!(ack.command_type(), "ack_attention");
         assert_eq!(mute.command_type(), "mute_attention");
+        assert_eq!(unmute.command_type(), "unmute_attention");
 
         // Stated as its own assertion rather than left to the reader of the
-        // three above: this is the rule, the equalities are just how it is
+        // four above: this is the rule, the equalities are just how it is
         // currently satisfied.
-        for quiet in [&ack, &mute] {
+        for quiet in [&ack, &mute, &unmute] {
             assert_ne!(
                 quiet.command_type(),
                 resolve.command_type(),
@@ -704,8 +721,8 @@ mod tests {
         }
     }
 
-    /// Neither quieting verb carries an `expected_version`, and that is the
-    /// contract shape, not an omission: ack and mute are idempotent
+    /// No quieting verb carries an `expected_version`, and that is the contract
+    /// shape, not an omission: ack, mute and unmute are idempotent
     /// last-write-wins stamps, so a CAS would refuse the second identical
     /// press of a key the operator is entitled to press twice.
     #[test]
@@ -718,12 +735,15 @@ mod tests {
                 attention_item_id: AttentionItemId::new("att-item-1"),
                 muted_until: Timestamp::new("2026-07-28T00:00:00Z"),
             },
+            KernelCommand::UnmuteAttention {
+                attention_item_id: AttentionItemId::new("att-item-1"),
+            },
         ] {
             let json = serde_json::to_value(&command).expect("serialize");
             let object = json.as_object().expect("a tagged object");
             assert!(
                 !object.contains_key("expected_version"),
-                "{command:?} grew a version field — ack/mute are non-CAS stamps"
+                "{command:?} grew a version field — the quieting verbs are non-CAS stamps"
             );
         }
     }
@@ -964,6 +984,9 @@ mod tests {
             KernelCommand::MuteAttention {
                 attention_item_id: AttentionItemId::new("att-item-1"),
                 muted_until: ts(),
+            },
+            KernelCommand::UnmuteAttention {
+                attention_item_id: AttentionItemId::new("att-item-1"),
             },
             KernelCommand::RecordEvidence {
                 evidence_id: EvidenceId::new("ev-1"),
