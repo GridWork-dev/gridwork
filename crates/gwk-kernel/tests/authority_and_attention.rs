@@ -212,6 +212,7 @@ async fn an_explicit_attention_item_deduplicates_by_name_and_resolves_once() {
         summary: "data-migration pages".to_owned(),
         subject_ref: Some("task/t-1".to_owned()),
         raised_by: Some(actor("kernel")),
+        priority: Some(1),
     };
 
     apply(&store, "raise", raise("att-1")).await;
@@ -254,6 +255,167 @@ async fn an_explicit_attention_item_deduplicates_by_name_and_resolves_once() {
     // The dedup slot reopened: the same problem recurring is a NEW item, not a
     // reopened one. That is what `WHERE resolved_at IS NULL` buys.
     apply(&store, "raise-3", raise("att-3")).await;
+
+    drop_database(&maintenance, &name).await;
+}
+
+/// Quieting an item is not closing it, and the database is what proves it.
+///
+/// Ack and mute stamp their own columns and leave `resolved_at` NULL, so the
+/// row keeps its `(kind, subject_ref)` dedup slot — which is the mechanism
+/// behind "mute is never mapped to resolve". If either verb were implemented as
+/// a resolve, the re-raise below would stop being refused and the silenced
+/// problem would immediately page again.
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
+async fn acking_and_muting_quiet_an_item_without_resolving_it() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "attentionquiet", 64).await;
+
+    let raise = |id: &str| KernelCommand::RaiseAttention {
+        attention_item_id: AttentionItemId::new(id),
+        kind: "risk_tag".to_owned(),
+        summary: "data-migration pages".to_owned(),
+        subject_ref: Some("task/t-1".to_owned()),
+        raised_by: Some(actor("kernel")),
+        priority: Some(3),
+    };
+    apply(&store, "raise", raise("att-1")).await;
+
+    let stamps = |store: &PgEventStore| {
+        let pool = store.pool().clone();
+        async move {
+            sqlx::query(
+                "SELECT priority, acked_at IS NOT NULL AS acked, \
+                        muted_until IS NOT NULL AS muted, \
+                        resolved_at IS NOT NULL AS resolved \
+                 FROM gwk.attention_item WHERE id = $1",
+            )
+            .bind("att-1")
+            .fetch_one(&pool)
+            .await
+            .expect("stamps")
+        }
+    };
+
+    // Raised with a rank: the column has a writer, so it is not a dead column
+    // the contract merely promises.
+    let row = stamps(&store).await;
+    assert_eq!(row.get::<Option<i32>, _>("priority"), Some(3));
+    assert!(!row.get::<bool, _>("acked"));
+
+    apply(
+        &store,
+        "ack",
+        KernelCommand::AckAttention {
+            attention_item_id: AttentionItemId::new("att-1"),
+        },
+    )
+    .await;
+    apply(
+        &store,
+        "mute",
+        KernelCommand::MuteAttention {
+            attention_item_id: AttentionItemId::new("att-1"),
+            muted_until: Timestamp::new("2026-08-04T00:00:00Z"),
+        },
+    )
+    .await;
+
+    let row = stamps(&store).await;
+    assert!(row.get::<bool, _>("acked"), "ack stamps acked_at");
+    assert!(row.get::<bool, _>("muted"), "mute stamps muted_until");
+    assert!(
+        !row.get::<bool, _>("resolved"),
+        "neither quieting verb may set resolved_at — that is what makes them \
+         distinct from resolve"
+    );
+
+    // The dedup slot is STILL HELD. A muted problem does not get to raise
+    // itself again the moment it is silenced.
+    let (code, message) = refuse(&store, "raise-while-muted", raise("att-2")).await;
+    assert_eq!(code, KernelErrorCode::Validation, "{message}");
+    assert!(message.contains("att-1"), "{message}");
+
+    // Idempotent last-write-wins: the same key pressed twice is not an error,
+    // which is why neither command carries an expected version.
+    apply(
+        &store,
+        "ack-again",
+        KernelCommand::AckAttention {
+            attention_item_id: AttentionItemId::new("att-1"),
+        },
+    )
+    .await;
+    apply(
+        &store,
+        "unmute",
+        KernelCommand::MuteAttention {
+            attention_item_id: AttentionItemId::new("att-1"),
+            muted_until: Timestamp::new("2026-08-03T00:00:00Z"),
+        },
+    )
+    .await;
+    let muted_until: Option<String> = sqlx::query_scalar(
+        "SELECT to_char(muted_until AT TIME ZONE 'UTC', 'YYYY-MM-DD') \
+         FROM gwk.attention_item WHERE id = $1",
+    )
+    .bind("att-1")
+    .fetch_one(store.pool())
+    .await
+    .expect("muted_until");
+    assert_eq!(
+        muted_until.as_deref(),
+        Some("2026-08-03"),
+        "the last write wins — unmuting is a stamp already past, not a second verb"
+    );
+
+    // Naming an item that does not exist is the ONLY way these stamps fail,
+    // and it fails typed rather than silently touching nothing.
+    let (code, _) = refuse(
+        &store,
+        "ack-ghost",
+        KernelCommand::AckAttention {
+            attention_item_id: AttentionItemId::new("att-nope"),
+        },
+    )
+    .await;
+    assert_eq!(code, KernelErrorCode::NotFound);
+
+    drop_database(&maintenance, &name).await;
+}
+
+/// A `subject_ref`-less item never deduplicates — the client obligation, shown.
+///
+/// The DDL says NULL stays distinct by PostgreSQL default and calls that
+/// deliberate, so this is NOT a schema defect to fix; it is the reason
+/// client-raised items must always name a subject. Pinning the behaviour here
+/// means a future editor who "fixes" the index by making NULLs collide breaks a
+/// named test instead of silently swallowing every anonymous page but the first.
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
+async fn a_null_subject_ref_never_deduplicates() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "attentionnullsubj", 64).await;
+
+    let raise = |id: &str| KernelCommand::RaiseAttention {
+        attention_item_id: AttentionItemId::new(id),
+        kind: "risk_tag".to_owned(),
+        summary: "about nothing in particular".to_owned(),
+        subject_ref: None,
+        raised_by: Some(actor("kernel")),
+        priority: None,
+    };
+
+    apply(&store, "raise-1", raise("anon-1")).await;
+    // Same kind, both unresolved, no subject: two rows, not a refusal.
+    apply(&store, "raise-2", raise("anon-2")).await;
+    assert_eq!(
+        counts(&store).await.1,
+        2,
+        "NULL subject_ref does not collide — which is exactly why a client that \
+         wants dedup has to pass one"
+    );
 
     drop_database(&maintenance, &name).await;
 }

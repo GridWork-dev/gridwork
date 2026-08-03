@@ -332,12 +332,45 @@ pub enum KernelCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[specta(optional)]
         raised_by: Option<Actor>,
+        /// Presentation rank, mirroring `CreateTask`'s `priority`. Optional so
+        /// the kernel's own page path — which has no opinion about rank — can
+        /// keep raising items without inventing one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[specta(optional)]
+        priority: Option<i32>,
     },
+    /// Close the item. The ONLY verb that frees the (kind, subject_ref) dedup
+    /// slot, which is why resolve is re-arm: the same problem recurring after
+    /// this raises a NEW item rather than reopening the old one.
+    ///
+    /// Not a dismiss. Overloading it as one would write a false
+    /// `attention_resolved` row into an append-only ledger, and quieting a row
+    /// the operator has not handled is what `AckAttention`/`MuteAttention`
+    /// exist for.
     ResolveAttention {
         attention_item_id: AttentionItemId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[specta(optional)]
         resolution: Option<String>,
+    },
+    /// Stamp the item seen. Leaves `resolved_at` alone, so the dedup slot
+    /// stays held and the ledger records no resolution that did not happen.
+    ///
+    /// No `expected_version`: a stamp is idempotent last-write-wins, the same
+    /// non-CAS write `ResolveAttention` already is.
+    AckAttention {
+        attention_item_id: AttentionItemId,
+    },
+    /// Quiet the item until an instant. Same stamp discipline as ack, and
+    /// likewise NOT a resolve — a mute that freed the dedup slot would let the
+    /// muted problem raise itself again immediately, which is the opposite of
+    /// what the operator asked for.
+    ///
+    /// Unmuting is this command with a `muted_until` already past; a second
+    /// verb would be a second way to spell the same last write.
+    MuteAttention {
+        attention_item_id: AttentionItemId,
+        muted_until: Timestamp,
     },
 
     // ---- evidence ----
@@ -535,6 +568,8 @@ impl KernelCommand {
             Self::RevokeAuthority { .. } => "revoke_authority",
             Self::RaiseAttention { .. } => "raise_attention",
             Self::ResolveAttention { .. } => "resolve_attention",
+            Self::AckAttention { .. } => "ack_attention",
+            Self::MuteAttention { .. } => "mute_attention",
             Self::RecordEvidence { .. } => "record_evidence",
             Self::RecordCostEntry { .. } => "record_cost_entry",
             Self::RegisterWorktree { .. } => "register_worktree",
@@ -614,7 +649,7 @@ mod tests {
         // slip in `command_type()` would silently route the wrong handler. Walk
         // the serialized tag of a value from EVERY variant instead.
         let all = all_variants();
-        assert_eq!(all.len(), 36, "the v1 command set is 36 variants");
+        assert_eq!(all.len(), 38, "the v1 command set is 38 variants");
         for command in &all {
             let json = serde_json::to_value(command).expect("serialize");
             let tag = json["type"].as_str().expect("tagged with a string type");
@@ -628,6 +663,69 @@ mod tests {
         tags.sort_unstable();
         tags.dedup();
         assert_eq!(tags.len(), all.len(), "two variants share a command_type");
+    }
+
+    /// Quieting an item and closing it are DIFFERENT VERBS on the wire.
+    ///
+    /// The rule this pins is a design rule the contract can actually hold: a
+    /// dismiss must never be spelled `resolve_attention`. If a later editor
+    /// "simplifies" ack or mute into the resolve variant, the ledger starts
+    /// recording resolutions that never happened — and the three assertions
+    /// below are what refuses that, since the command set is closed and these
+    /// are the only three spellings an attention verb can have.
+    #[test]
+    fn quieting_an_attention_item_is_never_spelled_resolve() {
+        let id = || AttentionItemId::new("att-item-1");
+        let resolve = KernelCommand::ResolveAttention {
+            attention_item_id: id(),
+            resolution: None,
+        };
+        let ack = KernelCommand::AckAttention {
+            attention_item_id: id(),
+        };
+        let mute = KernelCommand::MuteAttention {
+            attention_item_id: id(),
+            muted_until: Timestamp::new("2026-07-28T00:00:00Z"),
+        };
+
+        assert_eq!(resolve.command_type(), "resolve_attention");
+        assert_eq!(ack.command_type(), "ack_attention");
+        assert_eq!(mute.command_type(), "mute_attention");
+
+        // Stated as its own assertion rather than left to the reader of the
+        // three above: this is the rule, the equalities are just how it is
+        // currently satisfied.
+        for quiet in [&ack, &mute] {
+            assert_ne!(
+                quiet.command_type(),
+                resolve.command_type(),
+                "{quiet:?} must not map to resolve — a dismiss is not a resolution"
+            );
+        }
+    }
+
+    /// Neither quieting verb carries an `expected_version`, and that is the
+    /// contract shape, not an omission: ack and mute are idempotent
+    /// last-write-wins stamps, so a CAS would refuse the second identical
+    /// press of a key the operator is entitled to press twice.
+    #[test]
+    fn the_quieting_verbs_carry_no_version_to_contend_on() {
+        for command in [
+            KernelCommand::AckAttention {
+                attention_item_id: AttentionItemId::new("att-item-1"),
+            },
+            KernelCommand::MuteAttention {
+                attention_item_id: AttentionItemId::new("att-item-1"),
+                muted_until: Timestamp::new("2026-07-28T00:00:00Z"),
+            },
+        ] {
+            let json = serde_json::to_value(&command).expect("serialize");
+            let object = json.as_object().expect("a tagged object");
+            assert!(
+                !object.contains_key("expected_version"),
+                "{command:?} grew a version field — ack/mute are non-CAS stamps"
+            );
+        }
     }
 
     #[test]
@@ -854,10 +952,18 @@ mod tests {
                 summary: "data-migration pages".into(),
                 subject_ref: Some("task-1".into()),
                 raised_by: None,
+                priority: Some(2),
             },
             KernelCommand::ResolveAttention {
                 attention_item_id: AttentionItemId::new("att-item-1"),
                 resolution: None,
+            },
+            KernelCommand::AckAttention {
+                attention_item_id: AttentionItemId::new("att-item-1"),
+            },
+            KernelCommand::MuteAttention {
+                attention_item_id: AttentionItemId::new("att-item-1"),
+                muted_until: ts(),
             },
             KernelCommand::RecordEvidence {
                 evidence_id: EvidenceId::new("ev-1"),

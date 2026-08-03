@@ -485,6 +485,23 @@ fn route_of(envelope: &CommandEnvelope, command: &KernelCommand) -> Result<Route
             attention_item_id.as_str().to_owned(),
             "attention_resolved",
         ),
+        // Their own event types, not a flavour of `attention_resolved`: the log
+        // is what proves what the operator actually did, and "quieted" and
+        // "handled" are different claims about the same row.
+        C::AckAttention {
+            attention_item_id, ..
+        } => (
+            "attention_item",
+            attention_item_id.as_str().to_owned(),
+            "attention_acked",
+        ),
+        C::MuteAttention {
+            attention_item_id, ..
+        } => (
+            "attention_item",
+            attention_item_id.as_str().to_owned(),
+            "attention_muted",
+        ),
 
         C::WriteOrchestratorCheckpoint { checkpoint } => (
             "orchestrator_checkpoint",
@@ -883,7 +900,16 @@ async fn decide(
         // a grant is live until revoked and an item is open until resolved,
         // and both projections refuse the second write themselves — the UPDATE
         // is predicated on the state it expects to find.
-        C::RevokeAuthority { .. } | C::ResolveAttention { .. } => {
+        //
+        // Ack and mute join them for a different reason worth keeping straight:
+        // they are idempotent last-write-wins stamps, so there is no second
+        // write to refuse. Pressing the key twice moves the stamp, and a CAS
+        // here would turn that into a stale-version error on an act the
+        // operator is entitled to repeat.
+        C::RevokeAuthority { .. }
+        | C::ResolveAttention { .. }
+        | C::AckAttention { .. }
+        | C::MuteAttention { .. } => {
             current_aggregate_version(conn, route.aggregate_type, &route.aggregate_id).await?
         }
 

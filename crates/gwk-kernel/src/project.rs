@@ -966,17 +966,19 @@ pub(crate) async fn apply_event(
             summary,
             subject_ref,
             raised_by,
+            priority,
         } => {
             sqlx::query(
                 "INSERT INTO gwk.attention_item \
-                   (id, kind, summary, subject_ref, raised_by, raised_at) \
-                 VALUES ($1, $2, $3, $4, $5, $6::timestamptz)",
+                   (id, kind, summary, subject_ref, raised_by, priority, raised_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz)",
             )
             .bind(attention_item_id.as_str())
             .bind(kind)
             .bind(summary)
             .bind(subject_ref.as_deref())
             .bind(json_opt(raised_by.as_ref())?)
+            .bind(*priority)
             .bind(at)
             .execute(&mut *conn)
             .await
@@ -1005,6 +1007,43 @@ pub(crate) async fn apply_event(
                 "unresolved attention_item",
                 attention_item_id.as_str(),
             )?;
+        }
+        // Both stamps predicate on the id ALONE — deliberately not on
+        // `resolved_at IS NULL` the way resolve does. A stamp is
+        // last-write-wins, so the only thing that can go wrong is naming an
+        // item that does not exist, and `require_one` turns that into the
+        // typed not-found. Adding an open-ness predicate here would make the
+        // second press of an idempotent key a spurious error.
+        //
+        // Neither writes `resolved_at`. That is the whole mechanism behind
+        // "mute is never a resolve": the row keeps its (kind, subject_ref)
+        // dedup slot, so silencing a problem does not re-arm it.
+        KernelCommand::AckAttention { attention_item_id } => {
+            let done = sqlx::query(
+                "UPDATE gwk.attention_item SET acked_at = $2::timestamptz WHERE id = $1",
+            )
+            .bind(attention_item_id.as_str())
+            .bind(at)
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| db("ack attention item", e))?;
+            require_one(done, "attention_item", attention_item_id.as_str())?;
+        }
+        KernelCommand::MuteAttention {
+            attention_item_id,
+            muted_until,
+        } => {
+            // From the COMMAND, not `now()` plus a duration: replay has to
+            // rebuild the same deadline it built live.
+            let done = sqlx::query(
+                "UPDATE gwk.attention_item SET muted_until = $2::timestamptz WHERE id = $1",
+            )
+            .bind(attention_item_id.as_str())
+            .bind(muted_until.as_str())
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| db("mute attention item", e))?;
+            require_one(done, "attention_item", attention_item_id.as_str())?;
         }
 
         // The epoch boundary is the log itself — there is no row behind it.
@@ -1092,6 +1131,9 @@ pub(crate) async fn page_attention(
     // One kind, fixed here rather than passed: every item this path raises is
     // the same thing — the kernel refused a gated command. The caller-facing
     // `RaiseAttention` is where an open kind belongs.
+    //
+    // `priority` is left unset for the same reason: this path has no opinion
+    // about rank, and NULL already means unranked. Omission here, not oversight.
     let kind = "authority";
     sqlx::query(
         "INSERT INTO gwk.attention_item \
