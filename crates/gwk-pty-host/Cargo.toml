@@ -1,0 +1,19 @@
+[package]
+name = "gwk-pty-host"
+version = "0.0.1"
+description = "Resident PTY engine host: session registry, spawn, and detach/reattach routing"
+homepage = "https://gridwork.dev"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Not published — matches gwk-pty and the gwk-adapter-* crates. Skeleton only
+# (the runtime lands in a follow-up change): this crate is under CLEANROOM.md's
+# second-review gate from its first line, both by the `crates/gwk-pty` prefix
+# match and by its own explicit row in .github/cleanroom-paths.txt — gated for
+# what it is FOR, not for what it contains yet.
+publish = false
+
+[lints]
+workspace = true

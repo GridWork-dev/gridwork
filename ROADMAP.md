@@ -72,7 +72,10 @@ cases, with the performance envelope measured and receipted per run.
 
 All pillars complete and packaged: single-command install (`cargo install gridwork`
 and friends), and distribution stops assuming you run your own postgres — a zero-setup
-embedded backend is part of 1.0 packaging, not before.
+embedded backend is part of 1.0 packaging, not before. "And friends" is doing real
+work here: through Workspace, `cargo install gridwork` gives you the kernel, the CLI,
+and the TUI's lenses — the PTY engine host (`gwk-pty-host`) stays a separate,
+unpublished process until its own release lands as part of 1.0 packaging.
 
 ## Principles that won't move
 

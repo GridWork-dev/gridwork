@@ -9,7 +9,10 @@ members = ["crates/*", "xtask"]
 # coverage — it just gets its own lane.
 #
 # Consequence to know before adding a crate: a new `crates/*` entry is a member
-# but NOT a default member unless it is listed here.
+# but NOT a default member unless it is listed here. `gwk-pty-host` is the
+# newest crate absent from this list — no Zig requirement itself yet, kept out
+# on the same policy rather than moved in and back out the day it depends on
+# `gwk-pty`. Its own `pty-host` CI job covers it explicitly.
 default-members = [
   "crates/gridwork",
   "crates/gwk",

@@ -45,6 +45,12 @@ protocol), and the TUI (the only human surface — there is no web console).
 Clients are thin; policy, state machines, and authority live behind the
 kernel boundary.
 
+`gw` — kernel, CLI, and the TUI's lenses — is the whole install surface
+through the Console stage. The PTY engine host is a separate, unpublished
+process (`gwk-pty-host`); the TUI consumes its output as wire data and never
+links it, so `cargo install gridwork` stays free of it until the host has its
+own release.
+
 **Transport.** Local clients connect over a Unix domain socket. Remote use is
 SSH to the host, then the same socket — the kernel does not listen on a
 network interface, and will not until a recorded authentication decision

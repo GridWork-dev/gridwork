@@ -14,6 +14,14 @@
 # `gwk-pty-host` gates, one directory deeper. The seeded step in the
 # `cleanroom-gate` CI job feeds exactly that path and fails if it is not caught.
 crates/gwk-pty
+# Redundant with the prefix above by construction — `crates/gwk-pty-host`
+# already starts with `crates/gwk-pty` — and pre-committed anyway. The header
+# comment above named this exact crate as the naming-coin-flip hole before it
+# existed; leaving its coverage to the prefix match alone would still be
+# correct today and silently wrong the day a sibling crate is named something
+# the prefix does not start with. Writing the row is the decision; the prefix
+# match is only why the gate does not need it to be first.
+crates/gwk-pty-host
 crates/gwk-adapter-
 crates/gwk-tui/src/workspace
 # The parity harness, engine-driving half only. Its runners spawn the three
