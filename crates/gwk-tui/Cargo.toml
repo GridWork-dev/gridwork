@@ -1,0 +1,27 @@
+[package]
+name = "gwk-tui"
+version = "0.0.2"
+description = "The GridWork terminal console — the thin client that renders kernel projections"
+homepage = "https://gridwork.dev"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Not published at this commit: the crate has no API and no consumer yet, and an
+# empty crate on crates.io advertises a surface that does not exist. It flips
+# publishable in the change that first makes `gridwork` depend on it — the
+# install carries kernel + CLI + lenses — and the README crates-table row rides
+# that same change rather than landing ahead of the thing it describes.
+publish = false
+
+[dependencies]
+# Declared and not yet used: the lens work that consumes it is ordered behind a
+# gate this commit sits ahead of, and the dependency has to be in the graph now
+# for the single-`ratatui-core` lockfile assertion in CI to have anything to
+# assert. `unused_crate_dependencies` is allow-by-default and this workspace
+# does not raise it, so the unused edge is silent by design, not by oversight.
+ratatui.workspace = true
+
+[lints]
+workspace = true
