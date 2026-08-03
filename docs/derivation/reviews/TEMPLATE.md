@@ -23,7 +23,10 @@ date: <YYYY-MM-DD>
       Record the finding as the CLASS searched and the HIT COUNT — "terminal-tooling
       comparand class (5 terms): 0 hits" — never the query terms themselves. A record
       that lists them publishes the exact strings this check exists to keep out, and
-      the record is the one artifact nobody re-reviews
+      the record is the one artifact nobody re-reviews. Give the term count only if you
+      ran the grep and know it — never reconstruct one. A name already registered in
+      ../SPECS.md is a permitted source, not a query term: cite it, and say whether you
+      checked the protocol or the implementation
 - [ ] leak — `./tools/leak-scan.sh` green
 
 ## Notes

@@ -83,6 +83,18 @@ exactly the four things rule 4 names:
    the exact strings the check exists to keep out of this repository, in the one
    artifact nobody reviews a second time. The shape is required at authoring time
    precisely so it is not something to catch afterwards.
+
+   Give the term count when you ran the grep and know it; leave it out when you don't.
+   Never reconstruct one — a count inferred from the length of a list you are deleting
+   is a number nobody can check, in a record whose only value is that its numbers are
+   checkable. "Class: 0 hits" is complete; an invented "(5 terms)" is worse than
+   silence.
+
+   A name that is already a **registered permitted source** in `../SPECS.md` is not a
+   query term and is not redacted — cite it. Where a project appears both as a
+   registered protocol and as an implementation, saying which one you checked IS the
+   finding, and collapsing it into a class count deletes the answer to a question the
+   registry itself raises.
 4. **leak** — `./tools/leak-scan.sh` green.
 
 A behavior with no citable permitted source is an escalation, not a guess.
