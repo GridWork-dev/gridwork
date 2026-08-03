@@ -28,4 +28,5 @@
 //! of this crate is lens code and is deliberately outside the gate: the gate
 //! follows the risk, not the directory tree.
 
+pub mod probe;
 pub mod theme;

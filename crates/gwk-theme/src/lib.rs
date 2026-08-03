@@ -24,6 +24,7 @@
 //! this repository's public mirror of the private tier tables.
 
 pub mod marks;
+pub mod probe;
 pub mod swatch;
 pub mod tier;
 
