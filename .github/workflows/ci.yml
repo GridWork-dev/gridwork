@@ -900,8 +900,24 @@ jobs:
           git checkout -- crates/gwk-theme/Cargo.toml
           echo "cleanroom-gate: renamed gwk-pty dependency correctly rejected"
 
-          # The table form. TOML has four ways to say this and a check that
-          # knows three of them is a check with a documented bypass.
+          # The same rename in a TOML LITERAL string. This one was a live bypass:
+          # the check matched only the double-quoted form, so swapping one quote
+          # character linked the PTY engine past the gate — no prefix row, no
+          # second-reader record, no markers. A seed per quote style, because the
+          # thing that broke was a character class, and only a seed that spells it
+          # out can keep it from narrowing again.
+          sed -i "/^\[dependencies\]/a hidden = { package = 'gwk-pty', path = '../gwk-pty' }" crates/gwk-theme/Cargo.toml
+          if : | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate passed a literal-string renamed gwk-pty dependency' >&2
+            exit 1
+          fi
+          git checkout -- crates/gwk-theme/Cargo.toml
+          echo "cleanroom-gate: literal-string renamed gwk-pty dependency correctly rejected"
+
+          # The table form. TOML spells a KEY three ways too — bare, basic, and
+          # literal — and cargo accepts all three wherever the crate name appears,
+          # so each is its own bypass until a seed says otherwise. A check that
+          # knows some spellings of a name is a check with a documented bypass.
           printf '\n[dependencies.gwk-pty]\nworkspace = true\n' >> crates/gwk-theme/Cargo.toml
           if : | ./tools/cleanroom-gate.sh; then
             echo 'cleanroom-gate passed a [dependencies.gwk-pty] table' >&2
@@ -909,6 +925,22 @@ jobs:
           fi
           git checkout -- crates/gwk-theme/Cargo.toml
           echo "cleanroom-gate: [dependencies.gwk-pty] table correctly rejected"
+
+          printf '\n[dependencies."gwk-pty"]\nworkspace = true\n' >> crates/gwk-theme/Cargo.toml
+          if : | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate passed a [dependencies."gwk-pty"] quoted-key table' >&2
+            exit 1
+          fi
+          git checkout -- crates/gwk-theme/Cargo.toml
+          echo "cleanroom-gate: quoted-key gwk-pty table correctly rejected"
+
+          sed -i "/^\[dependencies\]/a 'gwk-pty'.workspace = true" crates/gwk-theme/Cargo.toml
+          if : | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate passed a literal-quoted gwk-pty key' >&2
+            exit 1
+          fi
+          git checkout -- crates/gwk-theme/Cargo.toml
+          echo "cleanroom-gate: literal-quoted gwk-pty key correctly rejected"
 
           # The positive control, and the only one that can catch the check
           # being deleted: with no declarant anywhere, a broken detection and a

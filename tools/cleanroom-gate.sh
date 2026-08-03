@@ -365,7 +365,16 @@ check_pty_dependents() {
     # a rename (`foo = { package = "gwk-pty" }`). The rename matters most: it is
     # the one shape that hides the dependency from a reader skimming for the
     # name, which is exactly the reader this gate stands in for.
-    grep -qE '^[[:space:]]*gwk-pty[[:space:]]*[.=]|^\[[^]]*dependencies\.gwk-pty\]|package[[:space:]]*=[[:space:]]*"gwk-pty"' \
+    #
+    # Every arm accepts an optionally QUOTED key, and the rename arm accepts
+    # either quote character, because TOML spells a key three ways — bare, basic
+    # ("gwk-pty"), and literal ('gwk-pty') — and cargo accepts all three. An
+    # earlier version matched only the bare key and only a double-quoted rename,
+    # so `hidden = { package = 'gwk-pty', path = '../gwk-pty' }` linked the PTY
+    # engine and passed: no prefix row, no second-reader record, no markers. A
+    # check that knows some spellings of a name is a check with an undocumented
+    # bypass, and this one was a single keystroke wide.
+    grep -qE '^[[:space:]]*"?'"'"'?gwk-pty"?'"'"'?[[:space:]]*[.=]|^\[[^]]*dependencies\."?'"'"'?gwk-pty"?'"'"'?\]|package[[:space:]]*=[[:space:]]*["'"'"']gwk-pty["'"'"']' \
       "$manifest" || continue
     # Its own manifest names it without depending on it.
     [[ "$crate" == "crates/gwk-pty" ]] && continue
