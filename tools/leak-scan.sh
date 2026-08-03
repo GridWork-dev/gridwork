@@ -9,11 +9,18 @@
 # session files legitimately hold private paths and must not redden the gate.
 set -euo pipefail
 
-patterns='/home/[a-z0-9_-]+/|/Users/[a-z0-9_-]+/|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]+|_(TOKEN|SECRET|API_KEY|PASSWORD)=[^[:space:]]|BEGIN [A-Z ]*PRIVATE KEY|claude\.ai/code/session_'
+base_patterns='/home/[a-z0-9_-]+/|/Users/[a-z0-9_-]+/|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]+|_(TOKEN|SECRET|API_KEY|PASSWORD)=[^[:space:]]|BEGIN [A-Z ]*PRIVATE KEY|claude\.ai/code/session_'
 
 here="$(cd "$(dirname "$0")" && pwd)"
+overlay_patterns=''
 if [[ -f "$here/leak-scan.local" ]]; then
-  patterns="$patterns|$(grep -Ev '^[[:space:]]*(#|$)' "$here/leak-scan.local" | paste -sd'|' -)"
+  # An all-comment/blank local file must yield NO overlay tier, not an empty ERE
+  # (an empty alternation branch matches every line and would redden the whole tree).
+  overlay_patterns="$(grep -Ev '^[[:space:]]*(#|$)' "$here/leak-scan.local" | paste -sd'|' - || true)"
+fi
+patterns="$base_patterns"
+if [[ -n "$overlay_patterns" ]]; then
+  patterns="$patterns|$overlay_patterns"
 fi
 
 # Validate the assembled pattern set once, before any scan — a malformed ERE (most
@@ -113,14 +120,38 @@ if [[ "$(file -b --mime-type site/og.png)" != "image/png" ]]; then
   echo 'leak-scan: site/og.png is not image/png — the binary exemption covers only the reviewed PNG' >&2
   exit 1
 fi
+# The tree scan runs in two tiers. Base public patterns scan every tracked file.
+# Estate overlay patterns additionally exempt docs/derivation/reviews/ — the
+# clean-room review records are the one sanctioned place that names quarantined
+# subjects (each records its grep-for-the-subject verdict), so an overlay tripwire
+# on a subject's name would flag the very line proving no leak exists. Base
+# patterns (credentials, home paths, key blocks) still cover those records in
+# full, and --stdin/--history keep the combined set: history is judged as content,
+# not by where a line would land in today's tree.
 # Branch on output, not exit status: xargs exits 123 if any batch matches, and a real
 # match in one batch plus a clean batch must still fail the gate loudly.
 # grep -a, never -I: -I's binary sniff runs over the whole stream, so a NUL past
 # file(1)'s window would silently skip the file. Noisy matches from binary bytes
 # are the correct failure direction for a publication gate.
-matches=$( { git ls-files -z ':!tools/leak-scan.sh' | xargs -0 -r grep -Ean "$patterns"; } 2>"$scan_err" || true)
-if [[ -s "$scan_err" ]]; then
-  refuse 'content scan'
+# run_scan reports through the global scan_out, never command substitution — a
+# $(...) subshell would reduce refuse()'s exit 2 to a swallowed substitution
+# status and fail the gate OPEN on a scanner diagnostic.
+scan_out=''
+run_scan() {
+  local label="$1" pats="$2"
+  shift 2
+  scan_out=$( { git ls-files -z ':!tools/leak-scan.sh' "$@" | xargs -0 -r grep -Ean "$pats"; } 2>"$scan_err" || true)
+  if [[ -s "$scan_err" ]]; then
+    refuse "$label"
+  fi
+}
+run_scan 'content scan' "$base_patterns"
+matches="$scan_out"
+if [[ -n "$overlay_patterns" ]]; then
+  run_scan 'overlay content scan' "$overlay_patterns" ':!docs/derivation/reviews'
+  if [[ -n "$scan_out" ]]; then
+    matches="${matches:+$matches$'\n'}$scan_out"
+  fi
 fi
 if [[ -n "$matches" ]]; then
   echo "$matches"
