@@ -1,0 +1,109 @@
+---
+title: Second-reader records
+description: How derivation subjects are hashed, independently reviewed, and published with scope and verdict.
+---
+
+CLEANROOM.md rule 4: every change touching the paths in
+[`.github/cleanroom-paths.txt`](https://github.com/GridWork-dev/gridwork/blob/main/.github/cleanroom-paths.txt) gets an
+independent fresh-context review before it reaches `main`. This directory is where
+those reviews are recorded, and `cleanroom-gate` in CI is what makes skipping one
+visible.
+
+## The subject digest
+
+A record is named after its **subject** — a SHA-256 over every gated path the change
+touches paired with that file's blob hash at `HEAD`, plus the text of every registry
+row those files' `Derivation:` markers cite:
+
+```
+docs/derivation/reviews/<subject>.md
+```
+
+Get it for the current branch:
+
+```bash
+git diff --no-renames --name-only origin/main...HEAD | ./tools/cleanroom-gate.sh --subject
+```
+
+(If the branch also edits `SPECS.md` or `CAPTURES.md`, the gate needs a base to diff
+their rows against: prepend `CLEANROOM_BASE="$(git merge-base origin/main HEAD)"` to
+the `cleanroom-gate.sh` end of the pipe. CI exports it on every run.)
+
+The digest covers gated files and the rows they cite, so committing the record does not
+change it — but editing any gated file afterwards does, and the gate goes red again.
+That is the point: a review is bound to the content it actually read, and cannot be
+carried across a rewrite of that content.
+
+The registry half of a citation gets the same treatment, because a review checks that a
+marker and its row *agree* — binding only the file half would leave the row free to move
+under a record that vouched for the pair. Editing a row a gated file cites, even in a
+change that touches no gated path, re-opens review of the files citing it: the gate
+diffs registry rows against `CLEANROOM_BASE` and treats the citing files as touched,
+and it refuses a registry edit it has no base to judge. A row nothing cites stays free
+to add or fix — pre-seeding is meant to be cheap, and stays so.
+
+Two scope notes, said plainly. The diff feeding the gate must be produced with
+`--no-renames` (CI's is): default rename detection folds a modify-plus-rename into one
+line naming only the new path, which is exactly how a registry edit would vanish from
+the input — the reviewer of this mechanism defeated its first version that way. And the
+binding covers table rows, not the prose around them: the sentences that govern how a
+row is read stay rule 4's reader's job, like every other claim in this repository.
+
+## Writing one
+
+```bash
+subject=$(git diff --no-renames --name-only origin/main...HEAD | ./tools/cleanroom-gate.sh --subject)
+cp docs/derivation/reviews/TEMPLATE.md "docs/derivation/reviews/$subject.md"
+```
+
+Fill in `subject:`, `reviewer:`, and tick all four checks. Commit it in the same
+branch. The gate verifies the file exists, that it declares the matching subject, that
+it names a reviewer, and that all four checks are ticked — and, separately, that every
+gated source file in the change carries a resolving `Derivation:` marker.
+
+## What the reviewer does
+
+Read the gated diff cold — without the implementing session's context — and check
+exactly the four things rule 4 names:
+
+1. **citations** — every non-obvious terminal behavior carries a `Derivation:` marker
+   naming a permitted source by ID, from [`../SPECS.md`](/docs/derivation/specifications) (public
+   specifications) or [`../CAPTURES.md`](/docs/derivation/captures) (registered observations).
+
+   The gate already proved every cited ID resolves and that no gated source file is
+   unmarked, so do not re-check that by hand. **Check what the gate cannot:** that each
+   marker sits on the behavior it describes, and that the cited source actually says what
+   the code does. A marker citing a real spec for the wrong behavior passes the gate and
+   fails this check — that is the case you are here for.
+2. **framing** — no source-derived framing: no comment, name, or structure that reads as
+   transcribed from another implementation rather than from a specification.
+3. **references** — no other project named as a comparand, and no capture cited by path.
+   Captures are referenced by registered ID and SHA-256, never otherwise.
+4. **leak** — `./tools/leak-scan.sh` green.
+
+A behavior with no citable permitted source is an escalation, not a guess.
+
+## What this proves, and what it does not
+
+It proves a review ran against this exact content, that its record was written at commit
+time rather than reconstructed after a question was raised, and that every citation
+resolves.
+
+It does **not** prove the reviewer was independent. This repository has one maintainer;
+GitHub does not permit a pull-request author to approve their own pull request, so a
+required-review rule would not create a gate here — it would only make `main` unmergeable.
+Independence is procedural: the reviewer is a fresh-context session with no exposure to
+the implementing session's context. Claiming the narrower thing truthfully is worth more
+than claiming a stronger control that a single-maintainer repository cannot deliver.
+
+## Published records
+
+| Date | Scope | Record |
+| --- | --- | --- |
+| 2026-08-02 | Claude control-channel `--verbose` fix, `CAP-003`, and parity-runner hardening | [`08ad472…`](https://github.com/GridWork-dev/gridwork/blob/main/docs/derivation/reviews/08ad472a68f78fbd6b2764d555e10116f94ea62df6edb40e73ab9097095b4a63.md) |
+| 2026-08-01 | Codex app-server adapter, typed protocol handling, and vendored schema provenance | [`214ce08…`](https://github.com/GridWork-dev/gridwork/blob/main/docs/derivation/reviews/214ce08ceff320c86aa2b7a559b77c6257e3e2c93bae4cef5c0b2291faa37a29.md) |
+| 2026-07-30 | Initial PTY engine crate, toolchain pins, and first derivation marker | [`29b2277…`](https://github.com/GridWork-dev/gridwork/blob/main/docs/derivation/reviews/29b22771ca9ff3c7443b6a77764e423c77fbc7f7f22b136fdbe56b673f482fa8.md) |
+| 2026-08-01 | Claude adapter stream parsing, control channel, cost mapping, and approval relay | [`7b9d5b7…`](https://github.com/GridWork-dev/gridwork/blob/main/docs/derivation/reviews/7b9d5b77b4dac5f1a0113104bfe859c4a3e6baf17a6ed05afb6ce817aa79d3e6.md) |
+| 2026-08-01 | Initial render/control halves for the opencode, Claude, and Codex adapters | [`a447d09…`](https://github.com/GridWork-dev/gridwork/blob/main/docs/derivation/reviews/a447d09f2a2a94f0af1e908c74fb1d1389a823c6379811984cbfd25b7a6f6635.md) |
+| 2026-08-01 | PTY sessions, replay/conformance fixtures, and complete capture-tree enforcement | [`d4cfef6…`](https://github.com/GridWork-dev/gridwork/blob/main/docs/derivation/reviews/d4cfef6ff67cc88082f3f2fe33c7a4b60e8deccb28b25a91b1011b1745a716bc.md) |
+| 2026-08-01 | opencode event-bus normalization and per-child cost extraction | [`e250724…`](https://github.com/GridWork-dev/gridwork/blob/main/docs/derivation/reviews/e2507240fd4e02c59548138b2c26a1af5c590aa1d0ffe5c8ef3e94651c0f61d5.md) |

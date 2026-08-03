@@ -602,16 +602,60 @@ jobs:
         working-directory: contracts
       - run: ./tools/check-theme-sync.sh
 
-  # The site container must stay buildable: repo-root context (allowlist
-  # .dockerignore), digest-pinned base, Caddyfile validated at build time.
+  # The site must install with Bun, generate Fumadocs sources, build Next's
+  # standalone output, and serve the production routes with the header floor.
   site:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: docker build -f site/Dockerfile .
+      - name: Build standalone site image
+        run: docker build -f site/Dockerfile -t gridwork-site:ci .
+      - name: Smoke routes and security headers
+        run: |
+          set -euo pipefail
+          container_id="$(docker run -d -p 127.0.0.1:8080:3000 -e PORT=3000 gridwork-site:ci)"
+          if [[ ! "$container_id" =~ ^[a-f0-9]{64}$ ]]; then
+            echo "site smoke: invalid container id" >&2
+            exit 1
+          fi
+          cleanup() { docker rm -f "$container_id" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+
+          ready=0
+          for _ in $(seq 1 30); do
+            if curl -fsS -o /dev/null http://127.0.0.1:8080/; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [[ "$ready" -ne 1 ]]; then
+            echo "site smoke: server did not become ready" >&2
+            docker logs "$container_id" >&2
+            exit 1
+          fi
+
+          check_response() {
+            local path="$1"
+            local expected_status="$2"
+            local response
+            response="$(curl -sS -D - -o /dev/null "http://127.0.0.1:8080${path}")"
+            echo "$response" | grep -qE "^HTTP/[0-9.]+ ${expected_status} "
+            for header in Strict-Transport-Security X-Content-Type-Options X-Frame-Options Referrer-Policy Content-Security-Policy; do
+              echo "$response" | grep -qi "^${header}:"
+            done
+            if echo "$response" | grep -qi '^X-Powered-By:'; then
+              echo "site smoke: X-Powered-By leaked on ${path}" >&2
+              exit 1
+            fi
+          }
+
+          check_response / 200
+          check_response /docs 200
+          check_response /this-path-does-not-exist 404
 
   # bans/licenses/sources block merges; advisories run separately below so a
   # newly published advisory can't redden an unchanged PR.
