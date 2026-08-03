@@ -1229,6 +1229,8 @@ dependencies = [
  "serde",
  "serde_json",
  "specta",
+ "unicode-properties",
+ "unicode-width",
 ]
 
 [[package]]

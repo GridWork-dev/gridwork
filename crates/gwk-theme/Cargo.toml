@@ -17,6 +17,8 @@ specta.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+unicode-properties.workspace = true
+unicode-width.workspace = true
 
 [lints]
 workspace = true

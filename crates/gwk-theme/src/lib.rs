@@ -10,6 +10,13 @@
 //!
 //! NOTE: the `Token { name: …, value: …, role: … }` lines below are parsed by
 //! `tools/check-theme-sync.sh` — keep one token per line.
+//!
+//! [`marks`] carries the other half of the ratified vocabulary: the symbol
+//! inventory the terminal surface draws from, and the admission rule that
+//! governs what may enter it. Also data only — no rendering, no escape
+//! sequences, no process.
+
+pub mod marks;
 
 /// One named color token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, specta::Type)]
