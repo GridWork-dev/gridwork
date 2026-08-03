@@ -15,10 +15,21 @@ public record of that procedure, in force before any engine code exists.
    maintainers, agents, or external contributors (see CONTRIBUTING.md). Concept-level
    inspiration from public, documented behavior is fine; derivation is not.
 2. **Engine authors don't read copyleft source.** Whoever implements code under the
-   paths listed in `.github/cleanroom-paths.txt` (the PTY engine, engine adapters, and
-   all multiplexer work) does not read the source of copyleft terminal multiplexers —
-   before or during that work. Behavior is derived from public specifications and
-   observed wire behavior only.
+   paths listed in `.github/cleanroom-paths.txt` does not read the source of copyleft
+   terminal multiplexers — before or during that work. Behavior is derived from public
+   specifications and observed wire behavior only.
+
+   **What gets listed is a category, not a directory.** Any path whose code supervises
+   an engine process or a PTY session — spawn, pump loop, restart semantics, session
+   registry, detach/reattach routing — or emits or parses terminal-protocol bytes is
+   gated, at whatever module granularity keeps the tax off lens code.
+
+   The granularity clause is the point, not a softening. A crate is rarely all one
+   thing: the parity harness is a pure data model plus a set of runners that spawn and
+   kill engine children, and gating the whole crate to reach the runners would put a
+   review tax on check functions that never see a process. So the runners are listed
+   and the rest is not. The gate follows the risk; the directory tree is just where the
+   risk happens to sit this week.
 ## What every gated change carries
 
 Every gated change carries stable citation IDs and an independent second reader record.
