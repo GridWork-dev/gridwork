@@ -53,7 +53,8 @@ subject=$(git diff --no-renames --name-only origin/main...HEAD | ./tools/cleanro
 cp docs/derivation/reviews/TEMPLATE.md "docs/derivation/reviews/$subject.md"
 ```
 
-Fill in `subject:`, `reviewer:`, and tick all four checks. Commit it in the same
+Fill in `subject:`, `reviewer:`, `session:` (the reviewing session's opaque id — an id,
+never a path), and tick all four checks. Commit it in the same
 branch. The gate verifies the file exists, that it declares the matching subject, that
 it names a reviewer, and that all four checks are ticked — and, separately, that every
 gated source file in the change carries a resolving `Derivation:` marker.
@@ -76,6 +77,12 @@ exactly the four things rule 4 names:
    transcribed from another implementation rather than from a specification.
 3. **references** — no other project named as a comparand, and no capture cited by path.
    Captures are referenced by registered ID and SHA-256, never otherwise.
+
+   Write this one up as the **class searched and the hit count** — "terminal-tooling
+   comparand class (5 terms): 0 hits" — never the query terms. Naming them publishes
+   the exact strings the check exists to keep out of this repository, in the one
+   artifact nobody reviews a second time. The shape is required at authoring time
+   precisely so it is not something to catch afterwards.
 4. **leak** — `./tools/leak-scan.sh` green.
 
 A behavior with no citable permitted source is an escalation, not a guess.
