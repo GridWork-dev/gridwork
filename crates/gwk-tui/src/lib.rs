@@ -1,11 +1,11 @@
 //! The GridWork terminal console — the thin client half.
 //!
-//! **This crate is a skeleton.** It exports nothing yet. The lenses that will
-//! live here — the Queue, the Board, the config surface, the session
-//! drill-down — are ordered behind a design gate this commit deliberately sits
-//! in front of, so the crate lands as its manifest, its module boundary, and
-//! its dependency posture, and nothing else. Painting anything here now would
-//! be applying an idiom that has not been ratified.
+//! **The crate is still nearly a skeleton.** The lenses that will live here —
+//! the Queue, the Board, the config surface, the session drill-down — are
+//! ordered behind a design gate, so what exists so far is the manifest, the
+//! module boundary, the dependency posture, and [`theme`]: the one function
+//! that turns a resolved token into a renderer colour. The idiom that function
+//! applies IS ratified; the lenses that consume it are not yet built.
 //!
 //! # What the crate is
 //!
@@ -27,3 +27,5 @@
 //! `.github/cleanroom-paths.txt`). Nothing in that module exists yet. The rest
 //! of this crate is lens code and is deliberately outside the gate: the gate
 //! follows the risk, not the directory tree.
+
+pub mod theme;

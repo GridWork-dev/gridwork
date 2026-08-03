@@ -371,7 +371,13 @@ test("signal theme: 15 tokens, crate order, hex values", async () => {
   if (!Array.isArray(raw)) throw new Error("theme is not an array");
   const tokens = raw as B.Token[];
   expect(tokens).toHaveLength(15);
-  expect(tokens[0]).toEqual({ name: "bg", value: "#070B10", role: "canvas background" });
+  expect(tokens[0]).toEqual({
+    name: "bg",
+    value: "#070B10",
+    role: "canvas background",
+    index256: 232,
+    tier16: "NotAColor",
+  });
   for (const token of tokens) {
     expect(token.value).toMatch(/^#[0-9A-F]{6}$/i);
     expect(token.name).toMatch(/^[a-z0-9_]+$/);

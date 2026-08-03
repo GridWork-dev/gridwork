@@ -1,5 +1,5 @@
-//! The SIGNAL design tokens — data only, no rendering, no dependencies beyond
-//! serialization.
+//! The ratified SIGNAL vocabulary — data and total functions, no rendering, no
+//! dependencies beyond serialization.
 //!
 //! One source of truth consumed three ways: the site's CSS custom properties
 //! (checked by `tools/check-theme-sync.sh` — token `name` maps to
@@ -9,14 +9,58 @@
 //! decision, never drift.
 //!
 //! NOTE: the `Token { name: …, value: …, role: … }` lines below are parsed by
-//! `tools/check-theme-sync.sh` — keep one token per line.
+//! `tools/check-theme-sync.sh` — keep `name` and `value` adjacent, one token
+//! per line.
 //!
-//! [`marks`] carries the other half of the ratified vocabulary: the symbol
-//! inventory the terminal surface draws from, and the admission rule that
-//! governs what may enter it. Also data only — no rendering, no escape
-//! sequences, no process.
+//! Two modules carry the rest of the vocabulary, both equally data-only:
+//!
+//! * [`marks`] — the symbol inventory the terminal surface draws from, and the
+//!   admission rule that governs what may enter it.
+//! * [`tier`] — the colour-capability ladder, and the hand-authored map from a
+//!   token to what each tier can actually show. It resolves a token to a slot
+//!   NUMBER and stops there; turning a slot into bytes belongs to a renderer.
+//!
+//! [`swatch`] renders both into one text frame per tier — the goldens that are
+//! this repository's public mirror of the private tier tables.
 
 pub mod marks;
+pub mod swatch;
+pub mod tier;
+
+pub use tier::{AnsiSlot, ColorChoice, ColorTier, Paint, TerminalEnv, Tier16};
+
+/// A flag value the parser refuses. Shared by every closed-value flag on this
+/// surface, so they all refuse the same way and all name what they DO accept.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlagValueError {
+    pub flag: &'static str,
+    pub given: String,
+    pub allowed: &'static [&'static str],
+}
+
+impl FlagValueError {
+    pub fn new(flag: &'static str, given: &str, allowed: &'static [&'static str]) -> Self {
+        FlagValueError {
+            flag,
+            given: given.to_owned(),
+            allowed,
+        }
+    }
+}
+
+impl std::fmt::Display for FlagValueError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: no such value {:?}; one of: {}",
+            self.flag,
+            self.given,
+            self.allowed.join(", ")
+        )
+    }
+}
+
+impl std::error::Error for FlagValueError {}
 
 /// One named color token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, specta::Type)]
@@ -27,6 +71,14 @@ pub struct Token {
     pub value: &'static str,
     /// What the token is FOR — the contract is the role, not the hex.
     pub role: &'static str,
+    /// The nearest xterm-256 cube index, measured once and recorded here.
+    /// Precomputed rather than quantized at render time, which is also why it
+    /// exists for the three tokens that are never painted: the table that
+    /// measured it measured all fifteen.
+    pub index256: u8,
+    /// What sixteen colours does with the token. HAND-AUTHORED — see
+    /// [`tier::Tier16`] for why computing it fails.
+    pub tier16: tier::Tier16,
 }
 
 /// The SIGNAL palette.
@@ -38,21 +90,21 @@ pub struct Token {
 /// be, because the contract is the role.
 #[rustfmt::skip]
 pub const SIGNAL: &[Token] = &[
-    Token { name: "bg", value: "#070B10", role: "canvas background" },
-    Token { name: "surface", value: "#121A24", role: "raised surface" },
-    Token { name: "surface_2", value: "#1F2B3A", role: "second elevation" },
-    Token { name: "hue", value: "#6BDBFF", role: "accent" },
-    Token { name: "hue_dim", value: "#3FA8CC", role: "accent, dimmed" },
-    Token { name: "hue_bright", value: "#9AE8FF", role: "accent, bright" },
-    Token { name: "fg", value: "#E4EDF5", role: "foreground text" },
-    Token { name: "faint", value: "#526274", role: "faint structure (decorative/hairline only — never text or essential UI)" },
-    Token { name: "muted", value: "#9AA5AF", role: "muted text" },
-    Token { name: "warn", value: "#F2C14E", role: "warning" },
-    Token { name: "fail", value: "#FF6E6E", role: "failure" },
-    Token { name: "ok", value: "#6EE7A8", role: "success" },
-    Token { name: "border", value: "#748496", role: "solid structural boundary" },
-    Token { name: "focus", value: "#6BDBFF", role: "focused-pane / control indicator" },
-    Token { name: "selection", value: "#F5F9FD", role: "selected-row foreground" },
+    Token { name: "bg", value: "#070B10", role: "canvas background", index256: 232, tier16: Tier16::NotAColor },
+    Token { name: "surface", value: "#121A24", role: "raised surface", index256: 234, tier16: Tier16::NotAColor },
+    Token { name: "surface_2", value: "#1F2B3A", role: "second elevation", index256: 235, tier16: Tier16::NotAColor },
+    Token { name: "hue", value: "#6BDBFF", role: "accent", index256: 81, tier16: Tier16::Slot(AnsiSlot::BrightCyan) },
+    Token { name: "hue_dim", value: "#3FA8CC", role: "accent, dimmed", index256: 38, tier16: Tier16::Slot(AnsiSlot::Cyan) },
+    Token { name: "hue_bright", value: "#9AE8FF", role: "accent, bright", index256: 117, tier16: Tier16::BoldSlot(AnsiSlot::BrightCyan) },
+    Token { name: "fg", value: "#E4EDF5", role: "foreground text", index256: 255, tier16: Tier16::Reset },
+    Token { name: "faint", value: "#526274", role: "faint structure (decorative/hairline only — never text or essential UI)", index256: 59, tier16: Tier16::Dropped },
+    Token { name: "muted", value: "#9AA5AF", role: "muted text", index256: 248, tier16: Tier16::Slot(AnsiSlot::BrightBlack) },
+    Token { name: "warn", value: "#F2C14E", role: "warning", index256: 221, tier16: Tier16::Slot(AnsiSlot::BrightYellow) },
+    Token { name: "fail", value: "#FF6E6E", role: "failure", index256: 203, tier16: Tier16::Slot(AnsiSlot::BrightRed) },
+    Token { name: "ok", value: "#6EE7A8", role: "success", index256: 78, tier16: Tier16::Slot(AnsiSlot::BrightGreen) },
+    Token { name: "border", value: "#748496", role: "solid structural boundary", index256: 244, tier16: Tier16::Slot(AnsiSlot::White) },
+    Token { name: "focus", value: "#6BDBFF", role: "focused-pane / control indicator", index256: 81, tier16: Tier16::ReverseVideo },
+    Token { name: "selection", value: "#F5F9FD", role: "selected-row foreground", index256: 231, tier16: Tier16::ReverseVideo },
 ];
 
 #[cfg(test)]
@@ -121,7 +173,13 @@ mod tests {
         let json = serde_json::to_value(SIGNAL[0]).expect("serialize");
         assert_eq!(
             json,
-            serde_json::json!({ "name": "bg", "value": "#070B10", "role": "canvas background" })
+            serde_json::json!({
+                "name": "bg",
+                "value": "#070B10",
+                "role": "canvas background",
+                "index256": 232,
+                "tier16": "NotAColor",
+            })
         );
     }
 }
