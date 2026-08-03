@@ -568,7 +568,20 @@ CREATE TABLE gwk.attention_item (
   summary     text NOT NULL,
   subject_ref text,
   raised_by   jsonb,
+  -- Rank only, and the same `integer` the task carries. NOT cost-of-waiting:
+  -- an urgency-times-age order needs a per-kind decay this contract does not
+  -- model, and that clause is explicitly deferred rather than covered by this
+  -- column. A reader who takes this as "queue ordering is solved" will ship a
+  -- queue where a stale low-priority page never rises.
+  priority    integer,
   raised_at   timestamptz NOT NULL DEFAULT now(),
+  -- Seen and quiet-until stamps. Both leave `resolved_at` alone ON PURPOSE:
+  -- the partial index below is predicated on `resolved_at IS NULL`, so an ack
+  -- or a mute keeps the item holding its dedup slot and the muted problem
+  -- cannot raise itself again the moment it is silenced. Idempotent
+  -- last-write-wins — re-acking moves the stamp and is not an error.
+  acked_at    timestamptz,
+  muted_until timestamptz,
   resolved_at timestamptz,
   resolution  text
 );
@@ -582,6 +595,10 @@ CREATE TABLE gwk.attention_item (
 -- nothing in particular is not the same item as another about nothing in
 -- particular. The kernel's own page path always names a subject, so this only
 -- affects an explicit RaiseAttention that omits one.
+--
+-- The predicate is `resolved_at IS NULL` and nothing else. Adding `acked_at`
+-- or `muted_until` to it would let a silenced problem raise a second item the
+-- instant it was silenced — the opposite of what quieting a row asks for.
 CREATE UNIQUE INDEX attention_item_unresolved_dedup
   ON gwk.attention_item (kind, subject_ref)
   WHERE resolved_at IS NULL;
@@ -825,4 +842,4 @@ COMMIT;
 // unwrapped 64-hex line lands past 100 columns — the generator and
 // rustfmt would then fight, showing up as permanent contract drift.
 pub const CONTRACT_SQL_SHA256: &str =
-    "54084768d27b82e241674d8ef35fc1f9c898a97da34f8af09b2df4bf69851184";
+    "9bf3aa7872705b96b73455eac8868a31aa9b1d55e3270df7f796f08dcc1a15f3";

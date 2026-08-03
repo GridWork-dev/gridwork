@@ -57,9 +57,21 @@ if [[ "${1:-}" == "--history" ]]; then
   # The DEFAULT no-arg tracked-tree scan below is unchanged and stays green.
   # --diff-merges=first-parent so a leak introduced only by an evil merge (plain
   # `git log -p` shows no diff for merge commits) is still scanned.
+  # ADDED lines only. `git log -p` renders a removal as a `-` line, so scanning the raw
+  # patch makes REMOVING a leaked term trip the gate: the range carrying the remediation
+  # goes red, and the only way through is --no-verify — on precisely the push where the
+  # gate most needs to be armed. A gate that penalizes its own remediation gets disabled.
+  # What publishes is what a commit ADDS, and a term added and removed inside the same
+  # range still trips on its `+` line, so the intermediate-commit case this leg exists
+  # for is untouched. Commit messages survive the filter (git indents them by four
+  # spaces), so message coverage is unchanged. awk, not `grep -v`: grep exits 1 when it
+  # selects nothing, which pipefail would turn into a spurious gate failure, while awk
+  # exits 0 on an empty selection and nonzero only on a real error — which pipefail then
+  # propagates, failing this leg CLOSED like every other scan in this file.
   shift
   status=0
-  git log -p --diff-merges=first-parent "$@" | "$here/$(basename "$0")" --stdin || status=$?
+  git log -p --diff-merges=first-parent "$@" | awk '!/^-/' \
+    | "$here/$(basename "$0")" --stdin || status=$?
   exit "$status"
 fi
 
@@ -120,14 +132,15 @@ if [[ "$(file -b --mime-type site/og.png)" != "image/png" ]]; then
   echo 'leak-scan: site/og.png is not image/png — the binary exemption covers only the reviewed PNG' >&2
   exit 1
 fi
-# The tree scan runs in two tiers. Base public patterns scan every tracked file.
-# Estate overlay patterns additionally exempt docs/derivation/reviews/ — the
-# clean-room review records are the one sanctioned place that names quarantined
-# subjects (each records its grep-for-the-subject verdict), so an overlay tripwire
-# on a subject's name would flag the very line proving no leak exists. Base
-# patterns (credentials, home paths, key blocks) still cover those records in
-# full, and --stdin/--history keep the combined set: history is judged as content,
-# not by where a line would land in today's tree.
+# The tree scan runs in two tiers, and BOTH now scan every tracked file. The overlay
+# tier used to exempt docs/derivation/reviews/, because a record named the quarantined
+# subjects it had grepped for and an overlay tripwire on a subject's name would flag the
+# very line proving no leak exists. The class-and-count rule removed that premise: a
+# record states the class searched and the hit count, never the terms, so there is
+# nothing left in that directory for the overlay tier to false-positive on. The
+# exemption is gone with it — carrying it forward would leave the one directory whose
+# whole purpose is naming what must not leak as the one directory the leak tier cannot
+# see, and that is not a trade this gate can make once it costs nothing.
 # Branch on output, not exit status: xargs exits 123 if any batch matches, and a real
 # match in one batch plus a clean batch must still fail the gate loudly.
 # grep -a, never -I: -I's binary sniff runs over the whole stream, so a NUL past
@@ -148,7 +161,7 @@ run_scan() {
 run_scan 'content scan' "$base_patterns"
 matches="$scan_out"
 if [[ -n "$overlay_patterns" ]]; then
-  run_scan 'overlay content scan' "$overlay_patterns" ':!docs/derivation/reviews'
+  run_scan 'overlay content scan' "$overlay_patterns"
   if [[ -n "$scan_out" ]]; then
     matches="${matches:+$matches$'\n'}$scan_out"
   fi

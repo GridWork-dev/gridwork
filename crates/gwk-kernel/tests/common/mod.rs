@@ -674,6 +674,7 @@ pub async fn populate(store: &PgEventStore) {
             summary: "data-migration pages".to_owned(),
             subject_ref: Some("task/t-1".to_owned()),
             raised_by: Some(actor("kernel")),
+            priority: Some(1),
         },
     )
     .await;
