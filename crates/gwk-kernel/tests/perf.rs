@@ -641,6 +641,7 @@ fn mixed_command(n: u64) -> KernelCommand {
             summary: "measured".to_owned(),
             subject_ref: None,
             raised_by: None,
+            priority: None,
         },
         3 => KernelCommand::RecordEvidence {
             evidence_id: EvidenceId::new(format!("ev-mix-{n}")),

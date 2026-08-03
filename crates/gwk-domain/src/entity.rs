@@ -419,7 +419,35 @@ pub struct AttentionItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[specta(optional)]
     pub raised_by: Option<Actor>,
+    /// Presentation rank, mirroring [`Task::priority`] exactly — same type,
+    /// same optionality, same "absent means unranked".
+    ///
+    /// This is RANK ONLY. It is deliberately NOT cost-of-waiting: a queue
+    /// ordered by urgency-times-age needs `raised_at` weighted against a
+    /// per-kind decay the contract does not model, and that clause is
+    /// EXPLICITLY DEFERRED rather than covered here. Reading this column as
+    /// "ranking is solved" is the mistake it is worth naming: a client sorting
+    /// on it alone still shows a week-old low-priority page below a minute-old
+    /// high-priority one forever.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub priority: Option<i32>,
     pub raised_at: Timestamp,
+    /// Seen, not handled. An ack quiets the row's presentation and NOTHING
+    /// else: `resolved_at` stays absent, so the item still holds its
+    /// (kind, subject_ref) dedup slot and the same problem still cannot raise
+    /// a second time. Mute is the same stamp with a deadline on it.
+    ///
+    /// Both are idempotent last-write-wins: acking twice moves the stamp and
+    /// is not an error, which is why neither carries an expected version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub acked_at: Option<Timestamp>,
+    /// Quiet until this instant. Past-or-absent means audible; a client
+    /// unmutes by stamping a time already gone rather than by a second verb.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub muted_until: Option<Timestamp>,
     // Set together when someone closes the item. While `resolved_at` is absent
     // the item is what the (kind, subject_ref) dedup counts, so it is also the
     // field that decides whether the same problem raises a second time.
