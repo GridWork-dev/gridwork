@@ -972,22 +972,25 @@ jobs:
           BASE_REF: ${{ github.base_ref }}
         run: |
           git log --format=%B "origin/${BASE_REF}..HEAD" | ./tools/leak-scan.sh --stdin
-      - name: scan PR diff range (added and deleted lines)
-        if: github.event_name == 'pull_request'
-        shell: bash
-        env:
-          BASE_REF: ${{ github.base_ref }}
-        run: |
-          git diff --unified=0 "origin/${BASE_REF}...HEAD" | ./tools/leak-scan.sh --stdin
       - name: scan PR commit content (every commit patch, intermediate included)
         if: github.event_name == 'pull_request'
         # The range diff nets an add-then-remove to zero; scanning each commit's
-        # patch catches a value that lived only in an intermediate PR commit.
+        # patch catches a value that lived only in an intermediate PR commit. A
+        # separate `git diff --unified=0` leg used to run first and is gone: every
+        # line of a range diff is a `+` in some commit's patch inside that same
+        # range, so it was strictly subsumed by this step — and keeping it meant
+        # maintaining the added-lines filter in a second place, which is the drift
+        # the one-pattern-list rule exists to prevent.
+        #
+        # --history, not a hand-rolled `git log -p | --stdin`: the added-lines
+        # filter that keeps a REMOVAL of a leaked term from reddening the gate
+        # lives inside --history. Inlining the pipeline here bypassed it, so CI
+        # would have gone red on exactly the commits that clean a leak up.
         shell: bash
         env:
           BASE_REF: ${{ github.base_ref }}
         run: |
-          git log -p --diff-merges=first-parent "origin/${BASE_REF}..HEAD" | ./tools/leak-scan.sh --stdin
+          ./tools/leak-scan.sh --history "origin/${BASE_REF}..HEAD"
       - name: scan pushed commit messages and content
         if: github.event_name == 'push'
         shell: bash
@@ -999,10 +1002,10 @@ jobs:
             # Branch creation / first publication: there is no before SHA, so the
             # pushed range is the full history of the pushed SHA — messages AND content.
             git log --format=%B "$AFTER" | ./tools/leak-scan.sh --stdin
-            git log -p --diff-merges=first-parent "$AFTER" | ./tools/leak-scan.sh --stdin
+            ./tools/leak-scan.sh --history "$AFTER"
           else
             git log --format=%B "${BEFORE}..${AFTER}" | ./tools/leak-scan.sh --stdin
-            git log -p --diff-merges=first-parent "${BEFORE}..${AFTER}" | ./tools/leak-scan.sh --stdin
+            ./tools/leak-scan.sh --history "${BEFORE}..${AFTER}"
           fi
       - name: prove the gate can fail (seeded violation)
         run: |
