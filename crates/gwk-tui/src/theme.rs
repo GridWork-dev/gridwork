@@ -8,7 +8,7 @@
 //! whole degradation path is ours, which is exactly why it lives behind one
 //! function instead of a capability check per widget.
 
-use gwk_theme::marks::{Mark, StateBinding};
+use gwk_theme::marks::{GlyphSet, Mark, StateBinding};
 use gwk_theme::{AnsiSlot, ColorTier, Paint, Token};
 use ratatui::style::{Color, Modifier, Style};
 
@@ -75,19 +75,12 @@ pub fn state_style(state: &StateBinding, tier: ColorTier) -> Style {
     }
 }
 
-/// The glyph a mark shows on `frame`, honouring the escape.
+/// The glyph a mark shows on `frame` under `glyphs`.
 ///
-/// A cycling mark advances; a static one ignores the frame counter. Under the
-/// escape every mark is its single ASCII fallback, cycles included — an ASCII
-/// spinner that animated would need eight ASCII frames nobody ruled.
-pub fn glyph(mark: &Mark, frame: usize, ascii: bool) -> char {
-    if ascii {
-        return mark.ascii;
-    }
-    if mark.glyphs.is_empty() {
-        return mark.ascii;
-    }
-    mark.glyphs[frame % mark.glyphs.len()]
+/// A thin re-export of [`Mark::at`]: the escape is a property of the inventory,
+/// not of the renderer, so it resolves where the inventory lives.
+pub fn glyph(mark: &Mark, frame: usize, glyphs: GlyphSet) -> char {
+    mark.at(frame, glyphs)
 }
 
 #[cfg(test)]
@@ -219,17 +212,47 @@ mod tests {
     #[test]
     fn a_cycling_mark_advances_and_a_static_one_does_not() {
         let spinner = mark("spinner").expect("spinner");
-        let frames: BTreeSet<char> = (0..8).map(|f| glyph(spinner, f, false)).collect();
+        let frames: BTreeSet<char> = (0..8)
+            .map(|f| glyph(spinner, f, GlyphSet::Unicode))
+            .collect();
         assert_eq!(frames.len(), 8);
-        assert_eq!(glyph(spinner, 8, false), glyph(spinner, 0, false));
+        assert_eq!(
+            glyph(spinner, 8, GlyphSet::Unicode),
+            glyph(spinner, 0, GlyphSet::Unicode)
+        );
 
         let done = mark("done").expect("done");
-        assert_eq!(glyph(done, 0, false), glyph(done, 7, false));
+        assert_eq!(
+            glyph(done, 0, GlyphSet::Unicode),
+            glyph(done, 7, GlyphSet::Unicode)
+        );
 
         // The escape flattens the cycle: one mark, one ASCII character.
         for entry in MARKS {
-            assert_eq!(glyph(entry, 0, true), entry.ascii);
-            assert_eq!(glyph(entry, 5, true), entry.ascii);
+            assert_eq!(glyph(entry, 0, GlyphSet::Ascii), entry.ascii);
+            assert_eq!(glyph(entry, 5, GlyphSet::Ascii), entry.ascii);
         }
+    }
+
+    #[test]
+    fn tier_and_glyph_set_are_independent_escapes() {
+        // A terminal can need the ASCII set and still have every colour, and a
+        // terminal can be monochrome and render every mark. Asking for one
+        // escape must not silently take the other — which is what a single
+        // combined "degraded mode" flag would have done.
+        let spinner = mark("spinner").expect("spinner");
+        for tier in ColorTier::ALL {
+            assert_eq!(
+                glyph(spinner, 3, GlyphSet::Unicode),
+                spinner.glyphs[3],
+                "the glyph set moved with the tier at {}",
+                tier.as_str()
+            );
+        }
+        assert_eq!(
+            token_style(token("fail"), ColorTier::Truecolor).fg,
+            Some(Color::Rgb(0xFF, 0x6E, 0x6E)),
+            "the tier moved with the glyph set"
+        );
     }
 }

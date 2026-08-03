@@ -144,6 +144,58 @@ pub fn mark(name: &str) -> Option<&'static Mark> {
     MARKS.iter().find(|mark| mark.name == name)
 }
 
+/// The `--glyphs=` value. Exactly two, and **no detection**.
+///
+/// The admission rule has no per-glyph waiver path, so this is the single
+/// documented escape for the whole inventory: a terminal or font that cannot
+/// draw one mark cannot draw it, and the answer is the ASCII set rather than a
+/// substitution nobody ruled.
+///
+/// Structurally symmetric with the colour flag — a closed value set, parsed
+/// once at startup, an unknown value refused rather than absorbed. It is
+/// deliberately NOT run through [`crate::TerminalEnv`], because that resolver's
+/// whole job is reading the environment and this flag's whole ruling is that
+/// nothing is detected. Two values is the entire vocabulary; a font-coverage
+/// probe would be a third answer the ruling does not have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GlyphSet {
+    #[default]
+    Unicode,
+    Ascii,
+}
+
+impl GlyphSet {
+    pub const FLAG: &'static str = "--glyphs";
+    pub const VALUES: &'static [&'static str] = &["unicode", "ascii"];
+
+    pub fn parse(value: &str) -> Result<Self, crate::FlagValueError> {
+        match value {
+            "unicode" => Ok(GlyphSet::Unicode),
+            "ascii" => Ok(GlyphSet::Ascii),
+            other => Err(crate::FlagValueError::new(Self::FLAG, other, Self::VALUES)),
+        }
+    }
+
+    pub const fn is_ascii(self) -> bool {
+        matches!(self, GlyphSet::Ascii)
+    }
+}
+
+impl Mark {
+    /// The codepoint this mark shows on `frame` under `glyphs`.
+    ///
+    /// A cycling mark advances; a static one ignores the counter. Under the
+    /// escape every mark is its single ASCII fallback, cycles included: an
+    /// animated ASCII spinner would need eight ASCII frames nobody ruled, and
+    /// inventing them here would be minting inventory through the escape hatch.
+    pub fn at(&self, frame: usize, glyphs: GlyphSet) -> char {
+        if glyphs.is_ascii() || self.glyphs.is_empty() {
+            return self.ascii;
+        }
+        self.glyphs[frame % self.glyphs.len()]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -307,6 +359,67 @@ mod tests {
                 entry.name
             );
         }
+    }
+
+    #[test]
+    fn the_escape_is_the_whole_inventory_and_has_exactly_two_values() {
+        // The escape covers EVERY mark, because the admission rule has no
+        // per-glyph waiver: a partial escape would leave the surface with one
+        // unrenderable cell and no way to ask for a different one.
+        for entry in MARKS {
+            assert_eq!(entry.at(0, GlyphSet::Ascii), entry.ascii, "{}", entry.name);
+            // Including the cycles, at every frame.
+            for frame in 0..16 {
+                assert_eq!(entry.at(frame, GlyphSet::Ascii), entry.ascii);
+            }
+        }
+        // Unicode is the default and the cycles cycle.
+        assert_eq!(GlyphSet::default(), GlyphSet::Unicode);
+        let spinner = mark("spinner").expect("spinner");
+        let frames: BTreeSet<char> = (0..8).map(|f| spinner.at(f, GlyphSet::Unicode)).collect();
+        assert_eq!(frames.len(), 8);
+        assert_eq!(
+            spinner.at(8, GlyphSet::Unicode),
+            spinner.at(0, GlyphSet::Unicode)
+        );
+
+        assert_eq!(GlyphSet::parse("ascii"), Ok(GlyphSet::Ascii));
+        assert_eq!(GlyphSet::parse("unicode"), Ok(GlyphSet::Unicode));
+        let err = GlyphSet::parse("auto").expect_err("there is no detection");
+        let text = err.to_string();
+        assert!(text.contains("--glyphs"), "{text}");
+        for allowed in GlyphSet::VALUES {
+            assert!(text.contains(allowed), "{text} omits {allowed}");
+            assert!(GlyphSet::parse(allowed).is_ok(), "{allowed}");
+        }
+        assert_eq!(
+            GlyphSet::VALUES.len(),
+            2,
+            "exactly two values, no detection"
+        );
+    }
+
+    #[test]
+    fn the_escape_never_collides_two_marks_into_one_cell() {
+        // The property that makes the escape usable rather than merely
+        // available: two states that were distinct under the inventory must
+        // stay distinct under ASCII. Identity marks may repeat a letter with a
+        // second-letter rule, so this binds the EXPRESSION set, which is where
+        // the states live.
+        let mut seen: Vec<(char, &str)> = MARKS
+            .iter()
+            .filter(|m| m.kind == MarkKind::Expression)
+            .map(|m| (m.ascii, m.name))
+            .collect();
+        seen.sort_unstable();
+        let collisions: Vec<_> = seen
+            .windows(2)
+            .filter(|pair| pair[0].0 == pair[1].0)
+            .collect();
+        assert!(
+            collisions.is_empty(),
+            "the ASCII escape collapses expression marks: {collisions:?}"
+        );
     }
 
     #[test]
