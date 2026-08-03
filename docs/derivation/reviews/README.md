@@ -73,6 +73,14 @@ exactly the four things rule 4 names:
    marker sits on the behavior it describes, and that the cited source actually says what
    the code does. A marker citing a real spec for the wrong behavior passes the gate and
    fails this check — that is the case you are here for.
+
+   **`Derivation: none — <reason>` is a claim you check like any other.** It says the
+   file derives nothing, and the gate can only confirm that a reason was written, never
+   that it is true. Read the file and decide: does it spawn a process, parse a byte,
+   supervise a session, or encode any terminal behavior at all? If it does, the
+   declaration is false, and that is a blocker at the same severity as a wrong section
+   number — and easier to miss, because a `none` invites you to stop reading. It is the
+   one marker that earns *more* scrutiny than a citation, not less.
 2. **framing** — no source-derived framing: no comment, name, or structure that reads as
    transcribed from another implementation rather than from a specification.
 3. **references** — no other project named as a comparand, and no capture cited by path.

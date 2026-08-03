@@ -76,6 +76,14 @@ exactly the four things rule 4 names:
    marker sits on the behavior it describes, and that the cited source actually says what
    the code does. A marker citing a real spec for the wrong behavior passes the gate and
    fails this check — that is the case you are here for.
+
+   **`Derivation: none — <reason>` is a claim you check like any other.** It says the
+   file derives nothing, and the gate can only confirm that a reason was written, never
+   that it is true. Read the file and decide: does it spawn a process, parse a byte,
+   supervise a session, or encode any terminal behavior at all? If it does, the
+   declaration is false, and that is a blocker at the same severity as a wrong section
+   number — and easier to miss, because a `none` invites you to stop reading. It is the
+   one marker that earns *more* scrutiny than a citation, not less.
 2. **framing** — no source-derived framing: no comment, name, or structure that reads as
    transcribed from another implementation rather than from a specification.
 3. **references** — no other project named as a comparand, and no capture cited by path.
@@ -118,6 +126,7 @@ than claiming a stronger control that a single-maintainer repository cannot deli
 
 | Date | Scope | Record |
 | --- | --- | --- |
+| 2026-08-03 | `gwk-pty-host` skeleton crate, and rule 3's `Derivation: none` declaration form | [`2340dbf…`](https://github.com/GridWork-dev/gridwork/blob/main/docs/derivation/reviews/2340dbf1d7b42edb44b2143c3f795ec8d954fa32ccb8b38779337a4740ffe5e9.md) |
 | 2026-08-02 | Claude control-channel `--verbose` fix, `CAP-003`, and parity-runner hardening | [`08ad472…`](https://github.com/GridWork-dev/gridwork/blob/main/docs/derivation/reviews/08ad472a68f78fbd6b2764d555e10116f94ea62df6edb40e73ab9097095b4a63.md) |
 | 2026-08-01 | Codex app-server adapter, typed protocol handling, and vendored schema provenance | [`214ce08…`](https://github.com/GridWork-dev/gridwork/blob/main/docs/derivation/reviews/214ce08ceff320c86aa2b7a559b77c6257e3e2c93bae4cef5c0b2291faa37a29.md) |
 | 2026-07-30 | Initial PTY engine crate, toolchain pins, and first derivation marker | [`29b2277…`](https://github.com/GridWork-dev/gridwork/blob/main/docs/derivation/reviews/29b22771ca9ff3c7443b6a77764e423c77fbc7f7f22b136fdbe56b673f482fa8.md) |

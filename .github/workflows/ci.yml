@@ -418,6 +418,42 @@ jobs:
           attach_tests > /dev/null
           echo "the reattach gate rejects each seed and accepts the real code"
 
+  # `gwk-pty-host` is a workspace member but not a DEFAULT member (see the note
+  # in the root Cargo.toml) — not for the `pty` job's reason, it needs no Zig
+  # today, but on the same policy: `test`/`msrv`/`package` build only default
+  # members, so a crate absent from that list is silently unbuilt and
+  # untested by every one of them unless something else names it. This job is
+  # that something else.
+  pty-host:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - run: cargo fmt -p gwk-pty-host --check
+      - run: cargo clippy -p gwk-pty-host --all-targets --locked -- -D warnings
+      - run: cargo test -p gwk-pty-host --all-targets --locked
+      - run: cargo test -p gwk-pty-host --doc --locked
+      # A crate silently dropped from `default-members` and named nowhere else
+      # is a crate no job builds — the exact hole this job exists to close.
+      # Prove it by breaking the crate and watching THIS job go red, not by
+      # trusting that the three commands above would notice.
+      - name: prove this job goes red when the crate breaks
+        run: |
+          set -euo pipefail
+          trap 'git checkout -- crates/gwk-pty-host/src/lib.rs' EXIT
+          printf '\npub fn seeded_compile_error( {\n' >> crates/gwk-pty-host/src/lib.rs
+          if cargo test -p gwk-pty-host --all-targets --locked > /dev/null 2>&1; then
+            echo 'gwk-pty-host built clean with a seeded compile error in it — this job cannot fail' >&2
+            exit 1
+          fi
+          echo "pty-host: seeded breakage correctly rejected"
+
   # Criterion 4, executable: `cargo install gridwork` has to work for someone who
   # has never heard of Zig. Every other job happens to run on a runner without
   # Zig, which makes the claim true BY ACCIDENT — nothing there would notice if it
@@ -1134,12 +1170,39 @@ jobs:
           fi
           echo "cleanroom-gate: path citation correctly rejected"
 
+          # Half four: `Derivation: none` with no reason. The declaration form is the
+          # one marker that names no registry row, so it is the one an author could
+          # sprinkle to silence this gate — the mandatory reason is what stops that,
+          # and a rule nothing seeds is a rule that quietly stops applying.
+          printf '// Derivation: none\nfn seeded() {}\n' > "$dir/bare-none.rs"
+          if echo "$dir/bare-none.rs" | ./tools/cleanroom-gate.sh --markers; then
+            echo 'marker check accepted a Derivation: none with no reason' >&2
+            exit 1
+          fi
+          echo "cleanroom-gate: unexplained 'none' correctly rejected"
+
+          # Half five: `none` beside a real citation. A file derives nothing or it
+          # names its sources, never both — and this direction is the dangerous one,
+          # because a reviewer who reads the `none` stops looking and never checks
+          # the citation sitting next to it.
+          printf '// Derivation: none — seeded\n// Derivation: ECMA-48 §8.3.14 — seeded\nfn seeded() {}\n' > "$dir/none-plus.rs"
+          if echo "$dir/none-plus.rs" | ./tools/cleanroom-gate.sh --markers; then
+            echo 'marker check accepted a Derivation: none alongside a real citation' >&2
+            exit 1
+          fi
+          echo "cleanroom-gate: contradictory 'none' correctly rejected"
+
           # The positive control. Seeds that can only ever fail would also pass with
           # the whole parser replaced by `exit 1`, which is the failure this job
-          # exists to make impossible.
+          # exists to make impossible. Two of them now: a citation and a declaration,
+          # because a parser that rejected every `none` would pass all five seeds above.
           printf '// Derivation: ECMA-48 §8.3.14 — seeded\nfn seeded() {}\n' > "$dir/ok.rs"
           echo "$dir/ok.rs" | ./tools/cleanroom-gate.sh --markers
           echo "cleanroom-gate: registered citation correctly accepted"
+
+          printf '// Derivation: none — seeded: this file derives nothing\nfn seeded() {}\n' > "$dir/ok-none.rs"
+          echo "$dir/ok-none.rs" | ./tools/cleanroom-gate.sh --markers
+          echo "cleanroom-gate: explained 'none' correctly accepted"
           rm -rf "${prefix}-seed"
 
   # Hosted CI enforces the GENERIC pattern set only — the estate-specific extension

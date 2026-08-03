@@ -76,6 +76,22 @@ public record of that procedure, in force before any engine code exists.
 
    A behavior with no citable permitted source is an escalation, not a guess.
 
+   **A file that derives nothing says so, rather than inventing a citation.** The gate
+   keys on file extension, not content, so a gated crate's skeleton — or a re-export, or
+   a config module — owes a marker it has nothing truthful to fill in. The declaration
+   form is rule 3's answer:
+
+   ```
+   // Derivation: none — skeleton only: no process spawned, no byte parsed
+   ```
+
+   The reason is mandatory; a bare `Derivation: none` is not a marker and the gate keeps
+   rejecting the file. A `none` may not sit beside a real citation — a file derives
+   nothing or it names its sources, never both, and the failure direction is why: a
+   reviewer who sees the `none` stops looking and never checks the citation next to it.
+   This is not a way out of an awkward behavior. A behavior with no citable permitted
+   source is still an escalation, not a `none`.
+
    What the gate proves is that the claim was made and that the source is registered.
    It does not prove the claim is TRUE — a marker can name a spec the code did not come
    from, or the right spec with the wrong section, and only rule 4's reader catches
