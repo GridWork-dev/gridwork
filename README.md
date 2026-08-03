@@ -143,6 +143,7 @@ code.
 | [`gwk`](https://docs.rs/gwk) | Namespace root for the `gwk-*` crates. **No API** | 0.0.2, name only |
 | `xtask` | Codegen and release glue. Not published | in-tree |
 | `gwk-pty` | PTY engine: server-side VT, render-state deltas, reattach | planned |
+| `gwk-pty-host` | Resident PTY engine host: session registry, spawn, detach/reattach routing | planned — unpublished, and not part of `cargo install gridwork` until its own release |
 | `gwk-adapter-*` | Per-engine ACP + hooks adapters | planned |
 | `gwk-tui` | The client: modes, lenses, palette | planned |
 
@@ -154,7 +155,11 @@ into looking like one.
 nothing, because the `gw` binary and the `gwk-kernel` behind it were in this tree and
 not on crates.io; publishing the kernel is what changed, exactly as the 0.0.1 README
 said it would. What you get is the headless CLI — it still needs a PostgreSQL 16 and
-the two roles above before it does anything.
+the two roles above before it does anything. Through the Console stage, that command
+stays scoped to the kernel, the CLI, and the TUI's lenses: the PTY engine host is a
+separate, unpublished process the installed binary never links (`gwk-tui` never
+depends on `gwk-pty`, asserted in CI) and does not ship until packaging catches up to
+it, at 1.0.
 
 Library crates are prefixed `gwk-` (the crates.io name `gw` belongs to an unrelated
 tool). **The binary is `gw`** — from the first build, permanently.
