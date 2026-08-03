@@ -366,11 +366,11 @@ test("kernel checkpoint: decimal-string sequence, lowercase digest", async () =>
   await reemit("kernel-checkpoint.json", checkpoint);
 });
 
-test("signal theme: 12 tokens, crate order, hex values", async () => {
+test("signal theme: 15 tokens, crate order, hex values", async () => {
   const raw = JSON.parse(await Bun.file(`${import.meta.dir}/signal-theme.json`).text());
   if (!Array.isArray(raw)) throw new Error("theme is not an array");
   const tokens = raw as B.Token[];
-  expect(tokens).toHaveLength(12);
+  expect(tokens).toHaveLength(15);
   expect(tokens[0]).toEqual({ name: "bg", value: "#070B10", role: "canvas background" });
   for (const token of tokens) {
     expect(token.value).toMatch(/^#[0-9A-F]{6}$/i);

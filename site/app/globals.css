@@ -15,6 +15,9 @@
   --warn:#F2C14E;
   --fail:#FF6E6E;
   --ok:#6EE7A8;
+  --border:#748496;
+  --focus:#6BDBFF;
+  --selection:#F5F9FD;
 
   --line: rgba(82, 98, 116, 0.34);
   --line-hi: rgba(82, 98, 116, 0.58);

@@ -23,6 +23,12 @@ pub struct Token {
 }
 
 /// The SIGNAL palette.
+///
+/// Twelve ratified tokens plus the three minted by ADR-0028 for the console's
+/// structural roles. `focus` carries `hue`'s value on purpose — it is minted as
+/// a distinct ROLE, not a distinct hex, and stays pinned there until a rendered
+/// console proves it must diverge. Names are unique; values are not required to
+/// be, because the contract is the role.
 #[rustfmt::skip]
 pub const SIGNAL: &[Token] = &[
     Token { name: "bg", value: "#070B10", role: "canvas background" },
@@ -37,6 +43,9 @@ pub const SIGNAL: &[Token] = &[
     Token { name: "warn", value: "#F2C14E", role: "warning" },
     Token { name: "fail", value: "#FF6E6E", role: "failure" },
     Token { name: "ok", value: "#6EE7A8", role: "success" },
+    Token { name: "border", value: "#748496", role: "solid structural boundary" },
+    Token { name: "focus", value: "#6BDBFF", role: "focused-pane / control indicator" },
+    Token { name: "selection", value: "#F5F9FD", role: "selected-row foreground" },
 ];
 
 #[cfg(test)]
@@ -44,12 +53,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn twelve_unique_snake_named_hex_tokens() {
-        assert_eq!(SIGNAL.len(), 12);
+    fn fifteen_unique_snake_named_hex_tokens() {
+        assert_eq!(SIGNAL.len(), 15);
         let mut names: Vec<&str> = SIGNAL.iter().map(|t| t.name).collect();
         names.sort_unstable();
         names.dedup();
-        assert_eq!(names.len(), 12, "duplicate token name");
+        assert_eq!(names.len(), 15, "duplicate token name");
         for token in SIGNAL {
             assert!(
                 token
@@ -80,6 +89,24 @@ mod tests {
             faint.role,
             "faint structure (decorative/hairline only — never text or essential UI)"
         );
+    }
+
+    #[test]
+    fn focus_shares_hues_value_on_purpose() {
+        // ADR-0028 residual 1, made mechanical: `focus` is a distinct role on a
+        // shared hex, and the shared hex is the decision rather than an
+        // oversight. Anyone "fixing" the duplicate has to delete this test and
+        // say why — every candidate fourth cyan measured 7-9 dE from an
+        // existing member of the three-intensity family, which is accent
+        // collapse, not a family member.
+        let value = |name: &str| {
+            SIGNAL
+                .iter()
+                .find(|token| token.name == name)
+                .map(|token| token.value)
+                .expect("token")
+        };
+        assert_eq!(value("focus"), value("hue"));
     }
 
     #[test]

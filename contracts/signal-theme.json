@@ -58,5 +58,20 @@
     "name": "ok",
     "value": "#6EE7A8",
     "role": "success"
+  },
+  {
+    "name": "border",
+    "value": "#748496",
+    "role": "solid structural boundary"
+  },
+  {
+    "name": "focus",
+    "value": "#6BDBFF",
+    "role": "focused-pane / control indicator"
+  },
+  {
+    "name": "selection",
+    "value": "#F5F9FD",
+    "role": "selected-row foreground"
   }
 ]
