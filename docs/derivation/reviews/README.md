@@ -53,7 +53,8 @@ subject=$(git diff --no-renames --name-only origin/main...HEAD | ./tools/cleanro
 cp docs/derivation/reviews/TEMPLATE.md "docs/derivation/reviews/$subject.md"
 ```
 
-Fill in `subject:`, `reviewer:`, and tick all four checks. Commit it in the same
+Fill in `subject:`, `reviewer:`, `session:` (the reviewing session's opaque id — an id,
+never a path), and tick all four checks. Commit it in the same
 branch. The gate verifies the file exists, that it declares the matching subject, that
 it names a reviewer, and that all four checks are ticked — and, separately, that every
 gated source file in the change carries a resolving `Derivation:` marker.
@@ -76,6 +77,24 @@ exactly the four things rule 4 names:
    transcribed from another implementation rather than from a specification.
 3. **references** — no other project named as a comparand, and no capture cited by path.
    Captures are referenced by registered ID and SHA-256, never otherwise.
+
+   Write this one up as the **class searched and the hit count** — "terminal-tooling
+   comparand class (5 terms): 0 hits" — never the query terms. Naming them publishes
+   the exact strings the check exists to keep out of this repository, in the one
+   artifact nobody reviews a second time. The shape is required at authoring time
+   precisely so it is not something to catch afterwards.
+
+   Give the term count when you ran the grep and know it; leave it out when you don't.
+   Never reconstruct one — a count inferred from the length of a list you are deleting
+   is a number nobody can check, in a record whose only value is that its numbers are
+   checkable. "Class: 0 hits" is complete; an invented "(5 terms)" is worse than
+   silence.
+
+   A name that is already a **registered permitted source** in `../SPECS.md` is not a
+   query term and is not redacted — cite it. Where a project appears both as a
+   registered protocol and as an implementation, saying which one you checked IS the
+   finding, and collapsing it into a class count deletes the answer to a question the
+   registry itself raises.
 4. **leak** — `./tools/leak-scan.sh` green.
 
 A behavior with no citable permitted source is an escalation, not a guess.

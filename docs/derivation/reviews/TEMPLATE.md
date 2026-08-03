@@ -1,5 +1,6 @@
 subject: <paste the digest from `./tools/cleanroom-gate.sh --subject`>
 reviewer: <the reviewing lane — a fresh-context session with no exposure to the implementing session>
+session: <the reviewing session's opaque id — an id only, never a path>
 date: <YYYY-MM-DD>
 
 # Second-reader record
@@ -18,7 +19,14 @@ date: <YYYY-MM-DD>
       says, and came from it
 - [ ] framing — no source-derived framing in comments, names, or structure
 - [ ] references — no naming of other projects as comparands, and no capture cited by
-      path: captures are referenced by their registered ID and SHA-256, never otherwise
+      path: captures are referenced by their registered ID and SHA-256, never otherwise.
+      Record the finding as the CLASS searched and the HIT COUNT — "terminal-tooling
+      comparand class (5 terms): 0 hits" — never the query terms themselves. A record
+      that lists them publishes the exact strings this check exists to keep out, and
+      the record is the one artifact nobody re-reviews. Give the term count only if you
+      ran the grep and know it — never reconstruct one. A name already registered in
+      ../SPECS.md is a permitted source, not a query term: cite it, and say whether you
+      checked the protocol or the implementation
 - [ ] leak — `./tools/leak-scan.sh` green
 
 ## Notes
