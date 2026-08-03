@@ -25,7 +25,7 @@ STATES (11)
   state            mark              glyph  ascii  token       this tier
   idle             idle              ⠄      .      muted       index 248
   queued           queued            ⠒      :      muted       index 248
-  starting         spinner           ⠋      -      hue_dim     index 38
+  starting         starting          ⠈      ^      hue_dim     index 38
   running          spinner           ⠋      -      hue         index 81
   canceling        spinner_reversed  ⠆      ~      muted       index 248
   needs_attention  attention         !      !      warn        index 221
@@ -50,5 +50,5 @@ CYCLES
   spinner_reversed ⠆⡄⣠⢰⠸⠹⠙⠋
 
 WIDTH RULER - every mark is one cell, so the pipes line up
-  |✦|✧|▴|▸|◃|▿|∙|⠄|⠒|⠋|⠆|!|⊘|✗|✓|⊖|?|
-  |X|X|X|X|X|X|X|X|X|X|X|X|X|X|X|X|X|
+  |✦|✧|▴|▸|◃|▿|∙|⠄|⠒|⠈|⠋|⠆|!|⊘|✗|✓|⊖|?|
+  |X|X|X|X|X|X|X|X|X|X|X|X|X|X|X|X|X|X|

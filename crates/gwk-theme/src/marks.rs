@@ -1,10 +1,14 @@
 //! The ratified mark inventory — the console's symbol vocabulary.
 //!
-//! Seventeen marks over twenty-three codepoints. Seven name WHO an agent is,
-//! ten name WHAT it is doing, and the two cells sit side by side. Cardinality
-//! is identity **plus** expression, never identity times expression: a per-pair
-//! composite would need seventy mutually distinguishable single-cell codepoints
-//! and the admissible pool is roughly two dozen.
+//! Eighteen marks over twenty-four codepoints. Seven name WHO an agent is,
+//! eleven name WHAT it is doing, and the two cells sit side by side.
+//! Cardinality is identity **plus** expression, never identity times
+//! expression: a per-pair composite would need seventy-seven mutually
+//! distinguishable single-cell codepoints and the admissible pool is roughly
+//! two dozen.
+//!
+//! Eleven expression marks for eleven states, one each. That the two counts
+//! match is the whole point — see `the_state_to_glyph_map_is_injective`.
 //!
 //! # The admission rule
 //!
@@ -92,6 +96,17 @@ pub const MARKS: &[Mark] = &[
     // Expression.
     Mark { name: "idle",             glyphs: &['⠄'],      ascii: '.', kind: MarkKind::Expression },
     Mark { name: "queued",           glyphs: &['⠒'],      ascii: ':', kind: MarkKind::Expression },
+    // `starting` had no mark of its own: it was the running spinner dimmed, so
+    // the two states were separated by accent intensity and nothing else, and
+    // at the bottom tier — where no colour is emitted — they became one cell.
+    // The operator ruled it a distinct mark. Braille, because that family is
+    // already here and adds no second font-coverage risk and no second width
+    // class; STATIC, because "the engine has not come up yet" is honestly a
+    // non-moving state, and a state deciding not to move at all is exactly what
+    // the motion rules leave to it. U+2808 is dot 4 — the upper-RIGHT corner,
+    // diagonally opposite `idle`'s lower-left dot, because idle-versus-starting
+    // is the confusion that would actually cost an operator something.
+    Mark { name: "starting",         glyphs: &['⠈'],      ascii: '^', kind: MarkKind::Expression },
     Mark { name: "spinner",          glyphs: SPINNER,          ascii: '-', kind: MarkKind::Expression },
     Mark { name: "spinner_reversed", glyphs: SPINNER_REVERSED, ascii: '~', kind: MarkKind::Expression },
     // Plain `!`, not U+26A0: the warning sign is EAW=N and passes the first
@@ -126,9 +141,10 @@ pub struct StateBinding {
 pub const STATES: &[StateBinding] = &[
     StateBinding { name: "idle",            mark: "idle",             token: "muted" },
     StateBinding { name: "queued",          mark: "queued",           token: "muted" },
-    // `starting` and `running` share the spinner and differ only in accent
-    // intensity. See `exactly_one_state_pair_is_separated_by_colour_alone`.
-    StateBinding { name: "starting",        mark: "spinner",          token: "hue_dim" },
+    // `starting` keeps `hue_dim` — it is still a live-but-not-yet-running
+    // state and the dimmer accent reads correctly. What changed is that the
+    // accent is no longer the ONLY thing separating it from `running`.
+    StateBinding { name: "starting",        mark: "starting",         token: "hue_dim" },
     StateBinding { name: "running",         mark: "spinner",          token: "hue" },
     StateBinding { name: "canceling",       mark: "spinner_reversed", token: "muted" },
     StateBinding { name: "needs_attention", mark: "attention",        token: "warn" },
@@ -281,16 +297,16 @@ mod tests {
     }
 
     #[test]
-    fn seventeen_marks_over_twenty_three_codepoints() {
-        assert_eq!(MARKS.len(), 17, "the ruled inventory is 17 marks");
+    fn eighteen_marks_over_twenty_four_codepoints() {
+        assert_eq!(MARKS.len(), 18, "the ruled inventory is 18 marks");
         let codepoints: BTreeSet<char> = MARKS
             .iter()
             .flat_map(|m| m.glyphs.iter().copied())
             .collect();
         assert_eq!(
             codepoints.len(),
-            23,
-            "the ruled inventory is 23 codepoints — 15 static plus one 8-frame cycle, \
+            24,
+            "the ruled inventory is 24 codepoints — 16 static plus one 8-frame cycle, \
              with the reversed cycle contributing no new ones"
         );
         assert_eq!(
@@ -305,7 +321,7 @@ mod tests {
                 .iter()
                 .filter(|m| m.kind == MarkKind::Expression)
                 .count(),
-            10
+            11
         );
     }
 
@@ -423,31 +439,40 @@ mod tests {
     }
 
     #[test]
-    fn exactly_one_state_pair_is_separated_by_colour_alone() {
-        // A REPORTED collision between two rulings, pinned rather than
-        // resolved. The mark set rules `starting` as a dimmed spinner and
-        // `running` as the same spinner undimmed, which makes them one glyph
-        // and two accent intensities. The injectivity invariant says no two
-        // states are distinguished by colour alone and the glyph is sufficient
-        // for every pair. Both cannot hold, and at the bottom tier — where no
-        // colour is emitted at all — the two states become the same cell.
+    fn the_state_to_glyph_map_is_injective() {
+        // THE invariant: no two states in this system are distinguished by
+        // colour alone, and the glyph alone is sufficient for every pair. It is
+        // what makes a washed sixteen-colour terminal degrade to monochrome
+        // SEMANTICS rather than to nothing — if colour carries zero bits
+        // anywhere, removing all of it removes zero bits.
         //
-        // The operator holds the call, so this test decides nothing: it pins
-        // the collision at exactly one pair, so a second one cannot arrive
-        // quietly while the first is still open.
-        let mut colour_only: Vec<(&str, &str)> = Vec::new();
-        for (i, a) in STATES.iter().enumerate() {
-            for b in &STATES[i + 1..] {
-                if a.mark == b.mark && a.token != b.token {
-                    colour_only.push((a.name, b.name));
-                }
-            }
-        }
+        // It did not hold when this file was first written. `starting` was the
+        // running spinner dimmed, so those two states were one glyph and two
+        // accent intensities, and at the bottom tier they were the same cell.
+        // Both readings were ratified text and neither could be quietly
+        // preferred, so the collision was reported and pinned at exactly one
+        // pair. The operator ruled: mint `starting` its own mark. This test is
+        // the invariant it restored, asserted at full strength.
+        let mut by_mark: Vec<(&str, &str)> = STATES.iter().map(|s| (s.mark, s.name)).collect();
+        by_mark.sort_unstable();
+        let shared: Vec<_> = by_mark
+            .windows(2)
+            .filter(|pair| pair[0].0 == pair[1].0)
+            .map(|pair| (pair[0].0, pair[0].1, pair[1].1))
+            .collect();
+        assert!(
+            shared.is_empty(),
+            "these states share a mark, so the glyph alone no longer distinguishes \
+             them and whatever separates them is colour: {shared:?}"
+        );
+        // The stronger consequence, stated so it cannot be lost: eleven states
+        // over eleven expression marks, one each.
         assert_eq!(
-            colour_only,
-            vec![("starting", "running")],
-            "the state pairs separated by colour alone changed; the known one is \
-             an open operator call, a new one is a defect"
+            STATES.len(),
+            MARKS
+                .iter()
+                .filter(|m| m.kind == MarkKind::Expression)
+                .count()
         );
     }
 }
