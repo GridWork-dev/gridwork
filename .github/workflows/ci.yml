@@ -868,6 +868,62 @@ jobs:
           # job exists to make impossible.
           : | ./tools/cleanroom-gate.sh
           echo "cleanroom-gate: the live tree is fully classified"
+      - name: a direct gwk-pty dependency owes a prefix row (seeded violations)
+        run: |
+          set -euo pipefail
+          # The classification step makes someone decide. This one takes the
+          # decision away where the answer is already known: a crate linking
+          # the PTY engine is gated by that fact, not by whether it got named
+          # `gwk-pty-host` or `gwk-host`. True at HEAD with zero new rows —
+          # `crates/gwk-adapter-` already covers all three declarants — so
+          # every proof here has to be seeded.
+          trap 'git checkout -- crates/gwk-theme/Cargo.toml crates/gwk-adapter-claude/Cargo.toml crates/gwk-adapter-codex/Cargo.toml crates/gwk-adapter-opencode/Cargo.toml' EXIT
+
+          # An ungated crate quietly acquiring the dependency — the shape the
+          # rule is named for.
+          sed -i '/^\[dependencies\]/a gwk-pty.workspace = true' crates/gwk-theme/Cargo.toml
+          if : | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate passed an ungated crate depending on gwk-pty' >&2
+            exit 1
+          fi
+          git checkout -- crates/gwk-theme/Cargo.toml
+          echo "cleanroom-gate: ungated gwk-pty dependent correctly rejected"
+
+          # The same dependency under another name. This is the one shape that
+          # hides from a reader skimming manifests for the string, which is
+          # exactly the reader this gate stands in for.
+          sed -i '/^\[dependencies\]/a hidden = { package = "gwk-pty", path = "../gwk-pty" }' crates/gwk-theme/Cargo.toml
+          if : | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate passed a renamed gwk-pty dependency' >&2
+            exit 1
+          fi
+          git checkout -- crates/gwk-theme/Cargo.toml
+          echo "cleanroom-gate: renamed gwk-pty dependency correctly rejected"
+
+          # The table form. TOML has four ways to say this and a check that
+          # knows three of them is a check with a documented bypass.
+          printf '\n[dependencies.gwk-pty]\nworkspace = true\n' >> crates/gwk-theme/Cargo.toml
+          if : | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate passed a [dependencies.gwk-pty] table' >&2
+            exit 1
+          fi
+          git checkout -- crates/gwk-theme/Cargo.toml
+          echo "cleanroom-gate: [dependencies.gwk-pty] table correctly rejected"
+
+          # The positive control, and the only one that can catch the check
+          # being deleted: with no declarant anywhere, a broken detection and a
+          # clean tree look identical, so the gate must treat zero as the
+          # broken one.
+          sed -i 's/^gwk-pty\.workspace = true$/# seeded removal/' crates/gwk-adapter-*/Cargo.toml
+          if : | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate passed with no gwk-pty declarant at all — a vacuous check' >&2
+            exit 1
+          fi
+          git checkout -- crates/gwk-adapter-claude/Cargo.toml crates/gwk-adapter-codex/Cargo.toml crates/gwk-adapter-opencode/Cargo.toml
+          echo "cleanroom-gate: an empty declarant set correctly reads as a broken detection"
+
+          : | ./tools/cleanroom-gate.sh
+          echo "cleanroom-gate: every direct gwk-pty dependent carries its prefix row"
       - name: prove an unregistered capture is rejected (seeded violation)
         run: |
           set -euo pipefail

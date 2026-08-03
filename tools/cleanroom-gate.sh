@@ -332,9 +332,84 @@ EOF
   fi
 }
 
+# A crate that declares a DIRECT `gwk-pty` dependency is gated, by that fact and
+# not by its name.
+#
+# This is the other half of the coin flip. The classification check above makes
+# someone decide; this one takes the decision away where the answer is already
+# known — a crate linking the PTY engine has the engine's types, its session
+# handles and its terminal bytes in scope, and whether the gate reaches it
+# cannot be left to whether somebody called it `gwk-pty-host` or `gwk-host`.
+# `crates/gwk-adapter-` covers the three that do today, so this adds no rows;
+# it makes the fourth one impossible to add quietly.
+#
+# TRANSITIVE dependencies are deliberately NOT covered. gwk-parity gets the
+# engine's types through the adapters and is not gated wholesale for it — the
+# category rule is module-granular precisely so a harness's pure half stays
+# cheap. Direct is the line because declaring the dependency is the act of
+# reaching for the engine, and it is the act a manifest records.
+#
+# ponytail: greps manifests rather than asking cargo. This job has no Rust
+# toolchain — it is a checkout and a bash script — and adding one to read
+# `cargo metadata` would cost minutes per run to learn what four lines of TOML
+# already say. The four shapes a direct dependency can take are all matched
+# below; the discovery is asserted non-empty so a fifth shape cannot make this
+# pass by finding nothing.
+check_pty_dependents() {
+  local bad=0 found=0 manifest crate p gated
+
+  for manifest in crates/*/Cargo.toml xtask/Cargo.toml; do
+    [[ -f "$manifest" ]] || continue
+    crate="${manifest%/Cargo.toml}"
+    # `gwk-pty = ...` / `gwk-pty.workspace = true` / `[dependencies.gwk-pty]` /
+    # a rename (`foo = { package = "gwk-pty" }`). The rename matters most: it is
+    # the one shape that hides the dependency from a reader skimming for the
+    # name, which is exactly the reader this gate stands in for.
+    grep -qE '^[[:space:]]*gwk-pty[[:space:]]*[.=]|^\[[^]]*dependencies\.gwk-pty\]|package[[:space:]]*=[[:space:]]*"gwk-pty"' \
+      "$manifest" || continue
+    # Its own manifest names it without depending on it.
+    [[ "$crate" == "crates/gwk-pty" ]] && continue
+    found=$((found + 1))
+
+    gated=0
+    for p in "${prefixes[@]}"; do
+      if [[ "$crate" == "$p"* ]]; then
+        gated=1
+        break
+      fi
+    done
+    if [[ $gated -eq 0 ]]; then
+      echo "cleanroom-gate: $crate declares a direct gwk-pty dependency and matches no gated prefix" >&2
+      bad=1
+    fi
+  done
+
+  # The positive control, inline. Every seed for this check is a violation, so
+  # deleting the grep would leave a check that passes because it finds nothing —
+  # the same green-because-it-could-not-look failure the whole job exists for.
+  # Three crates declare the dependency today; zero means the detection broke,
+  # not that the tree got cleaner.
+  if [[ $found -eq 0 ]]; then
+    echo "cleanroom-gate: no crate declares a gwk-pty dependency — the detection is broken, not the tree" >&2
+    bad=1
+  fi
+
+  if [[ $bad -ne 0 ]]; then
+    cat >&2 <<'EOF'
+
+A crate that links the PTY engine holds its types, its session handles and its
+terminal bytes. Whether the clean-room gate reaches it is not allowed to depend
+on the name someone picked: add the crate's prefix to
+.github/cleanroom-paths.txt in the same commit that adds the dependency.
+EOF
+    return 1
+  fi
+}
+
 if [[ "$mode" == "check" ]]; then
   check_captures
   check_crate_classification
+  check_pty_dependents
 fi
 
 input_paths=()
