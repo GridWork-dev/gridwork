@@ -1,0 +1,63 @@
+---
+title: Contract naming
+description: The casing, value-set, opaque-reference, vendor-neutral, integer, and timestamp rules for every GridWork contract surface.
+---
+
+Frozen at the Contract stage (stage 1 of 5). These rules bind every identifier
+the contract exports — Rust, generated TypeScript, SQL, and wire JSON. A
+rename after this freeze is a breaking contract change, not a style edit.
+
+## One casing rule
+
+**Everything on the wire is `snake_case`** — field names, entity names, event
+types, AND state values. There are no exceptions and no per-surface variants:
+
+- wire JSON field: `model_lane`, `tracker_ref`, `delivery_refs`
+- state values: `input_required`, `dead_letter`, `verification_complete`
+- SQL: same identifiers, same values (`gwk.attempt.model_lane`)
+- generated TypeScript **type names** keep the Rust type's PascalCase
+  (`EventEnvelope`, `AttemptState`) — types are code, values are wire.
+
+There is no serde rename layer between Rust field names and the wire: what the
+struct declares is what serializes, so wire == DDL == TS fields by
+construction.
+
+## Open vs closed value sets
+
+A value set is **closed** only when the contract itself owes exhaustive
+behavior for every member (FSM states, `TransitionResult` kinds, gate
+verdicts, command `outcome`). Everything classificatory is an **open bounded
+string** — new members are additive data, never a breaking enum change:
+
+- open: `engine`, `capability`, `role`, `model_lane`, `permission_profile`,
+  gate `kind`, evidence `kind`, actor `kind`, `event_type`, `aggregate_type`,
+  receipt `action`, attention/dispatch `kind`, `retention_class`
+- closed: the four FSM state sets, `outcome` (`clean|partial|unknown`),
+  gate `verdict` (`pending|pass|fail|partial`), lease `state`/`mode`
+
+## References are opaque
+
+Anything ending in `_ref` (and `tracker_ref` in particular) is an opaque
+token: the contract never parses it, never validates its scheme, and never
+names the vendor behind it. Per-channel delivery bookkeeping is a map
+(`delivery_refs: { channel → opaque ref }`), never a vendor-named column.
+
+## No vendor or brand identifiers
+
+Public identifiers never encode a vendor, a product, an internal tool, or a
+brand. If a value needs to point at one, it rides an opaque ref or an open
+kind chosen by the deployment, not by this contract.
+
+## 64-bit values
+
+Every counter that can exceed 2^53 − 1 crosses the wire as a **canonical
+decimal string** (`global_sequence`, fence tokens, byte counts, cost in
+micro-USD). Canonical: ASCII digits, no sign, no leading zero. In SQL these
+are `numeric(20,0)` — a signed `bigint` tops out at 2^63 − 1, half the u64
+range; the string rule is a wire-format rule.
+
+## Timestamps
+
+RFC 3339 strings on the wire, `timestamptz` in SQL, named `*_at`
+(`occurred_at`, `appended_at`, `expires_at`) — except `ts` on receipts, whose
+rows are pure attestations.

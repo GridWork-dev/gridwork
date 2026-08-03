@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # check-theme-sync.sh — the site's CSS custom properties and the gwk-theme
 # crate must agree, both directions:
-#   1. every crate token (snake_case) exists in site/index.html as
+#   1. every crate token (snake_case) exists in site/app/globals.css as
 #      --kebab-case:<value>
 #   2. every solid #RRGGBB custom property in the site exists in the crate
 # The crate is the source of truth; a mismatch is a design decision that
@@ -11,7 +11,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 crate=crates/gwk-theme/src/lib.rs
-site=site/index.html
+site=site/app/globals.css
 fail=0
 
 # crate -> site

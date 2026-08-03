@@ -1,5 +1,27 @@
-# Allowlist form: the site image needs ONLY site/. Everything else — source,
-# history, contracts, tooling — stays out of every build context by default.
+# Allowlist form: site/ plus only the canonical public docs checked during the build.
 *
 !site/
 site/README.md
+site/node_modules/
+site/.next/
+site/.source/
+site/public/og.png
+site/.env*
+!README.md
+!ROADMAP.md
+!CLEANROOM.md
+!SECURITY.md
+!docs/
+docs/**
+!docs/architecture.md
+!docs/protocol.md
+!docs/PARITY.md
+!docs/contract/
+!docs/contract/NAMING.md
+!docs/security/
+!docs/security/THREAT_MODEL.md
+!docs/derivation/
+!docs/derivation/SPECS.md
+!docs/derivation/CAPTURES.md
+!docs/derivation/reviews/
+!docs/derivation/reviews/*.md

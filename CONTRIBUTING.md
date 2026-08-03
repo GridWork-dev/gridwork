@@ -34,7 +34,7 @@ other things get checked:
 |---|---|
 | the MSRV job | `rustup toolchain install 1.94` — the floor is MSRV (1.94) |
 | `cargo deny` | `cargo install cargo-deny` |
-| the generated TypeScript | [Bun](https://bun.sh) — CI pins **1.3.14** |
+| the generated TypeScript and site | [Bun](https://bun.sh) — CI pins **1.3.14** |
 | the SQL DDL | a PostgreSQL 16 you can point `psql` at |
 | the site image | Docker |
 
@@ -79,6 +79,14 @@ usually the cheaper place to run them. Locally they are:
 ```bash
 cargo +1.94 check --workspace --all-targets --locked
 psql "$PGURL" -v ON_ERROR_STOP=1 -f schema/0001_contract.sql
+cd site
+bun install --frozen-lockfile
+bun run check:docs
+bun run typecheck
+bun run build
+cd ..
+./tools/check-theme-sync.sh
+./tools/check-claims.sh
 docker build -f site/Dockerfile .
 ```
 
