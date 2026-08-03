@@ -25,7 +25,7 @@ STATES (11)
   state            mark              glyph  ascii  token       this tier
   idle             idle              ⠄      .      muted       slot 8 bright_black
   queued           queued            ⠒      :      muted       slot 8 bright_black
-  starting         starting          ⠈      ^      hue_dim     slot 6 cyan
+  starting         starting          ⠉      ^      hue_dim     slot 6 cyan
   running          spinner           ⠋      -      hue         slot 14 bright_cyan
   canceling        spinner_reversed  ⠆      ~      muted       slot 8 bright_black
   needs_attention  attention         !      !      warn        slot 11 bright_yellow
@@ -50,5 +50,5 @@ CYCLES
   spinner_reversed ⠆⡄⣠⢰⠸⠹⠙⠋
 
 WIDTH RULER - every mark is one cell, so the pipes line up
-  |✦|✧|▴|▸|◃|▿|∙|⠄|⠒|⠈|⠋|⠆|!|⊘|✗|✓|⊖|?|
+  |✦|✧|▴|▸|◃|▿|∙|⠄|⠒|⠉|⠋|⠆|!|⊘|✗|✓|⊖|?|
   |X|X|X|X|X|X|X|X|X|X|X|X|X|X|X|X|X|X|

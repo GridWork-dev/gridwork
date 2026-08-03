@@ -103,10 +103,18 @@ pub const MARKS: &[Mark] = &[
     // already here and adds no second font-coverage risk and no second width
     // class; STATIC, because "the engine has not come up yet" is honestly a
     // non-moving state, and a state deciding not to move at all is exactly what
-    // the motion rules leave to it. U+2808 is dot 4 — the upper-RIGHT corner,
-    // diagonally opposite `idle`'s lower-left dot, because idle-versus-starting
-    // is the confusion that would actually cost an operator something.
-    Mark { name: "starting",         glyphs: &['⠈'],      ascii: '^', kind: MarkKind::Expression },
+    // the motion rules leave to it.
+    //
+    // U+2809 is dots 1+4 — the whole TOP ROW. ADR-0029 first picked U+2808
+    // (dot 4 alone) for being the diagonal opposite of `idle`'s lower-left dot,
+    // and the rendered probe showed why position alone was the wrong axis: two
+    // single dots at the lightest available ink read as the same speck at a
+    // glance, opposite corners or not. Two dots carry double the ink of `idle`,
+    // so the pair now separates by WEIGHT as well as position — and a weight
+    // difference survives the squint that a position difference does not.
+    // ADR-0030 amends ADR-0029 on this one property; everything else it ruled
+    // (braille, static, `hue_dim`) stands.
+    Mark { name: "starting",         glyphs: &['⠉'],      ascii: '^', kind: MarkKind::Expression },
     Mark { name: "spinner",          glyphs: SPINNER,          ascii: '-', kind: MarkKind::Expression },
     Mark { name: "spinner_reversed", glyphs: SPINNER_REVERSED, ascii: '~', kind: MarkKind::Expression },
     // Plain `!`, not U+26A0: the warning sign is EAW=N and passes the first
