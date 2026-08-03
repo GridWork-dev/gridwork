@@ -12,7 +12,13 @@
 //!
 //! This crate is under `CLEANROOM.md`'s second-review gate
 //! (`.github/cleanroom-paths.txt`), by the `crates/gwk-pty` prefix and by its
-//! own explicit row. It asserts no terminal-protocol behavior yet — nothing
-//! here spawns a process, parses a byte, or supervises anything — so it
-//! carries no `Derivation:` marker.
+//! own explicit row. It asserts no terminal-protocol behavior yet, so rather
+//! than invent a citation it carries rule 3's declaration form below. The
+//! reason is the marker: a reviewer can check it as easily as a section number,
+//! and the day this file gains a derived construct the declaration becomes
+//! false in the one place someone editing it will be looking.
+
+// Derivation: none — skeleton only: nothing here spawns a process, parses a byte,
+// or supervises a session. The runtime and its citations land in the follow-up.
+
 #![doc(html_root_url = "https://docs.rs/gwk-pty-host")]

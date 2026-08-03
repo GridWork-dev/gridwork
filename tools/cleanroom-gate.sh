@@ -128,6 +128,24 @@ cited_ids() {
   sed -nE 's@^[[:space:]]*(//|#)[[:space:]]*Derivation:[[:space:]]+([^[:space:]]+)[[:space:]]+[^[:space:]].*$@\2@p'
 }
 
+# The one ID that is a DECLARATION rather than a citation: `Derivation: none — <why>`
+# says this file derives nothing, so there is no permitted source to name.
+#
+# It exists because owes_marker() keys on file extension, not content: a gated
+# crate's skeleton — doc comments, no process spawned, no byte parsed, no session
+# supervised — owed a marker it had nothing truthful to fill in, and the only ways
+# out were a false citation or leaving the crate ungated. Both are worse than
+# saying so. This is the same bargain the rest of rule 3 already makes: the gate
+# proves a claim was MADE and is attributable; rule 4's reader is what makes it
+# true. A `none` is exactly as reviewable as a wrong section number, and more
+# visible than either.
+#
+# The reason is mandatory, and free: cited_ids' trailing `[^[:space:]]` means a
+# bare `Derivation: none` is not a marker at all, so the file reads as unmarked
+# and the gate rejects it. An unexplained `none` is the bypass this form would
+# otherwise be.
+NONE_ID='none'
+
 # CLEANROOM.md rule 3, made mechanical. Derived code names its permitted source in
 # the line above it. Until now rule 3 was enforced only by a reviewer ticking a
 # box — which is the check that cannot fail, one layer up.
@@ -142,6 +160,31 @@ check_markers() {
     if [[ ${#cited[@]} -eq 0 ]]; then
       echo "cleanroom-gate: $f is under the clean-room gate and carries no 'Derivation:' marker" >&2
       bad=1
+      continue
+    fi
+
+    # Split the declaration off from real citations before anything resolves it.
+    local declares_none=0 real=()
+    for id in "${cited[@]}"; do
+      if [[ "$id" == "$NONE_ID" ]]; then
+        declares_none=1
+      else
+        real+=("$id")
+      fi
+    done
+
+    # The two cannot both be true of one file. A `none` that sits beside a real
+    # citation is not a declaration, it is a contradiction — and the direction it
+    # fails matters: a reviewer skimming for markers sees the `none`, believes the
+    # file derives nothing, and never checks the citation it is standing next to.
+    if [[ $declares_none -eq 1 && ${#real[@]} -gt 0 ]]; then
+      echo "cleanroom-gate: $f declares 'Derivation: none' while also citing ${real[*]} — a file derives nothing or it names its sources, never both" >&2
+      bad=1
+      continue
+    fi
+
+    if [[ $declares_none -eq 1 ]]; then
+      echo "cleanroom-gate: $f declares no derivation"
       continue
     fi
 
@@ -172,6 +215,19 @@ source it came from, immediately above the derived construct:
 The citation is an ID registered in docs/derivation/SPECS.md (public
 specifications) or docs/derivation/CAPTURES.md (observed captures). Never a file
 path — rule 4's `references` check bans citing a capture by path.
+
+If the file genuinely derives NOTHING — a skeleton, a re-export, a config module
+that spawns no process, parses no byte, and supervises no session — say so
+instead of inventing a citation:
+
+  // Derivation: none — skeleton only: no process spawned, no byte parsed
+
+The reason is required: a bare `Derivation: none` is not a marker and this gate
+will keep rejecting the file. A `none` may not sit beside a real citation — a
+file derives nothing or it names its sources, never both. Rule 4's reader checks
+the declaration exactly as they check a section number.
+
+A behavior with no citable permitted source is an escalation, not a `none`.
 EOF
     return 1
   fi
@@ -563,6 +619,13 @@ subject="$(
         git show "HEAD:$f" 2>/dev/null || true
       done | cited_ids | LC_ALL=C sort -u
     ); do
+      # `none` is a declaration, not a citation: there is no registry row to bind,
+      # so it contributes nothing here. Without this it would hash as
+      # `unresolved-row none` — stable, but a lie in the one artifact whose whole
+      # job is to say exactly what the reviewer read. The declaring file's own blob
+      # is already in the digest from the loop above, so changing the stated reason
+      # still moves the subject and still re-opens review.
+      [[ "$id" == "$NONE_ID" ]] && continue
       rows="$(
         for reg in "${registries[@]}"; do
           git show "HEAD:$reg" 2>/dev/null || true

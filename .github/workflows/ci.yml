@@ -1170,12 +1170,39 @@ jobs:
           fi
           echo "cleanroom-gate: path citation correctly rejected"
 
+          # Half four: `Derivation: none` with no reason. The declaration form is the
+          # one marker that names no registry row, so it is the one an author could
+          # sprinkle to silence this gate — the mandatory reason is what stops that,
+          # and a rule nothing seeds is a rule that quietly stops applying.
+          printf '// Derivation: none\nfn seeded() {}\n' > "$dir/bare-none.rs"
+          if echo "$dir/bare-none.rs" | ./tools/cleanroom-gate.sh --markers; then
+            echo 'marker check accepted a Derivation: none with no reason' >&2
+            exit 1
+          fi
+          echo "cleanroom-gate: unexplained 'none' correctly rejected"
+
+          # Half five: `none` beside a real citation. A file derives nothing or it
+          # names its sources, never both — and this direction is the dangerous one,
+          # because a reviewer who reads the `none` stops looking and never checks
+          # the citation sitting next to it.
+          printf '// Derivation: none — seeded\n// Derivation: ECMA-48 §8.3.14 — seeded\nfn seeded() {}\n' > "$dir/none-plus.rs"
+          if echo "$dir/none-plus.rs" | ./tools/cleanroom-gate.sh --markers; then
+            echo 'marker check accepted a Derivation: none alongside a real citation' >&2
+            exit 1
+          fi
+          echo "cleanroom-gate: contradictory 'none' correctly rejected"
+
           # The positive control. Seeds that can only ever fail would also pass with
           # the whole parser replaced by `exit 1`, which is the failure this job
-          # exists to make impossible.
+          # exists to make impossible. Two of them now: a citation and a declaration,
+          # because a parser that rejected every `none` would pass all five seeds above.
           printf '// Derivation: ECMA-48 §8.3.14 — seeded\nfn seeded() {}\n' > "$dir/ok.rs"
           echo "$dir/ok.rs" | ./tools/cleanroom-gate.sh --markers
           echo "cleanroom-gate: registered citation correctly accepted"
+
+          printf '// Derivation: none — seeded: this file derives nothing\nfn seeded() {}\n' > "$dir/ok-none.rs"
+          echo "$dir/ok-none.rs" | ./tools/cleanroom-gate.sh --markers
+          echo "cleanroom-gate: explained 'none' correctly accepted"
           rm -rf "${prefix}-seed"
 
   # Hosted CI enforces the GENERIC pattern set only — the estate-specific extension
