@@ -51,6 +51,56 @@ jobs:
           # it must match, or the check above passes by not working.
           cargo tree -p gwk-pty --edges normal --prefix none | grep -q libghostty
           echo "gridwork is Zig-free; the grep that proves it is live"
+      # P6(a): the console is a THIN CLIENT. PTY sessions and engine adapters
+      # live server-side in their own host crate and the console consumes frames
+      # as wire data, which is what makes attach-from-anywhere fall out instead
+      # of needing to be built — a console owning its own PTY could only ever
+      # show the sessions on the box it runs on. That posture survives exactly
+      # as long as nobody adds the convenient direct dependency, so assert it.
+      - name: the console never links the PTY engine
+        run: |
+          set -euo pipefail
+          if cargo tree -p gwk-tui --edges normal --prefix none | grep -qE 'libghostty|gwk-pty'; then
+            echo 'gwk-tui depends on the PTY stack — the thin-client boundary is gone' >&2
+            exit 1
+          fi
+          # Same positive control as above, for the same reason: a grep that
+          # matches nothing anywhere would pass this check by not working.
+          cargo tree -p gwk-pty --edges normal --prefix none | grep -q gwk-pty
+          echo "gwk-tui is free of the PTY stack; the grep that proves it is live"
+      # ratatui 0.30 split the project into `ratatui-core` (the types) and the
+      # crates built on it. Every widget and effect crate in that ecosystem
+      # re-exports `ratatui_core::buffer::Buffer`, so TWO `ratatui-core`
+      # versions in one graph are two incompatible `Buffer` types: the failure
+      # is a wall of trait-mismatch errors at the seam between a widget crate
+      # and the frame it was handed, and it reads as our bug. The assertion is
+      # cheap and lands now, while `ratatui` is the only crate in the tree
+      # pulling `ratatui-core` — so the bump that brings a second one (an
+      # effects crate for the Hall, on its own release cadence) arrives at a
+      # named check instead of at that error.
+      - name: exactly one ratatui-core in the lockfile
+        run: |
+          set -euo pipefail
+          # One function over a file path, run against the real lockfile and
+          # then against a seeded copy, so the check and its negative cannot
+          # drift apart into two different greps.
+          cores() { grep -c '^name = "ratatui-core"$' "$1" || true; }
+          n="$(cores Cargo.lock)"
+          if [ "$n" != "1" ]; then
+            echo "Cargo.lock carries $n ratatui-core packages; exactly 1 is required" >&2
+            grep -n -A1 '^name = "ratatui-core"$' Cargo.lock >&2
+            exit 1
+          fi
+          # The seeded negative. A lockfile is the one input here, so the seed
+          # is a second package block in a copy of it — the exact shape a bump
+          # that fails to unify would produce.
+          cp Cargo.lock /tmp/seeded-two-cores.lock
+          printf '\n[[package]]\nname = "ratatui-core"\nversion = "0.0.0-seeded"\n' >> /tmp/seeded-two-cores.lock
+          if [ "$(cores /tmp/seeded-two-cores.lock)" = "1" ]; then
+            echo 'the count did not move with a second ratatui-core present — the check is broken' >&2
+            exit 1
+          fi
+          echo "cargo.lock carries exactly one ratatui-core; the seeded second one is counted"
 
   # The kernel's ignored integration suite needs a live PostgreSQL superuser:
   # each case creates and initializes its own database plus the runtime role.
@@ -736,6 +786,176 @@ jobs:
             exit 1
           fi
           echo "cleanroom-gate: seeded violation correctly rejected ($seed)"
+      - name: a gated module prefix reaches its siblings (seeded violation)
+        run: |
+          set -euo pipefail
+          # The prefixes are matched as strings, not as directories, and
+          # `crates/gwk-tui/src/workspace/` — with the trailing slash it carried
+          # until this branch — matched nothing outside that one directory. So
+          # multiplexer work split into a `workspace-adjacent/` sibling would
+          # have left the gate silent: no error, no diff, no review. Same hole
+          # as `gwk-host` passing while `gwk-pty-host` gates, one level down.
+          #
+          # Hardcoded rather than derived from the file, deliberately. Every
+          # other seed here reads `head -n1` so it keeps working as the list
+          # grows; this one is asserting a property of ONE line, and a derived
+          # seed would silently stop testing it the day that line moved.
+          seed="crates/gwk-tui/src/workspace-adjacent/pane.rs"
+          if echo "$seed" | ./tools/cleanroom-gate.sh; then
+            echo "cleanroom-gate passed $seed — a gated prefix is not reaching its siblings" >&2
+            exit 1
+          fi
+          echo "cleanroom-gate: sibling of a gated module correctly gated ($seed)"
+      - name: every crate is classified (seeded violations)
+        run: |
+          set -euo pipefail
+          # The step above proves the gate reaches a path it was told about.
+          # This one proves it notices a path nobody told it about at all —
+          # the crate that arrives ungated because no one wrote down which
+          # side of the gate it is on. Seeded with an EMPTY path list, like
+          # the capture check, because the change that adds an unclassified
+          # crate is exactly the change whose paths reach no gated prefix.
+          ne=".github/cleanroom-not-engine.txt"
+          cp "$ne" /tmp/not-engine.bak
+          restore() { cp /tmp/not-engine.bak "$ne"; rm -rf crates/seeded-scratch; }
+          trap restore EXIT
+
+          mkdir -p crates/seeded-scratch/src
+          if : | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate passed an unclassified crate — the completeness step is broken' >&2
+            exit 1
+          fi
+          rm -rf crates/seeded-scratch
+          echo "cleanroom-gate: unclassified crate correctly rejected"
+
+          # A line whose path does not exist. This is how a classification
+          # written for one crate gets inherited by a different one later, and
+          # how a crate could be declared not-engine BEFORE it exists — the
+          # naming coin flip with the coin tossed early.
+          printf 'crates/seeded-not-a-dir — seeded: a stale line\n' >> "$ne"
+          if : | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate passed a not-engine line naming no directory — stale lines are free' >&2
+            exit 1
+          fi
+          cp /tmp/not-engine.bak "$ne"
+          echo "cleanroom-gate: stale not-engine line correctly rejected"
+
+          # A path listed as not-engine that a gated prefix already covers.
+          # Whichever file is right, a crate classified both ways makes the
+          # record worth nothing — and "listed as not-engine" is the shape a
+          # future attempt to talk a gated crate out of the gate would take.
+          printf 'crates/gwk-pty — seeded: the engine crate claimed as not-engine\n' >> "$ne"
+          if : | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate passed a crate classified both ways — the files may disagree in silence' >&2
+            exit 1
+          fi
+          cp /tmp/not-engine.bak "$ne"
+          echo "cleanroom-gate: contradictory classification correctly rejected"
+
+          # A path with no rationale. The parser requires one, so this reads as
+          # unclassified rather than as a line — without this seed the
+          # requirement could be deleted and every step above would still pass.
+          sed -i -E 's@^crates/gwk-theme[[:space:]].*@crates/gwk-theme@' "$ne"
+          if : | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate accepted a not-engine path with no rationale' >&2
+            exit 1
+          fi
+          cp /tmp/not-engine.bak "$ne"
+          echo "cleanroom-gate: unjustified not-engine line correctly rejected"
+
+          # The positive control. Four seeds that can only fail would also pass
+          # with the whole check replaced by `exit 1`, which is the failure this
+          # job exists to make impossible.
+          : | ./tools/cleanroom-gate.sh
+          echo "cleanroom-gate: the live tree is fully classified"
+      - name: a direct gwk-pty dependency owes a prefix row (seeded violations)
+        run: |
+          set -euo pipefail
+          # The classification step makes someone decide. This one takes the
+          # decision away where the answer is already known: a crate linking
+          # the PTY engine is gated by that fact, not by whether it got named
+          # `gwk-pty-host` or `gwk-host`. True at HEAD with zero new rows —
+          # `crates/gwk-adapter-` already covers all three declarants — so
+          # every proof here has to be seeded.
+          trap 'git checkout -- crates/gwk-theme/Cargo.toml crates/gwk-adapter-claude/Cargo.toml crates/gwk-adapter-codex/Cargo.toml crates/gwk-adapter-opencode/Cargo.toml' EXIT
+
+          # An ungated crate quietly acquiring the dependency — the shape the
+          # rule is named for.
+          sed -i '/^\[dependencies\]/a gwk-pty.workspace = true' crates/gwk-theme/Cargo.toml
+          if : | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate passed an ungated crate depending on gwk-pty' >&2
+            exit 1
+          fi
+          git checkout -- crates/gwk-theme/Cargo.toml
+          echo "cleanroom-gate: ungated gwk-pty dependent correctly rejected"
+
+          # The same dependency under another name. This is the one shape that
+          # hides from a reader skimming manifests for the string, which is
+          # exactly the reader this gate stands in for.
+          sed -i '/^\[dependencies\]/a hidden = { package = "gwk-pty", path = "../gwk-pty" }' crates/gwk-theme/Cargo.toml
+          if : | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate passed a renamed gwk-pty dependency' >&2
+            exit 1
+          fi
+          git checkout -- crates/gwk-theme/Cargo.toml
+          echo "cleanroom-gate: renamed gwk-pty dependency correctly rejected"
+
+          # The same rename in a TOML LITERAL string. This one was a live bypass:
+          # the check matched only the double-quoted form, so swapping one quote
+          # character linked the PTY engine past the gate — no prefix row, no
+          # second-reader record, no markers. A seed per quote style, because the
+          # thing that broke was a character class, and only a seed that spells it
+          # out can keep it from narrowing again.
+          sed -i "/^\[dependencies\]/a hidden = { package = 'gwk-pty', path = '../gwk-pty' }" crates/gwk-theme/Cargo.toml
+          if : | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate passed a literal-string renamed gwk-pty dependency' >&2
+            exit 1
+          fi
+          git checkout -- crates/gwk-theme/Cargo.toml
+          echo "cleanroom-gate: literal-string renamed gwk-pty dependency correctly rejected"
+
+          # The table form. TOML spells a KEY three ways too — bare, basic, and
+          # literal — and cargo accepts all three wherever the crate name appears,
+          # so each is its own bypass until a seed says otherwise. A check that
+          # knows some spellings of a name is a check with a documented bypass.
+          printf '\n[dependencies.gwk-pty]\nworkspace = true\n' >> crates/gwk-theme/Cargo.toml
+          if : | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate passed a [dependencies.gwk-pty] table' >&2
+            exit 1
+          fi
+          git checkout -- crates/gwk-theme/Cargo.toml
+          echo "cleanroom-gate: [dependencies.gwk-pty] table correctly rejected"
+
+          printf '\n[dependencies."gwk-pty"]\nworkspace = true\n' >> crates/gwk-theme/Cargo.toml
+          if : | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate passed a [dependencies."gwk-pty"] quoted-key table' >&2
+            exit 1
+          fi
+          git checkout -- crates/gwk-theme/Cargo.toml
+          echo "cleanroom-gate: quoted-key gwk-pty table correctly rejected"
+
+          sed -i "/^\[dependencies\]/a 'gwk-pty'.workspace = true" crates/gwk-theme/Cargo.toml
+          if : | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate passed a literal-quoted gwk-pty key' >&2
+            exit 1
+          fi
+          git checkout -- crates/gwk-theme/Cargo.toml
+          echo "cleanroom-gate: literal-quoted gwk-pty key correctly rejected"
+
+          # The positive control, and the only one that can catch the check
+          # being deleted: with no declarant anywhere, a broken detection and a
+          # clean tree look identical, so the gate must treat zero as the
+          # broken one.
+          sed -i 's/^gwk-pty\.workspace = true$/# seeded removal/' crates/gwk-adapter-*/Cargo.toml
+          if : | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate passed with no gwk-pty declarant at all — a vacuous check' >&2
+            exit 1
+          fi
+          git checkout -- crates/gwk-adapter-claude/Cargo.toml crates/gwk-adapter-codex/Cargo.toml crates/gwk-adapter-opencode/Cargo.toml
+          echo "cleanroom-gate: an empty declarant set correctly reads as a broken detection"
+
+          : | ./tools/cleanroom-gate.sh
+          echo "cleanroom-gate: every direct gwk-pty dependent carries its prefix row"
       - name: prove an unregistered capture is rejected (seeded violation)
         run: |
           set -euo pipefail

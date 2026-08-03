@@ -12,10 +12,47 @@ public record of that procedure, in force before any engine code exists.
    maintainers, agents, or external contributors (see CONTRIBUTING.md). Concept-level
    inspiration from public, documented behavior is fine; derivation is not.
 2. **Engine authors don't read copyleft source.** Whoever implements code under the
-   paths listed in `.github/cleanroom-paths.txt` (the PTY engine, engine adapters, and
-   all multiplexer work) does not read the source of copyleft terminal multiplexers —
-   before or during that work. Behavior is derived from public specifications and
-   observed wire behavior only.
+   paths listed in `.github/cleanroom-paths.txt` does not read the source of copyleft
+   terminal multiplexers — before or during that work. Behavior is derived from public
+   specifications and observed wire behavior only.
+
+   **What gets listed is a category, not a directory.** Any path whose code supervises
+   an engine process or a PTY session — spawn, pump loop, restart semantics, session
+   registry, detach/reattach routing — or emits or parses terminal-protocol bytes is
+   gated, at whatever module granularity keeps the tax off lens code.
+
+   The granularity clause is the point, not a softening. A crate is rarely all one
+   thing: the parity harness is a pure data model plus a set of runners that spawn and
+   kill engine children, and gating the whole crate to reach the runners would put a
+   review tax on check functions that never see a process. So the runners are listed and
+   the rest is not. The gate follows the risk; the directory tree is just where the risk
+   happens to sit this week.
+
+   Two mechanical consequences, because a category rule enforced by memory is a rule
+   that decays into whatever the last person assumed:
+
+   - **Every crate is classified.** A `crates/` directory matches a gated prefix or
+     carries a line in `.github/cleanroom-not-engine.txt` saying why it is outside.
+     Neither is not an option, and the gate refuses to pass on an unclassified crate. A
+     crate is not ungated because nobody looked.
+   - **A direct `gwk-pty` dependency gates the crate.** It links the PTY engine, so it
+     is gated by that fact and not by its name. Without this, coverage came down to
+     whether a crate happened to be called `gwk-pty-host` rather than `gwk-host` — and
+     nothing anywhere would have said which one you got.
+
+   **Lens code is deliberately outside, and that is a ruling rather than an accident of
+   where the files landed.** The console renders projections the kernel already computed
+   and consumes engine output as wire data; it does not supervise anything and does not
+   speak the terminal protocol. Its multiplexer half — panes, layout, detach and
+   reattach routing — is gated, and lives under its own listed prefix for exactly that
+   reason. Drawing the line inside the crate is what keeps the review where the
+   copyleft-adjacent risk actually is.
+
+   **Library-mediated terminal I/O is exempt.** Reading key and mouse events through
+   crossterm, or painting through ratatui, is using a permissively-licensed dependency's
+   public API — the same act as calling any other crate. It emits no protocol bytes of
+   our authorship and derives nothing from anyone's source. Writing those sequences
+   ourselves is the gated thing; asking a library to is not.
 3. **Every non-obvious terminal behavior carries a derivation citation** — the public
    spec it implements or a captured observation, cited by stable ID from
    `docs/derivation/SPECS.md` or `docs/derivation/CAPTURES.md`. The citation is a
