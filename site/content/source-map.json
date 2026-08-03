@@ -15,12 +15,12 @@
     { "destination": "content/docs/derivation/specifications.mdx", "sources": [{ "path": "docs/derivation/SPECS.md", "sha256": "b1d9e2f917ed78ada448281ff0ffbe465256c7391b3e2c264da5fb48c3d121d8" }] },
     { "destination": "content/docs/derivation/captures.mdx", "sources": [{ "path": "docs/derivation/CAPTURES.md", "sha256": "1cb7028b8dc2965e13e5ddf9c440f5f333d0c6ebec918f652b83d7e8c43d6c8b" }] },
     { "destination": "content/docs/derivation/reviews.mdx", "sources": [
-      { "path": "docs/derivation/reviews/README.md", "sha256": "815dbaa4a71bcc9f91f9ae1c9b2902f020f1034c9fc977794613f250b3ac5342" },
+      { "path": "docs/derivation/reviews/README.md", "sha256": "798c8299ac2bcc72443268a4f866fc062af793a188eda9c222be52f1ebd05515" },
       { "path": "docs/derivation/reviews/08ad472a68f78fbd6b2764d555e10116f94ea62df6edb40e73ab9097095b4a63.md", "sha256": "9c5cd1e13ae7aeceeefe9690f5d7e79dc99f3241daa9ecf0b3dc02c8a719db5f" },
       { "path": "docs/derivation/reviews/214ce08ceff320c86aa2b7a559b77c6257e3e2c93bae4cef5c0b2291faa37a29.md", "sha256": "f6bfb9e68615b5d420a6166ab95eb7c82b3ab05cba02c847b0b369ce2851ef31" },
       { "path": "docs/derivation/reviews/29b22771ca9ff3c7443b6a77764e423c77fbc7f7f22b136fdbe56b673f482fa8.md", "sha256": "1a715a1370e94ded53de9500f8e3b2503591ee10997fa129cc633bfed1b8b315" },
       { "path": "docs/derivation/reviews/7b9d5b77b4dac5f1a0113104bfe859c4a3e6baf17a6ed05afb6ce817aa79d3e6.md", "sha256": "d6bae9f9a024038a460bd1ff167f0649f015810641c726890d23420b0f1ea13f" },
-      { "path": "docs/derivation/reviews/a447d09f2a2a94f0af1e908c74fb1d1389a823c6379811984cbfd25b7a6f6635.md", "sha256": "5bea28a40b3cf24a509c14c75440c12166a57788858b6c56cd66d730e888c052" },
+      { "path": "docs/derivation/reviews/a447d09f2a2a94f0af1e908c74fb1d1389a823c6379811984cbfd25b7a6f6635.md", "sha256": "649e22b06bba97130d4779c2dc6897714d2177bfa69336c5fffe4b8b94481376" },
       { "path": "docs/derivation/reviews/d4cfef6ff67cc88082f3f2fe33c7a4b60e8deccb28b25a91b1011b1745a716bc.md", "sha256": "a64f8c3d9f7c12237eb0ab1c02720ad33c95797c19b525e3ea95da380a1608c4" },
       { "path": "docs/derivation/reviews/e2507240fd4e02c59548138b2c26a1af5c590aa1d0ffe5c8ef3e94651c0f61d5.md", "sha256": "30c432e2e1d6d5f9df8a28c0c5fabc70a36a801eef7b51e58d31225d5d1a1d20" }
     ] },
