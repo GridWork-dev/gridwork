@@ -238,8 +238,103 @@ EOF
   fi
 }
 
+not_engine_file=".github/cleanroom-not-engine.txt"
+
+# Every `crates/` directory is CLASSIFIED: it matches a gated prefix, or it
+# carries a line in the not-engine allowlist. Never neither.
+#
+# The hole this closes is not a missing prefix, it is a missing decision. The
+# prefix list said what was gated and nothing said what the rest was, so a new
+# crate's coverage came down to whether its name happened to start with a listed
+# string — `gwk-pty-host` gates, `gwk-host` does not, and nothing anywhere would
+# have said so. Requiring a positive classification turns that from an omission
+# nobody notices into a line someone has to write and a reader can disagree with.
+#
+# Deliberately NOT driven by the changed-path list, for the same reason as
+# check_captures: the change that adds an unclassified crate is exactly the
+# change whose paths reach no gated prefix, so a diff-driven version would be
+# blind to the only thing it is for.
+#
+# Three ways to fail, and the second and third matter as much as the first:
+# unclassified (the crate nobody decided about); a listed path that is not a
+# directory (a stale line is how a future crate silently inherits a
+# classification written for a different one — and how a crate could be
+# pre-classified as not-engine before it exists, which is the coin flip again
+# with the coin tossed early); and a path both gated and listed (the two files
+# disagreeing, which makes the record worth nothing whichever one is right).
+check_crate_classification() {
+  local dir="crates"
+  [[ -d "$dir" ]] || return 0
+
+  if [[ ! -f "$not_engine_file" ]]; then
+    echo "cleanroom-gate: $not_engine_file is missing — refusing to pass" >&2
+    return 1
+  fi
+
+  # `<path> <whitespace> <rationale>`. The rationale is REQUIRED by the pattern
+  # — that trailing `[^[:space:]]` — the same way a Derivation: marker requires
+  # a description, and for the same reason: a bare path is a classification
+  # nobody had to defend, and one nobody had to defend is one nobody thought
+  # about. A line without one does not parse, so its crate reads as
+  # unclassified and the gate says so by name.
+  local listed=()
+  mapfile -t listed < <(
+    sed -nE 's@^[[:space:]]*([^#[:space:]]+)[[:space:]]+[^[:space:]].*$@\1@p' "$not_engine_file"
+  )
+
+  local bad=0 d p l gated found
+  while IFS= read -r -d '' d; do
+    gated=0
+    for p in "${prefixes[@]}"; do
+      if [[ "$d" == "$p"* ]]; then
+        gated=1
+        break
+      fi
+    done
+    found=0
+    for l in ${listed[@]+"${listed[@]}"}; do
+      if [[ "$l" == "$d" ]]; then
+        found=1
+        break
+      fi
+    done
+
+    if [[ $gated -eq 1 && $found -eq 1 ]]; then
+      echo "cleanroom-gate: $d is both gated and listed as not-engine — the two files disagree" >&2
+      bad=1
+    elif [[ $gated -eq 0 && $found -eq 0 ]]; then
+      echo "cleanroom-gate: $d matches no gated prefix and no not-engine line — unclassified" >&2
+      bad=1
+    fi
+  done < <(find "$dir" -mindepth 1 -maxdepth 1 -type d -print0 | LC_ALL=C sort -z)
+
+  for l in ${listed[@]+"${listed[@]}"}; do
+    if [[ ! -d "$l" ]]; then
+      echo "cleanroom-gate: $not_engine_file lists '$l', which is not a directory" >&2
+      bad=1
+    fi
+  done
+
+  if [[ $bad -ne 0 ]]; then
+    cat >&2 <<EOF
+
+CLEANROOM.md rule 2: every crate is on one side of the gate or the other, and
+which side is a decision that gets written down. Either add a prefix to
+.github/cleanroom-paths.txt — at whatever module granularity keeps the tax off
+lens code — or add a line to $not_engine_file saying, in one sentence, why this
+code neither supervises an engine process or a PTY session nor emits or parses
+terminal-protocol bytes.
+
+Leaving it out is not neutral. It is the crate being ungated because nobody
+looked, which is indistinguishable from the crate being ungated on purpose.
+EOF
+    return 1
+  fi
+}
+
 if [[ "$mode" == "check" ]]; then
   check_captures
+  check_crate_classification
 fi
 
 input_paths=()

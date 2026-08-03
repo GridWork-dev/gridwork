@@ -1,0 +1,32 @@
+# Crate directories deliberately OUTSIDE the clean-room gate, each with the
+# reason it is outside. Comments with '#'.
+#
+# WHY THIS FILE EXISTS. `cleanroom-paths.txt` says what is gated. Nothing said
+# what the rest was, so a new crate arrived unclassified and the gate's reach
+# came down to whether its name happened to start with a listed prefix — the
+# `gwk-host`-passes/`gwk-pty-host`-gates coin flip. The gate now refuses to pass
+# while any `crates/` directory matches neither a gated prefix nor a line here,
+# so adding a crate is a decision someone writes down rather than an omission
+# nobody notices.
+#
+# FORMAT: a path, whitespace, then a rationale. The rationale is required by the
+# parser — a bare path is not a line, it is an unclassified crate, and the gate
+# says so. The path must name a directory that exists: a stale line is how a
+# future crate inherits a classification written for a different one, which is
+# the same hole in a slower form.
+#
+# THE TEST TO APPLY (CLEANROOM.md rule 2, the category rule): does this code
+# supervise an engine process or a PTY session — spawn, pump loop, restart
+# semantics, session registry, detach/reattach routing — or emit or parse
+# terminal-protocol bytes? If yes it belongs in `cleanroom-paths.txt`, at
+# whatever module granularity keeps the tax off lens code. A line here is a
+# claim that the answer is no.
+
+crates/gridwork — the CLI: argument parsing, output formatting, and kernel calls over the UDS. Spawns nothing and parses no terminal bytes; `cargo tree -p gridwork` is asserted free of the PTY stack in CI.
+crates/gwk — the namespace umbrella. It has no API and no code: a `lib.rs` of doc comments holding the published `gwk-*` root.
+crates/gwk-cert — the conformance checker: reads a recorded event stream and replays it against the domain state machines. Consumes a file, never a process.
+crates/gwk-domain — the contract: types, events, and state machines, with no I/O of any kind.
+crates/gwk-kernel — the event store and its authority engine, over PostgreSQL. It supervises transactions, not engines; the only child processes anywhere near it are the ones its clients spawn.
+crates/gwk-parity — the harness's PURE half only (`matrix`, `pins`, `checks`, `lib.rs`): a data model plus check functions over already-normalized input. Its engine-driving half is gated by the two `crates/gwk-parity/src/{runners,bin}` prefixes and is NOT covered by this line — see cleanroom-paths.txt.
+crates/gwk-theme — the SIGNAL design tokens. Data only: no rendering, no escape sequences, no process.
+crates/gwk-tui — the console's lens half only. It consumes frames as wire data and never links `gwk-pty` (asserted in CI). Its multiplexer half lands under the gated `crates/gwk-tui/src/workspace` prefix and is NOT covered by this line.

@@ -16,3 +16,17 @@
 crates/gwk-pty
 crates/gwk-adapter-
 crates/gwk-tui/src/workspace
+# The parity harness, engine-driving half only. Its runners spawn the three
+# engine CLIs, drive them, answer their approval asks and kill them; its two
+# binaries are the harness entry point and the Claude approval-relay hook the
+# runner spawns. That is engine supervision by the category rule's own words,
+# and a test harness is not lens code, so the module granularity the rule
+# allows is spent keeping the tax off the crate's PURE half rather than off
+# this. The crate's own module doc already draws this exact line — "matrix,
+# pins and checks are the PURE library ... never a raw wire byte, never a live
+# process" — so gating the other half is recording a split that exists, not
+# imposing one. The remaining modules carry a not-engine line instead
+# (.github/cleanroom-not-engine.txt); a prefix longer than the crate directory
+# never classifies the directory itself.
+crates/gwk-parity/src/runners
+crates/gwk-parity/src/bin

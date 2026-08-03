@@ -806,6 +806,68 @@ jobs:
             exit 1
           fi
           echo "cleanroom-gate: sibling of a gated module correctly gated ($seed)"
+      - name: every crate is classified (seeded violations)
+        run: |
+          set -euo pipefail
+          # The step above proves the gate reaches a path it was told about.
+          # This one proves it notices a path nobody told it about at all —
+          # the crate that arrives ungated because no one wrote down which
+          # side of the gate it is on. Seeded with an EMPTY path list, like
+          # the capture check, because the change that adds an unclassified
+          # crate is exactly the change whose paths reach no gated prefix.
+          ne=".github/cleanroom-not-engine.txt"
+          cp "$ne" /tmp/not-engine.bak
+          restore() { cp /tmp/not-engine.bak "$ne"; rm -rf crates/seeded-scratch; }
+          trap restore EXIT
+
+          mkdir -p crates/seeded-scratch/src
+          if : | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate passed an unclassified crate — the completeness step is broken' >&2
+            exit 1
+          fi
+          rm -rf crates/seeded-scratch
+          echo "cleanroom-gate: unclassified crate correctly rejected"
+
+          # A line whose path does not exist. This is how a classification
+          # written for one crate gets inherited by a different one later, and
+          # how a crate could be declared not-engine BEFORE it exists — the
+          # naming coin flip with the coin tossed early.
+          printf 'crates/seeded-not-a-dir — seeded: a stale line\n' >> "$ne"
+          if : | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate passed a not-engine line naming no directory — stale lines are free' >&2
+            exit 1
+          fi
+          cp /tmp/not-engine.bak "$ne"
+          echo "cleanroom-gate: stale not-engine line correctly rejected"
+
+          # A path listed as not-engine that a gated prefix already covers.
+          # Whichever file is right, a crate classified both ways makes the
+          # record worth nothing — and "listed as not-engine" is the shape a
+          # future attempt to talk a gated crate out of the gate would take.
+          printf 'crates/gwk-pty — seeded: the engine crate claimed as not-engine\n' >> "$ne"
+          if : | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate passed a crate classified both ways — the files may disagree in silence' >&2
+            exit 1
+          fi
+          cp /tmp/not-engine.bak "$ne"
+          echo "cleanroom-gate: contradictory classification correctly rejected"
+
+          # A path with no rationale. The parser requires one, so this reads as
+          # unclassified rather than as a line — without this seed the
+          # requirement could be deleted and every step above would still pass.
+          sed -i -E 's@^crates/gwk-theme[[:space:]].*@crates/gwk-theme@' "$ne"
+          if : | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate accepted a not-engine path with no rationale' >&2
+            exit 1
+          fi
+          cp /tmp/not-engine.bak "$ne"
+          echo "cleanroom-gate: unjustified not-engine line correctly rejected"
+
+          # The positive control. Four seeds that can only fail would also pass
+          # with the whole check replaced by `exit 1`, which is the failure this
+          # job exists to make impossible.
+          : | ./tools/cleanroom-gate.sh
+          echo "cleanroom-gate: the live tree is fully classified"
       - name: prove an unregistered capture is rejected (seeded violation)
         run: |
           set -euo pipefail
