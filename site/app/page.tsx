@@ -60,15 +60,32 @@ const crates = [
     "gwk-pty",
     null,
     "PTY engine: server-side VT, render-state deltas, reattach",
-    "planned",
+    "in tree, unpublished",
+  ],
+  [
+    "gwk-pty-host",
+    null,
+    "Resident PTY engine host: session registry, spawn, detach/reattach routing",
+    "in tree, unpublished — skeleton",
   ],
   [
     "gwk-adapter-*",
     null,
     "Per-engine ACP + hooks adapters",
-    "planned",
+    "in tree, unpublished",
   ],
-  ["gwk-tui", null, "The client: modes, lenses, palette", "planned"],
+  [
+    "gwk-parity",
+    null,
+    "The engine parity matrix harness — runs locally, never in CI",
+    "in tree, unpublished",
+  ],
+  [
+    "gwk-tui",
+    null,
+    "The client: modes, lenses, palette",
+    "in tree, unpublished — skeleton",
+  ],
 ] as const;
 
 export default function HomePage() {

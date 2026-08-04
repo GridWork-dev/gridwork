@@ -3,7 +3,7 @@
 GridWork independently implements terminal multiplexing and agent orchestration —
 domains where established projects carry copyleft (AGPL/GPL) licenses. This project is
 Apache-2.0, and its independence is procedural, not just textual. This document is the
-public record of that procedure, in force before any engine code exists.
+public record of that procedure, in force since before any engine code existed.
 
 ## The rules
 

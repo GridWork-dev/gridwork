@@ -42,8 +42,10 @@ encrypted blobs, authority evaluation that leaves a receipt, event subscriptions
 `gw` — the headless CLI over the same protocol the TUI will use. Certified against a
 real PostgreSQL 16 and its performance envelope measured, not asserted.
 
-Be clear about what that leaves before you clone: there is **no PTY engine, no adapters
-and no TUI in this tree**. The whole human surface is stage 3 and later — so the
+Stage 3 is in flight, and its crates are in this tree: `gwk-pty` (a real server-side VT
+engine), the three `gwk-adapter-*` crates, the parity harness that measures them, a
+skeleton `gwk-pty-host`, and a skeleton `gwk-tui`. None of it is finished, none of it is
+published, and none of it is wired into a surface you can sit in front of — so the
 terminal-native and engine-agnostic bullets above are still describing what GridWork is
 being built to be, and the daemon you can run today has a JSON command line as its only
 face.
@@ -142,10 +144,11 @@ code.
 | [`gridwork`](https://docs.rs/gridwork) | Ships the `gw` binary — the CLI that speaks the kernel's protocol | 0.0.2 |
 | [`gwk`](https://docs.rs/gwk) | Namespace root for the `gwk-*` crates. **No API** | 0.0.2, name only |
 | `xtask` | Codegen and release glue. Not published | in-tree |
-| `gwk-pty` | PTY engine: server-side VT, render-state deltas, reattach | planned |
-| `gwk-pty-host` | Resident PTY engine host: session registry, spawn, detach/reattach routing | planned — unpublished, and not part of `cargo install gridwork` until its own release |
-| `gwk-adapter-*` | Per-engine ACP + hooks adapters | planned |
-| `gwk-tui` | The client: modes, lenses, palette | planned |
+| `gwk-pty` | PTY engine: server-side VT, render-state deltas, reattach | in tree, unpublished |
+| `gwk-pty-host` | Resident PTY engine host: session registry, spawn, detach/reattach routing | in tree, unpublished — skeleton, and not part of `cargo install gridwork` until its own release |
+| `gwk-adapter-*` | Per-engine ACP + hooks adapters | in tree, unpublished |
+| `gwk-parity` | The engine parity matrix harness — runs locally against logged-in engines, never in CI | in tree, unpublished |
+| `gwk-tui` | The client: modes, lenses, palette | in tree, unpublished — skeleton |
 
 `gwk` is published deliberately as a **name reservation with no API** — a module doc
 block pointing at the crates that do the work. It is not a library and is not padded
@@ -210,17 +213,24 @@ Stable Rust, MSRV 1.94. This builds the contract crates, the kernel, and the `gw
 [ROADMAP.md](ROADMAP.md)).
 
 ```bash
-cargo build --workspace
+cargo build
 ```
+
+That is the default-member set, deliberately not `--workspace`: `--workspace` overrides
+`default-members` and pulls in `gwk-pty`, which needs Zig (the exact version is pinned in
+`crates/gwk-pty/pins.env`) and a ghostty source tree — and whose build script clones
+ghostty when `GHOSTTY_SOURCE_DIR` is unset. Building the engine crates is
+`eval "$(./tools/pty-toolchain.sh --env)"` first; CI covers them in their own `pty` and
+`pty-host` jobs the same way.
 
 The Rust half of the gate CI enforces:
 
 ```bash
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --all-targets --locked
-cargo test --workspace --doc --locked
-cargo +1.94 check --workspace --all-targets --locked
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --all-targets --locked
+cargo test --doc --locked
+cargo +1.94 check --all-targets --locked
 cargo deny check bans licenses sources
 ```
 

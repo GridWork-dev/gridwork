@@ -7,7 +7,9 @@ per engine. A matrix cell is green when its test passes against the live kernel;
 the matrix is green when all twelve cells are.
 
 > Like `docs/architecture.md`, this is a design contract written in the present
-> tense: it specifies what the adapters must prove, and none of them exist yet.
+> tense: it specifies what the adapters must prove. The three adapter crates now
+> exist in the tree and are measured against it — the matrix, not the crates, is
+> what does not fully pass yet.
 > The per-engine inventory at the bottom is the exception — it records what each
 > engine's control surface actually exposes, captured live on 2026-08-01 against
 > the pinned versions below, because an acceptance test against an unstated

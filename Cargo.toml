@@ -55,13 +55,13 @@ chacha20poly1305 = "0.11.0"
 gwk-adapter-claude = { path = "crates/gwk-adapter-claude" }
 gwk-adapter-codex = { path = "crates/gwk-adapter-codex" }
 gwk-adapter-opencode = { path = "crates/gwk-adapter-opencode" }
-gwk-cert = { path = "crates/gwk-cert", version = "0.0.2" }
-gwk-domain = { path = "crates/gwk-domain", version = "0.0.2" }
-gwk-kernel = { path = "crates/gwk-kernel", version = "0.0.2" }
+gwk-cert = { path = "crates/gwk-cert", version = "0.0.3" }
+gwk-domain = { path = "crates/gwk-domain", version = "0.0.3" }
+gwk-kernel = { path = "crates/gwk-kernel", version = "0.0.3" }
 # Path-only, no version: unpublished (`publish = false`), like the adapter
 # crates that depend on it.
 gwk-pty = { path = "crates/gwk-pty" }
-gwk-theme = { path = "crates/gwk-theme", version = "0.0.2" }
+gwk-theme = { path = "crates/gwk-theme", version = "0.0.3" }
 # The SAFE wrapper, not the raw `-sys` bindings: this workspace forbids
 # `unsafe_code`, so raw FFI would not compile here at all. Exact-pinned because
 # libghostty-vt is pre-1.0 and its own docs promise breaking changes — a caret

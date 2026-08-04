@@ -14,9 +14,13 @@ Locked decisions change only by a recorded amendment, not by drift.
 > CLI half of the protocol. All of it certified against a real PostgreSQL 16,
 > with the performance envelope measured rather than asserted.
 >
-> **Not built:** the PTY engine, the agent adapters, and the TUI — the whole
-> human surface. Anything this file says about rendering, attaching, replaying,
-> or an engine is specification.
+> **In flight (in the tree, incomplete, unpublished):** the PTY engine
+> (`gwk-pty` — server-side VT, render deltas, styled cells, attach, record) and
+> the three agent adapters, with `gwk-pty-host` a skeleton whose runtime wiring
+> is in progress.
+>
+> **Not built:** the TUI — the whole human surface. Anything this file says
+> about lenses, the console, or the workspace is specification.
 >
 > `docs/security/THREAT_MODEL.md` labels each security stance **in force** /
 > **partial** / **designed, not yet built**; when this file and that one disagree

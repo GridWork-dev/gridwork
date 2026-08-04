@@ -85,6 +85,17 @@ need README.md "Don.t run .main." "main is not for use"
 # it goes red — which dropping it from C4 alone would not catch.
 need docs/contract/NAMING.md 'Frozen at the Contract stage \(stage 1 of 5\)' "contract-freeze stage"
 
+# C8 — the crates table names the same crate SET on both surfaces (README table,
+# landing-page array). Name-set only: wording and status drift are readable on
+# review, a crate present on one surface and absent from the other is not — that
+# is exactly how gwk-pty-host shipped in the README and never reached the site.
+readme_crates=$(grep -E '^\| \[?`' README.md | sed -E 's/^\| \[?`([^`]+)`.*/\1/' | LC_ALL=C sort || true)
+site_crates=$(sed -n '/^const crates = \[/,/^\] as const;/p' "$landing" | tr -d '\n ' | grep -oE '\["[^"]+"' | tr -d '["' | LC_ALL=C sort || true)
+if [ -z "$readme_crates" ] || [ "$readme_crates" != "$site_crates" ]; then
+  echo "check-claims: crates-table disagreement — README=[$(echo "$readme_crates" | tr '\n' ' ')] site=[$(echo "$site_crates" | tr '\n' ' ')]" >&2
+  fail=1
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "check-claims: FAIL" >&2
   exit 1

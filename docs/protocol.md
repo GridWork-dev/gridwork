@@ -7,8 +7,8 @@ is locked by [ADR 0002](decisions/0002-listener-before-auth.md).
 > **This is implemented.** The daemon, the socket, the framing, the handshake,
 > the request surface and event subscriptions are all in the tree and certified
 > against a real PostgreSQL — `gw` is a client of exactly what is described
-> below. Build it with a clone (`cargo run -p gridwork -- daemon`); it is not on
-> crates.io yet.
+> below. `cargo install gridwork` gets you the client; the daemon runs from the
+> same binary (`gw daemon`, or `cargo run -p gridwork -- daemon` from a clone).
 
 ## Connection and hello
 

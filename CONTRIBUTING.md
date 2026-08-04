@@ -6,9 +6,10 @@ an issue first.
 
 ## What's actually useful right now
 
-The kernel has landed and the engines have not (stage 3 of the
-[roadmap](ROADMAP.md)), so there is a running daemon to break but no human surface to
-build on yet. What is most useful:
+The kernel has landed and the engines are in flight (stage 3 of the
+[roadmap](ROADMAP.md)): the PTY engine and adapter crates are in the tree but incomplete
+and unpublished, so there is a running daemon to break but no human surface to build on
+yet. What is most useful:
 
 - **Read the contract and argue with it.** `crates/gwk-domain/src/fsm.rs` and
   `transition.rs` hold the entire state-machine contract — four enums, four edge
@@ -37,6 +38,7 @@ other things get checked:
 | the generated TypeScript and site | [Bun](https://bun.sh) — CI pins **1.3.14** |
 | the SQL DDL | a PostgreSQL 16 you can point `psql` at |
 | the site image | Docker |
+| the `pty` / `pty-host` jobs | Zig (the exact version is pinned in `crates/gwk-pty/pins.env`), then `eval "$(./tools/pty-toolchain.sh --env)"` per shell — touching `gwk-pty`, `gwk-pty-host`, or an adapter pulls this the same way touching `gwk-domain` pulls Bun |
 
 **You do not need any of them to contribute** — CI installs its own copy of each. Reach
 for a row only when you want to reproduce that job locally. One exception worth
@@ -51,11 +53,17 @@ Rust:
 
 ```bash
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --all-targets --locked
-cargo test --workspace --doc --locked
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --all-targets --locked
+cargo test --doc --locked
 cargo deny check
 ```
+
+Those run over the **default members**, deliberately not `--workspace` — CI does the
+same. `--workspace` overrides `default-members` and pulls in `gwk-pty`, which needs the
+Zig toolchain row above and whose build script clones ghostty when `GHOSTTY_SOURCE_DIR`
+is unset. The engine crates get the same three commands in their own CI jobs, under
+`./tools/pty-toolchain.sh --env`.
 
 The generated contract, if you touched `gwk-domain` or `gwk-theme`:
 
@@ -77,7 +85,7 @@ The three jobs left — `msrv`, `schema`, `site` — need the extra toolchains, 
 usually the cheaper place to run them. Locally they are:
 
 ```bash
-cargo +1.94 check --workspace --all-targets --locked
+cargo +1.94 check --all-targets --locked
 psql "$PGURL" -v ON_ERROR_STOP=1 -f schema/0001_contract.sql
 cd site
 bun install --frozen-lockfile

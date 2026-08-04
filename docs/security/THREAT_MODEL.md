@@ -75,7 +75,10 @@ to the host terminal, and anything echoed outside that model is
 escape-stripped. Control never rides synthetic keystrokes, so output cannot
 "type" into a session.
 
-**Status: designed, not yet built.** No terminal-handling code exists yet.
+**Status: partial.** In force: `gwk-pty` keeps raw child-process bytes `[u8]` end
+to end and feeds them to a server-side virtual-terminal model — the grid, not the
+byte stream, is what every consumer renders from. Still designed: the TUI that
+does that rendering, and the escape-stripped echo path, do not exist yet.
 
 ### 3. Hostile or buggy socket clients
 
@@ -191,7 +194,8 @@ REFUSES when full instead of queueing — overload becomes a typed answer the
 caller can act on rather than an unbounded pile of connections on one row. A
 consumer that stops reading loses its stream and is told the cursor it actually
 received, so resuming does not skip what it never got. Budgets remain contract
-data only: kill-and-alert needs an engine to kill, and stage 3 has not started.
+data only: kill-and-alert needs a running engine host to kill, and stage 3 is in
+flight — the engine crates are in the tree, but no host process enforces budgets yet.
 
 ### 8. Provenance of agent-authored code
 
@@ -218,7 +222,8 @@ refused rather than downgraded, and the refusal is a frame the client can read �
 a peer that guessed the version wrong must be able to tell that from a socket
 nobody was listening on. Capabilities are explicit in the hello and the
 unknown-`schema_version` refusal in the contract types is unchanged. Permission
-relay stays designed: adapters are stage 3.
+relay stays designed: adapter code is in the tree — `gwk-adapter-claude` already
+models the engine's permission prompts — but the kernel Gate relay is not yet wired.
 
 ### 10. Self-asserted actor identity
 

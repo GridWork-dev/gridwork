@@ -3,7 +3,7 @@ title: Protocol
 description: The implemented Unix-socket handshake, framing bounds, authentication, subscriptions, commands, idempotency, and typed errors.
 ---
 
-{/* curated-from: docs/protocol.md sha256=60cb0d56fd7306ec1c63bfcf8b30feb74ccb38d096ed45fad76bca304e329617 */}
+{/* curated-from: docs/protocol.md sha256=19074d644d7e9c1bbcc03860027d89932f0ba10a3b385cbb4504339f0ca4d3fc */}
 
 The client↔kernel contract. Semantics and byte-level framing are locked by
 [ADR 0001](https://github.com/GridWork-dev/gridwork/blob/main/docs/decisions/0001-wire-codec.md). The UDS-only authentication boundary
@@ -12,8 +12,8 @@ is locked by [ADR 0002](https://github.com/GridWork-dev/gridwork/blob/main/docs/
 > **This is implemented.** The daemon, the socket, the framing, the handshake,
 > the request surface and event subscriptions are all in the tree and certified
 > against a real PostgreSQL — `gw` is a client of exactly what is described
-> below. Build it with a clone (`cargo run -p gridwork -- daemon`); it is not on
-> crates.io yet.
+> below. `cargo install gridwork` gets you the client; the daemon runs from the
+> same binary (`gw daemon`, or `cargo run -p gridwork -- daemon` from a clone).
 
 ## Connection and hello
 
