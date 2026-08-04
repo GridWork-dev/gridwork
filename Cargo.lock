@@ -1225,6 +1225,15 @@ dependencies = [
 [[package]]
 name = "gwk-pty-host"
 version = "0.0.1"
+dependencies = [
+ "gwk-domain",
+ "gwk-kernel",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "gwk-theme"
