@@ -31,6 +31,7 @@ leaked, or copyleft-licensed is a rule 1 violation.
 | `XTERM-CTLSEQS` | XTerm Control Sequences | invisible-island.net/xterm/ctlseqs/ctlseqs.html |
 | `KITTY-KBD` | Kitty keyboard protocol | sw.kovidgoyal.net/kitty/keyboard-protocol/ |
 | `KITTY-GRAPHICS` | Kitty graphics protocol | sw.kovidgoyal.net/kitty/graphics-protocol/ |
+| `KITTY-UNDERLINES` | Kitty colored and styled underlines | sw.kovidgoyal.net/kitty/underlines/ |
 | `ACP-1` | Agent Client Protocol, wire version 1 | agentclientprotocol.com |
 | `CLAUDE-STREAM-JSON` | Claude Code CLI reference: print-mode `--input-format`/`--output-format` flags, stream-json on both, stdin/stdout | code.claude.com/docs/en/cli-reference |
 | `CLAUDE-HEADLESS` | Claude Code headless mode: the stream-json message stream's shapes and semantics | code.claude.com/docs/en/headless |

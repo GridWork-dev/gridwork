@@ -38,11 +38,13 @@ pub mod attach;
 pub mod record;
 pub mod render;
 pub mod session;
+pub mod style;
 
 pub use attach::{Attach, CaughtUp};
 pub use record::{Entry, Event, Recording};
 pub use render::{Frame, Renderer};
 pub use session::{Session, SpawnError};
+pub use style::{CellStyle, Color, Underline};
 
 /// How much scrollback a grid retains before evicting the oldest rows.
 ///
