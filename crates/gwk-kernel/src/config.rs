@@ -31,6 +31,13 @@ pub const BLOB_ROOT_ENV: &str = "GWK_BLOB_ROOT";
 pub const BLOB_KEK_ENV: &str = "GWK_BLOB_KEK";
 /// The nonsecret label recorded beside every blob this KEK wraps.
 pub const BLOB_KEK_ID_ENV: &str = "GWK_BLOB_KEK_ID";
+/// The key a rotation is moving TO, same encoding as [`BLOB_KEK_ENV`].
+///
+/// Its own variable, read only by `gw admin blob rotate`, because a rotation is
+/// the one operation that needs both keys at once while every other process
+/// needs exactly one. Carrying the incoming key in the running key's variable
+/// would leave nothing able to say which of the two it was holding.
+pub const BLOB_KEK_NEXT_ENV: &str = "GWK_BLOB_KEK_NEXT";
 
 /// The default socket path (ADR 0002: UDS only, no network listener).
 pub const DEFAULT_SOCKET_PATH: &str = "/run/gridwork/gwk.sock";
@@ -162,21 +169,7 @@ impl BlobConfig {
             )));
         }
 
-        let encoded = get(BLOB_KEK_ENV)
-            .ok_or_else(|| KernelError::Config(format!("{BLOB_KEK_ENV} is not set")))?;
-        let decoded = BASE64_STANDARD
-            .decode(encoded.trim())
-            // The error is not included: it reports positions and lengths of
-            // the value being parsed, and that value is a key.
-            .map_err(|_| KernelError::Config(format!("{BLOB_KEK_ENV} is not valid base64")))?;
-        let mut kek = Box::new([0u8; DEK_BYTES]);
-        if decoded.len() != DEK_BYTES {
-            return Err(KernelError::Config(format!(
-                "{BLOB_KEK_ENV} decodes to {} bytes, expected exactly {DEK_BYTES}",
-                decoded.len()
-            )));
-        }
-        kek.copy_from_slice(&decoded);
+        let kek = read_kek(BLOB_KEK_ENV, &get)?;
 
         let kek_id = get(BLOB_KEK_ID_ENV)
             .ok_or_else(|| KernelError::Config(format!("{BLOB_KEK_ID_ENV} is not set")))?;
@@ -187,6 +180,22 @@ impl BlobConfig {
             kek: SecretBox::new(kek),
             kek_id,
         })
+    }
+
+    /// The key a rotation is moving to.
+    ///
+    /// Read separately rather than as a fourth field, because it is required by
+    /// exactly one verb and absent everywhere else — a `BlobConfig` that carried
+    /// an `Option` for it would make every other caller of this type look like
+    /// it might rotate.
+    pub fn next_kek_from_env() -> Result<SecretBox<[u8; DEK_BYTES]>> {
+        Self::next_kek_from_lookup(env_lookup)
+    }
+
+    pub fn next_kek_from_lookup(
+        get: impl Fn(&str) -> Option<String>,
+    ) -> Result<SecretBox<[u8; DEK_BYTES]>> {
+        Ok(SecretBox::new(read_kek(BLOB_KEK_NEXT_ENV, &get)?))
     }
 
     /// Build a config directly, for tests and for a caller that already holds
@@ -211,6 +220,29 @@ impl BlobConfig {
     pub fn kek_id(&self) -> &str {
         &self.kek_id
     }
+}
+
+/// Decode one base64 KEK, named by the variable it came from.
+///
+/// Boxed rather than returned by value so the bytes are written once, into the
+/// allocation the [`SecretBox`] will own, instead of being copied off the stack
+/// on the way there.
+fn read_kek(name: &str, get: &impl Fn(&str) -> Option<String>) -> Result<Box<[u8; DEK_BYTES]>> {
+    let encoded = get(name).ok_or_else(|| KernelError::Config(format!("{name} is not set")))?;
+    let decoded = BASE64_STANDARD
+        .decode(encoded.trim())
+        // The error is not included: it reports positions and lengths of the
+        // value being parsed, and that value is a key.
+        .map_err(|_| KernelError::Config(format!("{name} is not valid base64")))?;
+    if decoded.len() != DEK_BYTES {
+        return Err(KernelError::Config(format!(
+            "{name} decodes to {} bytes, expected exactly {DEK_BYTES}",
+            decoded.len()
+        )));
+    }
+    let mut kek = Box::new([0u8; DEK_BYTES]);
+    kek.copy_from_slice(&decoded);
+    Ok(kek)
 }
 
 /// The label is written into every container header and is what a rotation

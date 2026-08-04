@@ -21,6 +21,11 @@
 //! * `admin blob` is retention: pin, unpin, sweep, shred. Off the client socket
 //!   because no wire request removes a blob, and beside `init` because these are
 //!   operator acts on stored bytes rather than questions about them.
+//! * `admin blob rotate` is here for a sharper reason than the rest of that
+//!   list: it is the only verb that holds TWO keys at once. Reaching it through
+//!   the socket would mean handing an incoming KEK to a running daemon, and the
+//!   split this module exists to make checkable is that key material has one
+//!   door.
 
 use gwk_domain::blob::BlobAddress;
 use gwk_domain::ids::EvidenceId;
@@ -59,6 +64,12 @@ pub enum Retention {
     Shred {
         address: BlobAddress,
     },
+    /// Move every blob off the running KEK and onto `GWK_BLOB_KEK_NEXT`.
+    ///
+    /// No address: rotation is a property of the store, and a per-blob rotation
+    /// would leave a deployment whose blobs are split across two keys with
+    /// nothing recording which is which.
+    Rotate,
 }
 
 /// Serve until told to stop.
@@ -375,6 +386,23 @@ pub async fn retention(what: &Retention, pretty: bool) -> Result<(), Failure> {
             // leaves an unreadable blob and never a readable one.
             blobs.shred(address).await.map_err(blob_failure)?;
             json!({"type": "blob_shredded", "address": address.as_str()})
+        }
+        Retention::Rotate => {
+            let next = BlobConfig::next_kek_from_env().map_err(configuration)?;
+            let report = blobs
+                .rewrap_all(next.expose_secret())
+                .await
+                .map_err(blob_failure)?;
+            // Both counts, because `rewrapped: 0` alone reads as "nothing
+            // happened" when on a resumed rotation it means "everything was
+            // already done" — the one question an operator finishing an
+            // interrupted rotation is actually asking.
+            json!({
+                "type": "blobs_rotated",
+                "kek_id": blobs.config().kek_id(),
+                "rewrapped": report.rewrapped,
+                "already_rotated": report.already,
+            })
         }
     };
     emit(&answer, pretty);

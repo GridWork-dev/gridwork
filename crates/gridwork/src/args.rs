@@ -161,6 +161,7 @@ gw — the GridWork kernel's command line
   gw admin blob unpin <address> <evidence-id>
   gw admin blob sweep
   gw admin blob shred <address>
+  gw admin blob rotate
   gw kernel health|status|watermark|verify-sealed
   gw kernel activate --cutover-id <id> --archive-manifest-sha256 <hex>
   gw command submit --file <path|->
@@ -186,7 +187,9 @@ Every answer is JSON on standard output. Exits: 0 success, 2 usage or input,
 3 refused, 4 not found, 5 unavailable, 6 does not verify, 10 a fault in gw.
 
 `daemon` and `admin` read GWK_DATABASE_URL / GWK_ADMIN_DATABASE_URL and the blob
-KEK. Every other verb uses only the socket.
+KEK. Every other verb uses only the socket. `admin blob rotate` also reads
+GWK_BLOB_KEK_NEXT, the key it is moving to; it is safe to re-run, and finishes an
+interrupted rotation rather than faulting on what it already did.
 ";
 
 /// Parse the arguments after the program name.
@@ -293,6 +296,10 @@ fn admin(rest: &mut Rest) -> Result<Verb, Failure> {
                 "shred" => Retention::Shred {
                     address: blob_address(&rest.word("a blob address")?)?,
                 },
+                // No arguments: the key it moves to arrives in the environment,
+                // beside the one it moves off. A KEK on a command line is a KEK
+                // in the shell history and in every `ps` on the box.
+                "rotate" => Retention::Rotate,
                 other => return Err(unknown("admin blob", other)),
             },
         }),

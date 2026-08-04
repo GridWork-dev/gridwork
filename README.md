@@ -195,7 +195,7 @@ The contract first, then the one place that enforces it:
 | [ROADMAP.md](ROADMAP.md) | The five stages and what each delivers |
 | [docs/architecture.md](docs/architecture.md) | What owns truth, what the pieces are, which decisions are locked |
 | [docs/protocol.md](docs/protocol.md) | The client↔kernel contract — framing, hello, requests, subscriptions |
-| [docs/operations.md](docs/operations.md) | Running the daemon: deployment, backup, recovery, key rotation |
+| [docs/operations.md](docs/operations.md) | Running the daemon: startup and fencing, recovery, shutdown, KEK rotation |
 | [docs/PARITY.md](docs/PARITY.md) | The engine parity matrix — four axes, per-engine acceptance tests, pinned versions |
 | [docs/contract/NAMING.md](docs/contract/NAMING.md) | The casing and wire-shape rules the contract is frozen under |
 | [docs/security/THREAT_MODEL.md](docs/security/THREAT_MODEL.md) | What GridWork defends against, and what it deliberately does not |

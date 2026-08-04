@@ -639,7 +639,8 @@ async fn rotation_replaces_every_wrapped_key_and_no_ciphertext() {
 
     let mut new_kek = TEST_KEK;
     new_kek[0] ^= 0xff;
-    assert_eq!(blobs.rewrap_all(&new_kek).await.expect("rewrap"), 3);
+    let report = blobs.rewrap_all(&new_kek).await.expect("rewrap");
+    assert_eq!((report.rewrapped, report.already), (3, 0));
 
     // Not one ciphertext byte moved. That is the property the whole placement
     // of the wrapped key was chosen for.
@@ -685,6 +686,81 @@ async fn rotation_replaces_every_wrapped_key_and_no_ciphertext() {
         rotated.stat(&doomed).await.expect_err("still shredded"),
         BlobError::Tombstoned
     ));
+
+    teardown(&maintenance, &name, &root).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
+async fn a_rotation_that_was_interrupted_is_finished_by_running_it_again() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = raw_store(&maintenance, "blobresume", 8).await;
+    let (root, blobs) = blob_store(&store, "blobresume").await;
+
+    let blobs_in: Vec<Vec<u8>> = (0..4).map(|n| bytes(64 + n)).collect();
+    let mut addresses = Vec::new();
+    for (n, plaintext) in blobs_in.iter().enumerate() {
+        addresses.push(put(&blobs, plaintext, &format!("application/x-{n}")).await);
+    }
+
+    let mut new_kek = TEST_KEK;
+    new_kek[0] ^= 0xff;
+
+    // A rotation is one row per statement, so a crash lands BETWEEN blobs: some
+    // are on the new key, the rest are on the old, and every one of them still
+    // carries the same label, because the label is inside the authenticated
+    // header and rotation replaces the key behind the name. Nothing on the row
+    // records which key wrapped it — so a resumed rotation cannot be told the
+    // answer, it has to work it out per blob.
+    //
+    // Two of the four, chosen by the same `ORDER BY digest` a real interruption
+    // would have stopped inside.
+    let mut half: Vec<&BlobAddress> = addresses.iter().collect();
+    half.sort_by_key(|a| a.digest_hex());
+    for address in &half[..2] {
+        blobs
+            .rewrap_one(address, &new_kek)
+            .await
+            .expect("simulate the prefix a crash left behind");
+    }
+
+    // The re-run must finish the job rather than fault on the first blob it
+    // already did. Unwrapping an already-rotated blob with the old key is an
+    // AEAD failure, which is indistinguishable from tampering unless the store
+    // asks the other question first.
+    let report = blobs.rewrap_all(&new_kek).await.expect("resume");
+    assert_eq!(
+        report.rewrapped, 2,
+        "the two the interruption did not reach"
+    );
+    assert_eq!(report.already, 2, "the two it did");
+
+    // ...and a third run is a no-op that still succeeds, which is what makes
+    // this safe to re-run when an operator is unsure how far the last one got.
+    let again = blobs.rewrap_all(&new_kek).await.expect("re-run");
+    assert_eq!((again.rewrapped, again.already), (0, 4));
+
+    let rotated = common::blob_store_with(&store, &root, new_kek).await;
+    for (address, plaintext) in addresses.iter().zip(&blobs_in) {
+        assert_eq!(
+            read_all(&rotated, address, plaintext.len() as u64).await,
+            *plaintext,
+            "{address}"
+        );
+    }
+
+    // A key that is neither the one on the row nor the one being rotated to is
+    // a wrong key, not a finished blob, and it has to stay an error — otherwise
+    // "already done" would swallow a real corruption and report a clean run.
+    let mut wrong = TEST_KEK;
+    wrong[1] ^= 0xff;
+    let stranger = common::blob_store_with(&store, &root, wrong).await;
+    let mut third = TEST_KEK;
+    third[2] ^= 0xff;
+    assert!(
+        stranger.rewrap_all(&third).await.is_err(),
+        "a rotation from the wrong key reported success"
+    );
 
     teardown(&maintenance, &name, &root).await;
 }
