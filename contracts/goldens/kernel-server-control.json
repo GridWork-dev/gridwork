@@ -113,9 +113,11 @@
                 "bold": false,
                 "dim": false,
                 "italic": false,
-                "underline": false,
+                "blink": false,
                 "inverse": false,
-                "strikethrough": false
+                "invisible": false,
+                "strikethrough": false,
+                "overline": false
               }
             },
             {
@@ -124,9 +126,11 @@
                 "bold": true,
                 "dim": false,
                 "italic": false,
-                "underline": false,
+                "blink": true,
                 "inverse": false,
+                "invisible": false,
                 "strikethrough": false,
+                "overline": false,
                 "fg": {
                   "type": "ansi16",
                   "slot": "bright_cyan"
@@ -141,9 +145,14 @@
                 "bold": false,
                 "dim": true,
                 "italic": true,
-                "underline": true,
+                "blink": false,
                 "inverse": false,
+                "invisible": false,
                 "strikethrough": false,
+                "overline": false,
+                "underline": {
+                  "type": "curly"
+                },
                 "fg": {
                   "type": "truecolor",
                   "r": 255,
@@ -153,6 +162,10 @@
                 "bg": {
                   "type": "xterm256",
                   "index": 236
+                },
+                "underline_color": {
+                  "type": "ansi16",
+                  "slot": "red"
                 }
               }
             },
@@ -162,9 +175,11 @@
                 "bold": false,
                 "dim": false,
                 "italic": false,
-                "underline": false,
+                "blink": false,
                 "inverse": true,
-                "strikethrough": true
+                "invisible": true,
+                "strikethrough": true,
+                "overline": true
               }
             }
           ]
@@ -189,9 +204,11 @@
                 "bold": false,
                 "dim": false,
                 "italic": false,
-                "underline": false,
+                "blink": false,
                 "inverse": false,
-                "strikethrough": false
+                "invisible": false,
+                "strikethrough": false,
+                "overline": false
               }
             }
           },
@@ -204,9 +221,11 @@
                 "bold": false,
                 "dim": false,
                 "italic": false,
-                "underline": false,
+                "blink": false,
                 "inverse": false,
-                "strikethrough": false
+                "invisible": false,
+                "strikethrough": false,
+                "overline": false
               }
             }
           }

@@ -768,6 +768,17 @@ pub enum KernelResult {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[specta(optional)]
         next_cursor: Option<String>,
+        /// How far the projector had applied when this page was read, so a
+        /// client can say how stale its view is against kernel truth rather
+        /// than against its own poll clock. Absent means an empty log — never
+        /// `0`, which is a real sequence, matching [`Self::Watermark`].
+        ///
+        /// A page is a projection read, not a snapshot of the log: two pages
+        /// of the same cursor walk can straddle an append. This field is what
+        /// lets a consumer notice that rather than assume it away.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[specta(optional)]
+        watermark: Option<Seq>,
     },
     Events {
         events: Vec<EventEnvelope>,

@@ -203,7 +203,16 @@ async fn a_page_at_a_time_walks_a_projection_exactly_once() {
             KernelResult::ProjectionPage {
                 records,
                 next_cursor,
+                watermark,
             } => {
+                // Every page carries how far the projector had applied. The
+                // log is non-empty by construction here — these tasks were
+                // appended above — so absent is a real failure, not an empty
+                // log.
+                assert!(
+                    watermark.is_some(),
+                    "page {round} carried no watermark against a non-empty log"
+                );
                 seen.extend(records.iter().map(record_key));
                 match next_cursor {
                     Some(next) => cursor = Some(next),
