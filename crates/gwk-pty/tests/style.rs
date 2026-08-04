@@ -259,10 +259,13 @@ fn a_dropped_attribute_fails_here_not_silently() {
     // back outside the check's reach.
     //
     // Derivation: ECMA-48 §8.3.117 — SGR 53 is "overlined", SGR 5 is
-    // "slowly blinking", SGR 8 is "concealed characters"; SGR is defined
-    // with cumulative effect, which is what lets the attribute pile below
-    // arrive as several sequences instead of one over-budget parameter
-    // list.
+    // "slowly blinking", SGR 8 is "concealed characters". Whether a later
+    // SGR adds to the rendition or replaces it is NOT unconditional:
+    // §8.3.117 makes it depend on the GRAPHIC RENDITION COMBINATION MODE,
+    // whose two settings §7.2.8 defines. This test relies on the cumulative
+    // setting — which is what lets the attribute pile below arrive as
+    // several sequences instead of one over-budget parameter list — and the
+    // assertion is what pins that the engine is in it.
     // Derivation: KITTY-UNDERLINES — SGR 58 with the colon-separated `2`
     // sub-parameter form sets the underline's own direct-RGB color.
     let styles = styles_of(
@@ -302,9 +305,11 @@ fn a_zwj_sequence_spans_two_style_entries_by_default() {
     // Derivation: UAX-29 — an extended grapheme cluster does not break
     // before or after ZERO WIDTH JOINER (rules GB9/GB11), so WOMAN + ZWJ +
     // ROCKET segments as one grapheme of `text`.
-    // Derivation: TERM-UNICODE-CORE — with mode 2027 reset a terminal uses
-    // legacy width-based segmentation, under which the joined sequence
-    // occupies separate cells.
+    // Derivation: CAP-004 — measured, not specified: with mode 2027 reset the
+    // pinned engine segments the joined sequence across separate cells.
+    // TERM-UNICODE-CORE is deliberately NOT cited for this half — it calls the
+    // reset state undefined, which is why this side has to be pinned by
+    // observation at all.
     let styles = styles_of("\x1b[31m\u{1F469}\u{200D}\u{1F680}".as_bytes());
     assert_eq!(styles[0].fg, Some(Color::Palette(1)));
     assert_eq!(

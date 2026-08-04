@@ -74,10 +74,11 @@ pub struct CellStyle {
     pub fg: Option<Color>,
     pub bg: Option<Color>,
     // Derivation: KITTY-UNDERLINES — SGR 58/59 set the underline's own color,
-    // independent of the text's foreground, "identical to the codes used for
-    // setting foreground(38)/background(48) colors". ECMA-48 §8.3.117 lists
-    // 58/59 as reserved and assigns them nothing, so the extension — not the
-    // base spec — is what makes this a real, separate attribute.
+    // independent of the text's foreground; the page says 58 "works exactly
+    // like the codes `38, 48`" that set foreground and background. ECMA-48
+    // §8.3.117 lists 58/59 as reserved and assigns them nothing, so the
+    // extension — not the base spec — is what makes this a real, separate
+    // attribute.
     pub underline_color: Option<Color>,
     // Derivation: ECMA-48 §8.3.117 — SGR 1 is "bold or increased intensity".
     pub bold: bool,

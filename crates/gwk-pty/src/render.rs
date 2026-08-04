@@ -26,13 +26,16 @@ pub struct Row {
     ///
     /// "Cluster" is the engine's cell segmentation, and entry `i` matches
     /// `text`'s i-th UAX-29 grapheme only when the two segmentations agree.
-    // Derivation: TERM-UNICODE-CORE — with mode 2027 reset (the default) a
-    // terminal segments at legacy width boundaries, so a ZWJ emoji sequence
-    // occupies several cells — several entries here — that a UAX-29 walk of
-    // `text` reads as ONE grapheme; with DECSET 2027, cells are extended
-    // grapheme clusters and the two walks agree. A consumer segmenting
-    // `text` with UAX-29 must set 2027 on the grid, or index by pushed
-    // cluster instead. Both sides are pinned in `tests/style.rs`.
+    // Derivation: TERM-UNICODE-CORE — mode 2027, when SET, requires cells to
+    // be extended grapheme clusters; when reset it states the behavior is
+    // undefined, so what a terminal does with the mode off is not something
+    // this document can be cited for.
+    // Derivation: CAP-004 — measured against the engine this build pins: with
+    // the mode reset a ZWJ emoji sequence occupies several cells, so several
+    // entries here, that a UAX-29 walk of `text` reads as ONE grapheme; with
+    // the mode set the two walks agree. A consumer segmenting `text` with
+    // UAX-29 must set 2027 on the grid, or index by pushed cluster instead.
+    // Both sides are pinned in `tests/style.rs`.
     ///
     // ponytail: a flat `Vec`, not run-length-encoded by shared style. Most of
     // a row shares one style, so an RLE span list would usually be smaller;
