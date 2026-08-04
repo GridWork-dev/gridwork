@@ -100,6 +100,17 @@ sqlx = { version = "0.9.0", default-features = false, features = [
 ] }
 thiserror = "2.0.19"
 tokio = { version = "1.53.1", default-features = false }
+# Two dev-only unicode tables, and they add NO crate to the graph: both are
+# already resolved in the lockfile (ratatui pulls `unicode-width`, sqlx's
+# `stringprep` pulls `unicode-properties`), so this is a new edge to a crate
+# cargo-deny already cleared, not a new dependency. They exist for the mark
+# inventory's admission gate, which has no waiver path and therefore cannot be
+# a hand-written table of claims about UCD — it has to read UCD. `width` and
+# `width_cjk` together express the East-Asian-Width clause as the rendered
+# consequence; `unicode-properties` carries the emoji clause, which width
+# cannot see (U+26A0 is Neutral and still unusable).
+unicode-properties = "0.1.4"
+unicode-width = "0.2.2"
 zeroize = "1.9.0"
 
 [workspace.lints.rust]

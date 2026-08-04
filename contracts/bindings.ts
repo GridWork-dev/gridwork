@@ -30,6 +30,16 @@ export type Actor_Serialize = {
 /**  An aggregate instance's identity, unique within its `aggregate_type`. */
 export type AggregateId = string;
 
+/**
+ *  One of the sixteen slots the user's own theme owns.
+ * 
+ *  ANSI names, not any particular library's: several rendering crates call slot
+ *  7 "gray", slot 8 "dark gray" and slot 15 "white", which is three chances to
+ *  be exactly one slot off. Declaration order IS slot order, so `as u8` is the
+ *  index — pinned by `tier_slot_declaration_order_is_slot_order`.
+ */
+export type AnsiSlot = "Black" | "Red" | "Green" | "Yellow" | "Blue" | "Magenta" | "Cyan" | "White" | "BrightBlack" | "BrightRed" | "BrightGreen" | "BrightYellow" | "BrightBlue" | "BrightMagenta" | "BrightCyan" | "BrightWhite";
+
 /**  One engine execution of a task, with its full semantic route snapshot. */
 export type Attempt = Attempt_Serialize | Attempt_Deserialize;
 
@@ -1953,6 +1963,46 @@ export type Task_Serialize = {
 };
 
 /**
+ *  What tier 16 does with a token. Six dispositions, and the last three are
+ *  three DIFFERENT things for three different reasons — collapsing any of them
+ *  into "no colour" loses the reason.
+ */
+export type Tier16 = 
+/**  Paint one of the user's own slots. */
+({ Slot: AnsiSlot }) & { BoldSlot?: never } | 
+/**
+ *  Paint a slot and add bold. Bold is the escalation channel here:
+ *  `hue_bright` shares slot 14 with `hue`, so weight is what separates
+ *  them once the palette is gone.
+ */
+({ BoldSlot: AnsiSlot }) & { Slot?: never } | 
+/**
+ *  The user's own foreground. `fg` has no slot of its own by design — the
+ *  baseline text of a terminal program belongs to the terminal.
+ */
+"Reset" | 
+/**
+ *  **Dropped.** No expression at this tier at all. `faint` would collide
+ *  with `muted` on slot 8, and it is decorative-only anyway, so it stops
+ *  existing rather than becoming a second muted.
+ */
+"Dropped" | 
+/**
+ *  **No slot needed.** Reverse video and the column-zero accent cell carry
+ *  the role outright at sixteen colours and below. A different disposition
+ *  from `Dropped` for a different reason: the role SURVIVES here, colour
+ *  just is not how it is carried. Reverse video is the one attribute that
+ *  works at every tier including monochrome, and the only one that is
+ *  background-agnostic.
+ */
+"ReverseVideo" | 
+/**
+ *  Not a foreground colour in a terminal at any tier. The three elevation
+ *  steps become reverse video, box rules and blank-line grouping instead.
+ */
+"NotAColor";
+
+/**
  *  An RFC 3339 timestamp carried opaquely (the contract pins the format, the
  *  kernel validates it; a plain JSON string on the wire).
  */
@@ -1966,6 +2016,18 @@ export type Token = {
 	value: string,
 	/**  What the token is FOR — the contract is the role, not the hex. */
 	role: string,
+	/**
+	 *  The nearest xterm-256 cube index, measured once and recorded here.
+	 *  Precomputed rather than quantized at render time, which is also why it
+	 *  exists for the three tokens that are never painted: the table that
+	 *  measured it measured all fifteen.
+	 */
+	index256: number,
+	/**
+	 *  What sixteen colours does with the token. HAND-AUTHORED — see
+	 *  [`tier::Tier16`] for why computing it fails.
+	 */
+	tier16: Tier16,
 };
 
 /**  What `apply` decided, as a tagged wire value. */

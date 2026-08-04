@@ -1233,12 +1233,15 @@ dependencies = [
  "serde",
  "serde_json",
  "specta",
+ "unicode-properties",
+ "unicode-width",
 ]
 
 [[package]]
 name = "gwk-tui"
 version = "0.0.2"
 dependencies = [
+ "gwk-theme",
  "ratatui",
 ]
 

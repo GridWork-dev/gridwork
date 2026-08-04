@@ -2,61 +2,122 @@
   {
     "name": "bg",
     "value": "#070B10",
-    "role": "canvas background"
+    "role": "canvas background",
+    "index256": 232,
+    "tier16": "NotAColor"
   },
   {
     "name": "surface",
     "value": "#121A24",
-    "role": "raised surface"
+    "role": "raised surface",
+    "index256": 234,
+    "tier16": "NotAColor"
   },
   {
     "name": "surface_2",
     "value": "#1F2B3A",
-    "role": "second elevation"
+    "role": "second elevation",
+    "index256": 235,
+    "tier16": "NotAColor"
   },
   {
     "name": "hue",
     "value": "#6BDBFF",
-    "role": "accent"
+    "role": "accent",
+    "index256": 81,
+    "tier16": {
+      "Slot": "BrightCyan"
+    }
   },
   {
     "name": "hue_dim",
     "value": "#3FA8CC",
-    "role": "accent, dimmed"
+    "role": "accent, dimmed",
+    "index256": 38,
+    "tier16": {
+      "Slot": "Cyan"
+    }
   },
   {
     "name": "hue_bright",
     "value": "#9AE8FF",
-    "role": "accent, bright"
+    "role": "accent, bright",
+    "index256": 117,
+    "tier16": {
+      "BoldSlot": "BrightCyan"
+    }
   },
   {
     "name": "fg",
     "value": "#E4EDF5",
-    "role": "foreground text"
+    "role": "foreground text",
+    "index256": 255,
+    "tier16": "Reset"
   },
   {
     "name": "faint",
     "value": "#526274",
-    "role": "faint structure (decorative/hairline only — never text or essential UI)"
+    "role": "faint structure (decorative/hairline only — never text or essential UI)",
+    "index256": 59,
+    "tier16": "Dropped"
   },
   {
     "name": "muted",
     "value": "#9AA5AF",
-    "role": "muted text"
+    "role": "muted text",
+    "index256": 248,
+    "tier16": {
+      "Slot": "BrightBlack"
+    }
   },
   {
     "name": "warn",
     "value": "#F2C14E",
-    "role": "warning"
+    "role": "warning",
+    "index256": 221,
+    "tier16": {
+      "Slot": "BrightYellow"
+    }
   },
   {
     "name": "fail",
     "value": "#FF6E6E",
-    "role": "failure"
+    "role": "failure",
+    "index256": 203,
+    "tier16": {
+      "Slot": "BrightRed"
+    }
   },
   {
     "name": "ok",
     "value": "#6EE7A8",
-    "role": "success"
+    "role": "success",
+    "index256": 78,
+    "tier16": {
+      "Slot": "BrightGreen"
+    }
+  },
+  {
+    "name": "border",
+    "value": "#748496",
+    "role": "solid structural boundary",
+    "index256": 244,
+    "tier16": {
+      "Slot": "White"
+    }
+  },
+  {
+    "name": "focus",
+    "value": "#6BDBFF",
+    "role": "focused-pane / control indicator",
+    "index256": 81,
+    "tier16": "ReverseVideo"
+  },
+  {
+    "name": "selection",
+    "value": "#F5F9FD",
+    "role": "selected-row foreground",
+    "index256": 231,
+    "tier16": "ReverseVideo"
   }
 ]
