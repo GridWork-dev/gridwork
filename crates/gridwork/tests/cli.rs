@@ -679,7 +679,12 @@ async fn the_admin_door_initializes_a_database_and_the_daemon_serves_it() {
     // far it got: the counts answer that, and `rewrapped: 0` here means done,
     // not "nothing to do".
     let again = gw_env("admin blob rotate", &rotate_env);
-    assert_eq!(code(&again), 0, "{}", String::from_utf8_lossy(&again.stdout));
+    assert_eq!(
+        code(&again),
+        0,
+        "{}",
+        String::from_utf8_lossy(&again.stdout)
+    );
     assert_eq!(json(&again)["rewrapped"], 0);
     assert_eq!(json(&again)["already_rotated"], 1);
 
