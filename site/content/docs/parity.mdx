@@ -3,7 +3,7 @@ title: Engine parity
 description: The four acceptance axes, version pins, harness, and live inventory used to prove adapter parity.
 ---
 
-{/* curated-from: docs/PARITY.md sha256=9a9b2f18ddff84008ace84e493cd99ff0ecf392aa3a86e0df7af30d69e09aad1 */}
+{/* curated-from: docs/PARITY.md sha256=c4bd440d45501f427092009ce8fb084b66a273ac581087de24fd196762d80878 */}
 
 What "done" means for the agent adapters — the parity matrix the roadmap promises
 for stage 3, defined before any adapter exists to measure. Four axes, each with an
@@ -12,7 +12,9 @@ per engine. A matrix cell is green when its test passes against the live kernel;
 the matrix is green when all twelve cells are.
 
 > Like `docs/architecture.md`, this is a design contract written in the present
-> tense: it specifies what the adapters must prove, and none of them exist yet.
+> tense: it specifies what the adapters must prove. The three adapter crates now
+> exist in the tree and are measured against it — the matrix, not the crates, is
+> what does not fully pass yet.
 > The per-engine inventory at the bottom is the exception — it records what each
 > engine's control surface actually exposes, captured live on 2026-08-01 against
 > the pinned versions below, because an acceptance test against an unstated

@@ -3,7 +3,7 @@
   "pages": [
     {
       "destination": "content/docs/index.mdx",
-      "sha256": "6aae6dbc104e5469dce0072b39c32ebee91f03b69619966c26be8d088e39f499",
+      "sha256": "489c43444ceba65ccb6a5321e55814fd3203e3f9687038488222cd6a76b6e608",
       "sources": [
         {
           "path": "README.md"
@@ -12,7 +12,7 @@
     },
     {
       "destination": "content/docs/quickstart.mdx",
-      "sha256": "1779fd8e6050a968d83750c61b9bf27a732dc352e38d5f547e83794ceab1d3b9",
+      "sha256": "ea4d226fdbf43877e8613521811888d26eda184551cff1707bb9058d16f15541",
       "sources": [
         {
           "path": "README.md"
@@ -21,7 +21,7 @@
     },
     {
       "destination": "content/docs/architecture.mdx",
-      "sha256": "ac87570947316cef804f2e6f8915a115c81bf4bfbbaf08e764da0a56496b911b",
+      "sha256": "5d556893dd25ac22708f77af817f4b16d8b240fbe5f20133cbf4597fe910ca83",
       "sources": [
         {
           "path": "docs/architecture.md"
@@ -30,7 +30,7 @@
     },
     {
       "destination": "content/docs/protocol.mdx",
-      "sha256": "15aa3ab3524d928e6ee089db944ab3898710c63e93a1f11319016161b7322f18",
+      "sha256": "88c85909716222f5652f681f494f436ca5f8f7067c2fb8c980a132fee235a8b8",
       "sources": [
         {
           "path": "docs/protocol.md"
@@ -39,7 +39,7 @@
     },
     {
       "destination": "content/docs/parity.mdx",
-      "sha256": "eb4786e09e3e0a9612fc0843fd7ff120f526e030db4f06a9dd06f00f7ae5180b",
+      "sha256": "720f25309747c1971037f4c9f1f48841acc76a444a92069daab0fe7e1a1b7475",
       "sources": [
         {
           "path": "docs/PARITY.md"
@@ -57,7 +57,7 @@
     },
     {
       "destination": "content/docs/security/index.mdx",
-      "sha256": "d76f58fcd3e9a55716556579d748b251b8bcd65fc61e6b585d89443a7f457f22",
+      "sha256": "b1da68d15d7823e625d7107e8b9188b3dbcbe839a93d48023b652818161ac776",
       "sources": [
         {
           "path": "docs/security/THREAT_MODEL.md"
@@ -69,7 +69,7 @@
     },
     {
       "destination": "content/docs/derivation/index.mdx",
-      "sha256": "3ee9b333c41d3a8de64740d8a729d01f6f035de725ac22483322fc4818981c22",
+      "sha256": "db4d7de80cffff0e39fd3f80eda469c6823b061716923ace2efc6f063778b80b",
       "sources": [
         {
           "path": "CLEANROOM.md"

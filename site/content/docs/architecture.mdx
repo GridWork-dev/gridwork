@@ -3,7 +3,7 @@ title: Architecture
 description: Truth ownership, append serialization, storage ports, projections, blobs, crash recovery, and contract surfaces.
 ---
 
-{/* curated-from: docs/architecture.md sha256=9ea8db5230d81db163f8cf95e02d13df6a2ea3c7c61ae6daa37689e255eb158f */}
+{/* curated-from: docs/architecture.md sha256=5133eae9122a9f0891831b35fbde7f4afa07d3f4c3cb5f20ff2a679cca6ce0f1 */}
 
 The implementation contract behind the roadmap: what owns truth, what the
 pieces are, and which decisions are locked versus deliberately deferred.
@@ -19,9 +19,13 @@ Locked decisions change only by a recorded amendment, not by drift.
 > CLI half of the protocol. All of it certified against a real PostgreSQL 16,
 > with the performance envelope measured rather than asserted.
 >
-> **Not built:** the PTY engine, the agent adapters, and the TUI — the whole
-> human surface. Anything this file says about rendering, attaching, replaying,
-> or an engine is specification.
+> **In flight (in the tree, incomplete, unpublished):** the PTY engine
+> (`gwk-pty` — server-side VT, render deltas, styled cells, attach, record) and
+> the three agent adapters, with `gwk-pty-host` a skeleton whose runtime wiring
+> is in progress.
+>
+> **Not built:** the TUI — the whole human surface. Anything this file says
+> about lenses, the console, or the workspace is specification.
 >
 > [Threat model](/docs/security) labels each security stance **in force** /
 > **partial** / **designed, not yet built**; when this file and that one disagree
