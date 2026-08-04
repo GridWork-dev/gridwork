@@ -260,6 +260,10 @@ fn private_relay_dir(tag: &str) -> Result<PathBuf, String> {
 }
 
 fn fixture_ask() -> Result<PreToolUseAsk, String> {
+    // Derivation: CLAUDE-HOOKS — the documented PreToolUse stdin schema this
+    // fixture instantiates (`session_id`, `transcript_path`, `cwd`,
+    // `hook_event_name`, `tool_name`, `tool_input`, `tool_use_id`), decoded
+    // through the adapter's own `PreToolUseAsk::from_stdin`.
     PreToolUseAsk::from_stdin(
         br#"{
             "session_id": "gwk-parity-session",

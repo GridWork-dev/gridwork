@@ -7,6 +7,10 @@
 //! `cargo run -p gwk-parity --bin parity` on a box with the three engine
 //! CLIs logged in.
 
+// Derivation: none — local driver only: runs the runners and prints the
+// filled matrix. Every engine interaction and wire shape lives in
+// src/runners/, which carries its own markers.
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let matrix = gwk_parity::runners::run_all().await;
