@@ -6,10 +6,17 @@
 //! travels the engine's own control surface. Control never rides synthetic
 //! keystrokes.
 //!
-//! The normalization surface all three adapters converge on is the ACP SDK's
-//! role machinery (the `Agent` role behind a connection), which this crate
-//! reaches over the real wire; the sibling adapters implement the same role
-//! over their own vendor protocols.
+//! The normalization surface all three adapters converge on is
+//! [`gwk_domain::engine::EngineAdapter`], which [`adapter`] implements over
+//! this crate's own normalized event type; the sibling adapters implement the
+//! same trait over their vendor protocols.
+//!
+//! This is the crate that speaks a real ACP wire, and it is worth being precise
+//! about why that does not make ACP the normalization layer. ACP drives this
+//! engine's agent loop; lifecycle, status and approval do not ride that
+//! connection at all — they ride the server's own event bus, as the next
+//! paragraph says. So even here the convergence is on gwk's types, and the
+//! sibling adapters are not approximating something this one gets natively.
 //!
 //! Lifecycle, status, and approval do not ride that ACP connection at all —
 //! per `docs/PARITY.md`, they ride the engine's own server event bus
@@ -24,8 +31,11 @@ use agent_client_protocol::AcpAgentConfig;
 use gwk_domain::EngineId;
 use gwk_pty::{Session, SpawnError};
 
+pub mod adapter;
 pub mod cost;
 pub mod event;
+
+pub use adapter::OpencodeAdapter;
 
 /// The engine CLI this adapter drives.
 pub const ENGINE: &str = "opencode";

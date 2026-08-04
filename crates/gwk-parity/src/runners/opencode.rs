@@ -39,9 +39,11 @@
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+use gwk_adapter_opencode::OpencodeAdapter;
 use gwk_adapter_opencode::cost::parse_children;
 use gwk_adapter_opencode::event::{Event, PermissionAsk, ToolRef, open_gate_command, parse_frame};
 use gwk_domain::GateId;
+use gwk_domain::engine::{EngineAdapter, LifecycleFact};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::time::timeout;
@@ -302,27 +304,34 @@ pub async fn lifecycle() -> Cell {
     let (events, session_result) = tokio::join!(bus, work);
     let _ = server.child.kill().await;
 
-    let mut tags = Vec::new();
-    if events
+    // Through the adapter, not around it — same reason as the sibling runners.
+    let facts: Vec<LifecycleFact> = events
         .iter()
-        .any(|(_, e)| matches!(e, Event::StreamConnected))
-    {
-        tags.push("stream_connected".to_owned());
-    }
-    if events
+        .filter_map(|(_, e)| OpencodeAdapter.normalize(e.clone()).ok())
+        .flatten()
+        .filter_map(|e| e.lifecycle())
+        .collect();
+    // The bus connecting is checked separately and NOT as an axis-1 fact.
+    // `docs/PARITY.md`'s axis-1 row for opencode names `session.created` and
+    // nothing else; `server.connected` is the stream's own liveness, which is
+    // why the adapter reports it unmodeled. Keeping it in the expected set
+    // would have this cell assert something the contract does not require —
+    // and it is not lost coverage, because a bus that never connected cannot
+    // deliver `session.created` either, so `start` fails first and says so.
+    let connected = events
         .iter()
-        .any(|(_, e)| matches!(e, Event::SessionCreated { .. }))
-    {
-        tags.push("start".to_owned());
-    }
+        .any(|(_, e)| matches!(e, Event::StreamConnected));
     if let Err(e) = session_result {
         return Cell::fail(
             ENGINE,
             Axis::Lifecycle,
-            format!("POST /session failed: {e}; bus facts observed before that: {tags:?}"),
+            format!(
+                "POST /session failed: {e}; bus connected: {connected}; lifecycle facts observed \
+                 before that: {facts:?}"
+            ),
         );
     }
-    let (verdict, detail) = check_lifecycle_observed(&["stream_connected", "start"], &tags);
+    let (verdict, detail) = check_lifecycle_observed(&[LifecycleFact::Started], &facts);
     Cell::new(ENGINE, Axis::Lifecycle, verdict, detail)
 }
 

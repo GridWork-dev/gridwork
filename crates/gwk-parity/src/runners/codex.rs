@@ -35,6 +35,7 @@
 
 use std::time::{Duration, Instant};
 
+use gwk_adapter_codex::CodexAdapter;
 use gwk_adapter_codex::schema::ThreadItem;
 use gwk_adapter_codex::wire::{Frame, RequestFrame};
 use gwk_adapter_codex::{
@@ -42,6 +43,7 @@ use gwk_adapter_codex::{
     file_change_response, normalize_notification, normalize_request,
     open_gate_for_command_execution, open_gate_for_file_change,
 };
+use gwk_domain::engine::{EngineAdapter, LifecycleFact};
 use gwk_domain::{GateId, KernelCommand};
 use tokio::time::timeout;
 
@@ -258,14 +260,18 @@ pub async fn lifecycle() -> Cell {
     }
     match run_thread(serde_json::json!({}), PLAIN_PROMPT, RUNNER_TIMEOUT).await {
         Ok((events, _)) => {
-            let mut tags = vec!["start".to_owned()];
-            if events
+            // Through the adapter, not around it — same reason as the claude
+            // runner. Note what the old spelling hid: `start` was pushed
+            // unconditionally, so the cell could pass without a `thread/started`
+            // ever arriving. It has to be observed now.
+            let facts: Vec<LifecycleFact> = events
                 .iter()
-                .any(|(_, e)| matches!(e, CodexEvent::TurnCompleted { .. }))
-            {
-                tags.push("end".to_owned());
-            }
-            let (verdict, detail) = check_lifecycle_observed(&["start", "end"], &tags);
+                .filter_map(|(_, e)| CodexAdapter.normalize(e.clone()).ok())
+                .flatten()
+                .filter_map(|e| e.lifecycle())
+                .collect();
+            let (verdict, detail) =
+                check_lifecycle_observed(&[LifecycleFact::Started, LifecycleFact::Ended], &facts);
             Cell::new(ENGINE, Axis::Lifecycle, verdict, detail)
         }
         Err(e) => Cell::fail(

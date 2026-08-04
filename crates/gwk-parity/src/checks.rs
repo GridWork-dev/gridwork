@@ -20,27 +20,49 @@
 use std::time::Duration;
 
 use gwk_domain::KernelCommand;
+use gwk_domain::engine::LifecycleFact;
 
 use crate::matrix::Verdict;
 
-/// Axis 1 — lifecycle. Every tag in `expected` must appear in `observed`;
+/// Axis 1 — lifecycle. Every fact in `expected` must appear in `observed`;
 /// `docs/PARITY.md`: "each surfaced as the adapter's normalized state" — a
 /// fact that never arrived is exactly what this rejects.
-pub fn check_lifecycle_observed(expected: &[&str], observed: &[String]) -> (Verdict, String) {
-    let missing: Vec<&str> = expected
+///
+/// Both sides are [`LifecycleFact`], not strings. Until the adapters shared a
+/// type, each runner spelled its own tags at the call site and this compared
+/// them for equality — three engines agreeing on orthography rather than on
+/// meaning. A typo in a runner read as a missing fact for that engine; a typo
+/// in an expectation read as a fact nothing could ever satisfy. Neither is
+/// expressible now. The strings survive only in the message, derived from the
+/// variant via [`LifecycleFact::tag`], so a harness log still reads the way
+/// `docs/PARITY.md`'s own prose does.
+pub fn check_lifecycle_observed(
+    expected: &[LifecycleFact],
+    observed: &[LifecycleFact],
+) -> (Verdict, String) {
+    let render =
+        |facts: &[LifecycleFact]| -> Vec<&'static str> { facts.iter().map(|f| f.tag()).collect() };
+    let missing: Vec<LifecycleFact> = expected
         .iter()
         .copied()
-        .filter(|e| !observed.iter().any(|o| o == e))
+        .filter(|e| !observed.contains(e))
         .collect();
     if missing.is_empty() {
         (
             Verdict::Pass,
-            format!("observed every expected lifecycle fact {expected:?}"),
+            format!(
+                "observed every expected lifecycle fact {:?}",
+                render(expected)
+            ),
         )
     } else {
         (
             Verdict::Fail,
-            format!("missing lifecycle fact(s) {missing:?}; observed {observed:?}"),
+            format!(
+                "missing lifecycle fact(s) {:?}; observed {:?}",
+                render(&missing),
+                render(observed)
+            ),
         )
     }
 }
@@ -153,8 +175,10 @@ mod tests {
 
     #[test]
     fn lifecycle_check_passes_when_every_expected_fact_was_observed() {
-        let (verdict, _) =
-            check_lifecycle_observed(&["start", "end"], &["start".to_owned(), "end".to_owned()]);
+        let (verdict, _) = check_lifecycle_observed(
+            &[LifecycleFact::Started, LifecycleFact::Ended],
+            &[LifecycleFact::Started, LifecycleFact::Ended],
+        );
         assert_eq!(verdict, Verdict::Pass);
     }
 
@@ -163,8 +187,12 @@ mod tests {
         // Positive control above proves it can pass; this proves it can
         // fail — "idle" was never observed.
         let (verdict, detail) = check_lifecycle_observed(
-            &["start", "idle", "end"],
-            &["start".to_owned(), "end".to_owned()],
+            &[
+                LifecycleFact::Started,
+                LifecycleFact::Idle,
+                LifecycleFact::Ended,
+            ],
+            &[LifecycleFact::Started, LifecycleFact::Ended],
         );
         assert_eq!(verdict, Verdict::Fail);
         assert!(

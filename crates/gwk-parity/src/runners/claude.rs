@@ -41,7 +41,9 @@ use gwk_adapter_claude::hook::{PermissionDecision, PreToolUseAsk, open_gate_from
 use gwk_adapter_claude::message::{Message, SubagentTree};
 use gwk_adapter_claude::relay::AskRelay;
 use gwk_adapter_claude::stream::StreamClient;
+use gwk_adapter_claude::{ClaudeAdapter, ClaudeSignal};
 use gwk_domain::GateId;
+use gwk_domain::engine::{EngineAdapter, LifecycleFact};
 use tokio::time::timeout;
 
 use super::{RUNNER_TIMEOUT, check_version, version_skip};
@@ -114,14 +116,23 @@ pub async fn lifecycle() -> Cell {
     }
     match run_one_turn(RUNNER_TIMEOUT).await {
         Ok(observed) => {
-            let mut tags = Vec::new();
-            if observed.iter().any(|(_, m)| m.is_session_start()) {
-                tags.push("start".to_owned());
-            }
-            if observed.iter().any(|(_, m)| m.is_result()) {
-                tags.push("end".to_owned());
-            }
-            let (verdict, detail) = check_lifecycle_observed(&["start", "end"], &tags);
+            // Through the adapter, not around it. This used to inspect the raw
+            // messages here and push string tags; the harness was then checking
+            // that THIS code agreed with itself about what a start looks like,
+            // not that the adapter reports one. A fact missing from the adapter
+            // now fails the cell, which is what axis 1 always meant.
+            let facts: Vec<LifecycleFact> = observed
+                .iter()
+                .filter_map(|(_, m)| {
+                    ClaudeAdapter
+                        .normalize(ClaudeSignal::Stream(m.clone()))
+                        .ok()
+                })
+                .flatten()
+                .filter_map(|e| e.lifecycle())
+                .collect();
+            let (verdict, detail) =
+                check_lifecycle_observed(&[LifecycleFact::Started, LifecycleFact::Ended], &facts);
             Cell::new(ENGINE, Axis::Lifecycle, verdict, detail)
         }
         Err(e) => Cell::fail(
