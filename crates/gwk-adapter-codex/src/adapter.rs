@@ -7,6 +7,20 @@
 //! is what a supervisor can ask of all three engines without knowing which one
 //! it has.
 //!
+//! # The approval gap, stated rather than papered over
+//!
+//! [`EngineEvent::ApprovalAsked`] is unreachable from here. Codex delivers an
+//! approval as a server-initiated JSON-RPC *request*, which this crate models as
+//! [`crate::ApprovalRequest`] through `normalize_request` — a different type on a
+//! different channel from the [`CodexEvent`] notifications this `Raw` covers.
+//!
+//! The sibling claude adapter met the same split and solved it with a union
+//! `Raw` over its two channels. Doing that here is the right fix and is not
+//! done in this change: it would widen `Raw` to a type nothing constructs yet,
+//! and an approval that no consumer reads is worth less than an honest gap. So
+//! codex reports three of the four axes through this trait, and axis 4 stays on
+//! `normalize_request` where its consumers already are.
+//!
 //! # Clean-room scope
 //!
 //! No new protocol behavior is read here. Every mapping below is over

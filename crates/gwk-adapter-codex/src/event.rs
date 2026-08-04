@@ -64,9 +64,14 @@ pub enum CodexEvent {
     },
     /// `thread/closed` — lifecycle: end.
     ThreadClosed { thread_id: String },
-    /// `turn/completed` — lifecycle: idle (on `TurnStatus::Completed`) or a
-    /// terminal turn outcome otherwise; also the typed item batch for this
-    /// turn.
+    /// `turn/completed` — the typed item batch for this turn, and the error
+    /// half of `docs/PARITY.md` axis 1 when it carries one.
+    ///
+    /// NOT idle. This said "lifecycle: idle (on `TurnStatus::Completed`)" and
+    /// that was never the contract: axis 1's codex row lists this notification
+    /// under ERROR alone, assigns idle to `thread/status/changed` and end to
+    /// `thread/closed`. `crate::adapter` reads it the row's way; this doc is
+    /// where the misreading started.
     TurnCompleted {
         thread_id: String,
         turn: crate::schema::Turn,

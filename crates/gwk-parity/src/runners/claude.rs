@@ -121,16 +121,25 @@ pub async fn lifecycle() -> Cell {
             // that THIS code agreed with itself about what a start looks like,
             // not that the adapter reports one. A fact missing from the adapter
             // now fails the cell, which is what axis 1 always meant.
-            let facts: Vec<LifecycleFact> = observed
-                .iter()
-                .filter_map(|(_, m)| {
-                    ClaudeAdapter
-                        .normalize(ClaudeSignal::Stream(m.clone()))
-                        .ok()
-                })
-                .flatten()
-                .filter_map(|e| e.lifecycle())
-                .collect();
+            // NOT `.ok()`. `ClaudeAdapter` raises `UnattributedLifecycle` for
+            // a `system`/`init` or `result` that names no session, precisely so
+            // that a broken transport is not mistaken for a quiet stream — and
+            // discarding it here would turn that fault back into the missing
+            // fact it was written to distinguish itself from. A normalize
+            // failure fails the cell, and says which message did it.
+            let mut facts: Vec<LifecycleFact> = Vec::new();
+            for (_, m) in &observed {
+                match ClaudeAdapter.normalize(ClaudeSignal::Stream(m.clone())) {
+                    Ok(events) => facts.extend(events.iter().filter_map(|e| e.lifecycle())),
+                    Err(e) => {
+                        return Cell::fail(
+                            ENGINE,
+                            Axis::Lifecycle,
+                            format!("the adapter refused a stream message: {e}"),
+                        );
+                    }
+                }
+            }
             let (verdict, detail) =
                 check_lifecycle_observed(&[LifecycleFact::Started, LifecycleFact::Ended], &facts);
             Cell::new(ENGINE, Axis::Lifecycle, verdict, detail)

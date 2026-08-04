@@ -207,9 +207,10 @@ pub trait EngineAdapter {
     /// Normalize one protocol frame into the facts it carries.
     ///
     /// A `Vec` because the mapping is not one-to-one in either direction: a
-    /// codex `turn/completed` is both an idle fact and a cost report, and a
-    /// frame that carries no fact at all yields nothing rather than a variant
-    /// meaning "nothing".
+    /// codex `thread/started` is both a lifecycle fact and a status push, a
+    /// claude `result` is an end, possibly an error, and a spend report at once,
+    /// and a frame that carries no fact at all yields nothing rather than a
+    /// variant meaning "nothing".
     fn normalize(&self, raw: Self::Raw) -> Result<Vec<EngineEvent>, Self::Error>;
 }
 

@@ -307,8 +307,10 @@ pub async fn lifecycle() -> Cell {
     // Through the adapter, not around it — same reason as the sibling runners.
     let facts: Vec<LifecycleFact> = events
         .iter()
-        .filter_map(|(_, e)| OpencodeAdapter.normalize(e.clone()).ok())
-        .flatten()
+        // `expect`, not `.ok()`: this adapter's `Error` is `Infallible`, so there
+        // is no failure to swallow — and if that ever changes, this stops
+        // compiling instead of quietly dropping facts the way a `.ok()` would.
+        .flat_map(|(_, e)| OpencodeAdapter.normalize(e.clone()).expect("infallible"))
         .filter_map(|e| e.lifecycle())
         .collect();
     // The bus connecting is checked separately and NOT as an axis-1 fact.
