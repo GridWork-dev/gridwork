@@ -361,9 +361,14 @@ impl Daemon {
                         .map(|record| cursor_key(record, key))
                         .transpose()?
                 };
+                // The same watermark `Watermark {}` would answer with, read
+                // from the readiness this request already resolved rather than
+                // re-queried: a second read could land the other side of an
+                // append and report a page as fresher than it is.
                 KernelResult::ProjectionPage {
                     records,
                     next_cursor,
+                    watermark: readiness.watermark,
                 }
             }
 

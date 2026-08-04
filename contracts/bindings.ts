@@ -331,52 +331,131 @@ export type CellColor =
 
 /**
  *  The attribute bits and colors a [`StyledCell`] carries, independent of its
- *  glyph. The six attributes are plain, always-present booleans — not
+ *  glyph.
+ * 
+ *  The eight attributes below are plain, always-present booleans — not
  *  `Option<bool>` — matching how this contract already carries `dirty` and
  *  `unpushed` elsewhere (`docs/contract/NAMING.md`): a boolean fact has no
  *  third "absent" state to distinguish from `false`.
+ * 
+ *  `underline` is the exception, and deliberately so: it is not a boolean
+ *  fact. A cell is un-underlined or carries one of five shapes, which is six
+ *  states, so it is an optional [`CellUnderline`] and absent means "not
+ *  underlined" the same way an absent `fg` means the terminal's own default.
+ *  An earlier version of this struct flattened it to a `bool`, which reported
+ *  a `4:3` curly underline as indistinguishable from a plain `4` — a fidelity
+ *  loss at the wire, in a contract whose whole job is to carry what the engine
+ *  parsed rather than what a client would guess.
+ * 
+ *  The set here tracks `gwk_pty::CellStyle`. When the engine gains an
+ *  attribute this struct does not carry, a consumer attaching to a session
+ *  silently loses it — so the two move together, and a widening of one without
+ *  the other is the defect, not the fix.
  */
 export type CellStyle = CellStyle_Serialize | CellStyle_Deserialize;
 
 /**
  *  The attribute bits and colors a [`StyledCell`] carries, independent of its
- *  glyph. The six attributes are plain, always-present booleans — not
+ *  glyph.
+ * 
+ *  The eight attributes below are plain, always-present booleans — not
  *  `Option<bool>` — matching how this contract already carries `dirty` and
  *  `unpushed` elsewhere (`docs/contract/NAMING.md`): a boolean fact has no
  *  third "absent" state to distinguish from `false`.
+ * 
+ *  `underline` is the exception, and deliberately so: it is not a boolean
+ *  fact. A cell is un-underlined or carries one of five shapes, which is six
+ *  states, so it is an optional [`CellUnderline`] and absent means "not
+ *  underlined" the same way an absent `fg` means the terminal's own default.
+ *  An earlier version of this struct flattened it to a `bool`, which reported
+ *  a `4:3` curly underline as indistinguishable from a plain `4` — a fidelity
+ *  loss at the wire, in a contract whose whole job is to carry what the engine
+ *  parsed rather than what a client would guess.
+ * 
+ *  The set here tracks `gwk_pty::CellStyle`. When the engine gains an
+ *  attribute this struct does not carry, a consumer attaching to a session
+ *  silently loses it — so the two move together, and a widening of one without
+ *  the other is the defect, not the fix.
  */
 export type CellStyle_Deserialize = {
 	bold: boolean,
 	dim: boolean,
 	italic: boolean,
-	underline: boolean,
+	blink: boolean,
 	inverse: boolean,
+	invisible: boolean,
 	strikethrough: boolean,
+	overline: boolean,
+	/**  Absent means the cell is not underlined. */
+	underline?: CellUnderline | null,
 	/**  Absent means the terminal's own default foreground. */
 	fg?: CellColor | null,
 	/**  Absent means the terminal's own default background. */
 	bg?: CellColor | null,
+	/**
+	 *  The underline's own color, set independently of the text's foreground.
+	 *  Absent means it follows the foreground, which is also what an
+	 *  un-underlined cell carries.
+	 */
+	underline_color?: CellColor | null,
 };
 
 /**
  *  The attribute bits and colors a [`StyledCell`] carries, independent of its
- *  glyph. The six attributes are plain, always-present booleans — not
+ *  glyph.
+ * 
+ *  The eight attributes below are plain, always-present booleans — not
  *  `Option<bool>` — matching how this contract already carries `dirty` and
  *  `unpushed` elsewhere (`docs/contract/NAMING.md`): a boolean fact has no
  *  third "absent" state to distinguish from `false`.
+ * 
+ *  `underline` is the exception, and deliberately so: it is not a boolean
+ *  fact. A cell is un-underlined or carries one of five shapes, which is six
+ *  states, so it is an optional [`CellUnderline`] and absent means "not
+ *  underlined" the same way an absent `fg` means the terminal's own default.
+ *  An earlier version of this struct flattened it to a `bool`, which reported
+ *  a `4:3` curly underline as indistinguishable from a plain `4` — a fidelity
+ *  loss at the wire, in a contract whose whole job is to carry what the engine
+ *  parsed rather than what a client would guess.
+ * 
+ *  The set here tracks `gwk_pty::CellStyle`. When the engine gains an
+ *  attribute this struct does not carry, a consumer attaching to a session
+ *  silently loses it — so the two move together, and a widening of one without
+ *  the other is the defect, not the fix.
  */
 export type CellStyle_Serialize = {
 	bold: boolean,
 	dim: boolean,
 	italic: boolean,
-	underline: boolean,
+	blink: boolean,
 	inverse: boolean,
+	invisible: boolean,
 	strikethrough: boolean,
+	overline: boolean,
+	/**  Absent means the cell is not underlined. */
+	underline?: CellUnderline | null,
 	/**  Absent means the terminal's own default foreground. */
 	fg?: CellColor | null,
 	/**  Absent means the terminal's own default background. */
 	bg?: CellColor | null,
+	/**
+	 *  The underline's own color, set independently of the text's foreground.
+	 *  Absent means it follows the foreground, which is also what an
+	 *  un-underlined cell carries.
+	 */
+	underline_color?: CellColor | null,
 };
+
+/**
+ *  How a cell's text is underlined, when it is.
+ * 
+ *  A separate enum rather than a `bool` because the shape is a real attribute
+ *  the engine reports, not a rendering flourish: a terminal that draws a curly
+ *  underline where the child asked for a dotted one is displaying something
+ *  the child did not send. The variants match what `gwk_pty::Underline`
+ *  carries, so the engine-to-wire conversion is total in both directions.
+ */
+export type CellUnderline = { type: "single" } | { type: "double" } | { type: "curly" } | { type: "dotted" } | { type: "dashed" };
 
 /**
  *  One checkpoint record.
@@ -1497,7 +1576,18 @@ event_count: string }) & { address?: never; code?: never; cols?: never; command_
  *  The command was applied. `events` are the appended envelopes with their
  *  assigned sequences; an idempotent replay answers with the original ones.
  */
-({ type: "command_applied"; command_id: CommandId; events: EventEnvelope_Deserialize[]; watermark: string }) & { address?: never; code?: never; cols?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never; writer_epoch?: never } | ({ type: "projection"; record: ProjectionRecord_Deserialize }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; records?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "projection_page"; records: ProjectionRecord_Deserialize[]; next_cursor?: string | null }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; offset?: never; public_revision?: never; ready?: never; record?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "events"; events: EventEnvelope_Deserialize[]; 
+({ type: "command_applied"; command_id: CommandId; events: EventEnvelope_Deserialize[]; watermark: string }) & { address?: never; code?: never; cols?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never; writer_epoch?: never } | ({ type: "projection"; record: ProjectionRecord_Deserialize }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; records?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "projection_page"; records: ProjectionRecord_Deserialize[]; next_cursor?: string | null; 
+/**
+ *  How far the projector had applied when this page was read, so a
+ *  client can say how stale its view is against kernel truth rather
+ *  than against its own poll clock. Absent means an empty log — never
+ *  `0`, which is a real sequence, matching [`Self::Watermark`].
+ * 
+ *  A page is a projection read, not a snapshot of the log: two pages
+ *  of the same cursor walk can straddle an append. This field is what
+ *  lets a consumer notice that rather than assume it away.
+ */
+watermark?: string | null }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; offset?: never; public_revision?: never; ready?: never; record?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never; writer_epoch?: never } | ({ type: "events"; events: EventEnvelope_Deserialize[]; 
 /**  The last delivered sequence; absent when the page was empty. */
 cursor?: string | null; watermark?: string | null }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never; writer_epoch?: never } | 
 /**  The subscription is live; batches follow as [`ServerControl::EventBatch`]. */
@@ -1549,7 +1639,18 @@ event_count: string }) & { address?: never; code?: never; cols?: never; command_
  *  The command was applied. `events` are the appended envelopes with their
  *  assigned sequences; an idempotent replay answers with the original ones.
  */
-({ type: "command_applied"; command_id: CommandId; events: EventEnvelope_Serialize[]; watermark: string }) & { address?: never; code?: never; cols?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never; writer_epoch?: never } | ({ type: "projection"; record: ProjectionRecord_Serialize }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; records?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "projection_page"; records: ProjectionRecord_Serialize[]; next_cursor?: string | null }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; offset?: never; public_revision?: never; ready?: never; record?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "events"; events: EventEnvelope_Serialize[]; 
+({ type: "command_applied"; command_id: CommandId; events: EventEnvelope_Serialize[]; watermark: string }) & { address?: never; code?: never; cols?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never; writer_epoch?: never } | ({ type: "projection"; record: ProjectionRecord_Serialize }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; records?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "projection_page"; records: ProjectionRecord_Serialize[]; next_cursor?: string | null; 
+/**
+ *  How far the projector had applied when this page was read, so a
+ *  client can say how stale its view is against kernel truth rather
+ *  than against its own poll clock. Absent means an empty log — never
+ *  `0`, which is a real sequence, matching [`Self::Watermark`].
+ * 
+ *  A page is a projection read, not a snapshot of the log: two pages
+ *  of the same cursor walk can straddle an append. This field is what
+ *  lets a consumer notice that rather than assume it away.
+ */
+watermark?: string | null }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; offset?: never; public_revision?: never; ready?: never; record?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never; writer_epoch?: never } | ({ type: "events"; events: EventEnvelope_Serialize[]; 
 /**  The last delivered sequence; absent when the page was empty. */
 cursor?: string | null; watermark?: string | null }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never; writer_epoch?: never } | 
 /**  The subscription is live; batches follow as [`ServerControl::EventBatch`]. */

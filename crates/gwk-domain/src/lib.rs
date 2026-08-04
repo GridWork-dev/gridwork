@@ -36,7 +36,9 @@ pub use envelope::{
     Actor, CommandEnvelope, ENVELOPE_SCHEMA_VERSION, EventEnvelope, INLINE_PAYLOAD_MAX_BYTES,
     Origin, PayloadRef, UnknownSchemaVersion, accept_schema_version,
 };
-pub use frame::{CellColor, CellStyle, PtyAnsiSlot, PtyCellUpdate, PtyDelta, PtyFrame, StyledCell};
+pub use frame::{
+    CellColor, CellStyle, CellUnderline, PtyAnsiSlot, PtyCellUpdate, PtyDelta, PtyFrame, StyledCell,
+};
 pub use fsm::{
     AttemptState, CommandState, GateVerdict, LeaseMode, LeaseState, MessageState, Outcome,
     StateMachine, TaskState,

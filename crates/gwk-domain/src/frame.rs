@@ -110,20 +110,59 @@ pub enum CellColor {
     Truecolor { r: u8, g: u8, b: u8 },
 }
 
+/// How a cell's text is underlined, when it is.
+///
+/// A separate enum rather than a `bool` because the shape is a real attribute
+/// the engine reports, not a rendering flourish: a terminal that draws a curly
+/// underline where the child asked for a dotted one is displaying something
+/// the child did not send. The variants match what `gwk_pty::Underline`
+/// carries, so the engine-to-wire conversion is total in both directions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CellUnderline {
+    Single,
+    Double,
+    Curly,
+    Dotted,
+    Dashed,
+}
+
 /// The attribute bits and colors a [`StyledCell`] carries, independent of its
-/// glyph. The six attributes are plain, always-present booleans — not
+/// glyph.
+///
+/// The eight attributes below are plain, always-present booleans — not
 /// `Option<bool>` — matching how this contract already carries `dirty` and
 /// `unpushed` elsewhere (`docs/contract/NAMING.md`): a boolean fact has no
 /// third "absent" state to distinguish from `false`.
+///
+/// `underline` is the exception, and deliberately so: it is not a boolean
+/// fact. A cell is un-underlined or carries one of five shapes, which is six
+/// states, so it is an optional [`CellUnderline`] and absent means "not
+/// underlined" the same way an absent `fg` means the terminal's own default.
+/// An earlier version of this struct flattened it to a `bool`, which reported
+/// a `4:3` curly underline as indistinguishable from a plain `4` — a fidelity
+/// loss at the wire, in a contract whose whole job is to carry what the engine
+/// parsed rather than what a client would guess.
+///
+/// The set here tracks `gwk_pty::CellStyle`. When the engine gains an
+/// attribute this struct does not carry, a consumer attaching to a session
+/// silently loses it — so the two move together, and a widening of one without
+/// the other is the defect, not the fix.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
 #[serde(deny_unknown_fields)]
 pub struct CellStyle {
     pub bold: bool,
     pub dim: bool,
     pub italic: bool,
-    pub underline: bool,
+    pub blink: bool,
     pub inverse: bool,
+    pub invisible: bool,
     pub strikethrough: bool,
+    pub overline: bool,
+    /// Absent means the cell is not underlined.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub underline: Option<CellUnderline>,
     /// Absent means the terminal's own default foreground.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[specta(optional)]
@@ -132,6 +171,12 @@ pub struct CellStyle {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[specta(optional)]
     pub bg: Option<CellColor>,
+    /// The underline's own color, set independently of the text's foreground.
+    /// Absent means it follows the foreground, which is also what an
+    /// un-underlined cell carries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub underline_color: Option<CellColor>,
 }
 
 /// One terminal cell: a displayed glyph plus the style it carries.
@@ -207,11 +252,15 @@ mod tests {
                 bold: false,
                 dim: false,
                 italic: false,
-                underline: false,
+                blink: false,
                 inverse: false,
+                invisible: false,
                 strikethrough: false,
+                overline: false,
+                underline: None,
                 fg: None,
                 bg: None,
+                underline_color: None,
             },
         }
     }
@@ -278,16 +327,75 @@ mod tests {
             "bold",
             "dim",
             "italic",
-            "underline",
+            "blink",
             "inverse",
+            "invisible",
             "strikethrough",
+            "overline",
         ] {
             assert!(style.contains_key(attr), "missing {attr}");
             assert_eq!(style[attr], serde_json::json!(false));
         }
+        // `underline` is deliberately NOT in that list. It was an
+        // always-present boolean until it had to carry a shape, and a cell is
+        // un-underlined or one of five shapes — six states, which no boolean
+        // holds. It is an omitted optional now, like the colors.
+        //
         // Absent optionals are OMITTED, not null (the tri-state discipline).
+        assert!(!style.contains_key("underline"));
         assert!(!style.contains_key("fg"));
         assert!(!style.contains_key("bg"));
+        assert!(!style.contains_key("underline_color"));
+    }
+
+    #[test]
+    fn underline_shape_survives_the_wire() {
+        // The regression this whole widening exists to prevent: a curly
+        // underline reported as indistinguishable from a plain one. Under the
+        // previous `bool` both of these serialized to `"underline": true`.
+        let mut curly = cell("x");
+        curly.style.underline = Some(CellUnderline::Curly);
+        let mut single = cell("x");
+        single.style.underline = Some(CellUnderline::Single);
+
+        let curly_json = serde_json::to_value(&curly).expect("serialize");
+        let single_json = serde_json::to_value(&single).expect("serialize");
+        assert_ne!(
+            curly_json, single_json,
+            "two different underline shapes serialized identically"
+        );
+
+        let back: StyledCell = serde_json::from_value(curly_json).expect("deserialize");
+        assert_eq!(back.style.underline, Some(CellUnderline::Curly));
+    }
+
+    #[test]
+    fn underline_color_is_independent_of_the_foreground() {
+        // SGR 58 sets the underline's own color; a wire that folded it into
+        // `fg` would report a red-underlined white word as a red word.
+        let mut styled = cell("x");
+        styled.style.fg = Some(CellColor::Ansi16 {
+            slot: PtyAnsiSlot::White,
+        });
+        styled.style.underline = Some(CellUnderline::Single);
+        styled.style.underline_color = Some(CellColor::Ansi16 {
+            slot: PtyAnsiSlot::Red,
+        });
+
+        let json = serde_json::to_value(&styled).expect("serialize");
+        let back: StyledCell = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(
+            back.style.fg,
+            Some(CellColor::Ansi16 {
+                slot: PtyAnsiSlot::White
+            })
+        );
+        assert_eq!(
+            back.style.underline_color,
+            Some(CellColor::Ansi16 {
+                slot: PtyAnsiSlot::Red
+            })
+        );
     }
 
     #[test]

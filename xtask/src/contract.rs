@@ -18,7 +18,7 @@ use gwk_domain::command::KernelCommand;
 use gwk_domain::entity::{Attempt, Budget, Command, Message, Task};
 use gwk_domain::envelope::{Actor, CommandEnvelope, EventEnvelope, Origin, PayloadRef};
 use gwk_domain::frame::{
-    CellColor, CellStyle, PtyAnsiSlot, PtyCellUpdate, PtyDelta, PtyFrame, StyledCell,
+    CellColor, CellStyle, CellUnderline, PtyAnsiSlot, PtyCellUpdate, PtyDelta, PtyFrame, StyledCell,
 };
 use gwk_domain::fsm::{AttemptState, CommandState, MessageState, Outcome, TaskState};
 use gwk_domain::ids::{
@@ -373,24 +373,39 @@ fn pty_session_id() -> PtySessionId {
     PtySessionId::new("pty-1")
 }
 
-fn plain_cell(glyph: &str) -> StyledCell {
-    StyledCell {
-        glyph: glyph.into(),
-        style: CellStyle {
-            bold: false,
-            dim: false,
-            italic: false,
-            underline: false,
-            inverse: false,
-            strikethrough: false,
-            fg: None,
-            bg: None,
-        },
+/// The SGR-0 rendition: no colors, no underline, every flag off.
+fn plain_style() -> CellStyle {
+    CellStyle {
+        bold: false,
+        dim: false,
+        italic: false,
+        blink: false,
+        inverse: false,
+        invisible: false,
+        strikethrough: false,
+        overline: false,
+        underline: None,
+        fg: None,
+        bg: None,
+        underline_color: None,
     }
 }
 
-/// A 2x2 frame exercising every color tier and a non-default attribute
-/// combination, plus the terminal-default (no `fg`/`bg`) cell.
+fn plain_cell(glyph: &str) -> StyledCell {
+    StyledCell {
+        glyph: glyph.into(),
+        style: plain_style(),
+    }
+}
+
+/// A 2x2 frame exercising every color tier, every attribute in its
+/// non-default state across the four cells, an underline shape that a boolean
+/// could not have carried, an independently-colored underline, and the
+/// terminal-default (no `fg`/`bg`) cell.
+///
+/// Spreading the attributes rather than setting them all on one cell is
+/// deliberate: a golden where every flag is `true` cannot catch two fields
+/// swapped in the generated bindings, because both sides read the same.
 fn golden_pty_frame() -> PtyFrame {
     PtyFrame {
         cells: vec![
@@ -400,15 +415,11 @@ fn golden_pty_frame() -> PtyFrame {
                     glyph: "w".into(),
                     style: CellStyle {
                         bold: true,
-                        dim: false,
-                        italic: false,
-                        underline: false,
-                        inverse: false,
-                        strikethrough: false,
+                        blink: true,
                         fg: Some(CellColor::Ansi16 {
                             slot: PtyAnsiSlot::BrightCyan,
                         }),
-                        bg: None,
+                        ..plain_style()
                     },
                 },
             ],
@@ -416,31 +427,31 @@ fn golden_pty_frame() -> PtyFrame {
                 StyledCell {
                     glyph: "k".into(),
                     style: CellStyle {
-                        bold: false,
                         dim: true,
                         italic: true,
-                        underline: true,
-                        inverse: false,
-                        strikethrough: false,
+                        // Curly, not Single: a `4:3` underline is the case the
+                        // old `bool` reported as indistinguishable from `4`.
+                        underline: Some(CellUnderline::Curly),
+                        underline_color: Some(CellColor::Ansi16 {
+                            slot: PtyAnsiSlot::Red,
+                        }),
                         fg: Some(CellColor::Truecolor {
                             r: 0xff,
                             g: 0x00,
                             b: 0x80,
                         }),
                         bg: Some(CellColor::Xterm256 { index: 236 }),
+                        ..plain_style()
                     },
                 },
                 StyledCell {
                     glyph: String::new(),
                     style: CellStyle {
-                        bold: false,
-                        dim: false,
-                        italic: false,
-                        underline: false,
                         inverse: true,
+                        invisible: true,
                         strikethrough: true,
-                        fg: None,
-                        bg: None,
+                        overline: true,
+                        ..plain_style()
                     },
                 },
             ],
