@@ -1,0 +1,72 @@
+# systemd unit for the gwk-pty-host resident process.
+#
+# NOT installed or enabled by landing this file — that is an operator act,
+# outside the scope of the change that added it. This describes how the
+# binary this crate builds (`crates/gwk-pty-host/src/main.rs`) is meant to
+# run once an operator chooses to.
+#
+# No in-repo packaging convention exists yet to follow: as of this change
+# neither the kernel (`crates/gwk-kernel`) nor `gw` (`crates/gridwork`)
+# ships a systemd unit in this repository, so there is nothing to copy from.
+# What follows is derived instead from `docs/operations.md`'s own
+# description of the kernel daemon's startup/shutdown contract — SIGTERM
+# handled, not just Ctrl-C; `notify_ready()`'s READY=1 datagram on
+# `$NOTIFY_SOCKET` — and this crate's own hard floor: no credential store,
+# no listening network surface of its own.
+
+[Unit]
+Description=GridWork PTY engine host (gwk-pty-host)
+Documentation=https://github.com/GridWork-dev/gridwork
+# Ordering only — this repo carries no gwk-kernel.service to depend on yet.
+# Add `After=gwk-kernel.service` (and `Requires=` if the kernel's own unit
+# ever gains one) the day that unit exists; until then this process fails
+# its own startup health probe loudly rather than silently racing a kernel
+# that is not there.
+After=network.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=/usr/local/bin/gwk-pty-host
+Restart=on-failure
+RestartSec=2s
+
+# The kernel authenticates a peer by its Unix-socket EUID alone (ADR 0002;
+# `crates/gwk-kernel/src/wire/listen.rs`'s `admits`) — this process MUST run
+# as the exact same user the kernel daemon does, or every command it
+# originates is refused at the handshake before a byte of the request is
+# even read. Set to the real deployment user; left commented here rather
+# than guessed, because a wrong guess that happens to "work" (matched by
+# accident) is worse than an obviously-unset one that fails loudly on first
+# boot.
+# User=gridwork
+# Group=gridwork
+
+# Where the kernel's own socket lives. Omit to use the same
+# /run/gridwork/gwk.sock default both `gw` and the kernel daemon read
+# (`gwk_kernel::DEFAULT_SOCKET_PATH`, `GWK_SOCKET_PATH`) — set only if a
+# deployment moved it.
+# Environment=GWK_SOCKET_PATH=/run/gridwork/gwk.sock
+
+# This process adds no credential store and no listening network surface of
+# its own (see `crates/gwk-pty-host/src/lib.rs`) — it only ever CONNECTS out,
+# on a Unix-domain socket. `RestrictAddressFamilies=AF_UNIX` is not
+# decorative: a future change that tried to bind a TCP/UDP listener would
+# fail at the syscall rather than merely going undocumented.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

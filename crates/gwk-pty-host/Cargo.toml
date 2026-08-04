@@ -15,5 +15,30 @@ repository.workspace = true
 # what it is FOR, not for what it contains yet.
 publish = false
 
+[[bin]]
+name = "gwk-pty-host"
+path = "src/main.rs"
+
+[dependencies]
+gwk-domain.workspace = true
+gwk-kernel.workspace = true
+serde_json.workspace = true
+# The idempotency key an `IngestRecord` origination mints is a digest over
+# the record's own body — the same content-addressing `gridwork`'s CLI
+# already uses for `gw ingest submit` (`crates/gridwork/src/main.rs`'s
+# `digest_of_json`). Already a workspace dependency; this crate reuses the
+# convention rather than inventing a second one.
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = [
+  "io-util",
+  "macros",
+  "net",
+  "rt",
+  "rt-multi-thread",
+  "signal",
+] }
+tracing.workspace = true
+
 [lints]
 workspace = true
