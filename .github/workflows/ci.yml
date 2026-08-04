@@ -1212,13 +1212,26 @@ jobs:
           fi
           echo "cleanroom-gate: 'none' beside a doc-comment citation correctly rejected"
 
+          # Half seven: the same defect one comment form over. A `///` outer doc
+          # comment documents the very item a derived construct usually is, so
+          # it is where a marker naturally lands — and the extractor once
+          # recognized only `//`, `//!` and `#`, leaving a `///` line invisible
+          # to every consumer: a `none` written there vanished beside a real
+          # citation instead of tripping the never-both check.
+          printf '/// Derivation: none — seeded\n// Derivation: ECMA-48 §8.3.14 — seeded\nfn seeded() {}\n' > "$dir/outer-none-beside-cite.rs"
+          if echo "$dir/outer-none-beside-cite.rs" | ./tools/cleanroom-gate.sh --markers; then
+            echo 'marker check accepted a /// Derivation: none alongside a real citation' >&2
+            exit 1
+          fi
+          echo "cleanroom-gate: outer-doc 'none' beside a citation correctly rejected"
+
           # The positive control. Seeds that can only ever fail would also pass with
           # the whole parser replaced by `exit 1`, which is the failure this job
-          # exists to make impossible. Three of them now: a citation, a declaration,
-          # and a `//!` doc-comment citation standing alone — the last one pins the
-          # never-both fix to the SHARED extractor, because a second none-side scan
-          # that merely fails the contradiction would still read this file as
-          # unmarked and reject it.
+          # exists to make impossible. Four of them now: a citation, a declaration,
+          # and a doc-comment citation standing alone in each doc form (`//!` and
+          # `///`) — the doc-form ones pin their fixes to the SHARED extractor,
+          # because a second none-side scan that merely fails the contradiction
+          # would still read these files as unmarked and reject them.
           printf '// Derivation: ECMA-48 §8.3.14 — seeded\nfn seeded() {}\n' > "$dir/ok.rs"
           echo "$dir/ok.rs" | ./tools/cleanroom-gate.sh --markers
           echo "cleanroom-gate: registered citation correctly accepted"
@@ -1230,6 +1243,10 @@ jobs:
           printf '//! Derivation: ECMA-48 §8.3.14 — seeded\nfn seeded() {}\n' > "$dir/ok-doc-cite.rs"
           echo "$dir/ok-doc-cite.rs" | ./tools/cleanroom-gate.sh --markers
           echo "cleanroom-gate: doc-comment citation correctly accepted"
+
+          printf '/// Derivation: ECMA-48 §8.3.14 — seeded\nfn seeded() {}\n' > "$dir/ok-outer-doc-cite.rs"
+          echo "$dir/ok-outer-doc-cite.rs" | ./tools/cleanroom-gate.sh --markers
+          echo "cleanroom-gate: outer-doc-comment citation correctly accepted"
           rm -rf "${prefix}-seed"
 
   # Hosted CI enforces the GENERIC pattern set only — the estate-specific extension
