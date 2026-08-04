@@ -96,7 +96,7 @@
     },
     {
       "destination": "content/docs/derivation/reviews.mdx",
-      "sha256": "e3eb5e58e911a478a1463d3e7e38180c8639d5a0ec4c6482ec279061fc3aa7b5",
+      "sha256": "525de3ef98660a43af6c1aa8999dcff8e0dd61e5d3b8d6e502887d6c9121e88c",
       "sources": [
         {
           "path": "docs/derivation/reviews"
