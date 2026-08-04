@@ -78,7 +78,7 @@
     },
     {
       "destination": "content/docs/derivation/specifications.mdx",
-      "sha256": "53a4f103a0f5809a4da77453418acf68b263decea32f0661599212384bd41cf9",
+      "sha256": "184b07b983642859c81b0201e6c9f3691efe5997144f8fca993b6497aad8047e",
       "sources": [
         {
           "path": "docs/derivation/SPECS.md"
@@ -87,7 +87,7 @@
     },
     {
       "destination": "content/docs/derivation/captures.mdx",
-      "sha256": "ea5755f7fd3112deb3387850dbfdf702218a995bd175b5653d5ebee8e4568c8a",
+      "sha256": "9ae70048d65a7dc03f90ae2da464b857ed719ac820267c8e415c2fe6d7dfe73e",
       "sources": [
         {
           "path": "docs/derivation/CAPTURES.md"
@@ -96,7 +96,7 @@
     },
     {
       "destination": "content/docs/derivation/reviews.mdx",
-      "sha256": "525de3ef98660a43af6c1aa8999dcff8e0dd61e5d3b8d6e502887d6c9121e88c",
+      "sha256": "24e6dbfe32b646a00267d01836cb1aa57c922bef19d099b05b3ecde0fc849a1a",
       "sources": [
         {
           "path": "docs/derivation/reviews"

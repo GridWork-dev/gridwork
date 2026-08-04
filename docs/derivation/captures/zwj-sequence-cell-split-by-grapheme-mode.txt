@@ -1,0 +1,43 @@
+capture: cell segmentation of a ZWJ emoji sequence, with grapheme-cluster mode
+         reset (the default) and set
+platform: Linux 7.1.5-arch1-2 x86_64
+
+probe (rust, this crate's public API against the pinned engine; the helper is
+the same one tests/style.rs uses):
+
+    use gwk_pty::render::Row;
+    use gwk_pty::{CellStyle, Grid, Renderer};
+
+    fn styles_of(input: &[u8]) -> Vec<CellStyle> {
+        let mut grid = Grid::new(10, 1).expect("10x1 grid");
+        let mut renderer = Renderer::new().expect("render state");
+        grid.write(input);
+        let frame = renderer.frame(&grid, 0).expect("frame");
+        let row: &Row = frame.changed.iter().find(|r| r.y == 0).expect("row 0");
+        row.styles.clone()
+    }
+
+    let seq = "\x1b[31m\u{1F469}\u{200D}\u{1F680}";      // SGR 31, WOMAN, ZWJ, ROCKET
+    styles_of(seq.as_bytes());                            // default
+    styles_of(format!("\x1b[?2027h{seq}").as_bytes());    // mode 2027 set
+
+observed:
+
+    default (mode reset): len=8
+      [0] fg=Some(Palette(1))
+      [1] fg=Some(Palette(1))
+      [2] fg=None
+
+    with CSI ? 2027 h:    len=9
+      [0] fg=Some(Palette(1))
+      [1] fg=None
+      [2] fg=None
+
+reading:
+
+    The joined sequence is ONE UAX-29 extended grapheme cluster either way. With
+    the mode reset it produces TWO style entries, both carrying the SGR under
+    test — so the engine segmented it at two cells. With the mode set it produces
+    ONE, and entry [1] is the first cell past the sequence. The row totals agree:
+    each emoji is two columns wide, and a spacer cell contributes no entry, so
+    two clusters + six trailing cells = 8, and one cluster + eight = 9.

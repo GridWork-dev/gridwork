@@ -1,5 +1,6 @@
 //! The rows-that-changed view of a grid: what a drawing surface needs to
-//! repaint, and nothing else.
+//! repaint, and nothing else — glyphs and [the style](crate::style) they
+//! carry, never a resolved pixel.
 //!
 //! This is the *other* meaning of "delta" — see [`crate::record`] for the one
 //! that gets persisted and replayed. A frame here is stamped with a sequence
@@ -10,6 +11,7 @@ use libghostty_vt::render::{CellIterator, Dirty, RenderState, RowIterator};
 use libghostty_vt::screen::CellWide;
 
 use crate::Grid;
+use crate::style::CellStyle;
 
 /// One row of a frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,6 +19,29 @@ pub struct Row {
     /// Zero-based row index within the viewport.
     pub y: u16,
     pub text: String,
+    /// Per-cell style, one entry per cluster pushed into `text`, in the same
+    /// order — NOT one entry per column. A spacer cell contributes neither a
+    /// cluster nor a style entry, the same rule `text` already follows for
+    /// wide characters (see the loop below), so the two stay index-aligned.
+    ///
+    /// "Cluster" is the engine's cell segmentation, and entry `i` matches
+    /// `text`'s i-th UAX-29 grapheme only when the two segmentations agree.
+    // Derivation: TERM-UNICODE-CORE — mode 2027, when SET, requires cells to
+    // be extended grapheme clusters; when reset it states the behavior is
+    // undefined, so what a terminal does with the mode off is not something
+    // this document can be cited for.
+    // Derivation: CAP-004 — measured against the engine this build pins: with
+    // the mode reset a ZWJ emoji sequence occupies several cells, so several
+    // entries here, that a UAX-29 walk of `text` reads as ONE grapheme; with
+    // the mode set the two walks agree. A consumer segmenting `text` with
+    // UAX-29 must set 2027 on the grid, or index by pushed cluster instead.
+    // Both sides are pinned in `tests/style.rs`.
+    ///
+    // ponytail: a flat `Vec`, not run-length-encoded by shared style. Most of
+    // a row shares one style, so an RLE span list would usually be smaller;
+    // add it if a profiled frame size ever calls for it — nothing here has
+    // measured one yet.
+    pub styles: Vec<CellStyle>,
 }
 
 /// What a surface has to redraw to be current with the grid.
@@ -97,6 +122,7 @@ impl Renderer {
                 let row_dirty = row.dirty().ok()?;
                 if full || row_dirty {
                     let mut text = String::new();
+                    let mut styles = Vec::new();
                     let mut cell_iter = self.cells.update(row).ok()?;
                     while let Some(cell) = cell_iter.next() {
                         // Derivation: UAX-11 — East Asian Wide (W) and
@@ -144,8 +170,15 @@ impl Renderer {
                         } else {
                             text.push_str(&cluster);
                         }
+                        // Pushed for the same cell `text` just gained a
+                        // cluster for, in the same iteration — that is what
+                        // keeps `styles[i]` describing the i-th pushed cluster
+                        // rather than some other cell's. Whether that cluster
+                        // is also `text`'s i-th UAX-29 grapheme depends on
+                        // mode 2027 — see the note on [`Row::styles`].
+                        styles.push(CellStyle::from(cell.style().ok()?));
                     }
-                    changed.push(Row { y, text });
+                    changed.push(Row { y, text, styles });
                 }
                 // Marking the row clean is the caller's job, not a side effect
                 // of reading it. Skipping this leaves every row dirty forever,

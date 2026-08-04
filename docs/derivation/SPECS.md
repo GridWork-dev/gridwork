@@ -31,6 +31,7 @@ leaked, or copyleft-licensed is a rule 1 violation.
 | `XTERM-CTLSEQS` | XTerm Control Sequences | invisible-island.net/xterm/ctlseqs/ctlseqs.html |
 | `KITTY-KBD` | Kitty keyboard protocol | sw.kovidgoyal.net/kitty/keyboard-protocol/ |
 | `KITTY-GRAPHICS` | Kitty graphics protocol | sw.kovidgoyal.net/kitty/graphics-protocol/ |
+| `KITTY-UNDERLINES` | Kitty colored and styled underlines | sw.kovidgoyal.net/kitty/underlines/ |
 | `ACP-1` | Agent Client Protocol, wire version 1 | agentclientprotocol.com |
 | `CLAUDE-STREAM-JSON` | Claude Code CLI reference: print-mode `--input-format`/`--output-format` flags, stream-json on both, stdin/stdout | code.claude.com/docs/en/cli-reference |
 | `CLAUDE-HEADLESS` | Claude Code headless mode: the stream-json message stream's shapes and semantics | code.claude.com/docs/en/headless |
@@ -45,6 +46,7 @@ leaked, or copyleft-licensed is a rule 1 violation.
 | `POSIX-WINSIZE` | POSIX.1-2024 (Issue 8) XSH, `tcsetwinsize()` | pubs.opengroup.org/onlinepubs/9799919799/functions/tcsetwinsize.html |
 | `UAX-11` | Unicode Standard Annex #11, East Asian Width | unicode.org/reports/tr11/ |
 | `UAX-29` | Unicode Standard Annex #29, Text Segmentation (grapheme clusters) | unicode.org/reports/tr29/ |
+| `TERM-UNICODE-CORE` | Terminal Unicode Core (grapheme-cluster processing, DEC private mode 2027). **Draft** (rev 1, 2021-09-06), in a repository declaring no license — cite it for what it requires when the mode is SET, and for its own statement that the reset state is undefined; it defines no reset-state behavior to cite | github.com/contour-terminal/terminal-unicode-core |
 
 ## Rows exist before the code that cites them
 
