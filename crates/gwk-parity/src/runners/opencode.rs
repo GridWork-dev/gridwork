@@ -276,10 +276,14 @@ async fn stream_events(url: &str, started: Instant, budget: Duration) -> Vec<(Du
     collected
 }
 
-/// Axis 1 — lifecycle: the bus's own liveness frame
-/// (`docs/PARITY.md`'s inventory notes: "the harness treats that frame as
-/// stream liveness, not session state") plus a real `session.created` from
-/// a real `POST /session`.
+/// Axis 1 — lifecycle: a real `session.created` from a real `POST /session`,
+/// through the adapter.
+///
+/// One fact, not two. This doc used to count the bus's own liveness frame as
+/// the other half, which reads its own citation backwards: `docs/PARITY.md`
+/// says the harness treats that frame as stream liveness and NOT session
+/// state, which is the position the code below now takes — the adapter reports
+/// it unmodeled, and axis 1's opencode row names `session.created` alone.
 pub async fn lifecycle() -> Cell {
     if let Err(cell) = ensure_version(Axis::Lifecycle).await {
         return cell;
@@ -313,7 +317,8 @@ pub async fn lifecycle() -> Cell {
         .flat_map(|(_, e)| OpencodeAdapter.normalize(e.clone()).expect("infallible"))
         .filter_map(|e| e.lifecycle())
         .collect();
-    // The bus connecting is checked separately and NOT as an axis-1 fact.
+    // The bus connecting is NOT an axis-1 fact, and is not separately asserted
+    // either — `connected` below only sharpens a failure message.
     // `docs/PARITY.md`'s axis-1 row for opencode names `session.created` and
     // nothing else; `server.connected` is the stream's own liveness, which is
     // why the adapter reports it unmodeled. Keeping it in the expected set

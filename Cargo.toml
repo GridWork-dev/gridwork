@@ -36,10 +36,15 @@ repository = "https://github.com/GridWork-dev/gridwork"
 [workspace.dependencies]
 aead = "0.6.1"
 aead-stream = "0.6.0"
-# The ACP SDK. One adapter speaks its wire (opencode); all three converge on
-# its Agent trait as the internal normalization surface. The WIRE version pin
-# (v1) lives in adapter code as the negotiated protocol version, not here —
-# the crate serves several wire versions from one release.
+# The ACP SDK, for the one adapter that speaks its wire: gwk-adapter-opencode,
+# and no other. This said "all three converge on its Agent trait as the internal
+# normalization surface", which was the load-bearing version of a claim three
+# crate docs and docs/PARITY.md also carried and none of them could support.
+# `Agent` is not a trait: it is a zero-sized marker struct implementing the SDK's
+# `Role`, tagging one end of a JSON-RPC connection. The normalization surface is
+# gwk's own, `gwk_domain::engine::EngineAdapter`. The WIRE version pin (v1) lives
+# in adapter code as the negotiated protocol version, not here — the crate serves
+# several wire versions from one release.
 agent-client-protocol = "2.0.0"
 base64 = "0.23.0"
 chacha20poly1305 = "0.11.0"

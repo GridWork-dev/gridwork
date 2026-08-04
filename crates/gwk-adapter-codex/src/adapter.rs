@@ -41,7 +41,9 @@
 use gwk_domain::engine::{EngineAdapter, EngineEvent, EngineStatus, LifecycleFact};
 use gwk_domain::ids::{EngineId, EngineSessionId};
 
-use crate::event::CodexEvent;
+use crate::event::{
+    CodexEvent, METHOD_ITEM_COMPLETED, METHOD_ITEM_STARTED, METHOD_SERVER_REQUEST_RESOLVED,
+};
 use crate::schema::ThreadStatus;
 
 /// The codex adapter's normalization half.
@@ -161,15 +163,15 @@ impl EngineAdapter for CodexAdapter {
             // it is a stream of typed items, not a point on a lifeline — so it
             // surfaces as unmodeled rather than being forced into a variant.
             CodexEvent::ItemStarted { .. } => vec![EngineEvent::Unmodeled {
-                tag: "item/started".to_owned(),
+                tag: METHOD_ITEM_STARTED.to_owned(),
             }],
             CodexEvent::ItemCompleted { .. } => vec![EngineEvent::Unmodeled {
-                tag: "item/completed".to_owned(),
+                tag: METHOD_ITEM_COMPLETED.to_owned(),
             }],
             // A resolution is the END of an approval, and axis 4's fact is the
             // ASK. Reporting it as `ApprovalAsked` would double every approval.
             CodexEvent::ApprovalResolved { .. } => vec![EngineEvent::Unmodeled {
-                tag: "serverRequest/resolved".to_owned(),
+                tag: METHOD_SERVER_REQUEST_RESOLVED.to_owned(),
             }],
             CodexEvent::Unrecognized { method } => vec![EngineEvent::Unmodeled { tag: method }],
         })

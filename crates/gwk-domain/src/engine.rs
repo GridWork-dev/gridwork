@@ -136,9 +136,11 @@ pub enum EngineEvent {
         session: EngineSessionId,
         request: String,
     },
-    /// Spend the engine reported. Carried as the engine stated it; turning it
-    /// into a ledger row is `KernelCommand::RecordCostEntry`'s job, and each
-    /// adapter's `cost` module already owns that mapping.
+    /// The engine reported spend. This variant says a report ARRIVED and
+    /// carries no figure — reading the tokens or the currency out of the frame
+    /// is each adapter's `cost` module's job, and building the ledger row is
+    /// `KernelCommand::RecordCostEntry`'s. A field here would be a second,
+    /// lossier copy of a number those already own.
     CostReported { session: EngineSessionId },
     /// Something real that this vocabulary does not name.
     ///
