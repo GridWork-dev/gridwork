@@ -16,6 +16,13 @@
 //! `OPENCODE-SERVER`; the derivations sit at their parse sites in
 //! [`crate::event`].
 
+// Derivation: none — this module reads no protocol. Every value it matches on is
+// already parsed and already cited at its parse site in a sibling module, and
+// what it decides is which entry of `docs/PARITY.md`'s own axis tables each one
+// belongs to. That is a mapping onto this repository's contract, not a reading
+// of a vendor's, so there is no source to name — and naming one would put a
+// citation on a decision the cited page never made.
+
 use gwk_domain::engine::{EngineAdapter, EngineEvent, EngineStatus, LifecycleFact};
 use gwk_domain::ids::{EngineId, EngineSessionId};
 

@@ -35,6 +35,13 @@
 //! `Message::is_successful_result`, whose markers carry the `SDKResultMessage`
 //! subtype union this arm depends on.
 
+// Derivation: none — this module reads no protocol. Every value it matches on is
+// already parsed and already cited at its parse site in a sibling module, and
+// what it decides is which entry of `docs/PARITY.md`'s own axis tables each one
+// belongs to. That is a mapping onto this repository's contract, not a reading
+// of a vendor's, so there is no source to name — and naming one would put a
+// citation on a decision the cited page never made.
+
 use gwk_domain::engine::{EngineAdapter, EngineEvent, LifecycleFact};
 use gwk_domain::ids::{EngineId, EngineSessionId};
 
@@ -125,11 +132,15 @@ impl ClaudeAdapter {
                 session: session.clone(),
                 fact: LifecycleFact::Ended,
             });
-            // A `result` is also where the invocation's spend is reported, and
-            // only when the engine actually stated a figure.
-            if message.total_cost_usd.is_some() {
-                events.push(EngineEvent::CostReported { session });
-            }
+            events.push(EngineEvent::CostReported { session });
+            // A `result` is also where the invocation's spend is reported.
+            // Unconditionally, not gated on `total_cost_usd`: axis 3 is explicit
+            // that "token counts are the universal fact; currency is not", so
+            // keying the report on the currency figure would drop the spend of
+            // every engine invocation that reported usage without a dollar
+            // amount — and `cost::record_cost_entry` already takes that figure
+            // as an `Option`. Which fields are recordable is that module's
+            // decision; this one only says a report arrived.
             return Ok(events);
         }
 
@@ -207,29 +218,28 @@ mod tests {
     }
 
     #[test]
-    fn spend_is_reported_only_when_the_engine_stated_a_figure() {
-        let without = ClaudeAdapter
-            .normalize(ClaudeSignal::Stream(message(serde_json::json!({
-                "type": "result", "subtype": "success", "session_id": "s-1",
-            }))))
-            .expect("normalizes");
-        assert!(
-            !without
-                .iter()
-                .any(|e| matches!(e, EngineEvent::CostReported { .. })),
-            "invented a cost report: {without:?}"
-        );
-        let with = ClaudeAdapter
-            .normalize(ClaudeSignal::Stream(message(serde_json::json!({
+    fn spend_is_reported_on_a_result_with_or_without_a_currency_figure() {
+        // This was gated on `total_cost_usd` and the second reader caught it:
+        // axis 3 says token counts are the universal fact and currency is not,
+        // so keying the report on the dollar amount drops the spend of every
+        // invocation that reported usage without one.
+        for json in [
+            serde_json::json!({"type": "result", "subtype": "success", "session_id": "s-1"}),
+            serde_json::json!({
                 "type": "result", "subtype": "success", "session_id": "s-1",
                 "total_cost_usd": 0.42,
-            }))))
-            .expect("normalizes");
-        assert!(
-            with.iter()
-                .any(|e| matches!(e, EngineEvent::CostReported { .. })),
-            "dropped a stated cost: {with:?}"
-        );
+            }),
+        ] {
+            let events = ClaudeAdapter
+                .normalize(ClaudeSignal::Stream(message(json.clone())))
+                .expect("normalizes");
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, EngineEvent::CostReported { .. })),
+                "{json}: dropped the spend report"
+            );
+        }
     }
 
     #[test]

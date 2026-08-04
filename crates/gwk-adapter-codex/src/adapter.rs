@@ -12,15 +12,23 @@
 //! No new protocol behavior is read here. Every mapping below is over
 //! [`CodexEvent`], which this crate already derived and cited; the derivations
 //! for `thread/started`, `thread/status/changed`, `turn/completed` and the rest
-//! sit at their parse sites in [`crate::event`] and [`crate::schema`]. A
-//! `Derivation:` marker on a match arm would cite the row a sibling module
-//! already carries for the same fact, which is how a citation becomes decor.
+//! sit at their parse sites in [`crate::event`] and [`crate::schema`]. What
+//! this module decides is which of `docs/PARITY.md`'s axis entries each already-
+//! parsed value belongs to, and that document is this repository's own — see the
+//! declaration below the doc block.
+
+// Derivation: none — this module reads no protocol. Every value it matches on is
+// already parsed and already cited at its parse site in a sibling module, and
+// what it decides is which entry of `docs/PARITY.md`'s own axis tables each one
+// belongs to. That is a mapping onto this repository's contract, not a reading
+// of a vendor's, so there is no source to name — and naming one would put a
+// citation on a decision the cited page never made.
 
 use gwk_domain::engine::{EngineAdapter, EngineEvent, EngineStatus, LifecycleFact};
 use gwk_domain::ids::{EngineId, EngineSessionId};
 
 use crate::event::CodexEvent;
-use crate::schema::{ThreadStatus, TurnStatus};
+use crate::schema::ThreadStatus;
 
 /// The codex adapter's normalization half.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -35,12 +43,13 @@ fn session(thread_id: &str) -> EngineSessionId {
 
 /// The three states `docs/PARITY.md` axis 2 allows, from codex's four.
 ///
-/// `notLoaded` and `systemError` are not statuses a supervisor acts on
-/// differently from idle: neither says the engine is working, and the
-/// systemError case reaches a caller as a lifecycle error through its own
-/// notification rather than as a status. Collapsing them here loses nothing the
-/// caller could have used, and `CodexEvent` still carries the exact
-/// `ThreadStatus` for anything that wants it.
+/// `notLoaded` and `systemError` collapse to idle because axis 2 offers no
+/// other home: its three states are working, idle, and waiting on approval, and
+/// neither of these says the engine is working. That is a lossy fit and not a
+/// claim that they MEAN idle — `CodexEvent` still carries the exact
+/// `ThreadStatus` for a caller that needs the difference, and only
+/// `ThreadStatus::Idle` is treated as the contract's idle LIFECYCLE surface, so
+/// nothing downstream reads a system error as a turn finishing.
 fn status_of(status: &ThreadStatus) -> EngineStatus {
     if status.is_waiting_on_approval() {
         return EngineStatus::WaitingOnApproval;
@@ -79,30 +88,50 @@ impl EngineAdapter for CodexAdapter {
                     status: status_of(&status),
                 },
             ],
-            CodexEvent::StatusChanged { thread_id, status } => vec![EngineEvent::Status {
-                session: session(&thread_id),
-                status: status_of(&status),
-            }],
+            // `docs/PARITY.md` axis 1's codex row gives the idle fact as
+            // `thread/status/changed` -> `idle`, so this arm carries BOTH: the
+            // status push, and — when that status is idle — the lifecycle fact
+            // the contract says this surface is where you observe.
+            CodexEvent::StatusChanged { thread_id, status } => {
+                let mut events = vec![EngineEvent::Status {
+                    session: session(&thread_id),
+                    status: status_of(&status),
+                }];
+                if matches!(status, ThreadStatus::Idle) {
+                    events.push(EngineEvent::Lifecycle {
+                        session: session(&thread_id),
+                        fact: LifecycleFact::Idle,
+                    });
+                }
+                events
+            }
             CodexEvent::ThreadClosed { thread_id } => vec![EngineEvent::Lifecycle {
                 session: session(&thread_id),
                 fact: LifecycleFact::Ended,
             }],
-            // The one arm that is genuinely two facts: axis 1 reads a completed
-            // turn as idle, and a turn that ended any other way as an error.
-            // `inProgress` on a `turn/completed` is neither — it is a
-            // contradiction the app-server should not send, and reporting
-            // nothing is honest where inventing `idle` would not be.
-            CodexEvent::TurnCompleted { thread_id, turn } => match turn.status {
-                TurnStatus::Completed => vec![EngineEvent::Lifecycle {
-                    session: session(&thread_id),
-                    fact: LifecycleFact::Idle,
-                }],
-                TurnStatus::Interrupted | TurnStatus::Failed => vec![EngineEvent::Lifecycle {
-                    session: session(&thread_id),
-                    fact: LifecycleFact::Errored,
-                }],
-                TurnStatus::InProgress => Vec::new(),
-            },
+            // `docs/PARITY.md` axis 1's codex row lists `turn/completed` in the
+            // ERROR column and nowhere else — "`turn/completed` carrying
+            // `error`, or the `error` notification". So the only lifecycle fact
+            // this notification can carry is an error, and only when it
+            // actually carries one. A turn ending is a turn boundary; the
+            // contract assigns idle to `thread/status/changed` and end to
+            // `thread/closed`, both of which arrive separately.
+            //
+            // `turn.error` is the condition rather than the status, because
+            // `error` is the thing the row names and the vendored schema scopes
+            // it exactly: populated only when the turn failed. Reading
+            // `interrupted` as an error would be this file's inference, not the
+            // row's claim — an interrupted turn is one somebody stopped.
+            CodexEvent::TurnCompleted { thread_id, turn } => {
+                if turn.error.is_some() {
+                    vec![EngineEvent::Lifecycle {
+                        session: session(&thread_id),
+                        fact: LifecycleFact::Errored,
+                    }]
+                } else {
+                    Vec::new()
+                }
+            }
             // `will_retry` is deliberately not consulted. A retry that has not
             // happened does not un-happen the error, and a supervisor that
             // waited for the retry before believing the error would be blind
@@ -136,16 +165,7 @@ impl EngineAdapter for CodexAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::{ThreadActiveFlag, Turn};
-
-    fn turn(status: TurnStatus) -> Turn {
-        Turn {
-            id: "t-1".to_owned(),
-            status,
-            error: None,
-            items: Vec::new(),
-        }
-    }
+    use crate::schema::{ThreadActiveFlag, Turn, TurnError, TurnStatus};
 
     #[test]
     fn a_thread_start_is_a_lifecycle_fact_and_a_status_at_once() {
@@ -186,19 +206,36 @@ mod tests {
     }
 
     #[test]
-    fn a_turns_ending_decides_between_idle_and_error() {
-        for (status, expected) in [
-            (TurnStatus::Completed, Some(LifecycleFact::Idle)),
-            (TurnStatus::Interrupted, Some(LifecycleFact::Errored)),
-            (TurnStatus::Failed, Some(LifecycleFact::Errored)),
-            // A `turn/completed` that says the turn is still running is a
-            // contradiction; nothing is the honest answer.
-            (TurnStatus::InProgress, None),
+    fn a_completed_turn_is_a_lifecycle_fact_only_when_it_carries_an_error() {
+        // `docs/PARITY.md` lists `turn/completed` in the error column alone.
+        // The earlier version of this mapping read a completed turn as idle and
+        // an interrupted one as an error, and both were this file's inference
+        // rather than the row's claim — the second reader caught it, and the
+        // harness had been passing on the same confusion since before the
+        // adapter existed (its runner pushed "end" on this notification, which
+        // the row assigns to `thread/closed`).
+        for (status, error, expected) in [
+            (TurnStatus::Completed, None, None),
+            (TurnStatus::Interrupted, None, None),
+            (TurnStatus::InProgress, None, None),
+            (
+                TurnStatus::Failed,
+                Some(TurnError {
+                    message: "boom".to_owned(),
+                    additional_details: None,
+                }),
+                Some(LifecycleFact::Errored),
+            ),
         ] {
             let events = CodexAdapter
                 .normalize(CodexEvent::TurnCompleted {
                     thread_id: "th-1".to_owned(),
-                    turn: turn(status),
+                    turn: Turn {
+                        id: "t-1".to_owned(),
+                        status,
+                        error,
+                        items: Vec::new(),
+                    },
                 })
                 .expect("infallible");
             assert_eq!(
@@ -207,6 +244,33 @@ mod tests {
                 "{status:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_idle_fact_comes_from_the_status_push_the_contract_names() {
+        let events = CodexAdapter
+            .normalize(CodexEvent::StatusChanged {
+                thread_id: "th-1".to_owned(),
+                status: ThreadStatus::Idle,
+            })
+            .expect("infallible");
+        assert_eq!(
+            events
+                .iter()
+                .filter_map(EngineEvent::lifecycle)
+                .collect::<Vec<_>>(),
+            [LifecycleFact::Idle]
+        );
+        // A busy push is a status and nothing more.
+        let busy = CodexAdapter
+            .normalize(CodexEvent::StatusChanged {
+                thread_id: "th-1".to_owned(),
+                status: ThreadStatus::Active {
+                    active_flags: Vec::new(),
+                },
+            })
+            .expect("infallible");
+        assert!(busy.iter().all(|e| e.lifecycle().is_none()), "{busy:?}");
     }
 
     #[test]
