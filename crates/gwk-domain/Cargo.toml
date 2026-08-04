@@ -1,6 +1,6 @@
 [package]
 name = "gwk-domain"
-version = "0.0.2"
+version = "0.0.3"
 description = "GridWork contract crate: shared domain types, events, and state machines"
 homepage = "https://gridwork.dev"
 keywords = ["gridwork", "event-sourcing", "state-machine", "contract", "agent"]
