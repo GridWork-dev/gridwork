@@ -124,6 +124,21 @@ pub fn is_upload_id(value: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+/// What a rotation did.
+///
+/// Two counts rather than one, because a resumed rotation reporting
+/// `rewrapped: 0` has SUCCEEDED — every blob was already on the new key — and a
+/// single number cannot tell that from a rotation that found nothing to do
+/// because it was pointed at a label no blob carries. An operator finishing an
+/// interrupted rotation is asking exactly that question.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Rotation {
+    /// Blobs this run moved from the old key to the new one.
+    pub rewrapped: usize,
+    /// Blobs an earlier interrupted run had already moved.
+    pub already: usize,
+}
+
 /// A committed blob's row, in the form every operation needs it.
 struct BlobRow {
     descriptor: BlobDescriptor,
@@ -293,7 +308,13 @@ impl PgBlobStore {
     /// The label does NOT change: it is inside each container's authenticated
     /// header, so a rewrap that relabeled would invalidate the very AAD the new
     /// wrap is bound to. Rotation replaces the key behind the name.
-    pub async fn rewrap_all(&self, new_kek: &[u8; DEK_BYTES]) -> Result<usize, BlobError> {
+    ///
+    /// Re-runnable, and that is not a convenience. One row per statement means
+    /// an interruption lands between blobs, leaving a prefix on the new key and
+    /// the rest on the old — with, by the paragraph above, the same label on
+    /// both. Nothing on the row says which key wrapped it, so a resumed run has
+    /// to work that out per blob rather than be told.
+    pub async fn rewrap_all(&self, new_kek: &[u8; DEK_BYTES]) -> Result<Rotation, BlobError> {
         let digests: Vec<String> = sqlx::query_scalar(
             "SELECT digest FROM gwk_internal.blob \
              WHERE kek_id = $1 AND tombstoned_at IS NULL ORDER BY digest",
@@ -303,36 +324,73 @@ impl PgBlobStore {
         .await
         .map_err(|e| storage("list blobs to rewrap", e))?;
 
-        let mut rewrapped = 0;
+        let mut report = Rotation::default();
         for digest in &digests {
-            let row = self.row(digest).await?.ok_or(BlobError::NotFound)?;
-            let (wrap_nonce, wrapped_dek) = key_material(&row)?;
-            let (_, _, header) = self.open_container(&row.descriptor).await?;
-            let new_nonce = container::generate::<aead::consts::U24>()?;
-            let new_wrapped = container::rewrap(
-                &header,
-                self.config.kek().expose_secret(),
-                new_kek,
-                &wrap_nonce,
-                &wrapped_dek,
-                &new_nonce.0,
-            )?;
-            // One row, one statement: a rotation interrupted here has rewrapped
-            // a prefix of the blobs and left the rest on the old key, which is
-            // exactly the state a re-run finishes from.
-            sqlx::query(
-                "UPDATE gwk_internal.blob SET wrap_nonce = $2, wrapped_dek = $3 \
-                 WHERE digest = $1 AND tombstoned_at IS NULL",
-            )
-            .bind(digest)
-            .bind(new_nonce.0.as_slice())
-            .bind(new_wrapped.as_slice())
-            .execute(&self.pool)
-            .await
-            .map_err(|e| storage("store rewrapped key", e))?;
-            rewrapped += 1;
+            let address =
+                BlobAddress::from_digest(digest).map_err(|e| storage("listed digest", e))?;
+            if self.rewrap_one(&address, new_kek).await? {
+                report.rewrapped += 1;
+            } else {
+                report.already += 1;
+            }
         }
-        Ok(rewrapped)
+        Ok(report)
+    }
+
+    /// Move ONE blob's wrapped key onto `new_kek`, or report it already there.
+    ///
+    /// `Ok(false)` means this store's key does not open the row but `new_kek`
+    /// does — the state an interrupted rotation leaves behind. The check is a
+    /// second unwrap of 32 bytes against a header already in hand, not a read of
+    /// the blob, so asking costs nothing next to the alternative: an AEAD
+    /// failure on the first already-rotated blob, indistinguishable from
+    /// tampering, stranding a half-rotated store with no way forward.
+    pub async fn rewrap_one(
+        &self,
+        address: &BlobAddress,
+        new_kek: &[u8; DEK_BYTES],
+    ) -> Result<bool, BlobError> {
+        let row = self.readable(address).await?;
+        let (wrap_nonce, wrapped_dek) = key_material(&row)?;
+        let (_, _, header) = self.open_container(&row.descriptor).await?;
+        let new_nonce = container::generate::<aead::consts::U24>()?;
+        let new_wrapped = match container::rewrap(
+            &header,
+            self.config.kek().expose_secret(),
+            new_kek,
+            &wrap_nonce,
+            &wrapped_dek,
+            &new_nonce.0,
+        ) {
+            Ok(wrapped) => wrapped,
+            Err(refused) => {
+                // The old key did not open it: already rotated, or actually
+                // broken. Different answers, so ask rather than assume either.
+                let Ok(mut dek) =
+                    container::unwrap_dek(&wrapped_dek, new_kek, &wrap_nonce, &header)
+                else {
+                    // Neither key opens it. The ORIGINAL failure is the fact to
+                    // report — the caller asked to rotate off THIS store's key,
+                    // and the new key's failure is only how the benign
+                    // explanation was ruled out.
+                    return Err(refused);
+                };
+                dek.zeroize();
+                return Ok(false);
+            }
+        };
+        // One row, one statement, so an interruption is always between blobs.
+        sqlx::query(
+            "UPDATE gwk_internal.blob SET wrap_nonce = $2, wrapped_dek = $3 \
+             WHERE digest = $1 AND tombstoned_at IS NULL",
+        )
+        .bind(address.digest_hex())
+        .bind(new_nonce.0.as_slice())
+        .bind(new_wrapped.as_slice())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| storage("store rewrapped key", e))?;
+        Ok(true)
     }
 
     /// Open a container and read its header — everything the AAD covers, and

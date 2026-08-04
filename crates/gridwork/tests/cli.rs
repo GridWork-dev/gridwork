@@ -634,6 +634,77 @@ async fn the_admin_door_initializes_a_database_and_the_daemon_serves_it() {
         "a refused read still wrote a file"
     );
 
+    // Rotation, the one admin verb that holds two keys at once. A blob put
+    // before it has to survive it, so it is uploaded here and read back after
+    // the restart below.
+    let carried_file = dir.join("carried.bin");
+    std::fs::write(&carried_file, b"a blob that outlives its key").expect("write");
+    let put = gw(
+        &socket,
+        &format!(
+            "blob put --file {} --media-type text/plain",
+            carried_file.display()
+        ),
+    );
+    assert_eq!(code(&put), 0);
+    let carried = json(&put)["descriptor"]["address"]
+        .as_str()
+        .expect("an address")
+        .to_owned();
+
+    let next_kek = BASE64_STANDARD.encode([0x77u8; 32]);
+    let rotate_env: Vec<(&str, &str)> = admin_env
+        .iter()
+        .copied()
+        .chain([("GWK_BLOB_KEK_NEXT", next_kek.as_str())])
+        .collect();
+    let rotated = gw_env("admin blob rotate", &rotate_env);
+    assert_eq!(
+        code(&rotated),
+        0,
+        "{}",
+        String::from_utf8_lossy(&rotated.stdout)
+    );
+    let report = json(&rotated);
+    assert_eq!(report["type"], "blobs_rotated");
+    // The LABEL is unchanged. It lives inside each container's authenticated
+    // header, so relabeling would invalidate the AAD the new wrap is bound to —
+    // rotation replaces the key behind the name.
+    assert_eq!(report["kek_id"], "kek-test");
+    assert_eq!(report["rewrapped"], 1);
+    assert_eq!(report["already_rotated"], 0);
+
+    // Re-running is safe and finishes rather than faults. This is the state an
+    // operator is in when a rotation was interrupted and they cannot tell how
+    // far it got: the counts answer that, and `rewrapped: 0` here means done,
+    // not "nothing to do".
+    let again = gw_env("admin blob rotate", &rotate_env);
+    assert_eq!(
+        code(&again),
+        0,
+        "{}",
+        String::from_utf8_lossy(&again.stdout)
+    );
+    assert_eq!(json(&again)["rewrapped"], 0);
+    assert_eq!(json(&again)["already_rotated"], 1);
+
+    // The running daemon is now BLIND to its own blobs: it holds the old key,
+    // and nothing told it otherwise. This is the operational hazard the
+    // procedure in docs/operations.md exists for — a rotation is not complete
+    // until the daemon is restarted with the new key.
+    let blinded = gw(
+        &socket,
+        &format!(
+            "blob get {carried} --output {}",
+            dir.join("blind.bin").display()
+        ),
+    );
+    assert_ne!(
+        code(&blinded),
+        0,
+        "the daemon read a blob its key no longer opens"
+    );
+
     // A second daemon on the same database must refuse rather than race: one
     // writer per store, enforced by an advisory lock that is never waited on.
     let second = gw_env(
@@ -701,12 +772,16 @@ async fn the_admin_door_initializes_a_database_and_the_daemon_serves_it() {
     // lock is takeable (`acquire` never waits, so a lock a corpse still held
     // would exit 3), the stale socket is probed and replaced rather than refused,
     // and recovery reaches a verdict on a log nobody checkpointed on the way out.
+    //
+    // It also carries the ROTATED key, which is the second half of the rotation
+    // above: same variable, same label, different bytes. That is the entire
+    // operator-facing swap.
     let mut restarted = Command::new(env!("CARGO_BIN_EXE_gw"))
         .arg("daemon")
         .env("GWK_DATABASE_URL", &runtime_dsn)
         .env("GWK_SOCKET_PATH", &socket)
         .env("GWK_BLOB_ROOT", &blob_root)
-        .env("GWK_BLOB_KEK", &kek)
+        .env("GWK_BLOB_KEK", &next_kek)
         .env("GWK_BLOB_KEK_ID", "kek-test")
         .env("GWK_PUBLIC_REVISION", &revision)
         .spawn()
@@ -731,6 +806,25 @@ async fn the_admin_door_initializes_a_database_and_the_daemon_serves_it() {
     let status = gw(&socket, "kernel status");
     assert_eq!(code(&status), 0);
     assert_eq!(json(&status)["public_revision"], reported);
+
+    // ...and the blob that was uploaded under the old key reads back byte for
+    // byte under the new one. No ciphertext moved to make that true — only the
+    // 32 wrapped bytes in its row.
+    let recovered_file = dir.join("carried-back.bin");
+    let readback = gw(
+        &socket,
+        &format!("blob get {carried} --output {}", recovered_file.display()),
+    );
+    assert_eq!(
+        code(&readback),
+        0,
+        "{}",
+        String::from_utf8_lossy(&readback.stdout)
+    );
+    assert_eq!(
+        std::fs::read(&recovered_file).expect("read back"),
+        b"a blob that outlives its key"
+    );
 
     // SIGTERM is how a service manager asks. The socket goes with it, or the
     // next start would take the stale-takeover path for no reason.
