@@ -210,6 +210,8 @@ test("client control: tagged frames, number major, decimal-string cursor", async
     "request",
     "request",
     "request",
+    "request",
+    "request",
   ]);
 
   for (const frame of frames) {
@@ -267,6 +269,22 @@ test("client control: tagged frames, number major, decimal-string cursor", async
   if (!isRecord(listRequest)) throw new Error("list request missing");
   expect("cursor" in listRequest).toBe(false);
 
+  // A reattach: `cursor` present, resuming after a prior frame revision.
+  const ptyAttach = raw[6];
+  if (!isRecord(ptyAttach)) throw new Error("frame 6 missing");
+  const attachRequest = ptyAttach["request"];
+  if (!isRecord(attachRequest)) throw new Error("pty attach request missing");
+  expect(attachRequest["type"]).toBe("pty_attach");
+  expect(attachRequest["cursor"]).toMatch(DECIMAL);
+
+  // A fresh, un-attached snapshot request carries no cursor at all.
+  const ptySnapshot = raw[7];
+  if (!isRecord(ptySnapshot)) throw new Error("frame 7 missing");
+  const snapshotRequest = ptySnapshot["request"];
+  if (!isRecord(snapshotRequest)) throw new Error("pty snapshot request missing");
+  expect(snapshotRequest["type"]).toBe("pty_snapshot");
+  expect("cursor" in snapshotRequest).toBe(false);
+
   await reemit("kernel-client-control.json", frames);
 });
 
@@ -282,6 +300,10 @@ test("server control: refusals are values, cursors survive a disconnect", async 
     "response",
     "event_batch",
     "stream_closed",
+    "response",
+    "response",
+    "pty_delta_batch",
+    "pty_stream_closed",
   ]);
 
   for (const frame of frames) {
@@ -313,6 +335,18 @@ test("server control: refusals are values, cursors survive a disconnect", async 
         // The last delivered cursor rides the disconnect, so the consumer
         // resumes instead of replaying from the start.
         expect(frame.last_cursor).toMatch(DECIMAL);
+        break;
+      }
+      case "pty_delta_batch": {
+        expect(frame.seq).toMatch(DECIMAL);
+        expect(frame.deltas.length).toBeGreaterThan(0);
+        break;
+      }
+      case "pty_stream_closed": {
+        expect(frame.code).toBe("slow_consumer");
+        // The PTY analogue of `stream_closed.last_cursor`, on its own
+        // sequence axis — a reattach resumes from here, not from `Seq`.
+        expect(frame.last_seq).toMatch(DECIMAL);
         break;
       }
       default: {
@@ -350,6 +384,28 @@ test("server control: refusals are values, cursors survive a disconnect", async 
   expect(descriptor["address"]).toMatch(/^sha256:[0-9a-f]{64}$/);
   expect(descriptor["byte_size"]).toMatch(DECIMAL);
   expect(blobResult["deduplicated"]).toBe(false);
+
+  const attached = raw[7];
+  if (!isRecord(attached)) throw new Error("frame 7 missing");
+  const attachedResult = attached["result"];
+  if (!isRecord(attachedResult)) throw new Error("pty attached result missing");
+  expect(attachedResult["type"]).toBe("pty_attached");
+  expect(attachedResult["cursor"]).toMatch(DECIMAL);
+
+  // The full styled frame: every color tier appears somewhere in the grid.
+  const snapshot = raw[8];
+  if (!isRecord(snapshot)) throw new Error("frame 8 missing");
+  const snapshotResult = snapshot["result"];
+  if (!isRecord(snapshotResult)) throw new Error("pty snapshot result missing");
+  expect(snapshotResult["type"]).toBe("pty_snapshot");
+  expect(snapshotResult["seq"]).toMatch(DECIMAL);
+  const frame = snapshotResult["frame"];
+  if (!isRecord(frame)) throw new Error("pty frame missing");
+  expect(Array.isArray(frame["cells"])).toBe(true);
+  const frameJson = JSON.stringify(frame);
+  for (const tier of ["ansi16", "xterm256", "truecolor"]) {
+    expect(frameJson).toContain(`"type":"${tier}"`);
+  }
 
   await reemit("kernel-server-control.json", frames);
 });
