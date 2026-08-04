@@ -32,8 +32,17 @@ against an unpinned version is void.
 | opencode | `1.18.3` | ACP wire v1 (`opencode acp`, JSON-RPC over stdio) for the agent loop; the server event bus (SSE `/event`) for lifecycle and approval |
 
 Three engines, three protocols — one true ACP client and two unrelated vendor
-protocols. The internal `Agent` trait is the normalization layer the three
-converge on, not the wire any of them speaks.
+protocols. `gwk_domain::engine::EngineAdapter` is the normalization layer the
+three converge on, not the wire any of them speaks: each adapter maps its own
+protocol onto the `LifecycleFact` and `EngineStatus` vocabularies this document
+defines, and the harness below checks those types rather than agreeing strings.
+
+It is deliberately not the ACP SDK's `Agent`. That name is a zero-sized marker
+struct tagging one end of a JSON-RPC connection, so there is nothing to
+implement; reaching the connection it tags would mean running an ACP endpoint
+inside each vendor adapter to speak to ourselves, which buys wire convergence
+and not the type convergence the harness needs. The SDK dependency stays in
+`gwk-adapter-opencode`, where a real ACP wire is spoken.
 
 ## The bound: D
 
@@ -56,13 +65,21 @@ Per engine, the facts that must be observed and the surface that carries them:
 
 | Engine | start | idle | error | end |
 | --- | --- | --- | --- | --- |
-| Claude Code | `system`/`init` stream message | `Stop` hook (turn finished) | `result` with subtype `error` | `result` message; `SessionEnd` hook on termination |
+| Claude Code | `system`/`init` stream message | `Stop` hook (turn finished) — **not yet adapted**, see below | `result` with subtype `error` | `result` message; `SessionEnd` hook on termination |
 | Codex | `thread/started` notification | `thread/status/changed` → `idle` | `turn/completed` carrying `error`, or the `error` notification | `thread/closed` |
 | opencode | `session.created` event | `session.idle` event | `session.error` event | `session.deleted` event |
 
 **Acceptance, per engine:** start a session and observe start; complete a turn and
 observe idle; kill the engine process mid-turn and observe error — each surfaced
 as the adapter's normalized state within D of the underlying fact.
+
+**Known gap — claude's idle fact.** `gwk-adapter-claude` models the `PreToolUse`
+hook (the approval channel) and not the `Stop` hook, so it reports start, error
+and end and never idle. The gap is stated rather than closed by mapping
+`result` to idle as well: a turn finishing inside a live session is a different
+fact from the session being over, which is why this axis lists them separately,
+and conflating them would make this row pass on a fact nothing observed. Pinned
+by `a_result_is_the_end_and_not_also_idle` so it cannot be closed by accident.
 
 ## Axis 2 — status truth
 

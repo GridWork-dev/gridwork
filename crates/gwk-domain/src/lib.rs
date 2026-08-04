@@ -8,6 +8,7 @@ pub mod blob;
 pub mod checkpoint;
 pub mod command;
 pub mod contract_sql;
+pub mod engine;
 pub mod entity;
 pub mod envelope;
 pub mod frame;
@@ -27,6 +28,11 @@ pub use checkpoint::{
     CHECKPOINT_EVENT_INTERVAL, CHECKPOINT_INTERVAL_SECS, CHECKPOINT_SCHEMA_VERSION, Checkpoint,
 };
 pub use command::{CommandDecodeError, KernelCommand};
+// Deliberately NOT in the generated TypeScript contract: nothing in `engine`
+// derives `specta::Type` and nothing is registered in xtask's export registry.
+// This is how the host's own components agree with each other, not something a
+// client parses off the wire.
+pub use engine::{EngineAdapter, EngineEvent, EngineStatus, LifecycleFact};
 pub use entity::{
     Attempt, AttentionItem, AuthorityGrant, Budget, Command, CostEntry,
     DISPATCH_NODE_INITIAL_STATE, DispatchNode, EngineSession, Evidence, Gate, IngestedRecord,

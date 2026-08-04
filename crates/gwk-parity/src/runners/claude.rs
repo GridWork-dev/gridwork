@@ -41,7 +41,9 @@ use gwk_adapter_claude::hook::{PermissionDecision, PreToolUseAsk, open_gate_from
 use gwk_adapter_claude::message::{Message, SubagentTree};
 use gwk_adapter_claude::relay::AskRelay;
 use gwk_adapter_claude::stream::StreamClient;
+use gwk_adapter_claude::{ClaudeAdapter, ClaudeSignal};
 use gwk_domain::GateId;
+use gwk_domain::engine::{EngineAdapter, LifecycleFact};
 use tokio::time::timeout;
 
 use super::{RUNNER_TIMEOUT, check_version, version_skip};
@@ -114,14 +116,32 @@ pub async fn lifecycle() -> Cell {
     }
     match run_one_turn(RUNNER_TIMEOUT).await {
         Ok(observed) => {
-            let mut tags = Vec::new();
-            if observed.iter().any(|(_, m)| m.is_session_start()) {
-                tags.push("start".to_owned());
+            // Through the adapter, not around it. This used to inspect the raw
+            // messages here and push string tags; the harness was then checking
+            // that THIS code agreed with itself about what a start looks like,
+            // not that the adapter reports one. A fact missing from the adapter
+            // now fails the cell, which is what axis 1 always meant.
+            // NOT `.ok()`. `ClaudeAdapter` raises `UnattributedLifecycle` for
+            // a `system`/`init` or `result` that names no session, precisely so
+            // that a broken transport is not mistaken for a quiet stream — and
+            // discarding it here would turn that fault back into the missing
+            // fact it was written to distinguish itself from. A normalize
+            // failure fails the cell, and says which message did it.
+            let mut facts: Vec<LifecycleFact> = Vec::new();
+            for (_, m) in &observed {
+                match ClaudeAdapter.normalize(ClaudeSignal::Stream(m.clone())) {
+                    Ok(events) => facts.extend(events.iter().filter_map(|e| e.lifecycle())),
+                    Err(e) => {
+                        return Cell::fail(
+                            ENGINE,
+                            Axis::Lifecycle,
+                            format!("the adapter refused a stream message: {e}"),
+                        );
+                    }
+                }
             }
-            if observed.iter().any(|(_, m)| m.is_result()) {
-                tags.push("end".to_owned());
-            }
-            let (verdict, detail) = check_lifecycle_observed(&["start", "end"], &tags);
+            let (verdict, detail) =
+                check_lifecycle_observed(&[LifecycleFact::Started, LifecycleFact::Ended], &facts);
             Cell::new(ENGINE, Axis::Lifecycle, verdict, detail)
         }
         Err(e) => Cell::fail(

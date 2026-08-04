@@ -9,10 +9,18 @@
 //! rides synthetic keystrokes; nothing in [`stream`] or [`relay`] ever
 //! reaches [`spawn_tui`].
 //!
-//! The normalization surface all three adapters converge on is the ACP SDK's
-//! role machinery: this crate implements the `Agent` role server-side over
-//! the vendor protocol, so the kernel side sees the same shape the real ACP
-//! adapter presents.
+//! The normalization surface all three adapters converge on is
+//! [`gwk_domain::engine::EngineAdapter`], which [`adapter`] implements over
+//! this crate's own normalized event type, so the kernel side sees the same
+//! shape the real ACP adapter presents.
+//!
+//! It is deliberately NOT the ACP SDK's `Agent`. This doc said so for three
+//! phases and could not be made true: `Agent` is a zero-sized marker struct
+//! tagging one end of a JSON-RPC connection, not a trait, so nothing can
+//! implement it — and standing up the connection it tags would mean running an
+//! ACP endpoint here to speak to ourselves. This crate carries no ACP SDK
+//! dependency, and that is the correct number for an engine that does not speak
+//! that wire.
 //!
 //! # Clean-room scope
 //!
@@ -33,6 +41,7 @@
 //! surface. See [`message`] and [`cost`] for exactly where each citation
 //! and each remaining escalation sits.
 
+pub mod adapter;
 pub mod cost;
 pub mod hook;
 pub mod message;
@@ -40,6 +49,8 @@ pub mod relay;
 pub mod stream;
 
 mod io_util;
+
+pub use adapter::{ClaudeAdapter, ClaudeSignal};
 
 use gwk_domain::EngineId;
 use gwk_pty::{Session, SpawnError};

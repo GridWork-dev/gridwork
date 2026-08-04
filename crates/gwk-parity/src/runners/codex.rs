@@ -35,6 +35,7 @@
 
 use std::time::{Duration, Instant};
 
+use gwk_adapter_codex::CodexAdapter;
 use gwk_adapter_codex::schema::ThreadItem;
 use gwk_adapter_codex::wire::{Frame, RequestFrame};
 use gwk_adapter_codex::{
@@ -42,6 +43,7 @@ use gwk_adapter_codex::{
     file_change_response, normalize_notification, normalize_request,
     open_gate_for_command_execution, open_gate_for_file_change,
 };
+use gwk_domain::engine::{EngineAdapter, LifecycleFact};
 use gwk_domain::{GateId, KernelCommand};
 use tokio::time::timeout;
 
@@ -247,25 +249,50 @@ async fn run_thread_inner(
     Ok((events, gates))
 }
 
-/// Axis 1 — lifecycle. Reaching `run_thread`'s `Ok` at all means the
-/// `thread/start` response arrived (the only way `run_thread_inner` learns
-/// the thread id it needs for `turn/start`), so "start" is satisfied by the
-/// response itself; "end" requires the `turn/completed` notification this
-/// crate's own drive loop breaks on.
+/// Axis 1 — lifecycle. Both facts come from the adapter now, not from this
+/// function's reading of the transport.
+///
+/// This doc used to say "start" was satisfied by the `thread/start` RESPONSE
+/// arriving and "end" by the `turn/completed` notification. Neither survives
+/// contact with `docs/PARITY.md`'s codex row, which assigns start to the
+/// `thread/started` notification and end to `thread/closed`, and lists
+/// `turn/completed` under error. So this checks `Started` only: it is what the
+/// adapter can report from a run that stops at turn completion.
+///
+/// Known limit, stated rather than worked around: `wait_for_response` discards
+/// notifications while it waits, so a `thread/started` that arrives before the
+/// `thread/start` response is lost and this cell fails. Fixing that is a change
+/// to the drive loop.
 pub async fn lifecycle() -> Cell {
     if let Err(cell) = ensure_version(Axis::Lifecycle).await {
         return cell;
     }
     match run_thread(serde_json::json!({}), PLAIN_PROMPT, RUNNER_TIMEOUT).await {
         Ok((events, _)) => {
-            let mut tags = vec!["start".to_owned()];
-            if events
+            // Through the adapter, not around it — same reason as the claude
+            // runner. Note what the old spelling hid: `start` was pushed
+            // unconditionally, so the cell could pass without a `thread/started`
+            // ever arriving. It has to be observed now.
+            let facts: Vec<LifecycleFact> = events
                 .iter()
-                .any(|(_, e)| matches!(e, CodexEvent::TurnCompleted { .. }))
-            {
-                tags.push("end".to_owned());
-            }
-            let (verdict, detail) = check_lifecycle_observed(&["start", "end"], &tags);
+                // `expect`, not `.ok()`: this adapter's `Error` is
+                // `Infallible`, so there is no failure to swallow — and if that
+                // ever changes, this stops compiling instead of quietly
+                // dropping facts the way a `.ok()` would.
+                .flat_map(|(_, e)| CodexAdapter.normalize(e.clone()).expect("infallible"))
+                .filter_map(|e| e.lifecycle())
+                .collect();
+            // `Started` alone. `Ended` is `thread/closed` (`docs/PARITY.md`
+            // axis 1) and this runner breaks its read loop on `turn/completed`
+            // and then kills the child, so no close can arrive in it. The old
+            // expectation asked for `Ended` and was met because the code here
+            // pushed "end" on `turn/completed` — a notification the same row
+            // lists under ERROR. The cell was green on a fact it never saw.
+            //
+            // This is the honest floor for what this run delivers. Widening it
+            // back is a change to the RUNNER — drive the thread to close, then
+            // observe it — not to this line.
+            let (verdict, detail) = check_lifecycle_observed(&[LifecycleFact::Started], &facts);
             Cell::new(ENGINE, Axis::Lifecycle, verdict, detail)
         }
         Err(e) => Cell::fail(

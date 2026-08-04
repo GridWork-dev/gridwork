@@ -7,19 +7,29 @@
 //! freshness check — a vendored schema nobody re-generates is a comment
 //! wearing a pin's name. Control never rides synthetic keystrokes.
 //!
-//! The normalization surface all three adapters converge on is the ACP SDK's
-//! role machinery: this crate implements the `Agent` role server-side over
-//! the vendor protocol, so the kernel side sees the same shape the real ACP
-//! adapter presents.
+//! The normalization surface all three adapters converge on is
+//! [`gwk_domain::engine::EngineAdapter`], which [`adapter`] implements over
+//! this crate's own normalized event type, so the kernel side sees the same
+//! shape the real ACP adapter presents.
+//!
+//! It is deliberately NOT the ACP SDK's `Agent`. This doc said so for three
+//! phases and could not be made true: `Agent` is a zero-sized marker struct
+//! tagging one end of a JSON-RPC connection, not a trait, so nothing can
+//! implement it — and standing up the connection it tags would mean running an
+//! ACP endpoint here to speak to ourselves. This crate carries no ACP SDK
+//! dependency, and that is the correct number for an engine that does not speak
+//! that wire.
 
 use gwk_domain::EngineId;
 use gwk_pty::{Session, SpawnError};
 
+pub mod adapter;
 pub mod command;
 pub mod event;
 pub mod schema;
 pub mod wire;
 
+pub use adapter::CodexAdapter;
 pub use command::{
     DecisionMappingError, command_execution_response, file_change_response,
     open_gate_for_command_execution, open_gate_for_file_change, record_cost_entry,

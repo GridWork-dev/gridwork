@@ -39,7 +39,7 @@
     },
     {
       "destination": "content/docs/parity.mdx",
-      "sha256": "1bc3a4e768c734cbc837c9b5b355fc857e35af9374a8ed77c8a5dcd4753f5d9b",
+      "sha256": "eb4786e09e3e0a9612fc0843fd7ff120f526e030db4f06a9dd06f00f7ae5180b",
       "sources": [
         {
           "path": "docs/PARITY.md"
@@ -96,7 +96,7 @@
     },
     {
       "destination": "content/docs/derivation/reviews.mdx",
-      "sha256": "24e6dbfe32b646a00267d01836cb1aa57c922bef19d099b05b3ecde0fc849a1a",
+      "sha256": "b64cd461bd31a5170679a96a3b76b9bd30b88963f8ea3502ee95de337fc685c0",
       "sources": [
         {
           "path": "docs/derivation/reviews"

@@ -30,15 +30,15 @@ use crate::wire::JsonRpcId;
 // `params: $ref ThreadStartedNotification`). Quoted here because
 // `schema.rs`'s types decode a notification's `params`; nothing in that
 // module names the method string itself.
-const METHOD_THREAD_STARTED: &str = "thread/started";
+pub(crate) const METHOD_THREAD_STARTED: &str = "thread/started";
 const METHOD_THREAD_STATUS_CHANGED: &str = "thread/status/changed";
 const METHOD_THREAD_CLOSED: &str = "thread/closed";
 const METHOD_TURN_COMPLETED: &str = "turn/completed";
 const METHOD_ERROR: &str = "error";
-const METHOD_ITEM_STARTED: &str = "item/started";
-const METHOD_ITEM_COMPLETED: &str = "item/completed";
+pub(crate) const METHOD_ITEM_STARTED: &str = "item/started";
+pub(crate) const METHOD_ITEM_COMPLETED: &str = "item/completed";
 const METHOD_TOKEN_USAGE_UPDATED: &str = "thread/tokenUsage/updated";
-const METHOD_SERVER_REQUEST_RESOLVED: &str = "serverRequest/resolved";
+pub(crate) const METHOD_SERVER_REQUEST_RESOLVED: &str = "serverRequest/resolved";
 
 // Derivation: CODEX-APP-SERVER `schemas/ServerRequest.json` — the
 // `Item/commandExecution/requestApprovalRequest` and
@@ -64,9 +64,14 @@ pub enum CodexEvent {
     },
     /// `thread/closed` — lifecycle: end.
     ThreadClosed { thread_id: String },
-    /// `turn/completed` — lifecycle: idle (on `TurnStatus::Completed`) or a
-    /// terminal turn outcome otherwise; also the typed item batch for this
-    /// turn.
+    /// `turn/completed` — the typed item batch for this turn, and the error
+    /// half of `docs/PARITY.md` axis 1 when it carries one.
+    ///
+    /// NOT idle. This said "lifecycle: idle (on `TurnStatus::Completed`)" and
+    /// that was never the contract: axis 1's codex row lists this notification
+    /// under ERROR alone, assigns idle to `thread/status/changed` and end to
+    /// `thread/closed`. `crate::adapter` reads it the row's way; this doc is
+    /// where the misreading started.
     TurnCompleted {
         thread_id: String,
         turn: crate::schema::Turn,
