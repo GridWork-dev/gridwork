@@ -249,33 +249,77 @@ fn background_default_49_clears_background() {
 fn a_dropped_attribute_fails_here_not_silently() {
     // The tests above each isolate one attribute, which means each one would
     // still pass even if `CellStyle::from` silently dropped a FIELD none of
-    // them individually looks at — `overline` is never set by any test
-    // above, so a conversion that forgot to wire it up would sail through
-    // every one of them. This is the seeded-negative check: set every
-    // attribute at once and assert the WHOLE struct against a
-    // fully-specified literal, so dropping any single one — including
-    // `overline`, which nothing above exercises — fails right here.
+    // them individually looks at — `overline`, `blink`, `invisible`, and
+    // `underline_color` are never set by any test above, so a conversion
+    // that forgot to wire one up would sail through every one of them. This
+    // is the seeded-negative check: set every attribute at once and assert
+    // the WHOLE struct against a fully-specified literal, so dropping any
+    // single one fails right here. Every field of the literal is in its
+    // non-default state — a `false`/`None` anywhere would put that field
+    // back outside the check's reach.
     //
-    // Derivation: ECMA-48 §8.3.117 — SGR 53 is "overlined", the one
-    // attribute this file otherwise never sets.
-    let styles = styles_of(b"\x1b[1;2;3;4;7;9;53;38;2;10;20;30;48;2;40;50;60mX");
+    // Derivation: ECMA-48 §8.3.117 — SGR 53 is "overlined", SGR 5 is
+    // "slowly blinking", SGR 8 is "concealed characters"; SGR is defined
+    // with cumulative effect, which is what lets the attribute pile below
+    // arrive as several sequences instead of one over-budget parameter
+    // list.
+    // Derivation: KITTY-UNDERLINES — SGR 58 with the colon-separated `2`
+    // sub-parameter form sets the underline's own direct-RGB color.
+    let styles = styles_of(
+        b"\x1b[1;2;3;4;5;7;8;9;53m\x1b[38;2;10;20;30m\x1b[48;2;40;50;60m\x1b[58:2::70:80:90mX",
+    );
     assert_eq!(
         styles[0],
         CellStyle {
             fg: Some(Color::Rgb(10, 20, 30)),
             bg: Some(Color::Rgb(40, 50, 60)),
-            underline_color: None,
+            underline_color: Some(Color::Rgb(70, 80, 90)),
             bold: true,
             dim: true,
             italic: true,
             underline: Some(Underline::Single),
-            blink: false,
+            blink: true,
             inverse: true,
-            invisible: false,
+            invisible: true,
             strikethrough: true,
             overline: true,
         },
         "one attribute did not survive the conversion: {:?}",
         styles[0]
     );
+}
+
+// --- Cluster segmentation vs `text` ---------------------------------------
+
+// A ZWJ emoji sequence is ONE UAX-29 grapheme cluster of `text` but, with
+// grapheme-cluster mode reset (the default), MORE THAN ONE cell — so more
+// than one `styles` entry. These two tests pin both sides of the condition
+// documented on `Row::styles`: a consumer walking `text` with UAX-29 reads
+// aligned styles only under mode 2027.
+
+#[test]
+fn a_zwj_sequence_spans_two_style_entries_by_default() {
+    // Derivation: UAX-29 — an extended grapheme cluster does not break
+    // before or after ZERO WIDTH JOINER (rules GB9/GB11), so WOMAN + ZWJ +
+    // ROCKET segments as one grapheme of `text`.
+    // Derivation: TERM-UNICODE-CORE — with mode 2027 reset a terminal uses
+    // legacy width-based segmentation, under which the joined sequence
+    // occupies separate cells.
+    let styles = styles_of("\x1b[31m\u{1F469}\u{200D}\u{1F680}".as_bytes());
+    assert_eq!(styles[0].fg, Some(Color::Palette(1)));
+    assert_eq!(
+        styles[1].fg,
+        Some(Color::Palette(1)),
+        "the second half of the split cluster carries its own entry"
+    );
+}
+
+#[test]
+fn mode_2027_makes_a_zwj_sequence_one_entry() {
+    // Derivation: TERM-UNICODE-CORE — under DECSET 2027 a cell holds an
+    // extended grapheme cluster, so the engine's segmentation and a UAX-29
+    // walk of `text` agree and `styles[i]` IS the i-th grapheme's style.
+    let styles = styles_of("\x1b[?2027h\x1b[31m\u{1F469}\u{200D}\u{1F680}".as_bytes());
+    assert_eq!(styles[0].fg, Some(Color::Palette(1)));
+    assert_eq!(styles[1].fg, None, "one cluster, one styled entry");
 }

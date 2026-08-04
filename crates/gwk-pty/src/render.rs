@@ -19,10 +19,20 @@ pub struct Row {
     /// Zero-based row index within the viewport.
     pub y: u16,
     pub text: String,
-    /// Per-cell style, one entry per grapheme pushed into `text`, in the same
+    /// Per-cell style, one entry per cluster pushed into `text`, in the same
     /// order — NOT one entry per column. A spacer cell contributes neither a
-    /// grapheme nor a style entry, the same rule `text` already follows for
+    /// cluster nor a style entry, the same rule `text` already follows for
     /// wide characters (see the loop below), so the two stay index-aligned.
+    ///
+    /// "Cluster" is the engine's cell segmentation, and entry `i` matches
+    /// `text`'s i-th UAX-29 grapheme only when the two segmentations agree.
+    // Derivation: TERM-UNICODE-CORE — with mode 2027 reset (the default) a
+    // terminal segments at legacy width boundaries, so a ZWJ emoji sequence
+    // occupies several cells — several entries here — that a UAX-29 walk of
+    // `text` reads as ONE grapheme; with DECSET 2027, cells are extended
+    // grapheme clusters and the two walks agree. A consumer segmenting
+    // `text` with UAX-29 must set 2027 on the grid, or index by pushed
+    // cluster instead. Both sides are pinned in `tests/style.rs`.
     ///
     // ponytail: a flat `Vec`, not run-length-encoded by shared style. Most of
     // a row shares one style, so an RLE span list would usually be smaller;
@@ -158,9 +168,11 @@ impl Renderer {
                             text.push_str(&cluster);
                         }
                         // Pushed for the same cell `text` just gained a
-                        // grapheme for, in the same iteration — that is what
-                        // keeps `styles[i]` describing `text`'s i-th grapheme
-                        // rather than some other cell's.
+                        // cluster for, in the same iteration — that is what
+                        // keeps `styles[i]` describing the i-th pushed cluster
+                        // rather than some other cell's. Whether that cluster
+                        // is also `text`'s i-th UAX-29 grapheme depends on
+                        // mode 2027 — see the note on [`Row::styles`].
                         styles.push(CellStyle::from(cell.style().ok()?));
                     }
                     changed.push(Row { y, text, styles });
