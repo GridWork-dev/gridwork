@@ -1,29 +1,116 @@
 {
-  "version": 1,
+  "version": 2,
   "pages": [
-    { "destination": "content/docs/index.mdx", "sources": [{ "path": "README.md", "sha256": "ca69cd90b19431176c7bc32eb1caf3f189353263b03438bef2970cad466c3d50" }] },
-    { "destination": "content/docs/quickstart.mdx", "sources": [{ "path": "README.md", "sha256": "ca69cd90b19431176c7bc32eb1caf3f189353263b03438bef2970cad466c3d50" }] },
-    { "destination": "content/docs/architecture.mdx", "sources": [{ "path": "docs/architecture.md", "sha256": "9ea8db5230d81db163f8cf95e02d13df6a2ea3c7c61ae6daa37689e255eb158f" }] },
-    { "destination": "content/docs/protocol.mdx", "sources": [{ "path": "docs/protocol.md", "sha256": "60cb0d56fd7306ec1c63bfcf8b30feb74ccb38d096ed45fad76bca304e329617" }] },
-    { "destination": "content/docs/parity.mdx", "sources": [{ "path": "docs/PARITY.md", "sha256": "0d79de59339e8512de3fd408ebe829e96111e4d39190f35fbbafbbae82313c13" }] },
-    { "destination": "content/docs/contract/index.mdx", "sources": [{ "path": "docs/contract/NAMING.md", "sha256": "93cb35aaa72c582ee80edf7916bd1705eedef20464114cbc1f6897c3eefc326b" }] },
-    { "destination": "content/docs/security/index.mdx", "sources": [
-      { "path": "docs/security/THREAT_MODEL.md", "sha256": "71af2af62f7de663aba0122624738452efebae3426a66cbae33651af76ef0868" },
-      { "path": "SECURITY.md", "sha256": "2f1a33d74d8ff0dcd9f6922c1863a406e78b1e293b15430406645947e40bef50" }
-    ] },
-    { "destination": "content/docs/derivation/index.mdx", "sources": [{ "path": "CLEANROOM.md", "sha256": "2c370d91b4d60c3ef80348c63233e2fb7703c452262536d811da632753564918" }] },
-    { "destination": "content/docs/derivation/specifications.mdx", "sources": [{ "path": "docs/derivation/SPECS.md", "sha256": "b1d9e2f917ed78ada448281ff0ffbe465256c7391b3e2c264da5fb48c3d121d8" }] },
-    { "destination": "content/docs/derivation/captures.mdx", "sources": [{ "path": "docs/derivation/CAPTURES.md", "sha256": "1cb7028b8dc2965e13e5ddf9c440f5f333d0c6ebec918f652b83d7e8c43d6c8b" }] },
-    { "destination": "content/docs/derivation/reviews.mdx", "sources": [
-      { "path": "docs/derivation/reviews/README.md", "sha256": "f3fa486664cd5993a66f99daf2eaf0d762c614f8bd3491b06599b063523b4bb6" },
-      { "path": "docs/derivation/reviews/08ad472a68f78fbd6b2764d555e10116f94ea62df6edb40e73ab9097095b4a63.md", "sha256": "9c5cd1e13ae7aeceeefe9690f5d7e79dc99f3241daa9ecf0b3dc02c8a719db5f" },
-      { "path": "docs/derivation/reviews/214ce08ceff320c86aa2b7a559b77c6257e3e2c93bae4cef5c0b2291faa37a29.md", "sha256": "f6bfb9e68615b5d420a6166ab95eb7c82b3ab05cba02c847b0b369ce2851ef31" },
-      { "path": "docs/derivation/reviews/29b22771ca9ff3c7443b6a77764e423c77fbc7f7f22b136fdbe56b673f482fa8.md", "sha256": "1a715a1370e94ded53de9500f8e3b2503591ee10997fa129cc633bfed1b8b315" },
-      { "path": "docs/derivation/reviews/7b9d5b77b4dac5f1a0113104bfe859c4a3e6baf17a6ed05afb6ce817aa79d3e6.md", "sha256": "d6bae9f9a024038a460bd1ff167f0649f015810641c726890d23420b0f1ea13f" },
-      { "path": "docs/derivation/reviews/a447d09f2a2a94f0af1e908c74fb1d1389a823c6379811984cbfd25b7a6f6635.md", "sha256": "03a139245222fe9377963f1725cc757bd3158ee01a7fc7019825c38ba6cd4916" },
-      { "path": "docs/derivation/reviews/d4cfef6ff67cc88082f3f2fe33c7a4b60e8deccb28b25a91b1011b1745a716bc.md", "sha256": "778fefa07f642b0fa8fef59e0e3105a810dcec33a5fe415c0f43884ce42a4bfa" },
-      { "path": "docs/derivation/reviews/e2507240fd4e02c59548138b2c26a1af5c590aa1d0ffe5c8ef3e94651c0f61d5.md", "sha256": "30c432e2e1d6d5f9df8a28c0c5fabc70a36a801eef7b51e58d31225d5d1a1d20" }
-    ] },
-    { "destination": "content/docs/roadmap.mdx", "sources": [{ "path": "ROADMAP.md", "sha256": "ab7503a264b938c6070aec03d698195b85fd68e78ce3666642c4aca0c43d0b06" }] }
+    {
+      "destination": "content/docs/index.mdx",
+      "sha256": "0d7fbe684ad030c6040f4c7636247ad1eb369598f743ba25c862b8a5086c35d7",
+      "sources": [
+        {
+          "path": "README.md"
+        }
+      ]
+    },
+    {
+      "destination": "content/docs/quickstart.mdx",
+      "sha256": "f0d884916316e4103ae0a156eabfadd3b73ad979226178cd6ad26242f0dfac48",
+      "sources": [
+        {
+          "path": "README.md"
+        }
+      ]
+    },
+    {
+      "destination": "content/docs/architecture.mdx",
+      "sha256": "ac87570947316cef804f2e6f8915a115c81bf4bfbbaf08e764da0a56496b911b",
+      "sources": [
+        {
+          "path": "docs/architecture.md"
+        }
+      ]
+    },
+    {
+      "destination": "content/docs/protocol.mdx",
+      "sha256": "15aa3ab3524d928e6ee089db944ab3898710c63e93a1f11319016161b7322f18",
+      "sources": [
+        {
+          "path": "docs/protocol.md"
+        }
+      ]
+    },
+    {
+      "destination": "content/docs/parity.mdx",
+      "sha256": "1bc3a4e768c734cbc837c9b5b355fc857e35af9374a8ed77c8a5dcd4753f5d9b",
+      "sources": [
+        {
+          "path": "docs/PARITY.md"
+        }
+      ]
+    },
+    {
+      "destination": "content/docs/contract/index.mdx",
+      "sha256": "e1de09a4cf60cade14512a3c2581cec88b05cceeb8763752d89fba4682d679e2",
+      "sources": [
+        {
+          "path": "docs/contract/NAMING.md"
+        }
+      ]
+    },
+    {
+      "destination": "content/docs/security/index.mdx",
+      "sha256": "d76f58fcd3e9a55716556579d748b251b8bcd65fc61e6b585d89443a7f457f22",
+      "sources": [
+        {
+          "path": "docs/security/THREAT_MODEL.md"
+        },
+        {
+          "path": "SECURITY.md"
+        }
+      ]
+    },
+    {
+      "destination": "content/docs/derivation/index.mdx",
+      "sha256": "3ee9b333c41d3a8de64740d8a729d01f6f035de725ac22483322fc4818981c22",
+      "sources": [
+        {
+          "path": "CLEANROOM.md"
+        }
+      ]
+    },
+    {
+      "destination": "content/docs/derivation/specifications.mdx",
+      "sha256": "53a4f103a0f5809a4da77453418acf68b263decea32f0661599212384bd41cf9",
+      "sources": [
+        {
+          "path": "docs/derivation/SPECS.md"
+        }
+      ]
+    },
+    {
+      "destination": "content/docs/derivation/captures.mdx",
+      "sha256": "ea5755f7fd3112deb3387850dbfdf702218a995bd175b5653d5ebee8e4568c8a",
+      "sources": [
+        {
+          "path": "docs/derivation/CAPTURES.md"
+        }
+      ]
+    },
+    {
+      "destination": "content/docs/derivation/reviews.mdx",
+      "sha256": "e3eb5e58e911a478a1463d3e7e38180c8639d5a0ec4c6482ec279061fc3aa7b5",
+      "sources": [
+        {
+          "path": "docs/derivation/reviews"
+        }
+      ]
+    },
+    {
+      "destination": "content/docs/roadmap.mdx",
+      "sha256": "8990776210775b5030832eadcc15bfc63522e709dc31a29c6d680cff3d0de827",
+      "sources": [
+        {
+          "path": "ROADMAP.md"
+        }
+      ]
+    }
   ]
 }

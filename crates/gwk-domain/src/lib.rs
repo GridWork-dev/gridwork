@@ -10,6 +10,7 @@ pub mod command;
 pub mod contract_sql;
 pub mod entity;
 pub mod envelope;
+pub mod frame;
 pub mod fsm;
 pub mod ids;
 pub mod ingestion;
@@ -35,6 +36,7 @@ pub use envelope::{
     Actor, CommandEnvelope, ENVELOPE_SCHEMA_VERSION, EventEnvelope, INLINE_PAYLOAD_MAX_BYTES,
     Origin, PayloadRef, UnknownSchemaVersion, accept_schema_version,
 };
+pub use frame::{CellColor, CellStyle, PtyAnsiSlot, PtyCellUpdate, PtyDelta, PtyFrame, StyledCell};
 pub use fsm::{
     AttemptState, CommandState, GateVerdict, LeaseMode, LeaseState, MessageState, Outcome,
     StateMachine, TaskState,
@@ -43,7 +45,8 @@ pub use ids::{
     AggregateId, AttemptId, AttentionItemId, AuthorityGrantId, BlobUploadId, ByteCount, CommandId,
     CorrelationId, CostEntryId, CostMicros, DispatchNodeId, EngineId, EngineSessionId, EventCount,
     EventId, EvidenceId, FenceToken, GateId, IdempotencyKey, IngestedRecordId, LeaseId, MessageId,
-    ProjectId, ReceiptId, RequestId, Seq, TaskId, Timestamp, TokenCount, WorktreeId, WriterEpoch,
+    ProjectId, PtyFrameSeq, PtySessionId, ReceiptId, RequestId, Seq, TaskId, Timestamp, TokenCount,
+    WorktreeId, WriterEpoch,
 };
 pub use ingestion::IngestionKind;
 pub use inherited::{
