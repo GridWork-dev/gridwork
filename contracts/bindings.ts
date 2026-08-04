@@ -309,6 +309,76 @@ export type Budget_Serialize = {
 };
 
 /**
+ *  One color a cell's foreground or background carries, in the tier the
+ *  terminal engine reported it at — exactly what the engine parsed off the
+ *  child process's escape sequences, never re-interpreted against a theme.
+ *  The three tiers name themselves after `gwk_theme::tier::ColorTier`'s
+ *  non-mono tiers by deliberate analogy (see the module doc); there is no
+ *  mono variant because mono is a RENDERING choice a client makes, not a fact
+ *  the wire carries.
+ */
+export type CellColor = 
+/**  One of the terminal's sixteen user-themed slots. */
+{ type: "ansi16"; slot: PtyAnsiSlot } | 
+/**
+ *  The 256-color palette index: 0-15 alias the ANSI slots, 16-231 are the
+ *  6x6x6 cube, 232-255 are the grayscale ramp. The wire carries the raw
+ *  index, never the decoded meaning.
+ */
+{ type: "xterm256"; index: number } | 
+/**  24-bit truecolor. */
+{ type: "truecolor"; r: number; g: number; b: number };
+
+/**
+ *  The attribute bits and colors a [`StyledCell`] carries, independent of its
+ *  glyph. The six attributes are plain, always-present booleans — not
+ *  `Option<bool>` — matching how this contract already carries `dirty` and
+ *  `unpushed` elsewhere (`docs/contract/NAMING.md`): a boolean fact has no
+ *  third "absent" state to distinguish from `false`.
+ */
+export type CellStyle = CellStyle_Serialize | CellStyle_Deserialize;
+
+/**
+ *  The attribute bits and colors a [`StyledCell`] carries, independent of its
+ *  glyph. The six attributes are plain, always-present booleans — not
+ *  `Option<bool>` — matching how this contract already carries `dirty` and
+ *  `unpushed` elsewhere (`docs/contract/NAMING.md`): a boolean fact has no
+ *  third "absent" state to distinguish from `false`.
+ */
+export type CellStyle_Deserialize = {
+	bold: boolean,
+	dim: boolean,
+	italic: boolean,
+	underline: boolean,
+	inverse: boolean,
+	strikethrough: boolean,
+	/**  Absent means the terminal's own default foreground. */
+	fg?: CellColor | null,
+	/**  Absent means the terminal's own default background. */
+	bg?: CellColor | null,
+};
+
+/**
+ *  The attribute bits and colors a [`StyledCell`] carries, independent of its
+ *  glyph. The six attributes are plain, always-present booleans — not
+ *  `Option<bool>` — matching how this contract already carries `dirty` and
+ *  `unpushed` elsewhere (`docs/contract/NAMING.md`): a boolean fact has no
+ *  third "absent" state to distinguish from `false`.
+ */
+export type CellStyle_Serialize = {
+	bold: boolean,
+	dim: boolean,
+	italic: boolean,
+	underline: boolean,
+	inverse: boolean,
+	strikethrough: boolean,
+	/**  Absent means the terminal's own default foreground. */
+	fg?: CellColor | null,
+	/**  Absent means the terminal's own default background. */
+	bg?: CellColor | null,
+};
+
+/**
  *  One checkpoint record.
  * 
  *  `projection_hash` is deterministic over the canonical projection records
@@ -1274,29 +1344,29 @@ export type KernelRequest = KernelRequest_Serialize | KernelRequest_Deserialize;
  */
 export type KernelRequest_Deserialize = 
 /**  Liveness only. Served sealed and active. */
-({ type: "health" }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; upload_id?: never } | 
+({ type: "health" }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | 
 /**  Full readiness detail. Served sealed and active. */
-({ type: "status" }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; upload_id?: never } | 
+({ type: "status" }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | 
 /**  How far the log goes, without a subscription. Served sealed and active. */
-({ type: "watermark" }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; upload_id?: never } | 
+({ type: "watermark" }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | 
 /**
  *  Prove the fresh epoch: exactly one genesis event, zero business rows.
  *  Served sealed and active.
  */
-({ type: "verify_sealed" }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; upload_id?: never } | 
+({ type: "verify_sealed" }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | 
 /**  The only mutation path. Sealed kernels admit `activate_kernel` alone. */
-({ type: "submit_command"; envelope: CommandEnvelope_Deserialize }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; upload_id?: never } | ({ type: "get_projection"; projection: ProjectionKind; id: string }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; length?: never; limit?: never; media_type?: never; offset?: never; sequence?: never; upload_id?: never } | ({ type: "list_projection"; projection: ProjectionKind; cursor?: string | null; limit?: number | null }) & { address?: never; byte_size?: never; data_base64?: never; envelope?: never; id?: never; length?: never; media_type?: never; offset?: never; sequence?: never; upload_id?: never } | 
+({ type: "submit_command"; envelope: CommandEnvelope_Deserialize }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | ({ type: "get_projection"; projection: ProjectionKind; id: string }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; length?: never; limit?: never; media_type?: never; offset?: never; sequence?: never; session_id?: never; upload_id?: never } | ({ type: "list_projection"; projection: ProjectionKind; cursor?: string | null; limit?: number | null }) & { address?: never; byte_size?: never; data_base64?: never; envelope?: never; id?: never; length?: never; media_type?: never; offset?: never; sequence?: never; session_id?: never; upload_id?: never } | 
 /**
  *  One page of events strictly after `cursor` (absent = from the
  *  beginning). `limit` is CLAMPED, not refused
  *  ([`MAX_READ_LIMIT`](crate::port::MAX_READ_LIMIT)).
  */
-({ type: "read_events"; cursor?: string | null; limit: number }) & { address?: never; byte_size?: never; data_base64?: never; envelope?: never; id?: never; length?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; upload_id?: never } | 
+({ type: "read_events"; cursor?: string | null; limit: number }) & { address?: never; byte_size?: never; data_base64?: never; envelope?: never; id?: never; length?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | 
 /**
  *  Durable-cursor subscription. Delivery is at-least-once; a reconnect
  *  from the last cursor recovers everything, in order.
  */
-({ type: "subscribe_events"; cursor?: string | null }) & { address?: never; byte_size?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; upload_id?: never } | ({ type: "blob_begin"; media_type: string; byte_size: string }) & { address?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; offset?: never; projection?: never; sequence?: never; upload_id?: never } | 
+({ type: "subscribe_events"; cursor?: string | null }) & { address?: never; byte_size?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | ({ type: "blob_begin"; media_type: string; byte_size: string }) & { address?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; offset?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | 
 /**
  *  One plaintext chunk, base64 in a bounded control frame — blob bytes
  *  never ride an ordinary payload (ADR 0001). Chunks are
@@ -1305,12 +1375,26 @@ export type KernelRequest_Deserialize =
  */
 ({ type: "blob_chunk"; upload_id: BlobUploadId; 
 /**  Contiguous from 0; a gap or repeat is a refusal. */
-sequence: number; data_base64: string }) & { address?: never; byte_size?: never; cursor?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never } | 
+sequence: number; data_base64: string }) & { address?: never; byte_size?: never; cursor?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; session_id?: never } | 
 /**
  *  Finish an upload. The kernel recomputes the plaintext digest and
  *  refuses if it is not `address`.
  */
-({ type: "blob_commit"; upload_id: BlobUploadId; address: string }) & { byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never } | ({ type: "blob_abort"; upload_id: BlobUploadId }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never } | ({ type: "blob_read"; address: string; offset: string; length: string }) & { byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; limit?: never; media_type?: never; projection?: never; sequence?: never; upload_id?: never } | ({ type: "blob_stat"; address: string }) & { byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; upload_id?: never };
+({ type: "blob_commit"; upload_id: BlobUploadId; address: string }) & { byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never } | ({ type: "blob_abort"; upload_id: BlobUploadId }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never } | ({ type: "blob_read"; address: string; offset: string; length: string }) & { byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; limit?: never; media_type?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | ({ type: "blob_stat"; address: string }) & { byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | 
+/**
+ *  Attach to a hosted PTY session's live output. Durable-cursor delivery,
+ *  mirroring [`Self::SubscribeEvents`]: an absent `cursor` is a fresh
+ *  attach, a present one is a reattach that resumes deltas after that
+ *  [`PtyFrameSeq`] without a gap. Deltas for this request follow as
+ *  [`ServerControl::PtyDeltaBatch`], tagged with the same `request_id`.
+ */
+({ type: "pty_attach"; session_id: PtySessionId; cursor?: string | null }) & { address?: never; byte_size?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; upload_id?: never } | 
+/**
+ *  One full styled frame at its current revision — the seed a client
+ *  applies later deltas onto. Served whether or not the session is
+ *  attached, like [`Self::ReadEvents`] beside [`Self::SubscribeEvents`].
+ */
+({ type: "pty_snapshot"; session_id: PtySessionId }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; upload_id?: never };
 
 /**
  *  What a client asks for. Tagged by `type`.
@@ -1325,29 +1409,29 @@ sequence: number; data_base64: string }) & { address?: never; byte_size?: never;
  */
 export type KernelRequest_Serialize = 
 /**  Liveness only. Served sealed and active. */
-({ type: "health" }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; upload_id?: never } | 
+({ type: "health" }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | 
 /**  Full readiness detail. Served sealed and active. */
-({ type: "status" }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; upload_id?: never } | 
+({ type: "status" }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | 
 /**  How far the log goes, without a subscription. Served sealed and active. */
-({ type: "watermark" }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; upload_id?: never } | 
+({ type: "watermark" }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | 
 /**
  *  Prove the fresh epoch: exactly one genesis event, zero business rows.
  *  Served sealed and active.
  */
-({ type: "verify_sealed" }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; upload_id?: never } | 
+({ type: "verify_sealed" }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | 
 /**  The only mutation path. Sealed kernels admit `activate_kernel` alone. */
-({ type: "submit_command"; envelope: CommandEnvelope_Serialize }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; upload_id?: never } | ({ type: "get_projection"; projection: ProjectionKind; id: string }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; length?: never; limit?: never; media_type?: never; offset?: never; sequence?: never; upload_id?: never } | ({ type: "list_projection"; projection: ProjectionKind; cursor?: string | null; limit?: number | null }) & { address?: never; byte_size?: never; data_base64?: never; envelope?: never; id?: never; length?: never; media_type?: never; offset?: never; sequence?: never; upload_id?: never } | 
+({ type: "submit_command"; envelope: CommandEnvelope_Serialize }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | ({ type: "get_projection"; projection: ProjectionKind; id: string }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; length?: never; limit?: never; media_type?: never; offset?: never; sequence?: never; session_id?: never; upload_id?: never } | ({ type: "list_projection"; projection: ProjectionKind; cursor?: string | null; limit?: number | null }) & { address?: never; byte_size?: never; data_base64?: never; envelope?: never; id?: never; length?: never; media_type?: never; offset?: never; sequence?: never; session_id?: never; upload_id?: never } | 
 /**
  *  One page of events strictly after `cursor` (absent = from the
  *  beginning). `limit` is CLAMPED, not refused
  *  ([`MAX_READ_LIMIT`](crate::port::MAX_READ_LIMIT)).
  */
-({ type: "read_events"; cursor?: string | null; limit: number }) & { address?: never; byte_size?: never; data_base64?: never; envelope?: never; id?: never; length?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; upload_id?: never } | 
+({ type: "read_events"; cursor?: string | null; limit: number }) & { address?: never; byte_size?: never; data_base64?: never; envelope?: never; id?: never; length?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | 
 /**
  *  Durable-cursor subscription. Delivery is at-least-once; a reconnect
  *  from the last cursor recovers everything, in order.
  */
-({ type: "subscribe_events"; cursor?: string | null }) & { address?: never; byte_size?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; upload_id?: never } | ({ type: "blob_begin"; media_type: string; byte_size: string }) & { address?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; offset?: never; projection?: never; sequence?: never; upload_id?: never } | 
+({ type: "subscribe_events"; cursor?: string | null }) & { address?: never; byte_size?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | ({ type: "blob_begin"; media_type: string; byte_size: string }) & { address?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; offset?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | 
 /**
  *  One plaintext chunk, base64 in a bounded control frame — blob bytes
  *  never ride an ordinary payload (ADR 0001). Chunks are
@@ -1356,12 +1440,26 @@ export type KernelRequest_Serialize =
  */
 ({ type: "blob_chunk"; upload_id: BlobUploadId; 
 /**  Contiguous from 0; a gap or repeat is a refusal. */
-sequence: number; data_base64: string }) & { address?: never; byte_size?: never; cursor?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never } | 
+sequence: number; data_base64: string }) & { address?: never; byte_size?: never; cursor?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; session_id?: never } | 
 /**
  *  Finish an upload. The kernel recomputes the plaintext digest and
  *  refuses if it is not `address`.
  */
-({ type: "blob_commit"; upload_id: BlobUploadId; address: string }) & { byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never } | ({ type: "blob_abort"; upload_id: BlobUploadId }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never } | ({ type: "blob_read"; address: string; offset: string; length: string }) & { byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; limit?: never; media_type?: never; projection?: never; sequence?: never; upload_id?: never } | ({ type: "blob_stat"; address: string }) & { byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; upload_id?: never };
+({ type: "blob_commit"; upload_id: BlobUploadId; address: string }) & { byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never } | ({ type: "blob_abort"; upload_id: BlobUploadId }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never } | ({ type: "blob_read"; address: string; offset: string; length: string }) & { byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; limit?: never; media_type?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | ({ type: "blob_stat"; address: string }) & { byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | 
+/**
+ *  Attach to a hosted PTY session's live output. Durable-cursor delivery,
+ *  mirroring [`Self::SubscribeEvents`]: an absent `cursor` is a fresh
+ *  attach, a present one is a reattach that resumes deltas after that
+ *  [`PtyFrameSeq`] without a gap. Deltas for this request follow as
+ *  [`ServerControl::PtyDeltaBatch`], tagged with the same `request_id`.
+ */
+({ type: "pty_attach"; session_id: PtySessionId; cursor?: string | null }) & { address?: never; byte_size?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; upload_id?: never } | 
+/**
+ *  One full styled frame at its current revision — the seed a client
+ *  applies later deltas onto. Served whether or not the session is
+ *  attached, like [`Self::ReadEvents`] beside [`Self::SubscribeEvents`].
+ */
+({ type: "pty_snapshot"; session_id: PtySessionId }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; upload_id?: never };
 
 /**
  *  What one request answered with, tagged by `type`. [`KernelResult::Error`]
@@ -1373,7 +1471,7 @@ export type KernelResult = KernelResult_Serialize | KernelResult_Deserialize;
  *  What one request answered with, tagged by `type`. [`KernelResult::Error`]
  *  is an ordinary variant: a refusal is a value, not an out-of-band condition.
  */
-export type KernelResult_Deserialize = ({ type: "health"; ready: boolean; sealed: boolean }) & { address?: never; code?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; record?: never; records?: never; sequence?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "status"; sealed: boolean; watermark?: string | null; 
+export type KernelResult_Deserialize = ({ type: "health"; ready: boolean; sealed: boolean }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; record?: never; records?: never; rows?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "status"; sealed: boolean; watermark?: string | null; 
 /**  The durable writer epoch this process booted into. */
 writer_epoch: string; 
 /**
@@ -1382,9 +1480,9 @@ writer_epoch: string;
  */
 contract_version: number; 
 /**  The full 40-character public revision this binary was built from. */
-public_revision: string }) & { address?: never; code?: never; command_id?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; ready?: never; record?: never; records?: never; sequence?: never; upload_id?: never } | ({ type: "watermark"; 
+public_revision: string }) & { address?: never; code?: never; cols?: never; command_id?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; ready?: never; record?: never; records?: never; rows?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never } | ({ type: "watermark"; 
 /**  Absent means an empty log — never `0`, which is a real sequence. */
-watermark?: string | null }) & { address?: never; code?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; sealed?: never; sequence?: never; upload_id?: never; writer_epoch?: never } | 
+watermark?: string | null }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never; writer_epoch?: never } | 
 /**
  *  The fresh-epoch proof. `genesis_watermark` is DATABASE-ASSIGNED and is
  *  never assumed to be `1`.
@@ -1394,33 +1492,38 @@ watermark?: string | null }) & { address?: never; code?: never; command_id?: nev
  *  Exactly `1` in a fresh sealed epoch — a COUNT, unrelated to the
  *  sequence above.
  */
-event_count: string }) & { address?: never; code?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; events?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; sequence?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | 
+event_count: string }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; events?: never; frame?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | 
 /**
  *  The command was applied. `events` are the appended envelopes with their
  *  assigned sequences; an idempotent replay answers with the original ones.
  */
-({ type: "command_applied"; command_id: CommandId; events: EventEnvelope_Deserialize[]; watermark: string }) & { address?: never; code?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; sealed?: never; sequence?: never; upload_id?: never; writer_epoch?: never } | ({ type: "projection"; record: ProjectionRecord_Deserialize }) & { address?: never; code?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; records?: never; sealed?: never; sequence?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "projection_page"; records: ProjectionRecord_Deserialize[]; next_cursor?: string | null }) & { address?: never; code?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; offset?: never; public_revision?: never; ready?: never; record?: never; sealed?: never; sequence?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "events"; events: EventEnvelope_Deserialize[]; 
+({ type: "command_applied"; command_id: CommandId; events: EventEnvelope_Deserialize[]; watermark: string }) & { address?: never; code?: never; cols?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never; writer_epoch?: never } | ({ type: "projection"; record: ProjectionRecord_Deserialize }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; records?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "projection_page"; records: ProjectionRecord_Deserialize[]; next_cursor?: string | null }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; offset?: never; public_revision?: never; ready?: never; record?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "events"; events: EventEnvelope_Deserialize[]; 
 /**  The last delivered sequence; absent when the page was empty. */
-cursor?: string | null; watermark?: string | null }) & { address?: never; code?: never; command_id?: never; contract_version?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; sealed?: never; sequence?: never; upload_id?: never; writer_epoch?: never } | 
+cursor?: string | null; watermark?: string | null }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never; writer_epoch?: never } | 
 /**  The subscription is live; batches follow as [`ServerControl::EventBatch`]. */
-({ type: "subscribed"; cursor?: string | null }) & { address?: never; code?: never; command_id?: never; contract_version?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; sealed?: never; sequence?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "blob_begun"; upload_id: BlobUploadId }) & { address?: never; code?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; sealed?: never; sequence?: never; watermark?: never; writer_epoch?: never } | ({ type: "blob_chunk_accepted"; upload_id: BlobUploadId; sequence: number }) & { address?: never; code?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; sealed?: never; watermark?: never; writer_epoch?: never } | ({ type: "blob_committed"; descriptor: BlobDescriptor; 
+({ type: "subscribed"; cursor?: string | null }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "blob_begun"; upload_id: BlobUploadId }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; session_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "blob_chunk_accepted"; upload_id: BlobUploadId; sequence: number }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; sealed?: never; seq?: never; session_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "blob_committed"; descriptor: BlobDescriptor; 
 /**
  *  True when an identical digest, size, AND media type already
  *  existed, so nothing new was written (ADR 0003).
  */
-deduplicated: boolean }) & { address?: never; code?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; detail?: never; event_count?: never; events?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; sealed?: never; sequence?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "blob_aborted"; upload_id: BlobUploadId }) & { address?: never; code?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; sealed?: never; sequence?: never; watermark?: never; writer_epoch?: never } | ({ type: "blob_bytes"; address: string; offset: string; data_base64: string }) & { code?: never; command_id?: never; contract_version?: never; cursor?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; public_revision?: never; ready?: never; record?: never; records?: never; sealed?: never; sequence?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "blob_stat"; descriptor: BlobDescriptor }) & { address?: never; code?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; detail?: never; event_count?: never; events?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; sealed?: never; sequence?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "error"; code: KernelErrorCode; message: string; 
+deduplicated: boolean }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "blob_aborted"; upload_id: BlobUploadId }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; session_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "blob_bytes"; address: string; offset: string; data_base64: string }) & { code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "blob_stat"; descriptor: BlobDescriptor }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | 
+/**
+ *  The attach succeeded. `cursor` is the frame revision deltas resume
+ *  from — absent only for a session that has not produced a frame yet.
+ */
+({ type: "pty_attached"; session_id: PtySessionId; rows: number; cols: number; cursor?: string | null }) & { address?: never; code?: never; command_id?: never; contract_version?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; sealed?: never; seq?: never; sequence?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "pty_snapshot"; session_id: PtySessionId; seq: string; frame: PtyFrame_Deserialize }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; sealed?: never; sequence?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "error"; code: KernelErrorCode; message: string; 
 /**
  *  Machine-readable specifics the code alone cannot carry — the actual
  *  version behind a `stale_version`, the offending field behind a
  *  `validation`. Absent when the code says everything.
  */
-detail?: JsonValue | null }) & { address?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; event_count?: never; events?: never; genesis_event_id?: never; genesis_watermark?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; sealed?: never; sequence?: never; upload_id?: never; watermark?: never; writer_epoch?: never };
+detail?: JsonValue | null }) & { address?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never; watermark?: never; writer_epoch?: never };
 
 /**
  *  What one request answered with, tagged by `type`. [`KernelResult::Error`]
  *  is an ordinary variant: a refusal is a value, not an out-of-band condition.
  */
-export type KernelResult_Serialize = ({ type: "health"; ready: boolean; sealed: boolean }) & { address?: never; code?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; record?: never; records?: never; sequence?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "status"; sealed: boolean; watermark?: string | null; 
+export type KernelResult_Serialize = ({ type: "health"; ready: boolean; sealed: boolean }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; record?: never; records?: never; rows?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "status"; sealed: boolean; watermark?: string | null; 
 /**  The durable writer epoch this process booted into. */
 writer_epoch: string; 
 /**
@@ -1429,9 +1532,9 @@ writer_epoch: string;
  */
 contract_version: number; 
 /**  The full 40-character public revision this binary was built from. */
-public_revision: string }) & { address?: never; code?: never; command_id?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; ready?: never; record?: never; records?: never; sequence?: never; upload_id?: never } | ({ type: "watermark"; 
+public_revision: string }) & { address?: never; code?: never; cols?: never; command_id?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; ready?: never; record?: never; records?: never; rows?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never } | ({ type: "watermark"; 
 /**  Absent means an empty log — never `0`, which is a real sequence. */
-watermark?: string | null }) & { address?: never; code?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; sealed?: never; sequence?: never; upload_id?: never; writer_epoch?: never } | 
+watermark?: string | null }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never; writer_epoch?: never } | 
 /**
  *  The fresh-epoch proof. `genesis_watermark` is DATABASE-ASSIGNED and is
  *  never assumed to be `1`.
@@ -1441,27 +1544,32 @@ watermark?: string | null }) & { address?: never; code?: never; command_id?: nev
  *  Exactly `1` in a fresh sealed epoch — a COUNT, unrelated to the
  *  sequence above.
  */
-event_count: string }) & { address?: never; code?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; events?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; sequence?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | 
+event_count: string }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; events?: never; frame?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | 
 /**
  *  The command was applied. `events` are the appended envelopes with their
  *  assigned sequences; an idempotent replay answers with the original ones.
  */
-({ type: "command_applied"; command_id: CommandId; events: EventEnvelope_Serialize[]; watermark: string }) & { address?: never; code?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; sealed?: never; sequence?: never; upload_id?: never; writer_epoch?: never } | ({ type: "projection"; record: ProjectionRecord_Serialize }) & { address?: never; code?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; records?: never; sealed?: never; sequence?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "projection_page"; records: ProjectionRecord_Serialize[]; next_cursor?: string | null }) & { address?: never; code?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; offset?: never; public_revision?: never; ready?: never; record?: never; sealed?: never; sequence?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "events"; events: EventEnvelope_Serialize[]; 
+({ type: "command_applied"; command_id: CommandId; events: EventEnvelope_Serialize[]; watermark: string }) & { address?: never; code?: never; cols?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never; writer_epoch?: never } | ({ type: "projection"; record: ProjectionRecord_Serialize }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; records?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "projection_page"; records: ProjectionRecord_Serialize[]; next_cursor?: string | null }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; offset?: never; public_revision?: never; ready?: never; record?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "events"; events: EventEnvelope_Serialize[]; 
 /**  The last delivered sequence; absent when the page was empty. */
-cursor?: string | null; watermark?: string | null }) & { address?: never; code?: never; command_id?: never; contract_version?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; sealed?: never; sequence?: never; upload_id?: never; writer_epoch?: never } | 
+cursor?: string | null; watermark?: string | null }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never; writer_epoch?: never } | 
 /**  The subscription is live; batches follow as [`ServerControl::EventBatch`]. */
-({ type: "subscribed"; cursor?: string | null }) & { address?: never; code?: never; command_id?: never; contract_version?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; sealed?: never; sequence?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "blob_begun"; upload_id: BlobUploadId }) & { address?: never; code?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; sealed?: never; sequence?: never; watermark?: never; writer_epoch?: never } | ({ type: "blob_chunk_accepted"; upload_id: BlobUploadId; sequence: number }) & { address?: never; code?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; sealed?: never; watermark?: never; writer_epoch?: never } | ({ type: "blob_committed"; descriptor: BlobDescriptor; 
+({ type: "subscribed"; cursor?: string | null }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "blob_begun"; upload_id: BlobUploadId }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; session_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "blob_chunk_accepted"; upload_id: BlobUploadId; sequence: number }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; sealed?: never; seq?: never; session_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "blob_committed"; descriptor: BlobDescriptor; 
 /**
  *  True when an identical digest, size, AND media type already
  *  existed, so nothing new was written (ADR 0003).
  */
-deduplicated: boolean }) & { address?: never; code?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; detail?: never; event_count?: never; events?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; sealed?: never; sequence?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "blob_aborted"; upload_id: BlobUploadId }) & { address?: never; code?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; sealed?: never; sequence?: never; watermark?: never; writer_epoch?: never } | ({ type: "blob_bytes"; address: string; offset: string; data_base64: string }) & { code?: never; command_id?: never; contract_version?: never; cursor?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; public_revision?: never; ready?: never; record?: never; records?: never; sealed?: never; sequence?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "blob_stat"; descriptor: BlobDescriptor }) & { address?: never; code?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; detail?: never; event_count?: never; events?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; sealed?: never; sequence?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "error"; code: KernelErrorCode; message: string; 
+deduplicated: boolean }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "blob_aborted"; upload_id: BlobUploadId }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; session_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "blob_bytes"; address: string; offset: string; data_base64: string }) & { code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "blob_stat"; descriptor: BlobDescriptor }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | 
+/**
+ *  The attach succeeded. `cursor` is the frame revision deltas resume
+ *  from — absent only for a session that has not produced a frame yet.
+ */
+({ type: "pty_attached"; session_id: PtySessionId; rows: number; cols: number; cursor?: string | null }) & { address?: never; code?: never; command_id?: never; contract_version?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; sealed?: never; seq?: never; sequence?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "pty_snapshot"; session_id: PtySessionId; seq: string; frame: PtyFrame_Serialize }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; sealed?: never; sequence?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "error"; code: KernelErrorCode; message: string; 
 /**
  *  Machine-readable specifics the code alone cannot carry — the actual
  *  version behind a `stale_version`, the offending field behind a
  *  `validation`. Absent when the code says everything.
  */
-detail?: JsonValue | null }) & { address?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; event_count?: never; events?: never; genesis_event_id?: never; genesis_watermark?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; sealed?: never; sequence?: never; upload_id?: never; watermark?: never; writer_epoch?: never };
+detail?: JsonValue | null }) & { address?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never; watermark?: never; writer_epoch?: never };
 
 /**
  *  An advisory lease over a scope (worktree, file set, singleton role).
@@ -1812,6 +1920,150 @@ export type ProjectionRecord_Deserialize = ({ projection_type: "task"; task: Tas
 export type ProjectionRecord_Serialize = ({ projection_type: "task"; task: Task_Serialize }) & { attempt?: never; attention_item?: never; authority_grant?: never; command?: never; cost_entry?: never; dispatch_node?: never; engine_session?: never; evidence?: never; gate?: never; ingested_record?: never; lease?: never; message?: never; orchestrator_checkpoint?: never; receipt?: never; worktree?: never } | ({ projection_type: "attempt"; attempt: Attempt_Serialize }) & { attention_item?: never; authority_grant?: never; command?: never; cost_entry?: never; dispatch_node?: never; engine_session?: never; evidence?: never; gate?: never; ingested_record?: never; lease?: never; message?: never; orchestrator_checkpoint?: never; receipt?: never; task?: never; worktree?: never } | ({ projection_type: "engine_session"; engine_session: EngineSession_Serialize }) & { attempt?: never; attention_item?: never; authority_grant?: never; command?: never; cost_entry?: never; dispatch_node?: never; evidence?: never; gate?: never; ingested_record?: never; lease?: never; message?: never; orchestrator_checkpoint?: never; receipt?: never; task?: never; worktree?: never } | ({ projection_type: "message"; message: Message_Serialize }) & { attempt?: never; attention_item?: never; authority_grant?: never; command?: never; cost_entry?: never; dispatch_node?: never; engine_session?: never; evidence?: never; gate?: never; ingested_record?: never; lease?: never; orchestrator_checkpoint?: never; receipt?: never; task?: never; worktree?: never } | ({ projection_type: "command"; command: Command_Serialize }) & { attempt?: never; attention_item?: never; authority_grant?: never; cost_entry?: never; dispatch_node?: never; engine_session?: never; evidence?: never; gate?: never; ingested_record?: never; lease?: never; message?: never; orchestrator_checkpoint?: never; receipt?: never; task?: never; worktree?: never } | ({ projection_type: "gate"; gate: Gate_Serialize }) & { attempt?: never; attention_item?: never; authority_grant?: never; command?: never; cost_entry?: never; dispatch_node?: never; engine_session?: never; evidence?: never; ingested_record?: never; lease?: never; message?: never; orchestrator_checkpoint?: never; receipt?: never; task?: never; worktree?: never } | ({ projection_type: "authority_grant"; authority_grant: AuthorityGrant_Serialize }) & { attempt?: never; attention_item?: never; command?: never; cost_entry?: never; dispatch_node?: never; engine_session?: never; evidence?: never; gate?: never; ingested_record?: never; lease?: never; message?: never; orchestrator_checkpoint?: never; receipt?: never; task?: never; worktree?: never } | ({ projection_type: "receipt"; receipt: Receipt_Serialize }) & { attempt?: never; attention_item?: never; authority_grant?: never; command?: never; cost_entry?: never; dispatch_node?: never; engine_session?: never; evidence?: never; gate?: never; ingested_record?: never; lease?: never; message?: never; orchestrator_checkpoint?: never; task?: never; worktree?: never } | ({ projection_type: "evidence"; evidence: Evidence_Serialize }) & { attempt?: never; attention_item?: never; authority_grant?: never; command?: never; cost_entry?: never; dispatch_node?: never; engine_session?: never; gate?: never; ingested_record?: never; lease?: never; message?: never; orchestrator_checkpoint?: never; receipt?: never; task?: never; worktree?: never } | ({ projection_type: "attention_item"; attention_item: AttentionItem_Serialize }) & { attempt?: never; authority_grant?: never; command?: never; cost_entry?: never; dispatch_node?: never; engine_session?: never; evidence?: never; gate?: never; ingested_record?: never; lease?: never; message?: never; orchestrator_checkpoint?: never; receipt?: never; task?: never; worktree?: never } | ({ projection_type: "worktree"; worktree: Worktree_Serialize }) & { attempt?: never; attention_item?: never; authority_grant?: never; command?: never; cost_entry?: never; dispatch_node?: never; engine_session?: never; evidence?: never; gate?: never; ingested_record?: never; lease?: never; message?: never; orchestrator_checkpoint?: never; receipt?: never; task?: never } | ({ projection_type: "lease"; lease: Lease_Serialize }) & { attempt?: never; attention_item?: never; authority_grant?: never; command?: never; cost_entry?: never; dispatch_node?: never; engine_session?: never; evidence?: never; gate?: never; ingested_record?: never; message?: never; orchestrator_checkpoint?: never; receipt?: never; task?: never; worktree?: never } | ({ projection_type: "dispatch_node"; dispatch_node: DispatchNode_Serialize }) & { attempt?: never; attention_item?: never; authority_grant?: never; command?: never; cost_entry?: never; engine_session?: never; evidence?: never; gate?: never; ingested_record?: never; lease?: never; message?: never; orchestrator_checkpoint?: never; receipt?: never; task?: never; worktree?: never } | ({ projection_type: "orchestrator_checkpoint"; orchestrator_checkpoint: OrchestratorCheckpoint_Serialize }) & { attempt?: never; attention_item?: never; authority_grant?: never; command?: never; cost_entry?: never; dispatch_node?: never; engine_session?: never; evidence?: never; gate?: never; ingested_record?: never; lease?: never; message?: never; receipt?: never; task?: never; worktree?: never } | ({ projection_type: "ingested_record"; ingested_record: IngestedRecord_Serialize }) & { attempt?: never; attention_item?: never; authority_grant?: never; command?: never; cost_entry?: never; dispatch_node?: never; engine_session?: never; evidence?: never; gate?: never; lease?: never; message?: never; orchestrator_checkpoint?: never; receipt?: never; task?: never; worktree?: never } | ({ projection_type: "cost_entry"; cost_entry: CostEntry_Serialize }) & { attempt?: never; attention_item?: never; authority_grant?: never; command?: never; dispatch_node?: never; engine_session?: never; evidence?: never; gate?: never; ingested_record?: never; lease?: never; message?: never; orchestrator_checkpoint?: never; receipt?: never; task?: never; worktree?: never };
 
 /**
+ *  One of the sixteen slots a terminal's own theme owns. Declaration order IS
+ *  slot order — pinned by `ansi_slot_declaration_order_is_slot_index`.
+ */
+export type PtyAnsiSlot = "black" | "red" | "green" | "yellow" | "blue" | "magenta" | "cyan" | "white" | "bright_black" | "bright_red" | "bright_green" | "bright_yellow" | "bright_blue" | "bright_magenta" | "bright_cyan" | "bright_white";
+
+/**  One cell's new content, addressed by zero-indexed grid position. */
+export type PtyCellUpdate = PtyCellUpdate_Serialize | PtyCellUpdate_Deserialize;
+
+/**  One cell's new content, addressed by zero-indexed grid position. */
+export type PtyCellUpdate_Deserialize = {
+	row: number,
+	col: number,
+	cell: StyledCell_Deserialize,
+};
+
+/**  One cell's new content, addressed by zero-indexed grid position. */
+export type PtyCellUpdate_Serialize = {
+	row: number,
+	col: number,
+	cell: StyledCell_Serialize,
+};
+
+/**
+ *  One incremental change since the previous frame revision.
+ * 
+ *  Two kinds, deliberately not one: a resize invalidates every coordinate a
+ *  client is already holding, so it cannot be folded into a cell update
+ *  without also telling the client the grid itself grew or shrank. Cursor
+ *  position and visibility are NOT modeled here — out of scope for this pass
+ *  (see the crate's kernel-protocol tests for what is pinned); a client
+ *  tracking those needs is a gap to close in the engine-side task, not a
+ *  silent omission this type hides.
+ */
+export type PtyDelta = PtyDelta_Serialize | PtyDelta_Deserialize;
+
+/**
+ *  One incremental change since the previous frame revision.
+ * 
+ *  Two kinds, deliberately not one: a resize invalidates every coordinate a
+ *  client is already holding, so it cannot be folded into a cell update
+ *  without also telling the client the grid itself grew or shrank. Cursor
+ *  position and visibility are NOT modeled here — out of scope for this pass
+ *  (see the crate's kernel-protocol tests for what is pinned); a client
+ *  tracking those needs is a gap to close in the engine-side task, not a
+ *  silent omission this type hides.
+ */
+export type PtyDelta_Deserialize = 
+/**
+ *  Zero or more cells changed. Each update's `row`/`col` is valid against
+ *  the grid's CURRENT size — the most recent snapshot or `resized` delta.
+ */
+({ type: "cells_changed"; updates: PtyCellUpdate_Deserialize[] }) & { cols?: never; rows?: never } | 
+/**
+ *  The session's grid was resized. Cell content outside the new bounds is
+ *  gone; a client that needs the new content re-requests
+ *  [`crate::protocol::KernelRequest::PtySnapshot`].
+ */
+({ type: "resized"; rows: number; cols: number }) & { updates?: never };
+
+/**
+ *  One incremental change since the previous frame revision.
+ * 
+ *  Two kinds, deliberately not one: a resize invalidates every coordinate a
+ *  client is already holding, so it cannot be folded into a cell update
+ *  without also telling the client the grid itself grew or shrank. Cursor
+ *  position and visibility are NOT modeled here — out of scope for this pass
+ *  (see the crate's kernel-protocol tests for what is pinned); a client
+ *  tracking those needs is a gap to close in the engine-side task, not a
+ *  silent omission this type hides.
+ */
+export type PtyDelta_Serialize = 
+/**
+ *  Zero or more cells changed. Each update's `row`/`col` is valid against
+ *  the grid's CURRENT size — the most recent snapshot or `resized` delta.
+ */
+({ type: "cells_changed"; updates: PtyCellUpdate_Serialize[] }) & { cols?: never; rows?: never } | 
+/**
+ *  The session's grid was resized. Cell content outside the new bounds is
+ *  gone; a client that needs the new content re-requests
+ *  [`crate::protocol::KernelRequest::PtySnapshot`].
+ */
+({ type: "resized"; rows: number; cols: number }) & { updates?: never };
+
+/**
+ *  A full styled frame: every cell of a hosted PTY session's grid at one
+ *  [`crate::ids::PtyFrameSeq`], row-major (`cells[row][col]`).
+ * 
+ *  `rows`/`cols` are not stored as separate fields — they are exactly
+ *  `cells.len()` and `cells[0].len()`, every row is the same length, and this
+ *  type has no constructor that could let a stored pair disagree with the
+ *  grid it describes. That shape rule is the kernel wire layer's to enforce
+ *  (see `crate::protocol`'s module doc on the split between what a type
+ *  admits and what the strict decoder refuses), not this type's to
+ *  self-validate: a wire type validates itself only when its value set is
+ *  CLOSED, and a rectangular grid of arbitrary size is not.
+ */
+export type PtyFrame = PtyFrame_Serialize | PtyFrame_Deserialize;
+
+/**
+ *  A full styled frame: every cell of a hosted PTY session's grid at one
+ *  [`crate::ids::PtyFrameSeq`], row-major (`cells[row][col]`).
+ * 
+ *  `rows`/`cols` are not stored as separate fields — they are exactly
+ *  `cells.len()` and `cells[0].len()`, every row is the same length, and this
+ *  type has no constructor that could let a stored pair disagree with the
+ *  grid it describes. That shape rule is the kernel wire layer's to enforce
+ *  (see `crate::protocol`'s module doc on the split between what a type
+ *  admits and what the strict decoder refuses), not this type's to
+ *  self-validate: a wire type validates itself only when its value set is
+ *  CLOSED, and a rectangular grid of arbitrary size is not.
+ */
+export type PtyFrame_Deserialize = {
+	cells: StyledCell_Deserialize[][],
+};
+
+/**
+ *  A full styled frame: every cell of a hosted PTY session's grid at one
+ *  [`crate::ids::PtyFrameSeq`], row-major (`cells[row][col]`).
+ * 
+ *  `rows`/`cols` are not stored as separate fields — they are exactly
+ *  `cells.len()` and `cells[0].len()`, every row is the same length, and this
+ *  type has no constructor that could let a stored pair disagree with the
+ *  grid it describes. That shape rule is the kernel wire layer's to enforce
+ *  (see `crate::protocol`'s module doc on the split between what a type
+ *  admits and what the strict decoder refuses), not this type's to
+ *  self-validate: a wire type validates itself only when its value set is
+ *  CLOSED, and a rectangular grid of arbitrary size is not.
+ */
+export type PtyFrame_Serialize = {
+	cells: StyledCell_Serialize[][],
+};
+
+/**
+ *  A hosted PTY session's identity, as the wire session registry names
+ *  it. Host-minted: a caller never invents one, only echoes an id an
+ *  earlier spawn handed back. Distinct from [`EngineSessionId`] — that is
+ *  the provider-level engine conversation, this is the terminal I/O
+ *  session a TUI attaches to, and the two do not share a lifecycle (an
+ *  attempt may hold one while resuming across several engine sessions,
+ *  or none at all).
+ */
+export type PtySessionId = string;
+
+/**
  *  An attestation that an actor performed an action — the audit row every
  *  auto-answer, state flip, and side effect leaves behind. The
  *  liveness-producer flip rule's receipt uses `subject_type = "attempt"`,
@@ -1890,17 +2142,30 @@ protocol_minor: number;
  *  The INTERSECTION of what the client asked for and what this kernel
  *  offers. A client must not assume anything absent here.
  */
-capabilities: string[]; sealed: boolean; watermark?: string | null }) & { code?: never; cursor?: never; events?: never; last_cursor?: never; message?: never; request_id?: never; result?: never } | ({ type: "hello_refusal"; code: KernelErrorCode; message: string }) & { capabilities?: never; cursor?: never; events?: never; last_cursor?: never; protocol_major?: never; protocol_minor?: never; request_id?: never; result?: never; sealed?: never; watermark?: never } | ({ type: "response"; request_id: RequestId; result: KernelResult_Deserialize }) & { capabilities?: never; code?: never; cursor?: never; events?: never; last_cursor?: never; message?: never; protocol_major?: never; protocol_minor?: never; sealed?: never; watermark?: never } | 
+capabilities: string[]; sealed: boolean; watermark?: string | null }) & { code?: never; cursor?: never; deltas?: never; events?: never; last_cursor?: never; last_seq?: never; message?: never; request_id?: never; result?: never; seq?: never; session_id?: never } | ({ type: "hello_refusal"; code: KernelErrorCode; message: string }) & { capabilities?: never; cursor?: never; deltas?: never; events?: never; last_cursor?: never; last_seq?: never; protocol_major?: never; protocol_minor?: never; request_id?: never; result?: never; sealed?: never; seq?: never; session_id?: never; watermark?: never } | ({ type: "response"; request_id: RequestId; result: KernelResult_Deserialize }) & { capabilities?: never; code?: never; cursor?: never; deltas?: never; events?: never; last_cursor?: never; last_seq?: never; message?: never; protocol_major?: never; protocol_minor?: never; sealed?: never; seq?: never; session_id?: never; watermark?: never } | 
 /**
  *  One batch on a live subscription. `cursor` is the last sequence in the
  *  batch — what a reconnect resumes from.
  */
-({ type: "event_batch"; request_id: RequestId; events: EventEnvelope_Deserialize[]; cursor: string }) & { capabilities?: never; code?: never; last_cursor?: never; message?: never; protocol_major?: never; protocol_minor?: never; result?: never; sealed?: never; watermark?: never } | 
+({ type: "event_batch"; request_id: RequestId; events: EventEnvelope_Deserialize[]; cursor: string }) & { capabilities?: never; code?: never; deltas?: never; last_cursor?: never; last_seq?: never; message?: never; protocol_major?: never; protocol_minor?: never; result?: never; sealed?: never; seq?: never; session_id?: never; watermark?: never } | 
 /**
  *  A subscription ended. `last_cursor` is what the consumer actually
  *  received, so a slow-consumer disconnect resumes without a gap.
  */
-({ type: "stream_closed"; request_id: RequestId; code: KernelErrorCode; last_cursor?: string | null }) & { capabilities?: never; cursor?: never; events?: never; message?: never; protocol_major?: never; protocol_minor?: never; result?: never; sealed?: never; watermark?: never };
+({ type: "stream_closed"; request_id: RequestId; code: KernelErrorCode; last_cursor?: string | null }) & { capabilities?: never; cursor?: never; deltas?: never; events?: never; last_seq?: never; message?: never; protocol_major?: never; protocol_minor?: never; result?: never; sealed?: never; seq?: never; session_id?: never; watermark?: never } | 
+/**
+ *  One batch of PTY deltas on a live attach. `seq` is the last delivered
+ *  frame revision — what a reattach resumes from, mirroring
+ *  [`Self::EventBatch`].
+ */
+({ type: "pty_delta_batch"; request_id: RequestId; session_id: PtySessionId; deltas: PtyDelta_Deserialize[]; seq: string }) & { capabilities?: never; code?: never; cursor?: never; events?: never; last_cursor?: never; last_seq?: never; message?: never; protocol_major?: never; protocol_minor?: never; result?: never; sealed?: never; watermark?: never } | 
+/**
+ *  A PTY attach ended. `last_seq` is the last delta revision the consumer
+ *  actually received — the PTY analogue of [`Self::StreamClosed`], kept
+ *  as its own variant rather than reusing that one because the two carry
+ *  different sequence axes ([`Seq`] there, [`PtyFrameSeq`] here).
+ */
+({ type: "pty_stream_closed"; request_id: RequestId; code: KernelErrorCode; last_seq?: string | null }) & { capabilities?: never; cursor?: never; deltas?: never; events?: never; last_cursor?: never; message?: never; protocol_major?: never; protocol_minor?: never; result?: never; sealed?: never; seq?: never; session_id?: never; watermark?: never };
 
 /**  Everything the kernel may send on kind `0x01`. */
 export type ServerControl_Serialize = ({ type: "hello_ack"; protocol_major: number; 
@@ -1910,17 +2175,72 @@ protocol_minor: number;
  *  The INTERSECTION of what the client asked for and what this kernel
  *  offers. A client must not assume anything absent here.
  */
-capabilities: string[]; sealed: boolean; watermark?: string | null }) & { code?: never; cursor?: never; events?: never; last_cursor?: never; message?: never; request_id?: never; result?: never } | ({ type: "hello_refusal"; code: KernelErrorCode; message: string }) & { capabilities?: never; cursor?: never; events?: never; last_cursor?: never; protocol_major?: never; protocol_minor?: never; request_id?: never; result?: never; sealed?: never; watermark?: never } | ({ type: "response"; request_id: RequestId; result: KernelResult_Serialize }) & { capabilities?: never; code?: never; cursor?: never; events?: never; last_cursor?: never; message?: never; protocol_major?: never; protocol_minor?: never; sealed?: never; watermark?: never } | 
+capabilities: string[]; sealed: boolean; watermark?: string | null }) & { code?: never; cursor?: never; deltas?: never; events?: never; last_cursor?: never; last_seq?: never; message?: never; request_id?: never; result?: never; seq?: never; session_id?: never } | ({ type: "hello_refusal"; code: KernelErrorCode; message: string }) & { capabilities?: never; cursor?: never; deltas?: never; events?: never; last_cursor?: never; last_seq?: never; protocol_major?: never; protocol_minor?: never; request_id?: never; result?: never; sealed?: never; seq?: never; session_id?: never; watermark?: never } | ({ type: "response"; request_id: RequestId; result: KernelResult_Serialize }) & { capabilities?: never; code?: never; cursor?: never; deltas?: never; events?: never; last_cursor?: never; last_seq?: never; message?: never; protocol_major?: never; protocol_minor?: never; sealed?: never; seq?: never; session_id?: never; watermark?: never } | 
 /**
  *  One batch on a live subscription. `cursor` is the last sequence in the
  *  batch — what a reconnect resumes from.
  */
-({ type: "event_batch"; request_id: RequestId; events: EventEnvelope_Serialize[]; cursor: string }) & { capabilities?: never; code?: never; last_cursor?: never; message?: never; protocol_major?: never; protocol_minor?: never; result?: never; sealed?: never; watermark?: never } | 
+({ type: "event_batch"; request_id: RequestId; events: EventEnvelope_Serialize[]; cursor: string }) & { capabilities?: never; code?: never; deltas?: never; last_cursor?: never; last_seq?: never; message?: never; protocol_major?: never; protocol_minor?: never; result?: never; sealed?: never; seq?: never; session_id?: never; watermark?: never } | 
 /**
  *  A subscription ended. `last_cursor` is what the consumer actually
  *  received, so a slow-consumer disconnect resumes without a gap.
  */
-({ type: "stream_closed"; request_id: RequestId; code: KernelErrorCode; last_cursor?: string | null }) & { capabilities?: never; cursor?: never; events?: never; message?: never; protocol_major?: never; protocol_minor?: never; result?: never; sealed?: never; watermark?: never };
+({ type: "stream_closed"; request_id: RequestId; code: KernelErrorCode; last_cursor?: string | null }) & { capabilities?: never; cursor?: never; deltas?: never; events?: never; last_seq?: never; message?: never; protocol_major?: never; protocol_minor?: never; result?: never; sealed?: never; seq?: never; session_id?: never; watermark?: never } | 
+/**
+ *  One batch of PTY deltas on a live attach. `seq` is the last delivered
+ *  frame revision — what a reattach resumes from, mirroring
+ *  [`Self::EventBatch`].
+ */
+({ type: "pty_delta_batch"; request_id: RequestId; session_id: PtySessionId; deltas: PtyDelta_Serialize[]; seq: string }) & { capabilities?: never; code?: never; cursor?: never; events?: never; last_cursor?: never; last_seq?: never; message?: never; protocol_major?: never; protocol_minor?: never; result?: never; sealed?: never; watermark?: never } | 
+/**
+ *  A PTY attach ended. `last_seq` is the last delta revision the consumer
+ *  actually received — the PTY analogue of [`Self::StreamClosed`], kept
+ *  as its own variant rather than reusing that one because the two carry
+ *  different sequence axes ([`Seq`] there, [`PtyFrameSeq`] here).
+ */
+({ type: "pty_stream_closed"; request_id: RequestId; code: KernelErrorCode; last_seq?: string | null }) & { capabilities?: never; cursor?: never; deltas?: never; events?: never; last_cursor?: never; message?: never; protocol_major?: never; protocol_minor?: never; result?: never; sealed?: never; seq?: never; session_id?: never; watermark?: never };
+
+/**
+ *  One terminal cell: a displayed glyph plus the style it carries.
+ * 
+ *  `glyph` is a `String`, not a `char` — a cell can hold a full grapheme
+ *  cluster (a combining mark, a ZWJ emoji sequence), which a single Rust
+ *  `char` cannot represent. An empty string is a legal glyph: a blank cell,
+ *  or the trailing half of a double-width character. Column width — a wide
+ *  glyph occupies two grid cells — is deliberately NOT modeled here: deciding
+ *  it is part of the engine-side conversion this task defers.
+ */
+export type StyledCell = StyledCell_Serialize | StyledCell_Deserialize;
+
+/**
+ *  One terminal cell: a displayed glyph plus the style it carries.
+ * 
+ *  `glyph` is a `String`, not a `char` — a cell can hold a full grapheme
+ *  cluster (a combining mark, a ZWJ emoji sequence), which a single Rust
+ *  `char` cannot represent. An empty string is a legal glyph: a blank cell,
+ *  or the trailing half of a double-width character. Column width — a wide
+ *  glyph occupies two grid cells — is deliberately NOT modeled here: deciding
+ *  it is part of the engine-side conversion this task defers.
+ */
+export type StyledCell_Deserialize = {
+	glyph: string,
+	style: CellStyle_Deserialize,
+};
+
+/**
+ *  One terminal cell: a displayed glyph plus the style it carries.
+ * 
+ *  `glyph` is a `String`, not a `char` — a cell can hold a full grapheme
+ *  cluster (a combining mark, a ZWJ emoji sequence), which a single Rust
+ *  `char` cannot represent. An empty string is a legal glyph: a blank cell,
+ *  or the trailing half of a double-width character. Column width — a wide
+ *  glyph occupies two grid cells — is deliberately NOT modeled here: deciding
+ *  it is part of the engine-side conversion this task defers.
+ */
+export type StyledCell_Serialize = {
+	glyph: string,
+	style: CellStyle_Serialize,
+};
 
 /**  Tracker-visible work item. */
 export type Task = Task_Serialize | Task_Deserialize;

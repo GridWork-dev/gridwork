@@ -154,6 +154,16 @@ string_id!(
     /// storage location, and an uncommitted upload expires after an hour.
     BlobUploadId
 );
+string_id!(
+    /// A hosted PTY session's identity, as the wire session registry names
+    /// it. Host-minted: a caller never invents one, only echoes an id an
+    /// earlier spawn handed back. Distinct from [`EngineSessionId`] — that is
+    /// the provider-level engine conversation, this is the terminal I/O
+    /// session a TUI attaches to, and the two do not share a lifecycle (an
+    /// attempt may hold one while resuming across several engine sessions,
+    /// or none at all).
+    PtySessionId
+);
 
 u64_decimal_string!(
     /// A position in the global event log. Assigned by the kernel append actor
@@ -185,6 +195,15 @@ u64_decimal_string!(
     /// A count of tokens, as an engine reported it. Never converted to money:
     /// the ledger records counts and currency as separate engine-reported facts.
     TokenCount
+);
+u64_decimal_string!(
+    /// A hosted PTY session's frame revision. Assigned by the session's own
+    /// producer, strictly increasing within that session — NOT a [`Seq`], and
+    /// not comparable across sessions. A snapshot's revision is the point a
+    /// client applies later deltas after; an attach's `cursor` names the same
+    /// axis to resume from on a reconnect, mirroring how [`Seq`] threads
+    /// through [`crate::protocol::KernelRequest::SubscribeEvents`].
+    PtyFrameSeq
 );
 u64_decimal_string!(
     /// A cost amount in micro-USD (1_000_000 = $1).
