@@ -34,7 +34,7 @@ const crates = [
   [
     "gwk-theme",
     "https://docs.rs/gwk-theme",
-    "The 12 SIGNAL design tokens — one source for the site, the TUI, and the generated TypeScript",
+    "The 15 SIGNAL design tokens — one source for the site, the TUI, and the generated TypeScript",
     "0.0.2",
   ],
   [
