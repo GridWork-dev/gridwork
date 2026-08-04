@@ -30,6 +30,32 @@ public record of that procedure, in force before any engine code exists.
    review tax on check functions that never see a process. So the runners are listed
    and the rest is not. The gate follows the risk; the directory tree is just where the
    risk happens to sit this week.
+
+   Two mechanical consequences, because a category rule enforced by memory is a rule
+   that decays into whatever the last person assumed:
+
+   - **Every crate is classified.** A `crates/` directory matches a gated prefix or
+     carries a line in `.github/cleanroom-not-engine.txt` saying why it is outside.
+     Neither is not an option, and the gate refuses to pass on an unclassified crate. A
+     crate is not ungated because nobody looked.
+   - **A direct `gwk-pty` dependency gates the crate.** It links the PTY engine, so it
+     is gated by that fact and not by its name. Without this, coverage came down to
+     whether a crate happened to be called `gwk-pty-host` rather than `gwk-host` — and
+     nothing anywhere would have said which one you got.
+
+   **Lens code is deliberately outside, and that is a ruling rather than an accident of
+   where the files landed.** The console renders projections the kernel already computed
+   and consumes engine output as wire data; it does not supervise anything and does not
+   speak the terminal protocol. Its multiplexer half — panes, layout, detach and
+   reattach routing — is gated, and lives under its own listed prefix for exactly that
+   reason. Drawing the line inside the crate is what keeps the review where the
+   copyleft-adjacent risk actually is.
+
+   **Library-mediated terminal I/O is exempt.** Reading key and mouse events through
+   crossterm, or painting through ratatui, is using a permissively-licensed dependency's
+   public API — the same act as calling any other crate. It emits no protocol bytes of
+   our authorship and derives nothing from anyone's source. Writing those sequences
+   ourselves is the gated thing; asking a library to is not.
 ## What every gated change carries
 
 Every gated change carries stable citation IDs and an independent second reader record.

@@ -1,8 +1,8 @@
 {
   "version": 1,
   "pages": [
-    { "destination": "content/docs/index.mdx", "sources": [{ "path": "README.md", "sha256": "e0766b027dfd0316438d56c51f218f33edf1551963b285e361c8b5624d57b5a4" }] },
-    { "destination": "content/docs/quickstart.mdx", "sources": [{ "path": "README.md", "sha256": "e0766b027dfd0316438d56c51f218f33edf1551963b285e361c8b5624d57b5a4" }] },
+    { "destination": "content/docs/index.mdx", "sources": [{ "path": "README.md", "sha256": "ca69cd90b19431176c7bc32eb1caf3f189353263b03438bef2970cad466c3d50" }] },
+    { "destination": "content/docs/quickstart.mdx", "sources": [{ "path": "README.md", "sha256": "ca69cd90b19431176c7bc32eb1caf3f189353263b03438bef2970cad466c3d50" }] },
     { "destination": "content/docs/architecture.mdx", "sources": [{ "path": "docs/architecture.md", "sha256": "9ea8db5230d81db163f8cf95e02d13df6a2ea3c7c61ae6daa37689e255eb158f" }] },
     { "destination": "content/docs/protocol.mdx", "sources": [{ "path": "docs/protocol.md", "sha256": "60cb0d56fd7306ec1c63bfcf8b30feb74ccb38d096ed45fad76bca304e329617" }] },
     { "destination": "content/docs/parity.mdx", "sources": [{ "path": "docs/PARITY.md", "sha256": "0d79de59339e8512de3fd408ebe829e96111e4d39190f35fbbafbbae82313c13" }] },

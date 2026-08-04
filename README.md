@@ -137,7 +137,7 @@ code.
 |---|---|---|
 | [`gwk-domain`](https://docs.rs/gwk-domain) | Shared types, events, state machines — the contract | 0.0.2 |
 | [`gwk-cert`](https://docs.rs/gwk-cert) | Stream checker, plus the storage suite a backend runs against its own event store | 0.0.2 |
-| [`gwk-theme`](https://docs.rs/gwk-theme) | The 12 SIGNAL design tokens — one source for the site, the TUI, and the generated TypeScript | 0.0.2 |
+| [`gwk-theme`](https://docs.rs/gwk-theme) | The 15 SIGNAL design tokens — one source for the site, the TUI, and the generated TypeScript | 0.0.2 |
 | [`gwk-kernel`](https://docs.rs/gwk-kernel) | Daemon: event store, projections, blobs, attention, authority, the wire | 0.0.2 |
 | [`gridwork`](https://docs.rs/gridwork) | Ships the `gw` binary — the CLI that speaks the kernel's protocol | 0.0.2 |
 | [`gwk`](https://docs.rs/gwk) | Namespace root for the `gwk-*` crates. **No API** | 0.0.2, name only |
