@@ -85,5 +85,145 @@
     "request_id": "req-6",
     "code": "slow_consumer",
     "last_cursor": "1"
+  },
+  {
+    "type": "response",
+    "request_id": "req-6",
+    "result": {
+      "type": "pty_attached",
+      "session_id": "pty-1",
+      "rows": 24,
+      "cols": 80,
+      "cursor": "42"
+    }
+  },
+  {
+    "type": "response",
+    "request_id": "req-7",
+    "result": {
+      "type": "pty_snapshot",
+      "session_id": "pty-1",
+      "seq": "43",
+      "frame": {
+        "cells": [
+          [
+            {
+              "glyph": "g",
+              "style": {
+                "bold": false,
+                "dim": false,
+                "italic": false,
+                "underline": false,
+                "inverse": false,
+                "strikethrough": false
+              }
+            },
+            {
+              "glyph": "w",
+              "style": {
+                "bold": true,
+                "dim": false,
+                "italic": false,
+                "underline": false,
+                "inverse": false,
+                "strikethrough": false,
+                "fg": {
+                  "type": "ansi16",
+                  "slot": "bright_cyan"
+                }
+              }
+            }
+          ],
+          [
+            {
+              "glyph": "k",
+              "style": {
+                "bold": false,
+                "dim": true,
+                "italic": true,
+                "underline": true,
+                "inverse": false,
+                "strikethrough": false,
+                "fg": {
+                  "type": "truecolor",
+                  "r": 255,
+                  "g": 0,
+                  "b": 128
+                },
+                "bg": {
+                  "type": "xterm256",
+                  "index": 236
+                }
+              }
+            },
+            {
+              "glyph": "",
+              "style": {
+                "bold": false,
+                "dim": false,
+                "italic": false,
+                "underline": false,
+                "inverse": true,
+                "strikethrough": true
+              }
+            }
+          ]
+        ]
+      }
+    }
+  },
+  {
+    "type": "pty_delta_batch",
+    "request_id": "req-6",
+    "session_id": "pty-1",
+    "deltas": [
+      {
+        "type": "cells_changed",
+        "updates": [
+          {
+            "row": 0,
+            "col": 0,
+            "cell": {
+              "glyph": "G",
+              "style": {
+                "bold": false,
+                "dim": false,
+                "italic": false,
+                "underline": false,
+                "inverse": false,
+                "strikethrough": false
+              }
+            }
+          },
+          {
+            "row": 0,
+            "col": 1,
+            "cell": {
+              "glyph": "W",
+              "style": {
+                "bold": false,
+                "dim": false,
+                "italic": false,
+                "underline": false,
+                "inverse": false,
+                "strikethrough": false
+              }
+            }
+          }
+        ]
+      },
+      {
+        "type": "resized",
+        "rows": 24,
+        "cols": 80
+      }
+    ],
+    "seq": "44"
+  },
+  {
+    "type": "pty_stream_closed",
+    "request_id": "req-6",
+    "code": "slow_consumer",
+    "last_seq": "44"
   }
 ]

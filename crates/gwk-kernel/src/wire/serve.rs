@@ -465,6 +465,23 @@ impl Daemon {
                 },
                 Err(e) => blob_refusal(&e),
             },
+
+            // The PTY half. This kernel holds no session registry yet — that
+            // lands with the pin-advance task that wires the PTY host in.
+            // Until then every session id is unknown, which the contract
+            // already has an honest answer for: the same refusal
+            // `GetProjection`/`BlobStat` give an absent id above, not a new
+            // "unimplemented" code invented just for this arm.
+            KernelRequest::PtyAttach { session_id, .. } => KernelResult::Error {
+                code: KernelErrorCode::NotFound,
+                message: format!("no pty session {session_id}"),
+                detail: None,
+            },
+            KernelRequest::PtySnapshot { session_id } => KernelResult::Error {
+                code: KernelErrorCode::NotFound,
+                message: format!("no pty session {session_id}"),
+                detail: None,
+            },
         })
     }
 
