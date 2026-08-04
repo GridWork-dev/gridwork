@@ -117,6 +117,8 @@ async fn spawn_server() -> Result<Server, String> {
 async fn wait_until_ready(base_url: &str, budget: Duration) -> bool {
     let deadline = tokio::time::Instant::now() + budget;
     while tokio::time::Instant::now() < deadline {
+        // Derivation: OPENCODE-SERVER — the endpoint table's own `GET /doc`,
+        // the schema endpoint every opencode server publishes.
         let probed = Command::new("curl")
             .args([
                 "-sS",
@@ -163,6 +165,9 @@ async fn curl_once(args: &[&str], budget: Duration) -> Result<Vec<u8>, String> {
 }
 
 async fn create_session(base_url: &str, budget: Duration) -> Result<String, String> {
+    // Derivation: OPENCODE-SERVER — the `GET /doc` OpenAPI schema: `POST
+    // /session` takes an all-optional body (`{}` is legal) and returns a
+    // Session carrying `.id`.
     let body = curl_once(
         &[
             "-X",
@@ -191,6 +196,10 @@ async fn prompt_async(
     prompt: &str,
     budget: Duration,
 ) -> Result<(), String> {
+    // Derivation: OPENCODE-SERVER — `GET /doc`: `POST
+    // /session/{id}/prompt_async` takes `{"parts": [{"type":"text","text":
+    // ...}]}` and answers 204 on acceptance, the work streaming back over the
+    // event bus.
     let body = serde_json::json!({ "parts": [{ "type": "text", "text": prompt }] }).to_string();
     curl_once(
         &[
@@ -217,6 +226,9 @@ async fn prompt_async(
 /// on it is transport framing (plain SSE), not opencode's own protocol —
 /// the bytes between two blank lines still go through `parse_frame`
 /// unparsed by anything else here.
+// Derivation: OPENCODE-SERVER — `GET /event` is the endpoint table's event
+// bus; its frames arrive as plain SSE, blank-line separated — the transport
+// split done here, with every frame's bytes still parsed only by the adapter.
 async fn stream_events(url: &str, started: Instant, budget: Duration) -> Vec<(Duration, Event)> {
     let max_time = (budget.as_secs() + 1).to_string();
     let mut child = match Command::new("curl")
@@ -398,6 +410,9 @@ pub async fn transcript_ingestion() -> Cell {
         )
         .await?;
         tokio::time::sleep(Duration::from_secs(2)).await;
+        // Derivation: OPENCODE-SERVER — `GET /doc`: `GET
+        // /session/{id}/children` lists a session's child sessions; the body
+        // is parsed only by the adapter's `parse_children`.
         curl_once(
             &[
                 "-X",

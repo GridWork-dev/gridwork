@@ -697,6 +697,80 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3.14"
+      # The docker build below runs the same gate inside `bun run build`; this
+      # leg exists so the SEEDED violations can run against a live checkout,
+      # which an image build cannot host.
+      - name: docs mirror freshness gate
+        working-directory: site
+        run: |
+          set -euo pipefail
+          bun install --frozen-lockfile
+          bun run check:docs
+      - name: prove the freshness gate can fail (seeded violations)
+        working-directory: site
+        run: |
+          set -euo pipefail
+          trap 'git checkout -- content/docs ../ROADMAP.md; rm -f ../docs/derivation/reviews/.seeded-record.md' EXIT
+
+          # Corrupted mirror content: the map registers each curated page's own
+          # bytes, so a mirror edited without re-registration is red. The first
+          # version of this gate checked the mirror for existence only, and a
+          # corrupted mirror passed it green.
+          printf '\nseeded stale paragraph\n' >> content/docs/roadmap.mdx
+          out=""
+          if out="$(bun run check:docs 2>&1)"; then
+            echo 'freshness gate accepted corrupted mirror content — the gate is broken' >&2
+            exit 1
+          fi
+          grep -q 'mirror content drifted' <<<"$out" || {
+            echo "corrupted mirror was rejected, but not by the registration hash:" >&2
+            printf '%s\n' "$out" >&2
+            exit 1
+          }
+          git checkout -- content/docs
+          echo "docs-freshness: corrupted mirror correctly rejected"
+
+          # The incident shape: the canonical source moves and the mirror does
+          # not. The curated-from binding lives INSIDE the mirror, so going
+          # green requires editing the mirror file itself — there is no map
+          # digest left to refresh around it.
+          printf '\nseeded source drift\n' >> ../ROADMAP.md
+          if out="$(bun run check:docs 2>&1)"; then
+            echo 'freshness gate accepted a moved source under an untouched mirror — the gate is broken' >&2
+            exit 1
+          fi
+          grep -q 'stale curated docs: content/docs/roadmap.mdx' <<<"$out" || {
+            echo "the stale mirror was rejected, but not through its curated-from binding:" >&2
+            printf '%s\n' "$out" >&2
+            exit 1
+          }
+          git checkout -- ../ROADMAP.md
+          echo "docs-freshness: stale mirror correctly rejected"
+
+          # A new file in a mirrored DIRECTORY source. The reviews mirror binds
+          # the whole tree's listing digest; a map that enumerated the records
+          # one by one silently stopped covering the tree the day the next
+          # record landed.
+          printf 'seeded record\n' > ../docs/derivation/reviews/.seeded-record.md
+          if out="$(bun run check:docs 2>&1)"; then
+            echo 'freshness gate accepted a new file in a mirrored directory — the gate is broken' >&2
+            exit 1
+          fi
+          grep -q 'stale curated docs: content/docs/derivation/reviews.mdx' <<<"$out" || {
+            echo "the directory growth was rejected, but not through the reviews binding:" >&2
+            printf '%s\n' "$out" >&2
+            exit 1
+          }
+          rm -f ../docs/derivation/reviews/.seeded-record.md
+          echo "docs-freshness: unwatched directory growth correctly rejected"
+
+          # Positive control: three seeds that can only fail would also pass
+          # with the checker replaced by `exit 1`.
+          bun run check:docs
+          echo "docs-freshness: the live tree is fresh"
       - name: Build standalone site image
         run: docker build -f site/Dockerfile -t gridwork-site:ci .
       - name: Smoke routes and security headers
@@ -1212,13 +1286,49 @@ jobs:
           fi
           echo "cleanroom-gate: 'none' beside a doc-comment citation correctly rejected"
 
+          # Half seven: the same defect one comment form over. A `///` outer doc
+          # comment documents the very item a derived construct usually is, so
+          # it is where a marker naturally lands — and the extractor once
+          # recognized only `//`, `//!` and `#`, leaving a `///` line invisible
+          # to every consumer: a `none` written there vanished beside a real
+          # citation instead of tripping the never-both check.
+          printf '/// Derivation: none — seeded\n// Derivation: ECMA-48 §8.3.14 — seeded\nfn seeded() {}\n' > "$dir/outer-none-beside-cite.rs"
+          if echo "$dir/outer-none-beside-cite.rs" | ./tools/cleanroom-gate.sh --markers; then
+            echo 'marker check accepted a /// Derivation: none alongside a real citation' >&2
+            exit 1
+          fi
+          echo "cleanroom-gate: outer-doc 'none' beside a citation correctly rejected"
+
+          # Half eight: four-plus slashes. The slash run is unbounded for the
+          # same reason `///` is recognized at all — a line the extractor
+          # cannot see is a line the never-both check cannot judge, and a
+          # `////` citation once stood beside a `none` and passed as a clean
+          # declaration.
+          printf '//// Derivation: ECMA-48 §8.3.14 — seeded\n// Derivation: none — seeded\nfn seeded() {}\n' > "$dir/four-slash-cite-beside-none.rs"
+          if echo "$dir/four-slash-cite-beside-none.rs" | ./tools/cleanroom-gate.sh --markers; then
+            echo 'marker check accepted a //// citation alongside a Derivation: none' >&2
+            exit 1
+          fi
+          echo "cleanroom-gate: four-slash citation beside 'none' correctly rejected"
+
+          # Half nine: a reason spelled entirely in punctuation. The mandatory
+          # reason is what keeps the `none` form from being a gate silencer,
+          # and `— —` satisfied the something-follows check while saying
+          # nothing.
+          printf '// Derivation: none — —\nfn seeded() {}\n' > "$dir/punctuation-reason.rs"
+          if echo "$dir/punctuation-reason.rs" | ./tools/cleanroom-gate.sh --markers; then
+            echo 'marker check accepted a Derivation: none with a punctuation-only reason' >&2
+            exit 1
+          fi
+          echo "cleanroom-gate: punctuation-only 'none' reason correctly rejected"
+
           # The positive control. Seeds that can only ever fail would also pass with
           # the whole parser replaced by `exit 1`, which is the failure this job
-          # exists to make impossible. Three of them now: a citation, a declaration,
-          # and a `//!` doc-comment citation standing alone — the last one pins the
-          # never-both fix to the SHARED extractor, because a second none-side scan
-          # that merely fails the contradiction would still read this file as
-          # unmarked and reject it.
+          # exists to make impossible. Four of them now: a citation, a declaration,
+          # and a doc-comment citation standing alone in each doc form (`//!` and
+          # `///`) — the doc-form ones pin their fixes to the SHARED extractor,
+          # because a second none-side scan that merely fails the contradiction
+          # would still read these files as unmarked and reject them.
           printf '// Derivation: ECMA-48 §8.3.14 — seeded\nfn seeded() {}\n' > "$dir/ok.rs"
           echo "$dir/ok.rs" | ./tools/cleanroom-gate.sh --markers
           echo "cleanroom-gate: registered citation correctly accepted"
@@ -1230,6 +1340,10 @@ jobs:
           printf '//! Derivation: ECMA-48 §8.3.14 — seeded\nfn seeded() {}\n' > "$dir/ok-doc-cite.rs"
           echo "$dir/ok-doc-cite.rs" | ./tools/cleanroom-gate.sh --markers
           echo "cleanroom-gate: doc-comment citation correctly accepted"
+
+          printf '/// Derivation: ECMA-48 §8.3.14 — seeded\nfn seeded() {}\n' > "$dir/ok-outer-doc-cite.rs"
+          echo "$dir/ok-outer-doc-cite.rs" | ./tools/cleanroom-gate.sh --markers
+          echo "cleanroom-gate: outer-doc-comment citation correctly accepted"
           rm -rf "${prefix}-seed"
 
   # Hosted CI enforces the GENERIC pattern set only — the estate-specific extension
