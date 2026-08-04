@@ -34,19 +34,33 @@ freshness before invoking `next build`.
 
 The repository-root documents are canonical. Files under `content/docs/` are curated
 adaptations for the public reading surface, not a second source of truth.
-`content/source-map.json` binds every curated page to its canonical source files and
-their SHA-256 digests.
+
+Each curated page embeds a `{/* curated-from: <path> sha256=<digest> */}` line per
+canonical source it mirrors — the digest of the source bytes it was curated from,
+written at curation time. A source may be a file or a directory (a directory binds the
+digest of its recursive `<sha256>  <relpath>` listing, so a file added anywhere under it
+counts as the source moving). `content/source-map.json` carries the footer's
+canonical-source links and the SHA-256 of each curated page's own bytes.
+
+The freshness gate (`bun run check:docs`) verifies all of it: every embedded digest
+against the current source bytes, every page's bytes against its registration, the
+page↔map agreement on which sources a page mirrors, and full coverage in both
+directions. An earlier version kept the source digests in `source-map.json` and checked
+the mirror for existence only — so refreshing a digest in the map, without re-curating
+the page it vouched for, passed green over a stale mirror (and a corrupted mirror passed
+too). The claim now lives inside the mirror: going green after a source moves requires
+editing the curated page itself. The CI `site` job seeds all three violations and
+requires the gate to reject each.
 
 When canonical documentation changes:
 
 1. Edit the canonical file first.
 2. Review and adapt every affected page under `content/docs/`.
-3. From the repository root, run `sha256sum <canonical-path>` and replace that source's
-   digest in `site/content/source-map.json`.
-4. Run `cd site && bun run check:docs`, then typecheck and build.
-
-Do not refresh a digest without reviewing its curated page. The freshness gate also
-fails when a curated MDX page is missing from the source map or a mapped page is absent.
+3. Update that page's `curated-from:` digest(s) to the new source digest
+   (`sha256sum <canonical-path>` from the repository root).
+4. Re-register the page: put the re-curated page's own digest
+   (`sha256sum site/content/docs/<page>.mdx`) in its `source-map.json` `sha256`.
+5. Run `cd site && bun run check:docs`, then typecheck and build.
 
 ## Generated state and assets
 

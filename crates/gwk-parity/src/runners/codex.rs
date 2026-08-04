@@ -122,6 +122,9 @@ async fn run_thread_inner(
     // (`{clientInfo: {name, version}}`, `clientInfo` required) name, from the
     // same generated bundle `thread/start`/`turn/start` cite in this module's
     // doc.
+    // Derivation: CODEX-APP-SERVER — ClientRequest.json's `initialize` variant
+    // + v1/InitializeParams.json: `{clientInfo: {name, version}}`, `clientInfo`
+    // required.
     client
         .send(&Frame::Request(RequestFrame {
             id: JsonRpcId::Num(0),
@@ -134,6 +137,11 @@ async fn run_thread_inner(
         .map_err(|e| e.to_string())?;
     wait_for_response(client, &JsonRpcId::Num(0), budget).await?;
 
+    // Derivation: CODEX-APP-SERVER — ClientRequest.json names `thread/start`
+    // (`{id, method, params}`); v2/ThreadStartParams.json: every field
+    // nullable, so a caller-supplied `{}` is a legal params body;
+    // v2/ThreadStartResponse.json: `{thread: {id, ...}}` — the `.thread.id`
+    // read below.
     client
         .send(&Frame::Request(RequestFrame {
             id: JsonRpcId::Num(1),
@@ -150,6 +158,10 @@ async fn run_thread_inner(
         .map(str::to_owned)
         .ok_or_else(|| "thread/start response carried no thread.id".to_owned())?;
 
+    // Derivation: CODEX-APP-SERVER — v2/TurnStartParams.json: `{threadId,
+    // input: [UserInput]}`, both required; UserInput's text variant is
+    // `{"type":"text","text":...}` per ClientRequest.json's
+    // `#/definitions/UserInput`.
     client
         .send(&Frame::Request(RequestFrame {
             id: JsonRpcId::Num(2),
@@ -342,6 +354,9 @@ pub async fn approval_relay() -> Cell {
     if let Err(cell) = ensure_version(Axis::ApprovalRelay).await {
         return cell;
     }
+    // Derivation: CODEX-APP-SERVER — v2/ThreadStartParams.json's
+    // `#/definitions/AskForApproval` `"untrusted"` and
+    // `#/definitions/SandboxMode` `"read-only"` variants.
     let thread_start_params = serde_json::json!({
         "sandbox": "read-only",
         "approvalPolicy": "untrusted",

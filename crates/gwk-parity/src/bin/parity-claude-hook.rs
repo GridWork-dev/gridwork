@@ -24,6 +24,11 @@ use gwk_adapter_claude::relay::relay_ask;
 
 const RELAY_DEADLINE: Duration = Duration::from_secs(30);
 
+// Derivation: CLAUDE-HOOKS — the hook subprocess contract this binary enacts:
+// a PreToolUse hook reads the ask's JSON on stdin and returns its decision as
+// JSON on its own stdout ("Exit 0 with JSON for structured control"). The
+// shapes on both ends go through gwk-adapter-claude's public types.
+
 fn main() {
     if let Err(message) = run() {
         eprintln!("parity-claude-hook: {message}");

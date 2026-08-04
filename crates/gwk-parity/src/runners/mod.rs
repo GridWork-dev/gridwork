@@ -38,6 +38,10 @@
 //! ruleset for a scripted session), the runner says so and records
 //! [`crate::matrix::Verdict::Skipped`] rather than guess.
 
+// Derivation: none — supervision plumbing only: version-pin checks, skip
+// cells and the run-all loop. No wire shape is built and no protocol byte is
+// parsed in this module; each runner module names its own sources.
+
 use std::time::Duration;
 
 use tokio::process::Command;
