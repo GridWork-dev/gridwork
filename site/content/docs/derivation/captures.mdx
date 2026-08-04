@@ -3,7 +3,7 @@ title: Captured observations
 description: The registered observation IDs, hashes, and review guarantees used when no public specification is sufficient.
 ---
 
-{/* curated-from: docs/derivation/CAPTURES.md sha256=1cb7028b8dc2965e13e5ddf9c440f5f333d0c6ebec918f652b83d7e8c43d6c8b */}
+{/* curated-from: docs/derivation/CAPTURES.md sha256=2634ac3df81abaefbc8397c4bfa74e6c718403d9b07dfda0135d5cc88d047256 */}
 
 Observed-behavior captures cited by clean-room derivation notes (CLEANROOM.md rule 3).
 Each capture has a stable ID and the SHA-256 of the raw capture. Scrubbed captures may
@@ -60,6 +60,7 @@ a different observation. `cleanroom-gate` resolves every cited ID against this t
 | `CAP-001` | `efb1138c4730af0cea8a0aa8e9a558c8c642227fa20ef529346c777cb4f2a043` | A public third-party VT fuzz harness. Its first input byte selects a parser code path and is not terminal input, and it drives a terminal built at 80×24 with 100 lines of scrollback. Both facts decide how the conformance corpus has to be replayed for its frames to describe the same terminal upstream tests. |
 | `CAP-002` | `9cf4c0478be69f618838964da0d483fbb02dc45394c9ca9968e041c958c9adf4` | On Linux, a `read` of a pseudoterminal master after the last descriptor for its slave has closed fails with `EIO` rather than reporting end-of-file. A terminal treating that errno as an error reports every clean child exit as a failure. |
 | `CAP-003` | `f387911b368f608bbdbc332981ef7a70db99fffebb42affaa00174c33288b2c7` | The pinned Claude Code CLI (2.1.220), invoked in print mode with `--input-format stream-json --output-format stream-json` and no `--verbose`, refuses at flag validation before either format flag takes effect: stderr `Error: When using --print, --output-format=stream-json requires --verbose`, exit status 1. |
+| `CAP-004` | `bfe0f1ac5235cdb4f477cfb19f224129b27333b1ec09be1e8efbb1d31e2bcaf3` | A ZWJ emoji sequence — one UAX-29 extended grapheme cluster — occupies TWO cells in the pinned engine with grapheme-cluster mode reset (the default), yielding two style entries that both carry the SGR set before it, and ONE cell with that mode set, yielding one. So a consumer segmenting the delta's `text` by UAX-29 reads styles index-aligned only under the set mode. |
 
 `CAP-001` takes the public-source clause: `crates/gwk-pty/fixtures/PROVENANCE.md` names
 its repository, revision, license and path. What that clause requires is that the tree is
@@ -90,3 +91,17 @@ as-real shape `CAP-002`'s note names. The capture records only the refusal: a pr
 live session against this repository's own project configuration and its output carried
 this operator's local session state, not stable, publishable protocol behavior. The negative
 probe alone is what this row cites.
+
+`CAP-004` takes the own-observation clause for the same reason `CAP-002` does, and the
+mistake it corrects is worth publishing. An earlier version of the change that added it
+cited `TERM-UNICODE-CORE` for the RESET-mode behavior. That document defines no reset-mode
+segmentation rule; it says several times over that the unset state is undefined, and its
+only sentence about joined sequences sits inside the mode-**enabled** requirement and runs
+the other way. Citing it for what a terminal does with the mode off was exactly the false
+citation dressed as a real one `CAP-002`'s note names — an escalation from "the
+specification declines to say" to "the specification says". The behavior is real, and this
+row records it as measured, through the crate's own public API against the engine the build
+pins, so the claim is falsifiable by re-running the probe rather than by reading a rule into
+a document that refuses to state one. `TERM-UNICODE-CORE` keeps the citations it earns:
+what the mode requires when set, and that the reset state is undefined — which argues for
+pinning both sides better than the invented rule did.
