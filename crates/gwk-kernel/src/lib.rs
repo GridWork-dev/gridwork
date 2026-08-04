@@ -13,7 +13,9 @@
 //! path and projections, and the blob spine — the encrypted container format
 //! and the store that dedups, pins, sweeps, rotates and shreds it, the
 //! projection snapshots, and the recovery that decides what a restart may claim
-//! about them. The wire server lands on top of them.
+//! about them. The wire server lands on top of them, and the TTL sweep rides
+//! beside it — the kernel's own periodic answer to a lease-holder that died
+//! rather than released.
 
 pub mod admin;
 pub mod authority;
@@ -27,6 +29,7 @@ pub mod project;
 pub mod recover;
 pub mod store;
 pub mod submit;
+pub mod ttl_sweep;
 pub mod wire;
 pub mod writer;
 
