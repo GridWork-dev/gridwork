@@ -72,5 +72,22 @@
       "upload_id": "upl-1",
       "address": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     }
+  },
+  {
+    "type": "request",
+    "request_id": "req-6",
+    "request": {
+      "type": "pty_attach",
+      "session_id": "pty-1",
+      "cursor": "42"
+    }
+  },
+  {
+    "type": "request",
+    "request_id": "req-7",
+    "request": {
+      "type": "pty_snapshot",
+      "session_id": "pty-1"
+    }
   }
 ]

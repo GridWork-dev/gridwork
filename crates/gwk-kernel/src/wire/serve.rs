@@ -212,6 +212,21 @@ impl Daemon {
         ));
     }
 
+    /// Start the periodic TTL sweep: a lease-holder that died rather than
+    /// released it gets noticed on [`crate::ttl_sweep::SWEEP_INTERVAL`], not
+    /// only on its next renewal attempt. See [`crate::ttl_sweep`].
+    ///
+    /// Separate from [`Daemon::new`] for the same reason
+    /// [`Daemon::notify_on_append`] is: it spawns, and a daemon that never
+    /// calls this still serves every other request correctly — dead leases
+    /// simply accumulate until something else expires them.
+    pub fn spawn_ttl_sweep(&self) {
+        tokio::spawn(crate::ttl_sweep::run(
+            Arc::clone(&self.store),
+            crate::ttl_sweep::SWEEP_INTERVAL,
+        ));
+    }
+
     /// The blob store, whose presence [`Daemon::new`] has already established.
     fn blobs(&self) -> &PgBlobStore {
         self.store
@@ -449,6 +464,23 @@ impl Daemon {
                     detail: None,
                 },
                 Err(e) => blob_refusal(&e),
+            },
+
+            // The PTY half. This kernel holds no session registry yet — that
+            // lands with the pin-advance task that wires the PTY host in.
+            // Until then every session id is unknown, which the contract
+            // already has an honest answer for: the same refusal
+            // `GetProjection`/`BlobStat` give an absent id above, not a new
+            // "unimplemented" code invented just for this arm.
+            KernelRequest::PtyAttach { session_id, .. } => KernelResult::Error {
+                code: KernelErrorCode::NotFound,
+                message: format!("no pty session {session_id}"),
+                detail: None,
+            },
+            KernelRequest::PtySnapshot { session_id } => KernelResult::Error {
+                code: KernelErrorCode::NotFound,
+                message: format!("no pty session {session_id}"),
+                detail: None,
             },
         })
     }
@@ -857,6 +889,7 @@ where
     // Before the first connection, so a subscription opened on it is on the
     // notified path rather than the poll path from its first read.
     daemon.notify_on_append();
+    daemon.spawn_ttl_sweep();
 
     let mut connections = tokio::task::JoinSet::new();
     let shutdown = std::pin::pin!(shutdown);

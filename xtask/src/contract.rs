@@ -17,11 +17,14 @@ use gwk_domain::checkpoint::{CHECKPOINT_SCHEMA_VERSION, Checkpoint};
 use gwk_domain::command::KernelCommand;
 use gwk_domain::entity::{Attempt, Budget, Command, Message, Task};
 use gwk_domain::envelope::{Actor, CommandEnvelope, EventEnvelope, Origin, PayloadRef};
+use gwk_domain::frame::{
+    CellColor, CellStyle, PtyAnsiSlot, PtyCellUpdate, PtyDelta, PtyFrame, StyledCell,
+};
 use gwk_domain::fsm::{AttemptState, CommandState, MessageState, Outcome, TaskState};
 use gwk_domain::ids::{
     AggregateId, AttemptId, BlobUploadId, ByteCount, CommandId, CorrelationId, CostMicros,
-    EngineId, EventCount, EventId, IdempotencyKey, LeaseId, MessageId, ProjectId, RequestId, Seq,
-    TaskId, Timestamp,
+    EngineId, EventCount, EventId, IdempotencyKey, LeaseId, MessageId, ProjectId, PtyFrameSeq,
+    PtySessionId, RequestId, Seq, TaskId, Timestamp,
 };
 use gwk_domain::inherited::{BudgetCursor, OrchestratorCheckpoint, PendingApproval};
 use gwk_domain::protocol::{
@@ -366,6 +369,105 @@ fn golden_activate_envelope() -> CommandEnvelope {
     }
 }
 
+fn pty_session_id() -> PtySessionId {
+    PtySessionId::new("pty-1")
+}
+
+fn plain_cell(glyph: &str) -> StyledCell {
+    StyledCell {
+        glyph: glyph.into(),
+        style: CellStyle {
+            bold: false,
+            dim: false,
+            italic: false,
+            underline: false,
+            inverse: false,
+            strikethrough: false,
+            fg: None,
+            bg: None,
+        },
+    }
+}
+
+/// A 2x2 frame exercising every color tier and a non-default attribute
+/// combination, plus the terminal-default (no `fg`/`bg`) cell.
+fn golden_pty_frame() -> PtyFrame {
+    PtyFrame {
+        cells: vec![
+            vec![
+                plain_cell("g"),
+                StyledCell {
+                    glyph: "w".into(),
+                    style: CellStyle {
+                        bold: true,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                        fg: Some(CellColor::Ansi16 {
+                            slot: PtyAnsiSlot::BrightCyan,
+                        }),
+                        bg: None,
+                    },
+                },
+            ],
+            vec![
+                StyledCell {
+                    glyph: "k".into(),
+                    style: CellStyle {
+                        bold: false,
+                        dim: true,
+                        italic: true,
+                        underline: true,
+                        inverse: false,
+                        strikethrough: false,
+                        fg: Some(CellColor::Truecolor {
+                            r: 0xff,
+                            g: 0x00,
+                            b: 0x80,
+                        }),
+                        bg: Some(CellColor::Xterm256 { index: 236 }),
+                    },
+                },
+                StyledCell {
+                    glyph: String::new(),
+                    style: CellStyle {
+                        bold: false,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: true,
+                        strikethrough: true,
+                        fg: None,
+                        bg: None,
+                    },
+                },
+            ],
+        ],
+    }
+}
+
+fn golden_pty_deltas() -> Vec<PtyDelta> {
+    vec![
+        PtyDelta::CellsChanged {
+            updates: vec![
+                PtyCellUpdate {
+                    row: 0,
+                    col: 0,
+                    cell: plain_cell("G"),
+                },
+                PtyCellUpdate {
+                    row: 0,
+                    col: 1,
+                    cell: plain_cell("W"),
+                },
+            ],
+        },
+        PtyDelta::Resized { rows: 24, cols: 80 },
+    ]
+}
+
 fn golden_client_control() -> Vec<ClientControl> {
     vec![
         ClientControl::Hello {
@@ -404,6 +506,20 @@ fn golden_client_control() -> Vec<ClientControl> {
             request: KernelRequest::BlobCommit {
                 upload_id: BlobUploadId::new("upl-1"),
                 address: blob_address('a'),
+            },
+        },
+        // A reattach: `cursor` present, resuming after a prior frame revision.
+        ClientControl::Request {
+            request_id: RequestId::new("req-6"),
+            request: KernelRequest::PtyAttach {
+                session_id: pty_session_id(),
+                cursor: Some(PtyFrameSeq::new(42)),
+            },
+        },
+        ClientControl::Request {
+            request_id: RequestId::new("req-7"),
+            request: KernelRequest::PtySnapshot {
+                session_id: pty_session_id(),
             },
         },
     ]
@@ -467,6 +583,37 @@ fn golden_server_control() -> Vec<ServerControl> {
             code: KernelErrorCode::SlowConsumer,
             // The consumer resumes from here rather than restarting.
             last_cursor: Some(Seq::new(1)),
+        },
+        ServerControl::Response {
+            request_id: RequestId::new("req-6"),
+            result: KernelResult::PtyAttached {
+                session_id: pty_session_id(),
+                rows: 24,
+                cols: 80,
+                cursor: Some(PtyFrameSeq::new(42)),
+            },
+        },
+        ServerControl::Response {
+            request_id: RequestId::new("req-7"),
+            result: KernelResult::PtySnapshot {
+                session_id: pty_session_id(),
+                seq: PtyFrameSeq::new(43),
+                frame: golden_pty_frame(),
+            },
+        },
+        // Pushed on the PtyAttach's own request_id, mirroring how EventBatch
+        // and StreamClosed above both ride the SubscribeEvents that opened
+        // them.
+        ServerControl::PtyDeltaBatch {
+            request_id: RequestId::new("req-6"),
+            session_id: pty_session_id(),
+            deltas: golden_pty_deltas(),
+            seq: PtyFrameSeq::new(44),
+        },
+        ServerControl::PtyStreamClosed {
+            request_id: RequestId::new("req-6"),
+            code: KernelErrorCode::SlowConsumer,
+            last_seq: Some(PtyFrameSeq::new(44)),
         },
     ]
 }
