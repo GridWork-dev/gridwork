@@ -1299,6 +1299,29 @@ jobs:
           fi
           echo "cleanroom-gate: outer-doc 'none' beside a citation correctly rejected"
 
+          # Half eight: four-plus slashes. The slash run is unbounded for the
+          # same reason `///` is recognized at all — a line the extractor
+          # cannot see is a line the never-both check cannot judge, and a
+          # `////` citation once stood beside a `none` and passed as a clean
+          # declaration.
+          printf '//// Derivation: ECMA-48 §8.3.14 — seeded\n// Derivation: none — seeded\nfn seeded() {}\n' > "$dir/four-slash-cite-beside-none.rs"
+          if echo "$dir/four-slash-cite-beside-none.rs" | ./tools/cleanroom-gate.sh --markers; then
+            echo 'marker check accepted a //// citation alongside a Derivation: none' >&2
+            exit 1
+          fi
+          echo "cleanroom-gate: four-slash citation beside 'none' correctly rejected"
+
+          # Half nine: a reason spelled entirely in punctuation. The mandatory
+          # reason is what keeps the `none` form from being a gate silencer,
+          # and `— —` satisfied the something-follows check while saying
+          # nothing.
+          printf '// Derivation: none — —\nfn seeded() {}\n' > "$dir/punctuation-reason.rs"
+          if echo "$dir/punctuation-reason.rs" | ./tools/cleanroom-gate.sh --markers; then
+            echo 'marker check accepted a Derivation: none with a punctuation-only reason' >&2
+            exit 1
+          fi
+          echo "cleanroom-gate: punctuation-only 'none' reason correctly rejected"
+
           # The positive control. Seeds that can only ever fail would also pass with
           # the whole parser replaced by `exit 1`, which is the failure this job
           # exists to make impossible. Four of them now: a citation, a declaration,

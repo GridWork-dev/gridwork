@@ -134,11 +134,19 @@ resolves() {
 # `///` had the same hole one form over — an outer doc comment documents the
 # very item a derived construct usually is, so it is where a marker naturally
 # lands, and a `Derivation:` line written there was invisible: unmarked standing
-# alone, a bare `none` standing beside one. No `/*`-style form: the extractor
-# has never recognized one, and every check aligns with this one pattern rather
-# than growing its own.
+# alone, a bare `none` standing beside one. The slash run is unbounded (`////`
+# and deeper match too): any such line still reads as a comment to a human, and
+# a form the extractor cannot see is a line the never-both check cannot judge —
+# the safe direction is to see more, never less. No `/*`-style form: the
+# extractor has never recognized one, and every check aligns with this one
+# pattern rather than growing its own.
+#
+# The description must contain at least one ALPHANUMERIC: a reason spelled
+# entirely in punctuation (`Derivation: none — —`) satisfied the
+# something-follows check while saying nothing, which made the mandatory
+# reason optional in practice.
 cited_ids() {
-  sed -nE 's@^[[:space:]]*(//[/!]?|#)[[:space:]]*Derivation:[[:space:]]+([^[:space:]]+)[[:space:]]+[^[:space:]].*$@\2@p'
+  sed -nE 's@^[[:space:]]*(//[/!]*|#)[[:space:]]*Derivation:[[:space:]]+([^[:space:]]+)[[:space:]]+[^[:alnum:]]*[[:alnum:]].*$@\2@p'
 }
 
 # The one ID that is a DECLARATION rather than a citation: `Derivation: none — <why>`
