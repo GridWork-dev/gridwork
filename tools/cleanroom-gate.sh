@@ -124,8 +124,17 @@ resolves() {
 # (that trailing `[^[:space:]]`), so a bare ID is not a marker. The separator
 # before it is deliberately unconstrained: pinning an em-dash would make the
 # gate's verdict depend on the CI runner's locale.
+#
+# The comment forms are `//`, `//!` and `#`. `//!` is here because a marker in a
+# Rust module doc comment is still a marker, and every consumer of this function
+# — the never-both check included — can only see what it sees: with `//!`
+# unrecognized, a doc-comment citation beside a `// Derivation: none` read as a
+# bare declaration and passed, which is exactly the reviewer-stops-at-the-none
+# failure the never-both check exists to prevent. No `/*`-style form: the
+# extractor has never recognized one, and every check aligns with this one
+# pattern rather than growing its own.
 cited_ids() {
-  sed -nE 's@^[[:space:]]*(//|#)[[:space:]]*Derivation:[[:space:]]+([^[:space:]]+)[[:space:]]+[^[:space:]].*$@\2@p'
+  sed -nE 's@^[[:space:]]*(//!?|#)[[:space:]]*Derivation:[[:space:]]+([^[:space:]]+)[[:space:]]+[^[:space:]].*$@\2@p'
 }
 
 # The one ID that is a DECLARATION rather than a citation: `Derivation: none — <why>`
