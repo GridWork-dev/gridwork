@@ -165,7 +165,7 @@ impl PgEventStore {
                 let decision = authority::evaluate(
                     &mut tx,
                     envelope,
-                    &envelope.command_type,
+                    authority::classification_key(&envelope.command_type, &command),
                     &route.aggregate_id,
                 )
                 .await?;

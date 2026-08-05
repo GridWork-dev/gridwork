@@ -16,7 +16,7 @@ use common::{
     refuse,
 };
 use gwk_domain::command::KernelCommand;
-use gwk_domain::ids::{AttentionItemId, AuthorityGrantId, CommandId, Timestamp};
+use gwk_domain::ids::{AttentionItemId, AuthorityGrantId, CommandId, EvidenceId, Timestamp};
 use gwk_domain::protocol::{KernelErrorCode, KernelResult};
 use gwk_kernel::store::PgEventStore;
 use sqlx::Row;
@@ -31,14 +31,31 @@ fn stop(id: &str) -> KernelCommand {
     }
 }
 
-fn grant(id: &str, scope: Option<&str>, expires_at: Option<&str>) -> KernelCommand {
+fn grant(
+    id: &str,
+    action_class: &str,
+    scope: Option<&str>,
+    expires_at: Option<&str>,
+) -> KernelCommand {
     KernelCommand::GrantAuthority {
         authority_grant_id: AuthorityGrantId::new(id),
         // Must equal the submitting envelope's actor for the grant to match.
         grantee: actor("kernel"),
-        action_class: "stop".to_owned(),
+        action_class: action_class.to_owned(),
         scope: scope.map(str::to_owned),
         expires_at: expires_at.map(Timestamp::new),
+    }
+}
+
+/// The kind-refined gated act: a config edit arriving as evidence (6′ P16 —
+/// decision 11's receipt is literal).
+fn config_evidence(id: &str) -> KernelCommand {
+    KernelCommand::RecordEvidence {
+        evidence_id: EvidenceId::new(id),
+        kind: "config_change".to_owned(),
+        r#ref: "4621797".to_owned(),
+        digest: None,
+        byte_size: None,
     }
 }
 
@@ -124,7 +141,7 @@ async fn a_matching_grant_allows_and_revoking_it_pages_again() {
     let (name, store) = fresh_store(&maintenance, "grant", 64).await;
 
     // Unscoped grant covers the whole action class.
-    apply(&store, "grant", grant("g-1", None, None)).await;
+    apply(&store, "grant", grant("g-1", "stop", None, None)).await;
     apply(&store, "stop", stop("c-1")).await;
 
     // Allowed commands are receipted too — every result writes one.
@@ -172,7 +189,7 @@ async fn scope_matches_exactly_and_expiry_is_read_against_the_command() {
     let (name, store) = fresh_store(&maintenance, "scope", 64).await;
 
     // Scoped to c-1 only. A prefix reading would let this cover c-1-extra.
-    apply(&store, "grant", grant("g-1", Some("c-1"), None)).await;
+    apply(&store, "grant", grant("g-1", "stop", Some("c-1"), None)).await;
     apply(&store, "allowed", stop("c-1")).await;
 
     let (code, _) = refuse(&store, "denied", stop("c-1-extra")).await;
@@ -187,7 +204,7 @@ async fn scope_matches_exactly_and_expiry_is_read_against_the_command() {
     apply(
         &store,
         "grant-2",
-        grant("g-2", Some("c-9"), Some("2026-07-27T00:00:00Z")),
+        grant("g-2", "stop", Some("c-9"), Some("2026-07-27T00:00:00Z")),
     )
     .await;
     let (code, _) = refuse(&store, "expired", stop("c-9")).await;
@@ -627,6 +644,84 @@ async fn a_grant_to_another_actor_does_not_allow_this_one() {
 
     let (code, _) = refuse(&store, "stop", stop("c-1")).await;
     assert_eq!(code, KernelErrorCode::Authority);
+
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
+async fn an_ungranted_config_change_evidence_pages_and_records_nothing() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "configpage", 64).await;
+
+    let (code, message) = refuse(&store, "cfg", config_evidence("e-1")).await;
+    assert_eq!(code, KernelErrorCode::Authority, "{message}");
+    assert!(message.contains("config_change"), "{message}");
+
+    // Refused means refused: the config-change evidence did not land...
+    assert_eq!(event_count(&store).await, 0);
+    // ...and the trail committed, with the class true of the act.
+    assert_eq!(counts(&store).await, (1, 1));
+    let action: String = sqlx::query_scalar("SELECT action FROM gwk.receipt")
+        .fetch_one(store.pool())
+        .await
+        .expect("receipt action");
+    assert_eq!(action, "config_change");
+
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
+async fn a_granted_config_change_lands_with_its_receipt_in_one_commit() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "configallow", 64).await;
+
+    apply(&store, "grant", grant("g-1", "config_change", None, None)).await;
+    apply(&store, "cfg", config_evidence("e-1")).await;
+
+    // Two events (the grant, the evidence), ONE receipt: the grant is
+    // deliberately unclassified, and the evidence's Allow wrote its row in
+    // the same transaction as the append — decision 11's receipt, literally.
+    assert_eq!(event_count(&store).await, 2);
+    assert_eq!(counts(&store).await, (1, 0));
+    let row = sqlx::query("SELECT action, observed_basis, subject_id FROM gwk.receipt")
+        .fetch_one(store.pool())
+        .await
+        .expect("receipt row");
+    assert_eq!(row.get::<String, _>("action"), "config_change");
+    assert_eq!(
+        row.get::<Option<String>, _>("observed_basis").as_deref(),
+        Some("matching unexpired scoped grant")
+    );
+    assert_eq!(row.get::<String, _>("subject_id"), "e-1");
+
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
+async fn an_ordinary_evidence_kind_is_not_the_config_class() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "configother", 64).await;
+
+    // The refinement's other half, seeded-proven: the general evidence verb
+    // stays ungated. A transcript record needs no grant, lands, and leaves no
+    // receipt claiming it was a config edit.
+    apply(
+        &store,
+        "ev",
+        KernelCommand::RecordEvidence {
+            evidence_id: EvidenceId::new("e-1"),
+            kind: "transcript".to_owned(),
+            r#ref: "runs/e-1.jsonl".to_owned(),
+            digest: None,
+            byte_size: None,
+        },
+    )
+    .await;
+    assert_eq!(event_count(&store).await, 1);
+    assert_eq!(counts(&store).await, (0, 0));
 
     drop_database(&maintenance, &name).await;
 }

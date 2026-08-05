@@ -43,6 +43,10 @@ const RISK_CLASS: &[(&str, &str)] = &[
     // The stop/kill spine. Killing running work is the destructive act in a
     // system whose whole job is to keep work running.
     ("issue_command", "stop"),
+    // Decision 11's receipt, literally (6′ P16): a config edit leaves an
+    // immutable row. The key is kind-refined — see `classification_key` for
+    // why the general evidence verb is not the act gated here.
+    ("record_evidence:config_change", "config_change"),
 ];
 
 /// What the gate decided.
@@ -62,6 +66,28 @@ impl Decision {
             Self::Unclassified => None,
             Self::Allow { action_class } | Self::Page { action_class } => Some(action_class),
         }
+    }
+}
+
+/// The key [`RISK_CLASS`] is consulted with for one command.
+///
+/// Almost always the command type itself. `record_evidence` is refined by its
+/// `kind`: the verb is the lifecycle's general evidence carrier (`transcript`,
+/// `diff`, `log`, …) and only the `config_change` kind is decision 11's
+/// config-edit act. Classifying the whole verb would gate ordinary evidence
+/// behind grants nobody has issued — and stamp a `config_change` receipt onto
+/// a transcript record, a label that lies about the act it attests.
+pub(crate) fn classification_key<'a>(
+    command_type: &'a str,
+    command: &gwk_domain::command::KernelCommand,
+) -> &'a str {
+    match command {
+        gwk_domain::command::KernelCommand::RecordEvidence { kind, .. }
+            if kind == "config_change" =>
+        {
+            "record_evidence:config_change"
+        }
+        _ => command_type,
     }
 }
 

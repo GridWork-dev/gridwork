@@ -253,4 +253,30 @@ mod tests {
         let error = decode::<ClientControl>(b"  ").expect_err("empty body accepted");
         assert_eq!(error.code, KernelErrorCode::Schema);
     }
+
+    proptest::proptest! {
+        /// Each example above refuses ONE malformation. The decoder's promise
+        /// is about every body: whatever the bytes, the answer is a decoded
+        /// value or a typed refusal on one of the contract's three codes —
+        /// never a panic, never a dropped connection. Bounded at 8 KiB for the
+        /// sibling `frame.rs` property's reason: the 4 MiB ceiling is a
+        /// boundary proved exactly elsewhere, while this is about the space in
+        /// between.
+        #[test]
+        fn any_body_decodes_or_refuses_on_a_contract_code(
+            body in proptest::collection::vec(proptest::num::u8::ANY, 0..8192)
+        ) {
+            if let Err(error) = decode::<ClientControl>(&body) {
+                proptest::prop_assert!(
+                    matches!(
+                        error.code,
+                        KernelErrorCode::Schema
+                            | KernelErrorCode::Validation
+                            | KernelErrorCode::DuplicateKey
+                    ),
+                    "{error}"
+                );
+            }
+        }
+    }
 }
