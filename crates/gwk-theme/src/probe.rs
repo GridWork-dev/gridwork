@@ -125,9 +125,9 @@ mod tests {
     #[test]
     fn probe_the_inventory_is_read_from_the_marks_not_written_down() {
         let cps = inventory_codepoints();
-        // 18 marks over 24 distinct codepoints; the spinner and its reverse
+        // 22 marks over 28 distinct codepoints; the spinner and its reverse
         // share all eight frames, which is why this is not simply MARKS.len().
-        assert_eq!(cps.len(), 24, "inventory codepoint count moved");
+        assert_eq!(cps.len(), 28, "inventory codepoint count moved");
         let mut sorted = cps.clone();
         sorted.sort_unstable();
         sorted.dedup();
@@ -188,7 +188,7 @@ mod tests {
     #[test]
     fn probe_no_reports_at_all_names_the_whole_inventory_rather_than_passing() {
         match evaluate(&[]) {
-            ProbeOutcome::Inconclusive(cs) => assert_eq!(cs.len(), 24),
+            ProbeOutcome::Inconclusive(cs) => assert_eq!(cs.len(), 28),
             other => panic!("an empty report set must not pass, got {other:?}"),
         }
         assert_eq!(evaluate(&[]).glyph_set(), GlyphSet::Ascii);

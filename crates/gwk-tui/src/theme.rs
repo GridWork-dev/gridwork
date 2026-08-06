@@ -8,6 +8,9 @@
 //! whole degradation path is ours, which is exactly why it lives behind one
 //! function instead of a capability check per widget.
 
+use std::borrow::Cow;
+use std::fmt::Write;
+
 use gwk_theme::marks::{GlyphSet, Mark, StateBinding};
 use gwk_theme::{AnsiSlot, ColorTier, Paint, Token};
 use ratatui::style::{Color, Modifier, Style};
@@ -83,6 +86,101 @@ pub fn glyph(mark: &Mark, frame: usize, glyphs: GlyphSet) -> char {
     mark.at(frame, glyphs)
 }
 
+/// Escape wire text that cannot occupy one stable terminal cell.
+///
+/// ASCII controls, ambiguous/wide characters, and emoji remain retypable as
+/// `\u{HEX}` rather than shearing the frame or disappearing. Processing stops
+/// at `cell_budget`, before a hostile off-screen value can force a full escaped
+/// allocation. Safe text that fits stays borrowed.
+pub fn safe_text(text: &str, cell_budget: usize) -> Cow<'_, str> {
+    let safe = |c: char| {
+        (c.is_ascii_graphic() || c == ' ') || (!c.is_ascii() && gwk_theme::marks::is_admissible(c))
+    };
+    let mut escaped: Option<String> = None;
+    let mut cells = 0;
+    for (offset, c) in text.char_indices() {
+        if safe(c) {
+            if cells == cell_budget {
+                return Cow::Owned(escaped.unwrap_or_else(|| text[..offset].to_string()));
+            }
+            if let Some(output) = &mut escaped {
+                output.push(c);
+            }
+            cells += 1;
+        } else {
+            let replacement = format!("\\u{{{:X}}}", c as u32);
+            if replacement.len() > cell_budget.saturating_sub(cells) {
+                return Cow::Owned(escaped.unwrap_or_else(|| text[..offset].to_string()));
+            }
+            let output = escaped.get_or_insert_with(|| {
+                let mut prefix = String::with_capacity(text.len().min(cell_budget));
+                prefix.push_str(&text[..offset]);
+                prefix
+            });
+            write!(output, "{replacement}").expect("writing an escape into a String cannot fail");
+            cells += replacement.len();
+        }
+    }
+    escaped.map_or(Cow::Borrowed(text), Cow::Owned)
+}
+
+/// Wrap escaped wire text into bounded one-cell rows.
+///
+/// The returned boolean says more source text remains. Both dimensions are
+/// hard bounds, so a detail pane can reveal long values without allocating
+/// beyond the cells it could ever paint.
+pub fn safe_text_lines(text: &str, cell_width: usize, max_lines: usize) -> (Vec<String>, bool) {
+    if cell_width == 0 || max_lines == 0 {
+        return (Vec::new(), !text.is_empty());
+    }
+
+    let safe = |c: char| {
+        (c.is_ascii_graphic() || c == ' ') || (!c.is_ascii() && gwk_theme::marks::is_admissible(c))
+    };
+    let mut lines = vec![String::new()];
+    let mut cells = 0;
+    for c in text.chars() {
+        if safe(c) {
+            if cells == cell_width {
+                if lines.len() == max_lines {
+                    return (lines, true);
+                }
+                lines.push(String::new());
+                cells = 0;
+            }
+            lines.last_mut().expect("one line always exists").push(c);
+            cells += 1;
+            continue;
+        }
+
+        for output in format!("\\u{{{:X}}}", c as u32).chars() {
+            if cells == cell_width {
+                if lines.len() == max_lines {
+                    return (lines, true);
+                }
+                lines.push(String::new());
+                cells = 0;
+            }
+            lines
+                .last_mut()
+                .expect("one line always exists")
+                .push(output);
+            cells += 1;
+        }
+    }
+    (lines, false)
+}
+
+/// The pinned state binding named `name`. Panics rather than propagates:
+/// the binding tables are load-bearing invariants, not runtime-absent data,
+/// and every lens leans on the same lookup.
+pub(crate) fn binding(name: &str) -> &'static StateBinding {
+    gwk_theme::marks::STATES
+        .iter()
+        .find(|s| s.name == name)
+        .expect("the state bindings are pinned")
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -111,6 +209,32 @@ mod tests {
             .map(|slot| format!("{:?}", color(*slot)))
             .collect();
         assert_eq!(mapped.len(), 16);
+    }
+
+    #[test]
+    fn unsafe_wire_text_is_retypable_and_safe_text_stays_borrowed() {
+        assert!(matches!(
+            safe_text("plain ASCII", usize::MAX),
+            Cow::Borrowed(_)
+        ));
+        assert!(matches!(
+            safe_text("admitted ▸", usize::MAX),
+            Cow::Borrowed(_)
+        ));
+        assert_eq!(
+            safe_text("unsafe ◆ 你好 ⚠\n", usize::MAX),
+            "unsafe \\u{25C6} \\u{4F60}\\u{597D} \\u{26A0}\\u{A}"
+        );
+        assert_eq!(safe_text("plain ASCII beyond", 5), "plain");
+        assert_eq!(safe_text("ok ◆ unseen", 3), "ok ");
+        assert_eq!(
+            safe_text_lines("abcdef", 3, 2),
+            (vec!["abc".into(), "def".into()], false)
+        );
+        assert_eq!(
+            safe_text_lines("◆ tail", 4, 2),
+            (vec!["\\u{2".into(), "5C6}".into()], true)
+        );
     }
 
     #[test]

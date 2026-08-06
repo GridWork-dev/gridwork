@@ -43,9 +43,11 @@ use gwk_theme::tier::ColorTier;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
+use unicode_width::UnicodeWidthStr;
 
 use crate::input::HitMap;
 use crate::theme;
+use crate::theme::binding;
 
 /// Everything the lens paints, assembled by the caller from projection pages.
 ///
@@ -208,13 +210,6 @@ fn audible_count(state: &QueueState) -> usize {
             .iter()
             .filter(|i| audible(i, &state.now))
             .count()
-}
-
-fn binding(name: &str) -> &'static StateBinding {
-    gwk_theme::marks::STATES
-        .iter()
-        .find(|s| s.name == name)
-        .expect("the state bindings are pinned")
 }
 
 /// One row's paint: mark cell, styled text, and what it stands for.
@@ -495,11 +490,16 @@ pub fn render(
             x += 2;
         }
         let width = (area.x + area.width).saturating_sub(x);
-        buf.set_stringn(x, y, &row.text, width as usize, text_style);
+        let safe_text = theme::safe_text(&row.text, width as usize);
+        buf.set_stringn(x, y, safe_text.as_ref(), width as usize, text_style);
         if let Some(right) = &row.right {
-            let rx = (area.x + area.width).saturating_sub(right.len() as u16);
-            if rx > x.saturating_add(row.text.len() as u16) {
-                buf.set_string(rx, y, right, text_style);
+            let safe_right = theme::safe_text(right, area.width as usize);
+            let right_width = UnicodeWidthStr::width(safe_right.as_ref());
+            let text_width = UnicodeWidthStr::width(safe_text.as_ref());
+            let rx = (area.x + area.width)
+                .saturating_sub(u16::try_from(right_width).unwrap_or(u16::MAX));
+            if rx > x.saturating_add(u16::try_from(text_width).unwrap_or(u16::MAX)) {
+                buf.set_string(rx, y, safe_right.as_ref(), text_style);
             }
         }
         if let Some(target) = &row.target {
@@ -525,10 +525,11 @@ pub fn render(
         .as_ref()
         .map_or_else(|| "-".to_string(), |w| w.to_string());
     let status = format!("QUEUE  !{}  as-of {as_of}", audible_count(state));
+    let safe_status = theme::safe_text(&status, area.width as usize);
     buf.set_stringn(
         area.x,
         area.y + area.height - 1,
-        &status,
+        safe_status.as_ref(),
         area.width as usize,
         Style::default(),
     );
@@ -986,19 +987,38 @@ mod tests {
     fn queue_every_cell_glyph_is_ascii_or_an_admitted_mark() {
         // The admission rule (taste-gate item 5, a hard lock): EAW=Ambiguous
         // codepoints shear frames on ambiguous-wide terminals, so nothing
-        // reaches the cell buffer except ASCII and the probed MARKS
-        // inventory. This walks the busiest frame so a stray em dash or
+        // reaches the cell buffer unless it passes the shared admission
+        // predicate. This walks the busiest frame so a stray em dash or
         // ellipsis in any row's text fails here, not on an operator's screen.
         let (dump, _, _) = dump_frame(72, 14, &workday_state(), None);
         for ch in dump.chars() {
             assert!(
-                ch.is_ascii()
-                    || gwk_theme::marks::MARKS
-                        .iter()
-                        .any(|m| m.glyphs.contains(&ch)),
+                ch.is_ascii() || gwk_theme::marks::is_admissible(ch),
                 "unadmitted glyph {ch:?} in the cell buffer"
             );
         }
+    }
+
+    #[test]
+    fn queue_unsafe_wire_glyphs_are_escaped_before_paint() {
+        let mut state = empty_state();
+        state.attention = vec![item("a-unsafe", "unsafe ◆ 你好 ⚠")];
+
+        let (dump, _, _) = dump_frame(96, 8, &state, None);
+        for unsafe_glyph in ['◆', '你', '好', '⚠'] {
+            assert!(
+                !dump.contains(unsafe_glyph),
+                "unsafe glyph {unsafe_glyph:?} reached the buffer:\n{dump}"
+            );
+        }
+        assert!(
+            dump.contains("\\u{25C6}"),
+            "the value stays retypable:\n{dump}"
+        );
+        assert!(
+            dump.contains("\\u{4F60}"),
+            "the value stays retypable:\n{dump}"
+        );
     }
 
     #[test]

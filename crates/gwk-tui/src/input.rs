@@ -142,11 +142,11 @@ impl<T> HitMap<T> {
         self.regions.push((area, target));
     }
 
-    /// The registered targets in paint order — the keyboard walks exactly
-    /// this list. That is what keeps the mouse an accelerator rather than the
-    /// only path to a verb: both input paths act on the same painted rows,
-    /// and a row a lens cut for space (its overflow notice names the cut) is
-    /// reachable by neither until it is painted.
+    /// The registered targets in paint order — the default keyboard walk for
+    /// a lens whose whole target set fits the frame. A windowed lens exposes a
+    /// separate full target order (the Board does) and uses this map only for
+    /// visible click regions. In both cases the mouse remains an accelerator,
+    /// never the only route to a target.
     pub fn targets(&self) -> impl Iterator<Item = &T> {
         self.regions.iter().map(|(_, target)| target)
     }

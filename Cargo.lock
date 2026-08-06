@@ -1255,6 +1255,8 @@ dependencies = [
  "gwk-domain",
  "gwk-theme",
  "ratatui",
+ "serde_json",
+ "unicode-width",
 ]
 
 [[package]]

@@ -1,0 +1,18 @@
+ 3 tasks  2 running
+ ⊞ harden the auth path  working                                   10:12
+   ⊚ codex  running  (implementer)                                 10:12
+     ∘ recon  completed  (subagent)
+       ∘ lint  registered  (subagent)
+   ⊚ claude  failed                                                09:48
+ ⊞ write the release notes  submitted                              09:05
+ ⊞ ship 0.0.2  completed                                           08:40
+   ⊚ codex  succeeded                                              08:39
+ off-page -- parents beyond this page
+   ⊚ codex  running                                                10:00
+
+------------------------------------------------------------------------
+ attempt at-01  task t-auth
+ engine codex  role implementer
+ state running
+ created 2026-08-06T09:40:00Z  updated 2026-08-06T10:12:00Z
+BOARD  [dag] flow  2 running  as-of 407

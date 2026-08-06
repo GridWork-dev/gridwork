@@ -1,8 +1,9 @@
 //! The GridWork terminal console — the thin client half.
 //!
-//! **One lens exists.** The [`queue`] — the workday screen — is built; the
-//! Board, the config surface, and the session drill-down are still ordered
-//! work. Beneath the lenses sits the substrate they consume: [`theme`], the
+//! **Two lenses exist.** The [`queue`] — the workday screen — and the
+//! [`board`] — the task/attempt DAG and the A2A message flow — are built;
+//! the config surface and the session drill-down are still ordered work.
+//! Beneath the lenses sits the substrate they consume: [`theme`], the
 //! one function that turns a resolved token into a renderer colour;
 //! [`probe`], which measures what the drawing terminal does with the glyph
 //! inventory; and [`input`], the session bracket, click hit-testing, and the
@@ -29,6 +30,7 @@
 //! of this crate is lens code and is deliberately outside the gate: the gate
 //! follows the risk, not the directory tree.
 
+pub mod board;
 pub mod input;
 pub mod probe;
 pub mod queue;
