@@ -16,6 +16,10 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+# Direct, not just ratatui's transitive backend: [`input`] needs the `osc52`
+# feature for the library-mediated clipboard command, and the typed event and
+# terminal-mode types it plumbs are crossterm's own.
+crossterm.workspace = true
 # The ratified vocabulary. This crate holds the one function that turns a
 # resolved slot into a renderer colour, so it needs the resolution; it does not
 # hold the resolution itself, which is data and belongs with the data.
