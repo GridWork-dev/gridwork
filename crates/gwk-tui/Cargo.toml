@@ -33,6 +33,10 @@ gwk-theme.workspace = true
 # first consumer so the single-`ratatui-core` lockfile assertion in CI had
 # something to assert before any widget existed.
 ratatui.workspace = true
+# Width is presentation data here: right-aligned tails must compare terminal
+# cells, not UTF-8 bytes. Already present through ratatui, so this adds one
+# direct edge and no crate to the lockfile.
+unicode-width.workspace = true
 
 [dev-dependencies]
 # The board-live example decodes real kernel pages through the contract's

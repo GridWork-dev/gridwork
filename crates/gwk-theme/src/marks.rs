@@ -31,6 +31,9 @@
 //! control that feeds the gate the two canonical bad codepoints and requires it
 //! to reject them.
 
+use unicode_properties::UnicodeEmoji;
+use unicode_width::UnicodeWidthChar;
+
 /// Which of the two cells a mark belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MarkKind {
@@ -79,8 +82,9 @@ pub const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⢰', '⣠', '⡄', 
 /// the reversed cycle is a mark for free.
 pub const SPINNER_REVERSED: &[char] = &['⠆', '⡄', '⣠', '⢰', '⠸', '⠹', '⠙', '⠋'];
 
-/// The ruled marks. This is the single inventory constant the admission rule
-/// is enforced over; a glyph that is not here does not reach the cell buffer.
+/// The ruled marks. This is the single authored inventory constant the
+/// admission rule is enforced over. Dynamic wire text passes through the same
+/// predicate at the renderer boundary rather than becoming a second inventory.
 #[rustfmt::skip]
 pub const MARKS: &[Mark] = &[
     // Identity — the systematic two-axis rule. Star = spans, triangle =
@@ -183,6 +187,17 @@ pub fn mark(name: &str) -> Option<&'static Mark> {
     MARKS.iter().find(|mark| mark.name == name)
 }
 
+/// Whether a codepoint is safe in one terminal cell under both width modes.
+///
+/// This is public so authored marks and dynamic wire text use one gate. A
+/// Neutral or Narrow character is one cell in both paths; emoji characters and
+/// components are excluded because terminal text/emoji presentation disagrees.
+pub fn is_admissible(c: char) -> bool {
+    matches!((c.width(), c.width_cjk()), (Some(1), Some(1)))
+        && !c.is_emoji_char()
+        && !c.is_emoji_component()
+}
+
 /// The `--glyphs=` value. Exactly two, and **no detection**.
 ///
 /// The admission rule has no per-glyph waiver path, so this is the single
@@ -239,54 +254,19 @@ impl Mark {
 mod tests {
     use std::collections::BTreeSet;
 
-    use unicode_properties::UnicodeEmoji;
-    use unicode_width::UnicodeWidthChar;
-
     use super::*;
     use crate::SIGNAL;
-
-    /// The admission rule as one total predicate, so the inventory sweep and
-    /// its positive control run the SAME code. A gate proved only against the
-    /// values it passes is not proved.
-    fn admissible(c: char) -> Result<(), String> {
-        // `EAW ∈ {N, Na}` expressed through the two width paths, which is the
-        // property that actually bites: a Neutral or Narrow character is one
-        // cell in BOTH, an Ambiguous one is one cell in the non-CJK path and
-        // two in the CJK path. Wide and Fullwidth are two in both. There is no
-        // EAW-class accessor in the crate graph, and this formulation is
-        // stronger than one anyway — it tests the rendered consequence rather
-        // than the classification the consequence is derived from.
-        match (c.width(), c.width_cjk()) {
-            (Some(1), Some(1)) => {}
-            (narrow, cjk) => {
-                return Err(format!(
-                    "U+{:04X} is {narrow:?} cells wide normally and {cjk:?} under \
-                     ambiguous-width=double; the admission rule takes only 1 and 1",
-                    c as u32
-                ));
-            }
-        }
-        // Non-emoji, read strictly: neither an emoji character nor an emoji
-        // component. A component is only emoji inside a sequence, but nothing
-        // in this inventory needs one, so the inventory takes the strict
-        // reading and leaves the loose one to whoever needs it.
-        if c.is_emoji_char() || c.is_emoji_component() {
-            return Err(format!(
-                "U+{:04X} is an emoji character or component; terminals substitute a \
-                 colour emoji font for it and the cell stops being one cell",
-                c as u32
-            ));
-        }
-        Ok(())
-    }
 
     #[test]
     fn every_inventory_codepoint_passes_the_admission_rule() {
         for entry in MARKS {
             for &glyph in entry.glyphs {
-                if let Err(why) = admissible(glyph) {
-                    panic!("mark {:?}: {why}", entry.name);
-                }
+                assert!(
+                    is_admissible(glyph),
+                    "mark {:?}: U+{:04X} is not one cell in both width modes or is emoji",
+                    entry.name,
+                    glyph as u32
+                );
             }
             // The escape is ASCII by construction, and this is what makes that
             // claim mechanical rather than asserted.
@@ -309,14 +289,14 @@ mod tests {
         // is the canonical second-clause case: Neutral width, still an emoji.
         for (bad, why) in [('◆', "ambiguous width"), ('⚠', "emoji")] {
             assert!(
-                admissible(bad).is_err(),
+                !is_admissible(bad),
                 "U+{:04X} ({why}) was admitted; the gate is broken",
                 bad as u32
             );
         }
         // And the control cuts both ways: a mark that IS admissible must pass,
         // or the gate could be a constant `Err`.
-        assert!(admissible('▸').is_ok());
+        assert!(is_admissible('▸'));
     }
 
     #[test]

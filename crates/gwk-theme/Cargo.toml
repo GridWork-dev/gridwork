@@ -14,11 +14,11 @@ repository.workspace = true
 [dependencies]
 serde.workspace = true
 specta.workspace = true
+unicode-properties.workspace = true
+unicode-width.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
-unicode-properties.workspace = true
-unicode-width.workspace = true
 
 [lints]
 workspace = true

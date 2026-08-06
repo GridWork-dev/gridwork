@@ -27,10 +27,10 @@
 //!
 //! # No gauges
 //!
-//! The wire carries budget caps (`Attempt::budget`), not usage counters, so
-//! a Board gauge would have a denominator and no numerator. When usage
-//! reaches the contract, the ruled form is braille — the spinner's one
-//! width class and font risk, and no other.
+//! This work view carries budget caps (`Attempt::budget`) but does not join the
+//! separately projected `CostEntry` usage rows owned by the cut cost/health
+//! panel. A gauge here would therefore fabricate a local numerator. When that
+//! panel lands, the ruled form is braille — one width class and font risk.
 //!
 //! # Absent parents are said in words
 //!
@@ -47,6 +47,7 @@ use gwk_theme::tier::ColorTier;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
+use unicode_width::UnicodeWidthStr;
 
 use crate::input::HitMap;
 use crate::theme;
@@ -150,10 +151,12 @@ fn graph_mark(name: &str) -> &'static Mark {
 /// and the status bar both derive from this single walk, so they cannot
 /// disagree.
 fn running_count(state: &BoardState) -> usize {
+    let mut seen = std::collections::BTreeSet::new();
     state
         .attempts
         .iter()
-        .filter(|a| a.state == AttemptState::Running)
+        .filter(|attempt| seen.insert(attempt.id.as_str()))
+        .filter(|attempt| attempt.state == AttemptState::Running)
         .count()
 }
 
@@ -170,6 +173,7 @@ struct Row {
     right: Option<String>,
     style: Style,
     target: Option<BoardTarget>,
+    diagnostic: bool,
 }
 
 impl Row {
@@ -181,6 +185,14 @@ impl Row {
             right: None,
             style,
             target: None,
+            diagnostic: false,
+        }
+    }
+
+    fn diagnostic(text: String, style: Style) -> Self {
+        Row {
+            diagnostic: true,
+            ..Self::plain(text, style)
         }
     }
 }
@@ -194,6 +206,22 @@ fn by_id<'a, T, F: Fn(&T) -> &str>(items: impl Iterator<Item = &'a T>, id: F) ->
     out
 }
 
+/// Keep the first row for each projection id and count overlapping/invalid
+/// duplicates so the frame can name them instead of duplicating targets.
+fn unique_by_id<'a, T>(items: &'a [T], id: impl Fn(&'a T) -> &'a str) -> (Vec<&'a T>, usize) {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut unique = Vec::with_capacity(items.len());
+    let mut duplicates = 0;
+    for item in items {
+        if seen.insert(id(item)) {
+            unique.push(item);
+        } else {
+            duplicates += 1;
+        }
+    }
+    (unique, duplicates)
+}
+
 fn task_row(task: &Task, tier: ColorTier) -> Row {
     let (word, bind) = task_face(task.state);
     let title = task.title.as_deref().unwrap_or_else(|| task.id.as_str());
@@ -204,6 +232,7 @@ fn task_row(task: &Task, tier: ColorTier) -> Row {
         right: Some(hhmm(&task.updated_at).to_string()),
         style: theme::state_style(bind, tier),
         target: Some(BoardTarget::Task(task.id.clone())),
+        diagnostic: false,
     }
 }
 
@@ -220,6 +249,7 @@ fn attempt_row(attempt: &Attempt, indent: u16, tier: ColorTier) -> Row {
         right: Some(hhmm(&attempt.updated_at).to_string()),
         style: theme::state_style(bind, tier),
         target: Some(BoardTarget::Attempt(attempt.id.clone())),
+        diagnostic: false,
     }
 }
 
@@ -234,15 +264,19 @@ fn node_row(node: &DispatchNode, indent: u16, muted: Style) -> Row {
         right: None,
         style: muted,
         target: Some(BoardTarget::Node(node.id.clone())),
+        diagnostic: false,
     }
 }
 
+type SpawnChildren<'a> =
+    std::collections::BTreeMap<(Option<&'a str>, &'a str), Vec<&'a DispatchNode>>;
+
 /// Walk one attempt's spawn tree depth-first with an explicit stack — wire
 /// data is not trusted to be acyclic — marking every node reached.
-fn spawn_rows(
-    roots: Vec<&DispatchNode>,
-    nodes: &[DispatchNode],
-    placed: &mut std::collections::BTreeSet<String>,
+fn spawn_rows<'a>(
+    roots: Vec<&'a DispatchNode>,
+    children_by_parent: &SpawnChildren<'a>,
+    placed: &mut std::collections::BTreeSet<&'a str>,
     base_indent: u16,
     muted: Style,
     out: &mut Vec<Row>,
@@ -252,20 +286,20 @@ fn spawn_rows(
         stack.push((root, base_indent));
     }
     while let Some((node, indent)) = stack.pop() {
-        if !placed.insert(node.id.as_str().to_string()) {
-            // Already placed: a parent cycle or a duplicated row. Counted
-            // at the end, never followed.
+        if !placed.insert(node.id.as_str()) {
+            // Already placed: a parent cycle reached the same row twice.
+            // Duplicate ids were normalized before this walk.
             continue;
         }
         out.push(node_row(node, indent, muted));
-        let children = by_id(
-            nodes
-                .iter()
-                .filter(|n| n.parent_id.as_ref().map(|p| p.as_str()) == Some(node.id.as_str())),
-            |n| n.id.as_str(),
+        let key = (
+            node.attempt_id.as_ref().map(|attempt| attempt.as_str()),
+            node.id.as_str(),
         );
-        for child in children.into_iter().rev() {
-            stack.push((child, indent.saturating_add(INDENT_STEP)));
+        if let Some(children) = children_by_parent.get(&key) {
+            for child in children.iter().rev() {
+                stack.push((child, indent.saturating_add(INDENT_STEP)));
+            }
         }
     }
 }
@@ -284,41 +318,101 @@ fn dag_rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
         return out;
     }
 
+    let (tasks, duplicate_tasks) = unique_by_id(&state.tasks, |task| task.id.as_str());
+    let (attempts, duplicate_attempts) =
+        unique_by_id(&state.attempts, |attempt| attempt.id.as_str());
+    let (nodes, duplicate_nodes) = unique_by_id(&state.nodes, |node| node.id.as_str());
+    let duplicate_count = duplicate_tasks + duplicate_attempts + duplicate_nodes;
+
+    let mut attempts_by_task: std::collections::BTreeMap<&str, Vec<&Attempt>> =
+        std::collections::BTreeMap::new();
+    for attempt in &attempts {
+        attempts_by_task
+            .entry(attempt.task_id.as_str())
+            .or_default()
+            .push(attempt);
+    }
+    for task_attempts in attempts_by_task.values_mut() {
+        task_attempts.sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
+    }
+
     out.push(Row::plain(
-        format!(
-            "{} tasks  {} running",
-            state.tasks.len(),
-            running_count(state)
-        ),
+        format!("{} tasks  {} running", tasks.len(), running_count(state)),
         muted,
     ));
 
-    let task_ids: std::collections::BTreeSet<&str> =
-        state.tasks.iter().map(|t| t.id.as_str()).collect();
-    let mut placed_nodes: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let task_ids: std::collections::BTreeSet<&str> = tasks.iter().map(|t| t.id.as_str()).collect();
+    let mut placed_nodes: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
 
     // A node roots a subtree when it has no parent on this page; it anchors
     // under its attempt when that attempt is on the page at all.
-    let node_ids: std::collections::BTreeSet<&str> =
-        state.nodes.iter().map(|n| n.id.as_str()).collect();
+    let node_ids: std::collections::BTreeSet<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
+    let node_anchors: std::collections::BTreeSet<(Option<&str>, &str)> = nodes
+        .iter()
+        .map(|node| {
+            (
+                node.attempt_id.as_ref().map(|attempt| attempt.as_str()),
+                node.id.as_str(),
+            )
+        })
+        .collect();
+    let mut children_by_parent: SpawnChildren<'_> = std::collections::BTreeMap::new();
+    for node in &nodes {
+        if let Some(parent) = &node.parent_id {
+            children_by_parent
+                .entry((
+                    node.attempt_id.as_ref().map(|attempt| attempt.as_str()),
+                    parent.as_str(),
+                ))
+                .or_default()
+                .push(node);
+        }
+    }
+    for children in children_by_parent.values_mut() {
+        children.sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
+    }
+    let parent_in_same_attempt = |node: &DispatchNode| {
+        node.parent_id.as_ref().is_some_and(|parent_id| {
+            node_anchors.contains(&(
+                node.attempt_id.as_ref().map(|attempt| attempt.as_str()),
+                parent_id.as_str(),
+            ))
+        })
+    };
+    let conflicting_anchors = nodes
+        .iter()
+        .filter(|node| {
+            node.parent_id
+                .as_ref()
+                .is_some_and(|parent| node_ids.contains(parent.as_str()))
+                && !parent_in_same_attempt(node)
+        })
+        .count();
+    let mut roots_by_attempt: std::collections::BTreeMap<Option<&str>, Vec<&DispatchNode>> =
+        std::collections::BTreeMap::new();
+    for node in &nodes {
+        if !parent_in_same_attempt(node) {
+            roots_by_attempt
+                .entry(node.attempt_id.as_ref().map(|attempt| attempt.as_str()))
+                .or_default()
+                .push(node);
+        }
+    }
+    for roots in roots_by_attempt.values_mut() {
+        roots.sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
+    }
     let roots_of = |attempt_id: &str| -> Vec<&DispatchNode> {
-        by_id(
-            state.nodes.iter().filter(|n| {
-                n.attempt_id.as_ref().map(|a| a.as_str()) == Some(attempt_id)
-                    && !n
-                        .parent_id
-                        .as_ref()
-                        .is_some_and(|p| node_ids.contains(p.as_str()))
-            }),
-            |n| n.id.as_str(),
-        )
+        roots_by_attempt
+            .get(&Some(attempt_id))
+            .cloned()
+            .unwrap_or_default()
     };
 
     let mut place_attempt = |attempt: &Attempt, indent: u16, out: &mut Vec<Row>| {
         out.push(attempt_row(attempt, indent, tier));
         spawn_rows(
             roots_of(attempt.id.as_str()),
-            &state.nodes,
+            &children_by_parent,
             &mut placed_nodes,
             indent + INDENT_STEP,
             muted,
@@ -326,42 +420,33 @@ fn dag_rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
         );
     };
 
-    for task in by_id(state.tasks.iter(), |t| t.id.as_str()) {
+    for task in by_id(tasks.iter().copied(), |t| t.id.as_str()) {
         out.push(task_row(task, tier));
-        for attempt in by_id(
-            state
-                .attempts
-                .iter()
-                .filter(|a| a.task_id.as_str() == task.id.as_str()),
-            |a| a.id.as_str(),
-        ) {
-            place_attempt(attempt, INDENT_STEP, &mut out);
+        if let Some(task_attempts) = attempts_by_task.get(task.id.as_str()) {
+            for attempt in task_attempts {
+                place_attempt(attempt, INDENT_STEP, &mut out);
+            }
         }
     }
 
     // Off-page: attempts whose task is beyond the page, and spawns anchored
     // to nothing on it. Rendered, headed, never dropped.
     let orphan_attempts = by_id(
-        state
-            .attempts
+        attempts
             .iter()
+            .copied()
             .filter(|a| !task_ids.contains(a.task_id.as_str())),
         |a| a.id.as_str(),
     );
     let attempt_ids: std::collections::BTreeSet<&str> =
-        state.attempts.iter().map(|a| a.id.as_str()).collect();
-    let orphan_node_roots = by_id(
-        state.nodes.iter().filter(|n| {
-            !n.attempt_id
-                .as_ref()
-                .is_some_and(|a| attempt_ids.contains(a.as_str()))
-                && !n
-                    .parent_id
-                    .as_ref()
-                    .is_some_and(|p| node_ids.contains(p.as_str()))
-        }),
-        |n| n.id.as_str(),
-    );
+        attempts.iter().map(|a| a.id.as_str()).collect();
+    let orphan_node_roots = roots_by_attempt
+        .iter()
+        .filter(|(attempt_id, _)| {
+            !attempt_id.is_some_and(|attempt_id| attempt_ids.contains(attempt_id))
+        })
+        .flat_map(|(_, roots)| roots.iter().copied())
+        .collect::<Vec<_>>();
     if !orphan_attempts.is_empty() || !orphan_node_roots.is_empty() {
         out.push(Row::plain(
             "off-page -- parents beyond this page".into(),
@@ -372,7 +457,7 @@ fn dag_rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
         }
         spawn_rows(
             orphan_node_roots,
-            &state.nodes,
+            &children_by_parent,
             &mut placed_nodes,
             INDENT_STEP,
             muted,
@@ -382,16 +467,39 @@ fn dag_rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
 
     // Anything still unplaced sits in a parent cycle no root reaches. Said
     // in words, with the count, in the same frame that could not draw it.
-    let unplaced = state
-        .nodes
+    let unplaced = nodes
         .iter()
         .filter(|n| !placed_nodes.contains(n.id.as_str()))
         .count();
+    let mut diagnostics = Vec::new();
     if unplaced > 0 {
-        out.push(Row::plain(
-            format!("+{unplaced} unplaced -- parent cycle"),
-            muted,
+        diagnostics.push(format!("+{unplaced} unplaced -- parent cycle"));
+    }
+    if conflicting_anchors > 0 {
+        let noun = if conflicting_anchors == 1 {
+            "anchor"
+        } else {
+            "anchors"
+        };
+        diagnostics.push(format!(
+            "+{conflicting_anchors} conflicting {noun} -- invalid page"
         ));
+    }
+    if duplicate_count > 0 {
+        let noun = if duplicate_count == 1 { "id" } else { "ids" };
+        diagnostics.push(format!(
+            "+{duplicate_count} duplicate {noun} -- invalid page"
+        ));
+    }
+    if !diagnostics.is_empty() {
+        let count = diagnostics.len();
+        for diagnostic in diagnostics.into_iter().rev() {
+            out.insert(0, Row::diagnostic(diagnostic, muted));
+        }
+        out.insert(
+            0,
+            Row::diagnostic(format!("invalid page -- {count} findings"), muted),
+        );
     }
 
     out
@@ -408,13 +516,14 @@ fn flow_rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
         return out;
     }
 
+    let (messages, duplicate_count) = unique_by_id(&state.messages, |message| message.id.as_str());
     let message_ids: std::collections::BTreeSet<&str> =
-        state.messages.iter().map(|m| m.id.as_str()).collect();
+        messages.iter().map(|m| m.id.as_str()).collect();
     // A message roots a thread when its reply target is not on this page —
     // a lost parent makes a root, never a dropped row.
-    let roots: Vec<&Message> = state
-        .messages
+    let roots: Vec<&Message> = messages
         .iter()
+        .copied()
         .filter(|m| {
             !m.reply_to
                 .as_ref()
@@ -433,7 +542,7 @@ fn flow_rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
     }
     let flows = correlated.len() + standalone.len();
     out.push(Row::plain(
-        format!("{flows} flows  {} messages", state.messages.len()),
+        format!("{flows} flows  {} messages", messages.len()),
         muted,
     ));
 
@@ -443,28 +552,40 @@ fn flow_rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
             .cmp(b.created_at.as_str())
             .then_with(|| a.id.as_str().cmp(b.id.as_str()))
     };
+    let mut replies_by_parent: std::collections::BTreeMap<&str, Vec<&Message>> =
+        std::collections::BTreeMap::new();
+    for message in &messages {
+        if let Some(parent) = &message.reply_to {
+            replies_by_parent
+                .entry(parent.as_str())
+                .or_default()
+                .push(message);
+        }
+    }
+    for replies in replies_by_parent.values_mut() {
+        replies.sort_by(arrival_order);
+    }
 
-    let thread = |root: &Message, base_indent: u16, out: &mut Vec<Row>| {
-        let mut placed: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    let mut placed: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let thread = |root: &Message,
+                  base_indent: u16,
+                  placed: &mut std::collections::BTreeSet<String>,
+                  out: &mut Vec<Row>| {
         let mut stack: Vec<(&Message, u16)> = vec![(root, base_indent)];
         while let Some((message, indent)) = stack.pop() {
-            if !placed.insert(message.id.as_str()) {
+            if !placed.insert(message.id.as_str().to_string()) {
                 continue;
             }
             out.push(message_row(message, indent, tier));
-            let mut replies: Vec<&Message> = state
-                .messages
-                .iter()
-                .filter(|m| m.reply_to.as_ref().map(|p| p.as_str()) == Some(message.id.as_str()))
-                .collect();
-            replies.sort_by(arrival_order);
-            for reply in replies.into_iter().rev() {
-                stack.push((
-                    reply,
-                    indent
-                        .saturating_add(INDENT_STEP)
-                        .min(INDENT_CAP * INDENT_STEP),
-                ));
+            if let Some(replies) = replies_by_parent.get(message.id.as_str()) {
+                for reply in replies.iter().rev() {
+                    stack.push((
+                        reply,
+                        indent
+                            .saturating_add(INDENT_STEP)
+                            .min(INDENT_CAP * INDENT_STEP),
+                    ));
+                }
             }
         }
     };
@@ -473,12 +594,37 @@ fn flow_rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
         out.push(Row::plain(format!("flow {cid}"), muted));
         group.sort_by(arrival_order);
         for root in group {
-            thread(root, INDENT_STEP, &mut out);
+            thread(root, INDENT_STEP, &mut placed, &mut out);
         }
     }
     standalone.sort_by(arrival_order);
     for root in standalone {
-        thread(root, 0, &mut out);
+        thread(root, 0, &mut placed, &mut out);
+    }
+
+    let unthreaded = messages
+        .iter()
+        .filter(|message| !placed.contains(message.id.as_str()))
+        .count();
+    let mut diagnostics = Vec::new();
+    if unthreaded > 0 {
+        diagnostics.push(format!("+{unthreaded} unthreaded -- reply cycle"));
+    }
+    if duplicate_count > 0 {
+        let noun = if duplicate_count == 1 { "id" } else { "ids" };
+        diagnostics.push(format!(
+            "+{duplicate_count} duplicate {noun} -- invalid page"
+        ));
+    }
+    if !diagnostics.is_empty() {
+        let count = diagnostics.len();
+        for diagnostic in diagnostics.into_iter().rev() {
+            out.insert(0, Row::diagnostic(diagnostic, muted));
+        }
+        out.insert(
+            0,
+            Row::diagnostic(format!("invalid page -- {count} findings"), muted),
+        );
     }
 
     out
@@ -502,6 +648,7 @@ fn message_row(message: &Message, indent: u16, tier: ColorTier) -> Row {
         right: Some(hhmm(&message.updated_at).to_string()),
         style: theme::state_style(bind, tier),
         target: Some(BoardTarget::Message(message.id.clone())),
+        diagnostic: false,
     }
 }
 
@@ -510,6 +657,33 @@ fn rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
         BoardView::Dag => dag_rows(state, tier),
         BoardView::Flow => flow_rows(state, tier),
     }
+}
+
+/// Every actionable target in deterministic visual order, including rows that
+/// the current geometry cannot paint. Keyboard navigation walks this order;
+/// the frame then windows around the resulting selection, while [`HitMap`]
+/// remains limited to clickable rows that are actually visible.
+pub fn target_order(state: &BoardState) -> Vec<BoardTarget> {
+    rows(state, ColorTier::Mono)
+        .into_iter()
+        .filter_map(|row| row.target)
+        .collect()
+}
+
+fn wrap_detail(lines: &[String], width: usize, limit: usize) -> (Vec<String>, bool) {
+    let mut wrapped = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let remaining = limit.saturating_sub(wrapped.len());
+        if remaining == 0 {
+            return (wrapped, true);
+        }
+        let (parts, cut) = theme::safe_text_lines(line, width, remaining);
+        wrapped.extend(parts);
+        if cut || (wrapped.len() == limit && index + 1 < lines.len()) {
+            return (wrapped, true);
+        }
+    }
+    (wrapped, false)
 }
 
 /// The selection detail pane's lines: the full fields the row truncates.
@@ -580,6 +754,14 @@ fn detail_lines(state: &BoardState, target: &BoardTarget) -> Option<Vec<String>>
         }
         BoardTarget::Node(id) => {
             let node = state.nodes.iter().find(|n| n.id.as_str() == id.as_str())?;
+            let anchor = match (&node.attempt_id, &node.parent_id) {
+                (Some(attempt), Some(parent)) => {
+                    format!("attempt {}  parent {}", attempt.as_str(), parent.as_str())
+                }
+                (Some(attempt), None) => format!("attempt {}  parent absent", attempt.as_str()),
+                (None, Some(parent)) => format!("attempt absent  parent {}", parent.as_str()),
+                (None, None) => "anchor absent -- no attempt or parent".into(),
+            };
             Some(vec![
                 format!("spawn {}", node.id.as_str()),
                 format!(
@@ -588,13 +770,7 @@ fn detail_lines(state: &BoardState, target: &BoardTarget) -> Option<Vec<String>>
                     node.state,
                     opt("label", node.label.as_deref()),
                 ),
-                format!(
-                    "{}{}",
-                    opt("attempt", node.attempt_id.as_ref().map(|a| a.as_str())),
-                    opt("parent", node.parent_id.as_ref().map(|p| p.as_str())),
-                )
-                .trim_start()
-                .to_string(),
+                anchor,
                 format!(
                     "created {}  updated {}",
                     node.created_at.as_str(),
@@ -664,27 +840,51 @@ pub fn render(
         return;
     }
 
-    let detail = selected.and_then(|target| detail_lines(state, target));
+    let built = rows(state, tier);
     // Status bar first, then the pane, then the body keeps at least one
     // row: a cramped pane shrinks before the body vanishes, and below two
     // rows — the rule plus one line — the pane is not worth its cells.
     let after_status = area.height - 1;
-    let detail_rows = detail.as_ref().map_or(0, |lines| {
+    let detail = selected
+        .and_then(|target| detail_lines(state, target))
+        .map(|lines| {
+            wrap_detail(
+                &lines,
+                area.width.saturating_sub(1) as usize,
+                usize::from(after_status.min(256)),
+            )
+        });
+    let desired_detail_rows = detail.as_ref().map_or(0, |(lines, source_cut)| {
         let cap = after_status.saturating_sub(1);
         if cap < 2 {
             0
         } else {
-            (lines.len() as u16 + 1).min(cap)
+            (lines.len() as u16 + 1 + u16::from(*source_cut)).min(cap)
         }
     });
+    let selected_row = selected.and_then(|target| {
+        built
+            .iter()
+            .position(|row| row.target.as_ref() == Some(target))
+    });
+    let diagnostic_rows = built.iter().take_while(|row| row.diagnostic).count();
+    let ordinary = &built[diagnostic_rows..];
+    let minimum_ordinary_rows = if ordinary.len() > 1 { 2 } else { 1 };
+    let minimum_body_rows = u16::try_from(diagnostic_rows)
+        .unwrap_or(u16::MAX)
+        .saturating_add(minimum_ordinary_rows);
+    let max_detail_rows = after_status.saturating_sub(minimum_body_rows);
+    let detail_rows = desired_detail_rows.min(max_detail_rows);
+    let detail_rows = if detail_rows < 2 { 0 } else { detail_rows };
     let body_rows = after_status - detail_rows;
 
-    let built = rows(state, tier);
-    let overflow = built.len().saturating_sub(body_rows as usize);
+    let pinned = diagnostic_rows.min(body_rows as usize);
+    let ordinary_body_rows = body_rows.saturating_sub(pinned as u16);
+    let overflow = ordinary.len().saturating_sub(ordinary_body_rows as usize);
     let visible = if overflow > 0 {
-        (body_rows as usize).saturating_sub(1)
+        (ordinary_body_rows as usize).saturating_sub(1)
     } else {
-        built.len()
+        ordinary.len()
     };
 
     let selection_fg = match tier {
@@ -695,8 +895,31 @@ pub fn render(
         ColorTier::Ansi16 | ColorTier::Mono => None,
     };
 
-    for (i, row) in built.iter().take(visible).enumerate() {
+    let start = if visible == 0 {
+        0
+    } else {
+        selected_row
+            .map(|index| index.saturating_sub(diagnostic_rows))
+            .filter(|index| *index >= visible)
+            .map_or(0, |index| index + 1 - visible)
+            .min(ordinary.len().saturating_sub(visible))
+    };
+    let end = (start + visible).min(ordinary.len());
+
+    for (i, row) in built.iter().take(pinned).enumerate() {
         let y = area.y + i as u16;
+        let text = theme::safe_text(&row.text, area.width.saturating_sub(1) as usize);
+        buf.set_stringn(
+            area.x + 1,
+            y,
+            text.as_ref(),
+            area.width.saturating_sub(1) as usize,
+            row.style,
+        );
+    }
+
+    for (i, row) in ordinary[start..end].iter().enumerate() {
+        let y = area.y + pinned as u16 + i as u16;
         let is_selected = matches!((selected, &row.target), (Some(sel), Some(t)) if *sel == *t);
         let text_style = match (is_selected, selection_fg) {
             (true, Some(fg)) => row.style.patch(fg),
@@ -721,11 +944,16 @@ pub fn render(
             x = x.saturating_add(2);
         }
         let width = (area.x + area.width).saturating_sub(x);
-        buf.set_stringn(x, y, &row.text, width as usize, text_style);
+        let safe_text = theme::safe_text(&row.text, width as usize);
+        buf.set_stringn(x, y, safe_text.as_ref(), width as usize, text_style);
         if let Some(right) = &row.right {
-            let rx = (area.x + area.width).saturating_sub(right.len() as u16);
-            if rx > x.saturating_add(row.text.len() as u16) {
-                buf.set_string(rx, y, right, text_style);
+            let safe_right = theme::safe_text(right, area.width as usize);
+            let right_width = UnicodeWidthStr::width(safe_right.as_ref());
+            let text_width = UnicodeWidthStr::width(safe_text.as_ref());
+            let rx = (area.x + area.width)
+                .saturating_sub(u16::try_from(right_width).unwrap_or(u16::MAX));
+            if rx > x.saturating_add(u16::try_from(text_width).unwrap_or(u16::MAX)) {
+                buf.set_string(rx, y, safe_right.as_ref(), text_style);
             }
         }
         if let Some(target) = &row.target {
@@ -734,17 +962,23 @@ pub fn render(
     }
 
     if overflow > 0 {
-        let y = area.y + body_rows.saturating_sub(1);
+        let y = area.y + pinned as u16 + ordinary_body_rows.saturating_sub(1);
         buf.set_stringn(
             area.x + 1,
             y,
-            format!("+{} more", built.len() - visible),
+            if start == 0 {
+                format!("+{} more", ordinary.len() - end)
+            } else if end == ordinary.len() {
+                format!("+{start} before")
+            } else {
+                format!("+{start} before  +{} more", ordinary.len() - end)
+            },
             area.width.saturating_sub(1) as usize,
             theme::state_style(theme::binding("idle"), tier),
         );
     }
 
-    if let (Some(lines), true) = (&detail, detail_rows > 0) {
+    if let (Some((lines, source_cut)), true) = (&detail, detail_rows > 0) {
         let muted = theme::state_style(theme::binding("idle"), tier);
         let top = area.y + body_rows;
         buf.set_stringn(
@@ -754,17 +988,37 @@ pub fn render(
             area.width as usize,
             muted,
         );
-        for (i, line) in lines
-            .iter()
-            .take(detail_rows.saturating_sub(1) as usize)
-            .enumerate()
-        {
+        let capacity = detail_rows.saturating_sub(1) as usize;
+        let truncated = *source_cut || lines.len() > capacity;
+        let visible_lines = if truncated {
+            capacity.saturating_sub(1)
+        } else {
+            lines.len()
+        };
+        for (i, line) in lines.iter().take(visible_lines).enumerate() {
             buf.set_stringn(
                 area.x + 1,
                 top + 1 + i as u16,
                 line,
                 area.width.saturating_sub(1) as usize,
                 Style::default(),
+            );
+        }
+        if truncated && capacity > 0 {
+            let omitted = lines.len() - visible_lines;
+            let y = top + detail_rows - 1;
+            let notice = if *source_cut {
+                "+more detail".to_string()
+            } else {
+                format!("+{omitted} more detail lines")
+            };
+            let safe_notice = theme::safe_text(&notice, area.width.saturating_sub(1) as usize);
+            buf.set_stringn(
+                area.x + 1,
+                y,
+                safe_notice.as_ref(),
+                area.width.saturating_sub(1) as usize,
+                muted,
             );
         }
     }
@@ -784,10 +1038,11 @@ pub fn render(
         "BOARD  {tabs}  {} running  as-of {as_of}",
         running_count(state)
     );
+    let safe_status = theme::safe_text(&status, area.width as usize);
     buf.set_stringn(
         area.x,
         area.y + area.height - 1,
-        &status,
+        safe_status.as_ref(),
         area.width as usize,
         Style::default(),
     );
@@ -1162,13 +1417,21 @@ mod tests {
 
     #[test]
     fn board_an_orphan_renders_under_the_off_page_header_not_silently() {
-        let state = workday_state();
+        let mut state = workday_state();
+        state
+            .attempts
+            .iter_mut()
+            .find(|attempt| attempt.id.as_str() == "at-99")
+            .expect("seeded orphan")
+            .engine = EngineId::new("orphan-engine");
         let (dump, _, _) = dump_frame(72, 18, &state, None);
         let header_at = dump
             .find("off-page -- parents beyond this page")
             .expect("the off-page header renders");
         // The orphan attempt renders after the header, as an attempt row.
-        let orphan_at = dump.rfind("codex  running").expect("the orphan renders");
+        let orphan_at = dump
+            .find("orphan-engine  running")
+            .expect("the orphan renders");
         assert!(
             orphan_at > header_at,
             "the orphan lives under the header:\n{dump}"
@@ -1176,7 +1439,7 @@ mod tests {
 
         // Without an orphan there is no header: absence sections do not
         // render for the sake of it.
-        let mut clean = workday_state();
+        let mut clean = state;
         clean.attempts.retain(|a| a.id.as_str() != "at-99");
         let (dump, _, _) = dump_frame(72, 18, &clean, None);
         assert!(!dump.contains("off-page"), "no orphans, no header:\n{dump}");
@@ -1251,6 +1514,117 @@ mod tests {
     }
 
     #[test]
+    fn board_reply_cycles_are_counted_in_words() {
+        let mut left = message(
+            "m-left",
+            "orchestrator",
+            "reviewer",
+            "review",
+            MessageState::Delivered,
+            "2026-08-06T10:00:00Z",
+            "2026-08-06T10:01:00Z",
+        );
+        let mut right = message(
+            "m-right",
+            "reviewer",
+            "orchestrator",
+            "findings",
+            MessageState::Delivered,
+            "2026-08-06T10:02:00Z",
+            "2026-08-06T10:03:00Z",
+        );
+        left.reply_to = Some(MessageId::new("m-right"));
+        right.reply_to = Some(MessageId::new("m-left"));
+        let mut state = empty_state();
+        state.view = BoardView::Flow;
+        state.messages = vec![left, right];
+
+        let (dump, hits, _) = dump_frame(72, 12, &state, None);
+        assert!(
+            dump.contains("+2 unthreaded -- reply cycle"),
+            "a reply cycle is counted instead of disappearing:\n{dump}"
+        );
+        assert_eq!(hits.targets().count(), 0, "cycle rows are not actionable");
+    }
+
+    #[test]
+    fn board_duplicate_ids_render_once_and_are_counted() {
+        let mut state = empty_state();
+        state.tasks = vec![
+            task(
+                "t-1",
+                "first task",
+                TaskState::Working,
+                "2026-08-06T10:00:00Z",
+            ),
+            task(
+                "t-1",
+                "duplicate task",
+                TaskState::Working,
+                "2026-08-06T10:00:00Z",
+            ),
+        ];
+        state.attempts = vec![
+            attempt(
+                "at-1",
+                "t-1",
+                "codex",
+                AttemptState::Running,
+                "2026-08-06T10:00:00Z",
+            ),
+            attempt(
+                "at-1",
+                "t-1",
+                "duplicate-engine",
+                AttemptState::Running,
+                "2026-08-06T10:00:00Z",
+            ),
+        ];
+        state.nodes = vec![
+            node("d-1", Some("at-1"), None, "first spawn", "registered"),
+            node("d-1", Some("at-1"), None, "duplicate spawn", "registered"),
+        ];
+
+        let (dump, hits, _) = dump_frame(72, 14, &state, None);
+        assert!(dump.contains("+3 duplicate ids -- invalid page"), "{dump}");
+        assert_eq!(dump.matches("first task").count(), 1, "{dump}");
+        assert_eq!(dump.matches("codex  running").count(), 1, "{dump}");
+        assert_eq!(dump.matches("first spawn").count(), 1, "{dump}");
+        assert!(!dump.contains("duplicate task"), "{dump}");
+        assert!(!dump.contains("duplicate-engine"), "{dump}");
+        assert!(!dump.contains("duplicate spawn"), "{dump}");
+        assert_eq!(hits.targets().count(), 3, "one target per unique id");
+
+        let mut flow = empty_state();
+        flow.view = BoardView::Flow;
+        flow.messages = vec![
+            message(
+                "m-1",
+                "first",
+                "receiver",
+                "brief",
+                MessageState::Delivered,
+                "2026-08-06T10:00:00Z",
+                "2026-08-06T10:00:00Z",
+            ),
+            message(
+                "m-1",
+                "duplicate",
+                "receiver",
+                "brief",
+                MessageState::Delivered,
+                "2026-08-06T10:00:00Z",
+                "2026-08-06T10:00:00Z",
+            ),
+        ];
+        let (dump, hits, _) = dump_frame(72, 10, &flow, None);
+        assert!(dump.contains("+1 duplicate id -- invalid page"), "{dump}");
+        assert_eq!(dump.matches("first -> receiver").count(), 1, "{dump}");
+        assert!(!dump.contains("duplicate -> receiver"), "{dump}");
+        assert_eq!(hits.targets().count(), 1, "one target per unique id");
+    }
+
+    #[test]
     fn board_selection_opens_the_detail_pane_with_the_full_fields() {
         let state = workday_state();
         let selected = BoardTarget::Attempt(AttemptId::new("at-01"));
@@ -1280,6 +1654,229 @@ mod tests {
         assert!(
             !dump.contains("attempt at-gone"),
             "a stale selection gets no pane:\n{dump}"
+        );
+    }
+
+    #[test]
+    fn board_every_target_kind_has_an_honest_detail_pane() {
+        let state = workday_state();
+        for (target, expected) in [
+            (
+                BoardTarget::Task(TaskId::new("t-auth")),
+                &["task t-auth", "harden the auth path"][..],
+            ),
+            (
+                BoardTarget::Node(DispatchNodeId::new("d-1")),
+                &[
+                    "spawn d-1",
+                    "kind subagent  state completed  label recon",
+                    "attempt at-01  parent absent",
+                ][..],
+            ),
+            (
+                BoardTarget::Message(MessageId::new("m-1")),
+                &[
+                    "message m-1  correlation c-42",
+                    "orchestrator -> researcher  kind brief",
+                ][..],
+            ),
+        ] {
+            let (dump, _, _) = dump_frame(96, 18, &state, Some(&target));
+            assert!(
+                expected.iter().all(|line| dump.contains(line)),
+                "detail for {target:?} omitted facts:\n{dump}"
+            );
+        }
+
+        let mut unanchored = workday_state();
+        unanchored.nodes[0].attempt_id = None;
+        let target = BoardTarget::Node(DispatchNodeId::new("d-1"));
+        let (dump, _, _) = dump_frame(96, 18, &unanchored, Some(&target));
+        assert!(
+            dump.contains("anchor absent -- no attempt or parent"),
+            "missing anchors are words, not a blank line:\n{dump}"
+        );
+    }
+
+    #[test]
+    fn board_detail_keeps_the_selected_row_reachable_and_names_its_cut() {
+        let state = workday_state();
+        let order = target_order(&state);
+        assert!(
+            order.contains(&BoardTarget::Attempt(AttemptId::new("at-99"))),
+            "keyboard order includes targets below the painted viewport"
+        );
+        let selected = BoardTarget::Attempt(AttemptId::new("at-01"));
+        let (dump, hits, _) = dump_frame(72, 9, &state, Some(&selected));
+        assert!(
+            hits.targets().any(|target| target == &selected),
+            "opening the pane must not cut its selected row:\n{dump}"
+        );
+        assert!(
+            dump.contains("before") && dump.contains("more"),
+            "the selected viewport names both sides of its cut:\n{dump}"
+        );
+
+        let selected = BoardTarget::Attempt(AttemptId::new("at-99"));
+        let (dump, hits, _) = dump_frame(72, 14, &state, Some(&selected));
+        assert!(
+            hits.targets().any(|target| target == &selected),
+            "an off-page selected row remains in the keyboard walk:\n{dump}"
+        );
+
+        let (dump, hits, _) = dump_frame(72, 8, &state, Some(&selected));
+        assert!(
+            hits.targets().any(|target| target == &selected),
+            "a selected row below the initial viewport is brought into view:\n{dump}"
+        );
+        assert!(
+            dump.contains("before"),
+            "a shifted viewport names the rows cut above it:\n{dump}"
+        );
+    }
+
+    #[test]
+    fn board_detail_wraps_long_values_within_its_bounded_pane() {
+        let mut state = empty_state();
+        state.tasks = vec![task(
+            "t-1",
+            "a deliberately long title that wraps across the narrow detail pane",
+            TaskState::Working,
+            "2026-08-06T10:00:00Z",
+        )];
+        let selected = BoardTarget::Task(TaskId::new("t-1"));
+
+        let (dump, _, _) = dump_frame(32, 18, &state, Some(&selected));
+        assert!(dump.contains("a deliberately long title"), "{dump}");
+        assert!(dump.contains("narrow detail"), "{dump}");
+        assert!(dump.lines().any(|line| line.trim() == "pane"), "{dump}");
+    }
+
+    #[test]
+    fn board_conflicting_dispatch_anchors_stay_with_their_declared_attempt() {
+        let mut state = empty_state();
+        state.tasks = vec![
+            task("t-1", "first", TaskState::Working, "2026-08-06T10:00:00Z"),
+            task("t-2", "second", TaskState::Working, "2026-08-06T10:00:00Z"),
+        ];
+        state.attempts = vec![
+            attempt(
+                "at-1",
+                "t-1",
+                "one",
+                AttemptState::Running,
+                "2026-08-06T10:00:00Z",
+            ),
+            attempt(
+                "at-2",
+                "t-2",
+                "two",
+                AttemptState::Running,
+                "2026-08-06T10:00:00Z",
+            ),
+        ];
+        state.nodes = vec![
+            node("d-parent", Some("at-1"), None, "parent-one", "registered"),
+            node(
+                "d-child",
+                Some("at-2"),
+                Some("d-parent"),
+                "child-two",
+                "registered",
+            ),
+        ];
+
+        let (dump, _, _) = dump_frame(96, 16, &state, None);
+        let attempt_two = dump.find("two  running").expect("second attempt renders");
+        let child = dump.find("child-two").expect("conflicting child renders");
+        assert!(
+            child > attempt_two,
+            "the child stays with attempt at-2:\n{dump}"
+        );
+        assert!(
+            dump.contains("+1 conflicting anchor -- invalid page"),
+            "the malformed edge is named:\n{dump}"
+        );
+    }
+
+    #[test]
+    fn board_invalid_page_diagnostics_survive_body_overflow() {
+        let mut state = workday_state();
+        state.tasks.push(state.tasks[0].clone());
+
+        let (dump, _, _) = dump_frame(72, 3, &state, None);
+        assert!(
+            dump.contains("+1 duplicate id -- invalid page"),
+            "corruption diagnostics stay above the ordinary rows:\n{dump}"
+        );
+
+        let selected = BoardTarget::Attempt(AttemptId::new("at-99"));
+        let (dump, _, _) = dump_frame(72, 8, &state, Some(&selected));
+        assert!(
+            dump.contains("+1 duplicate id -- invalid page"),
+            "selection windowing cannot hide corruption diagnostics:\n{dump}"
+        );
+
+        state.nodes.extend([
+            node(
+                "d-cycle-a",
+                Some("at-01"),
+                Some("d-cycle-b"),
+                "cycle-a",
+                "registered",
+            ),
+            node(
+                "d-cycle-b",
+                Some("at-01"),
+                Some("d-cycle-a"),
+                "cycle-b",
+                "registered",
+            ),
+            node(
+                "d-cross",
+                Some("at-99"),
+                Some("d-1"),
+                "cross-attempt",
+                "registered",
+            ),
+        ]);
+        let (dump, _, _) = dump_frame(72, 18, &state, None);
+        for finding in [
+            "+2 unplaced -- parent cycle",
+            "+1 conflicting anchor -- invalid page",
+            "+1 duplicate id -- invalid page",
+        ] {
+            assert!(
+                dump.contains(finding),
+                "every corruption class gets its own pinned row:\n{dump}"
+            );
+        }
+    }
+
+    #[test]
+    fn board_unsafe_wire_glyphs_are_escaped_before_paint() {
+        let mut state = empty_state();
+        state.tasks = vec![task(
+            "t-1",
+            "ship ◆ 你好 ⚠",
+            TaskState::Working,
+            "2026-08-06T10:00:00Z",
+        )];
+
+        let (dump, _, _) = dump_frame(96, 8, &state, None);
+        for unsafe_glyph in ['◆', '你', '好', '⚠'] {
+            assert!(
+                !dump.contains(unsafe_glyph),
+                "unsafe glyph {unsafe_glyph:?} reached the buffer:\n{dump}"
+            );
+        }
+        assert!(
+            dump.contains("\\u{25C6}"),
+            "the value stays retypable:\n{dump}"
+        );
+        assert!(
+            dump.contains("\\u{4F60}"),
+            "the value stays retypable:\n{dump}"
         );
     }
 
@@ -1324,7 +1921,7 @@ mod tests {
     fn board_every_cell_glyph_is_ascii_or_an_admitted_mark() {
         // The admission rule (taste-gate item 5, a hard lock): nothing
         // reaches the cell buffer except ASCII and the probed MARKS
-        // inventory — walked over the busiest frame of BOTH views, detail
+        // admission predicate — walked over the busiest frame of BOTH views, detail
         // pane open, so a stray em dash in any row or pane line fails here
         // rather than on an operator's screen.
         let state = workday_state();
@@ -1335,10 +1932,7 @@ mod tests {
         let (flow, _, _) = dump_frame(72, 18, &flow_state, None);
         for ch in dag.chars().chain(flow.chars()) {
             assert!(
-                ch.is_ascii()
-                    || gwk_theme::marks::MARKS
-                        .iter()
-                        .any(|m| m.glyphs.contains(&ch)),
+                ch.is_ascii() || gwk_theme::marks::is_admissible(ch),
                 "unadmitted glyph {ch:?} in the cell buffer"
             );
         }
@@ -1384,11 +1978,104 @@ mod tests {
     }
 
     #[test]
+    fn board_every_geometry_stays_inside_its_rect() {
+        let mut dag = workday_state();
+        dag.tasks[0].title = Some("hostile ◆ 你好 ⚠".into());
+        let mut flow = dag.clone();
+        flow.view = BoardView::Flow;
+        let selections = [
+            None,
+            Some(BoardTarget::Task(TaskId::new("t-auth"))),
+            Some(BoardTarget::Attempt(AttemptId::new("at-99"))),
+            Some(BoardTarget::Message(MessageId::new("m-1"))),
+        ];
+
+        for state in [&dag, &flow] {
+            for (origin_x, origin_y) in [(0, 0), (3, 2), (7, 5)] {
+                for width in 0..=24 {
+                    for height in 0..=12 {
+                        for selected in &selections {
+                            let outer = Rect::new(0, 0, 40, 20);
+                            let area = Rect::new(origin_x, origin_y, width, height);
+                            let mut buf = Buffer::empty(outer);
+                            let mut hits = HitMap::new();
+                            render(
+                                area,
+                                &mut buf,
+                                state,
+                                selected.as_ref(),
+                                ColorTier::Mono,
+                                GlyphSet::Unicode,
+                                &mut hits,
+                            );
+                            for y in 0..outer.height {
+                                for x in 0..outer.width {
+                                    let inside = x >= area.x
+                                        && x < area.x.saturating_add(area.width)
+                                        && y >= area.y
+                                        && y < area.y.saturating_add(area.height);
+                                    if !inside {
+                                        assert_eq!(
+                                            buf[(x, y)].symbol(),
+                                            " ",
+                                            "paint escaped {area:?} at ({x},{y})"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn board_spawn_indent_stops_at_the_cap() {
+        let mut state = empty_state();
+        state.tasks = vec![task(
+            "t-1",
+            "deep tree",
+            TaskState::Working,
+            "2026-08-06T10:00:00Z",
+        )];
+        state.attempts = vec![attempt(
+            "at-1",
+            "t-1",
+            "codex",
+            AttemptState::Running,
+            "2026-08-06T10:00:00Z",
+        )];
+        state.nodes = (0..12)
+            .map(|index| {
+                node(
+                    &format!("d-{index:02}"),
+                    Some("at-1"),
+                    (index > 0)
+                        .then(|| format!("d-{:02}", index - 1))
+                        .as_deref(),
+                    &format!("layer{index}"),
+                    "registered",
+                )
+            })
+            .collect();
+
+        let (dump, _, _) = dump_frame(96, 20, &state, None);
+        let column = |label: &str| {
+            dump.lines()
+                .find_map(|line| line.find(label))
+                .unwrap_or_else(|| panic!("{label} missing:\n{dump}"))
+        };
+        assert!(column("layer3") < column("layer4"), "{dump}");
+        assert_eq!(column("layer4"), column("layer11"), "{dump}");
+    }
+
+    #[test]
     fn board_overflow_names_the_cut_and_cut_rows_take_no_hits() {
         let state = workday_state();
         let (dump, hits, _) = dump_frame(72, 6, &state, None);
         assert!(
-            dump.contains("more"),
+            dump.contains("+7 more"),
             "an overflowing body names the cut:\n{dump}"
         );
         // 11 built rows, 4 painted (5 body rows, one spent on the notice):
@@ -1417,6 +2104,18 @@ mod tests {
         assert_eq!(walked.len(), 9, "every actionable row walks:\n{dump}");
         assert_eq!(walked[0], &BoardTarget::Task(TaskId::new("t-auth")));
         assert_eq!(walked[1], &BoardTarget::Attempt(AttemptId::new("at-01")));
+
+        let mut flow = workday_state();
+        flow.view = BoardView::Flow;
+        let (dump, hits, _) = dump_frame(72, 18, &flow, None);
+        let walked: Vec<&BoardTarget> = hits.targets().collect();
+        assert_eq!(walked.len(), 4, "every message row walks:\n{dump}");
+        assert!(
+            walked
+                .iter()
+                .all(|target| matches!(target, BoardTarget::Message(_))),
+            "the flow walk contains message targets only:\n{dump}"
+        );
     }
 
     #[test]
