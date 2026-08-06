@@ -142,6 +142,15 @@ impl<T> HitMap<T> {
         self.regions.push((area, target));
     }
 
+    /// The registered targets in paint order — the keyboard walks exactly
+    /// this list. That is what keeps the mouse an accelerator rather than the
+    /// only path to a verb: both input paths act on the same painted rows,
+    /// and a row a lens cut for space (its overflow notice names the cut) is
+    /// reachable by neither until it is painted.
+    pub fn targets(&self) -> impl Iterator<Item = &T> {
+        self.regions.iter().map(|(_, target)| target)
+    }
+
     /// The target under a cell, if any.
     pub fn hit(&self, column: u16, row: u16) -> Option<&T> {
         let position = Position::new(column, row);
