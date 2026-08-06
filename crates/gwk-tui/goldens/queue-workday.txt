@@ -1,0 +1,14 @@
+ 3 need attention                                           oldest 09:00
+ ! gate permission  rm -rf build/ in worktree?
+    options: allow / deny
+ ! KEK rotation is overdue  (watchdog)
+ ! deploy blocked on grant  3x since 09:14  (authority)
+ ⠄ disk pressure on the build host  acked  (watchdog)
+ ⠄ mcp facade flapping  muted until 18:00  (watchdog)
+ msg 11:58  researcher to orchestrator  (findings)
+ recent -- resolve is re-arm: a recurring problem raises anew
+ ✓ decided: allow (pass)
+ ✓ runner pool exhausted  -- pool widened
+
+
+QUEUE  !3  as-of 213

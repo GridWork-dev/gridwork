@@ -1252,6 +1252,7 @@ name = "gwk-tui"
 version = "0.0.2"
 dependencies = [
  "crossterm",
+ "gwk-domain",
  "gwk-theme",
  "ratatui",
 ]
