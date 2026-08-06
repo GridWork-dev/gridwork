@@ -83,6 +83,16 @@ pub fn glyph(mark: &Mark, frame: usize, glyphs: GlyphSet) -> char {
     mark.at(frame, glyphs)
 }
 
+/// The pinned state binding named `name`. Panics rather than propagates:
+/// the binding tables are load-bearing invariants, not runtime-absent data,
+/// and every lens leans on the same lookup.
+pub(crate) fn binding(name: &str) -> &'static StateBinding {
+    gwk_theme::marks::STATES
+        .iter()
+        .find(|s| s.name == name)
+        .expect("the state bindings are pinned")
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;

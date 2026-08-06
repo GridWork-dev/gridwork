@@ -46,6 +46,7 @@ use ratatui::style::{Modifier, Style};
 
 use crate::input::HitMap;
 use crate::theme;
+use crate::theme::binding;
 
 /// Everything the lens paints, assembled by the caller from projection pages.
 ///
@@ -208,13 +209,6 @@ fn audible_count(state: &QueueState) -> usize {
             .iter()
             .filter(|i| audible(i, &state.now))
             .count()
-}
-
-fn binding(name: &str) -> &'static StateBinding {
-    gwk_theme::marks::STATES
-        .iter()
-        .find(|s| s.name == name)
-        .expect("the state bindings are pinned")
 }
 
 /// One row's paint: mark cell, styled text, and what it stands for.

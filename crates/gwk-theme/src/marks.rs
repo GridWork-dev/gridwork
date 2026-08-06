@@ -1,11 +1,11 @@
 //! The ratified mark inventory — the console's symbol vocabulary.
 //!
-//! Eighteen marks over twenty-four codepoints. Seven name WHO an agent is,
-//! eleven name WHAT it is doing, and the two cells sit side by side.
-//! Cardinality is identity **plus** expression, never identity times
-//! expression: a per-pair composite would need seventy-seven mutually
-//! distinguishable single-cell codepoints and the admissible pool is roughly
-//! two dozen.
+//! Twenty-two marks over twenty-eight codepoints. Seven name WHO an agent
+//! is, eleven name WHAT it is doing — those two cells sit side by side —
+//! and four name WHAT KIND OF NODE a Board row stands for. Cardinality is
+//! identity **plus** expression, never identity times expression: a
+//! per-pair composite would need seventy-seven mutually distinguishable
+//! single-cell codepoints and the admissible pool is roughly two dozen.
 //!
 //! Eleven expression marks for eleven states, one each. That the two counts
 //! match is the whole point — see `the_state_to_glyph_map_is_injective`.
@@ -39,6 +39,11 @@ pub enum MarkKind {
     Identity,
     /// WHAT — the right cell.
     Expression,
+    /// WHAT KIND OF NODE — the Board's graph vocabulary. Names the shape of
+    /// a thing on a work view (a task, an attempt, a spawn, a message),
+    /// never who runs it or what it is doing: on a Board row the state is a
+    /// printed word, so this cell is free to carry the kind.
+    GraphTier,
 }
 
 /// One admitted mark.
@@ -71,12 +76,11 @@ impl Mark {
 pub const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⢰', '⣠', '⡄', '⠆'];
 
 /// The same eight frames played backwards. A second mark, zero new codepoints —
-/// which is how seventeen marks fit in twenty-three codepoints.
+/// the reversed cycle is a mark for free.
 pub const SPINNER_REVERSED: &[char] = &['⠆', '⡄', '⣠', '⢰', '⠸', '⠹', '⠙', '⠋'];
 
-/// The seventeen ruled marks. This is the single inventory constant the
-/// admission rule is enforced over; a glyph that is not here does not reach the
-/// cell buffer.
+/// The ruled marks. This is the single inventory constant the admission rule
+/// is enforced over; a glyph that is not here does not reach the cell buffer.
 #[rustfmt::skip]
 pub const MARKS: &[Mark] = &[
     // Identity — the systematic two-axis rule. Star = spans, triangle =
@@ -126,6 +130,17 @@ pub const MARKS: &[Mark] = &[
     Mark { name: "done",             glyphs: &['✓'],      ascii: 'v', kind: MarkKind::Expression },
     Mark { name: "canceled",         glyphs: &['⊖'],      ascii: 'o', kind: MarkKind::Expression },
     Mark { name: "unknown",          glyphs: &['?'],      ascii: '?', kind: MarkKind::Expression },
+
+    // Graph tier — the Board's node vocabulary, re-picked from the admissible
+    // pool after the proto's stand-ins failed admission (taste-gate item 17).
+    // Box = a work item, ringed dot = one execution of it, small ring = a
+    // spawn under that, diamond = a packet between parties. The two rings
+    // separate by WEIGHT as well as size — the ADR-0030 lesson that position
+    // or size alone does not survive a squint.
+    Mark { name: "task",     glyphs: &['⊞'], ascii: 'T', kind: MarkKind::GraphTier },
+    Mark { name: "attempt",  glyphs: &['⊚'], ascii: 'A', kind: MarkKind::GraphTier },
+    Mark { name: "dispatch", glyphs: &['∘'], ascii: 'D', kind: MarkKind::GraphTier },
+    Mark { name: "message",  glyphs: &['⋄'], ascii: 'M', kind: MarkKind::GraphTier },
 ];
 
 /// One agent state: which mark expresses it and which token colours it.
@@ -305,16 +320,16 @@ mod tests {
     }
 
     #[test]
-    fn eighteen_marks_over_twenty_four_codepoints() {
-        assert_eq!(MARKS.len(), 18, "the ruled inventory is 18 marks");
+    fn twenty_two_marks_over_twenty_eight_codepoints() {
+        assert_eq!(MARKS.len(), 22, "the ruled inventory is 22 marks");
         let codepoints: BTreeSet<char> = MARKS
             .iter()
             .flat_map(|m| m.glyphs.iter().copied())
             .collect();
         assert_eq!(
             codepoints.len(),
-            24,
-            "the ruled inventory is 24 codepoints — 16 static plus one 8-frame cycle, \
+            28,
+            "the ruled inventory is 28 codepoints — 20 static plus one 8-frame cycle, \
              with the reversed cycle contributing no new ones"
         );
         assert_eq!(
@@ -330,6 +345,13 @@ mod tests {
                 .filter(|m| m.kind == MarkKind::Expression)
                 .count(),
             11
+        );
+        assert_eq!(
+            MARKS
+                .iter()
+                .filter(|m| m.kind == MarkKind::GraphTier)
+                .count(),
+            4
         );
     }
 
@@ -426,24 +448,27 @@ mod tests {
     #[test]
     fn the_escape_never_collides_two_marks_into_one_cell() {
         // The property that makes the escape usable rather than merely
-        // available: two states that were distinct under the inventory must
+        // available: two marks that were distinct under the inventory must
         // stay distinct under ASCII. Identity marks may repeat a letter with a
-        // second-letter rule, so this binds the EXPRESSION set, which is where
-        // the states live.
-        let mut seen: Vec<(char, &str)> = MARKS
-            .iter()
-            .filter(|m| m.kind == MarkKind::Expression)
-            .map(|m| (m.ascii, m.name))
-            .collect();
-        seen.sort_unstable();
-        let collisions: Vec<_> = seen
-            .windows(2)
-            .filter(|pair| pair[0].0 == pair[1].0)
-            .collect();
-        assert!(
-            collisions.is_empty(),
-            "the ASCII escape collapses expression marks: {collisions:?}"
-        );
+        // second-letter rule, so this binds each of the OTHER kinds within
+        // itself — expression is where the states live, graph tier is where
+        // the Board's node kinds live, and the two never share a cell.
+        for kind in [MarkKind::Expression, MarkKind::GraphTier] {
+            let mut seen: Vec<(char, &str)> = MARKS
+                .iter()
+                .filter(|m| m.kind == kind)
+                .map(|m| (m.ascii, m.name))
+                .collect();
+            seen.sort_unstable();
+            let collisions: Vec<_> = seen
+                .windows(2)
+                .filter(|pair| pair[0].0 == pair[1].0)
+                .collect();
+            assert!(
+                collisions.is_empty(),
+                "the ASCII escape collapses {kind:?} marks: {collisions:?}"
+            );
+        }
     }
 
     #[test]

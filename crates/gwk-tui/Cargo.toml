@@ -34,5 +34,10 @@ gwk-theme.workspace = true
 # something to assert before any widget existed.
 ratatui.workspace = true
 
+[dev-dependencies]
+# The board-live example decodes real kernel pages through the contract's
+# `ProjectionRecord` before rendering them — the smoke run's whole point.
+serde_json.workspace = true
+
 [lints]
 workspace = true
