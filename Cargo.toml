@@ -48,6 +48,13 @@ aead-stream = "0.6.0"
 agent-client-protocol = "2.0.0"
 base64 = "0.23.0"
 chacha20poly1305 = "0.11.0"
+# Already in the graph transitively (ratatui's default backend); named here for
+# ONE reason: the `osc52` feature, which is how the console copies an ID to the
+# clipboard through the library instead of hand-writing the escape — the P12
+# exemption covers crossterm-MEDIATED I/O, and a hand-emitted OSC sequence is
+# not that. Feature unification turns it on for the same 0.29 copy ratatui
+# already links; its `base64` 0.22 requirement is likewise already resolved.
+crossterm = { version = "0.29.0", features = ["osc52"] }
 # Path-only, no version, like `gwk-pty` below: unpublished (`publish = false`)
 # — building any of the three needs Zig and a pinned ghostty checkout through
 # their shared `gwk-pty` dependency, and none is meaningful without a

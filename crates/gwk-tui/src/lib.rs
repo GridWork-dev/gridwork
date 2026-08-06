@@ -1,11 +1,12 @@
 //! The GridWork terminal console — the thin client half.
 //!
-//! **The crate is still nearly a skeleton.** The lenses that will live here —
-//! the Queue, the Board, the config surface, the session drill-down — are
-//! ordered behind a design gate, so what exists so far is the manifest, the
-//! module boundary, the dependency posture, and [`theme`]: the one function
-//! that turns a resolved token into a renderer colour. The idiom that function
-//! applies IS ratified; the lenses that consume it are not yet built.
+//! **The lenses are not built yet.** The Queue, the Board, the config
+//! surface, the session drill-down — those are ordered work. What exists is
+//! the substrate they consume: [`theme`], the one function that turns a
+//! resolved token into a renderer colour; [`probe`], which measures what the
+//! drawing terminal does with the glyph inventory; and [`input`], the session
+//! bracket, click hit-testing, and the OSC 52 copy path. The idioms those
+//! modules apply ARE ratified; the lenses that consume them are not yet built.
 //!
 //! # What the crate is
 //!
@@ -28,5 +29,6 @@
 //! of this crate is lens code and is deliberately outside the gate: the gate
 //! follows the risk, not the directory tree.
 
+pub mod input;
 pub mod probe;
 pub mod theme;
