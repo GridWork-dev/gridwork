@@ -226,6 +226,17 @@ impl Session {
     /// a session to stop needs the unconditional form, and it needs the reap,
     /// or the exit status is left for no one and the process table keeps a
     /// zombie until the supervisor itself exits.
+    // Derivation: POSIX-TERM §11.1.10 — on a modem disconnect, and only with
+    // CLOCAL unset, "the SIGHUP signal shall be sent to the controlling
+    // process for which the terminal is the controlling terminal": one
+    // process, not a process group and not the session, so even a child of
+    // that child sees nothing from the hangup — which strengthens, not
+    // weakens, this method's reason to exist. That closing the master
+    // side presents a disconnect to the slave side is this crate's reading
+    // of the PTY pairing, not a sentence the chapter contains (its
+    // pseudo-terminal mentions stop at control modes); CAP-002 registers
+    // the read side of the same event for the same reason. `kill()` is
+    // `child.kill()`, which does not ride the hangup path.
     pub async fn kill(&mut self) -> io::Result<()> {
         self.child.kill().await
     }

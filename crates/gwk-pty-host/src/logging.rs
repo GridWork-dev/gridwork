@@ -155,7 +155,7 @@ impl Visit for FieldVisitor {
 /// intended destination once the systemd unit runs it) already timestamps
 /// every line on receipt, so a second in-line calendar date would be a
 /// hand-rolled civil-date conversion earning its keep nowhere — `gridwork`'s
-/// own `rfc3339`/`civil_from_days` (`crates/gridwork/src/main.rs`) exists
+/// own `rfc3339`/`civil_from_days` (`crates/gridwork/src/lib.rs`) exists
 /// because a CLI's JSON answer has no other clock attached to it; a log line
 /// captured by a service manager does.
 fn now_unix_ms() -> u64 {

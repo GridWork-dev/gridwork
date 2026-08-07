@@ -175,7 +175,7 @@ pub fn ingest_record(
 
 /// The idempotency key one `IngestRecord` mints: content-addressed, the same
 /// convention `gw ingest submit` already uses
-/// (`crates/gridwork/src/main.rs`'s `digest_of_json`) — identical transcript
+/// (`crates/gridwork/src/lib.rs`'s `digest_of_json`) — identical transcript
 /// content submitted twice (a host restart re-processing output from before
 /// its last committed submission) lands once rather than twice.
 pub fn ingest_key(kind: IngestionKind, body: &Value) -> IdempotencyKey {
