@@ -31,12 +31,14 @@ jobs:
       - name: the performance whole-job guard fails closed (seeded violation)
         run: |
           set -euo pipefail
-          if ./tools/perf-job-guard.sh failure failure; then
+          if ./tools/perf-job-guard.sh final failure failure; then
             echo 'perf-job-guard accepted two misses — the retry guard is broken' >&2
             exit 1
           fi
-          ./tools/perf-job-guard.sh failure success
-          ./tools/perf-job-guard.sh success skipped
+          [ "$(./tools/perf-job-guard.sh attempt success success)" = 'outcome=success' ]
+          [ "$(./tools/perf-job-guard.sh attempt success failure)" = 'outcome=failure' ]
+          ./tools/perf-job-guard.sh final failure success
+          ./tools/perf-job-guard.sh final success skipped
       # DEFAULT members, not `--workspace`. `--workspace` overrides
       # `default-members` and would pull in gwk-pty, which needs Zig and a 71 MB
       # ghostty tree — and whose build script CLONES ghostty when
@@ -164,8 +166,9 @@ jobs:
   # remains the stable required check. Two misses are a regression; one miss
   # followed by a clean fresh run is runner noise, not a reason to widen slack.
   perf-attempt:
+    continue-on-error: true
     outputs:
-      outcome: ${{ steps.envelope.outcome }}
+      outcome: ${{ steps.verdict.outputs.outcome }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     services:
@@ -196,11 +199,18 @@ jobs:
         run: cargo test --release -p gwk-kernel --test perf -- --ignored --nocapture
       # Kept even on failure: a receipt naming which bound collapsed and by how
       # much is the whole point of the job.
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - id: receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: perf-receipt
           path: gwk-perf-receipt.json
+      - id: verdict
+        if: always()
+        env:
+          ENVELOPE_OUTCOME: ${{ steps.envelope.outcome }}
+          RECEIPT_OUTCOME: ${{ steps.receipt.outcome }}
+        run: ./tools/perf-job-guard.sh attempt "$ENVELOPE_OUTCOME" "$RECEIPT_OUTCOME" >> "$GITHUB_OUTPUT"
 
   perf-retry:
     needs: perf-attempt
@@ -248,7 +258,7 @@ jobs:
           persist-credentials: false
       - name: resolve the first attempt and fresh-runner retry
         run: >-
-          ./tools/perf-job-guard.sh
+          ./tools/perf-job-guard.sh final
           "${{ needs.perf-attempt.outputs.outcome }}"
           "${{ needs.perf-retry.result }}"
 
@@ -997,8 +1007,15 @@ jobs:
           fi
 
           write_record seeded-session-id
+          printf 'session: ../seeded/session\n' >> "$record"
+          if printf '%s\n' "$seed" | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate let an opaque id mask a second path-like session' >&2
+            exit 1
+          fi
+
+          write_record seeded-session-id
           printf '%s\n' "$seed" | ./tools/cleanroom-gate.sh
-          echo "cleanroom-gate: missing/path sessions rejected; opaque session id accepted"
+          echo "cleanroom-gate: missing/path/duplicate sessions rejected; one opaque id accepted"
       - name: a gated module prefix reaches its siblings (seeded violation)
         run: |
           set -euo pipefail

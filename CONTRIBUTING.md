@@ -146,9 +146,10 @@ rules that catch people:
   Adding a bad value and removing it in a later commit does *not* clear the gate — the
   fix is to rebase it out of history.
 
-The leak gate proves it can fail: CI feeds it three seeded violations — a home path, an
-agent-session URL, and a leak that exists only in an intermediate commit — and fails the
-build if the scan accepts any of them. `check-claims.sh` has no such self-test.
+The publication gates prove they can fail: CI feeds the leak scanner three seeded
+violations — a home path, an agent-session URL, and a leak that exists only in an
+intermediate commit — and deliberately bumps a current-stage docs mirror for
+`check-claims.sh`. The build fails if either scanner accepts its seed.
 
 ## Licensing and provenance
 
