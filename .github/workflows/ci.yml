@@ -576,9 +576,13 @@ jobs:
           # which for this crate means Zig and a 71 MB ghostty tree. The derived
           # loops below DO filter on `publish`, so they need no exclusion; this
           # line does. Verified by observation, not by reading the flag's name.
+          # gwk-pty-host joined the list when it took the engine and adapter
+          # path dependencies: packaging demands version requirements those
+          # unpublished siblings do not have.
           cargo package --workspace --exclude gwk-pty \
             --exclude gwk-adapter-opencode --exclude gwk-adapter-claude \
-            --exclude gwk-adapter-codex --exclude gwk-parity --locked
+            --exclude gwk-adapter-codex --exclude gwk-parity \
+            --exclude gwk-pty-host --locked
 
           # Every publishable member, straight from the manifest graph:
           # `publish = false` shows up as an empty array, so xtask drops out and
