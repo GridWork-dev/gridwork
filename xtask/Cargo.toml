@@ -22,7 +22,7 @@ specta-serde = "=0.0.12"
 specta-typescript = "=0.0.12"
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true
 
 [lints]
 workspace = true
