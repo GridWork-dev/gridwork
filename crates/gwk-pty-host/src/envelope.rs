@@ -12,7 +12,7 @@ use gwk_domain::{
 pub const ORIGIN_SYSTEM: &str = "gwk-pty-host";
 
 /// This host's `actor.kind` label on every envelope it mints — distinct
-/// from `"operator"` (`gw`'s own CLI, `crates/gridwork/src/main.rs`) and
+/// from `"operator"` (`gw`'s own CLI, `crates/gridwork/src/lib.rs`) and
 /// from `"kernel"` (the log's own actor on events it produces itself,
 /// `crates/gwk-kernel/src/project.rs`): a command this host originates is
 /// neither a human's request nor the kernel's own bookkeeping — it is what
@@ -23,7 +23,7 @@ pub const ACTOR_KIND: &str = "host";
 ///
 /// `command_id` is DERIVED from the idempotency key, not randomly minted —
 /// the same convention `gridwork`'s own CLI already uses for the commands
-/// it mints itself (`crates/gridwork/src/main.rs`'s `envelope()`: `CommandId
+/// it mints itself (`crates/gridwork/src/lib.rs`'s `envelope()`: `CommandId
 /// ::new(format!("cmd-{key}"))`), so the two surfaces in this workspace that
 /// mint their own envelopes agree on one scheme rather than each inventing
 /// its own. That is what makes a retried origination — a reconnect after a

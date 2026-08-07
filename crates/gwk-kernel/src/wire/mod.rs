@@ -21,6 +21,7 @@
 pub mod frame;
 pub mod hello;
 pub mod listen;
+pub mod pty;
 pub mod serve;
 pub mod strict;
 pub mod subscribe;

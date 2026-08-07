@@ -533,6 +533,30 @@ fn golden_client_control() -> Vec<ClientControl> {
                 session_id: pty_session_id(),
             },
         },
+        // The host's half of the PTY surface: a claim/reseed, one delta
+        // batch, and the explicit retire.
+        ClientControl::Request {
+            request_id: RequestId::new("req-8"),
+            request: KernelRequest::PtyPublishSnapshot {
+                session_id: pty_session_id(),
+                seq: Some(PtyFrameSeq::new(43)),
+                frame: golden_pty_frame(),
+            },
+        },
+        ClientControl::Request {
+            request_id: RequestId::new("req-9"),
+            request: KernelRequest::PtyPublishDeltas {
+                session_id: pty_session_id(),
+                seq: PtyFrameSeq::new(44),
+                deltas: golden_pty_deltas(),
+            },
+        },
+        ClientControl::Request {
+            request_id: RequestId::new("req-10"),
+            request: KernelRequest::PtyRetire {
+                session_id: pty_session_id(),
+            },
+        },
     ]
 }
 
@@ -625,6 +649,18 @@ fn golden_server_control() -> Vec<ServerControl> {
             request_id: RequestId::new("req-6"),
             code: KernelErrorCode::SlowConsumer,
             last_seq: Some(PtyFrameSeq::new(44)),
+        },
+        ServerControl::Response {
+            request_id: RequestId::new("req-9"),
+            result: KernelResult::PtyPublished {
+                session_id: pty_session_id(),
+            },
+        },
+        ServerControl::Response {
+            request_id: RequestId::new("req-10"),
+            result: KernelResult::PtyRetired {
+                session_id: pty_session_id(),
+            },
         },
     ]
 }

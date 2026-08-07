@@ -360,6 +360,11 @@ mod tests {
 
     #[test]
     fn styles_ride_the_conversion() {
+        // The escape bytes are a fixture, not a claim: that SGR 1 means bold
+        // and SGR 31 selects palette index 1 is pinned, with its citations,
+        // in `crates/gwk-pty/tests/style.rs` (`bold_sets_the_bold_flag`,
+        // `foreground_16_color_is_a_palette_index`). What this asserts is
+        // only that the conversion preserves what the engine reported.
         let (_, screen) = apply_once(4, 1, b"\x1b[1;31mX");
         let cell = &screen.cells[0][0];
         assert!(cell.style.bold);

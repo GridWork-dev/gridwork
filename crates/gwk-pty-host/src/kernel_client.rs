@@ -19,7 +19,8 @@
 
 use std::path::Path;
 
-use gwk_domain::ids::{DispatchNodeId, RequestId};
+use gwk_domain::frame::{PtyDelta, PtyFrame};
+use gwk_domain::ids::{DispatchNodeId, PtyFrameSeq, PtySessionId, RequestId};
 use gwk_domain::protocol::{
     CONNECTION_EGRESS_BYTES_PER_WINDOW, CONNECTION_INGRESS_BYTES_PER_WINDOW, ClientControl,
     FRAME_BODY_MAX_BYTES, FrameKind, KernelRequest, ProjectionKind, ProjectionRecord,
@@ -54,6 +55,17 @@ pub enum KernelClientError {
     Unexpected {
         waited_on: &'static str,
         found: String,
+    },
+    /// A typed refusal on the PTY publish surface. Surfaced as an error
+    /// rather than classified like [`crate::origination::Outcome`] because
+    /// every refusal here means the same thing to the one caller: this
+    /// connection's view of the session is stale — drop it and republish
+    /// from a fresh local attach.
+    #[error("the kernel refused {refused}: {code:?} {message}")]
+    Refused {
+        refused: &'static str,
+        code: KernelErrorCode,
+        message: String,
     },
 }
 
@@ -151,6 +163,80 @@ impl KernelClient {
         }
     }
 
+    /// Publish a session's full screen — the claim on first publish, the
+    /// reseed on a reconnect. `seq` is absent only while the session has
+    /// produced no frame yet.
+    pub async fn publish_snapshot(
+        &mut self,
+        id: &PtySessionId,
+        seq: Option<u64>,
+        frame: PtyFrame,
+    ) -> Result<(), KernelClientError> {
+        let request = KernelRequest::PtyPublishSnapshot {
+            session_id: id.clone(),
+            seq: seq.map(PtyFrameSeq::new),
+            frame,
+        };
+        match self.ask(request).await? {
+            KernelResult::PtyPublished { .. } => Ok(()),
+            KernelResult::Error { code, message, .. } => Err(KernelClientError::Refused {
+                refused: "a snapshot publish",
+                code,
+                message,
+            }),
+            other => Err(KernelClientError::Unexpected {
+                waited_on: "a publish acknowledgement",
+                found: format!("{other:?}"),
+            }),
+        }
+    }
+
+    /// Publish the delta batch that moves a session's screen to `seq`.
+    pub async fn publish_deltas(
+        &mut self,
+        id: &PtySessionId,
+        seq: u64,
+        deltas: Vec<PtyDelta>,
+    ) -> Result<(), KernelClientError> {
+        let request = KernelRequest::PtyPublishDeltas {
+            session_id: id.clone(),
+            seq: PtyFrameSeq::new(seq),
+            deltas,
+        };
+        match self.ask(request).await? {
+            KernelResult::PtyPublished { .. } => Ok(()),
+            KernelResult::Error { code, message, .. } => Err(KernelClientError::Refused {
+                refused: "a delta publish",
+                code,
+                message,
+            }),
+            other => Err(KernelClientError::Unexpected {
+                waited_on: "a publish acknowledgement",
+                found: format!("{other:?}"),
+            }),
+        }
+    }
+
+    /// Retire a session this connection claimed — the explicit form of what
+    /// hanging up does implicitly.
+    pub async fn retire(&mut self, id: &PtySessionId) -> Result<(), KernelClientError> {
+        let request = KernelRequest::PtyRetire {
+            session_id: id.clone(),
+        };
+        match self.ask(request).await? {
+            KernelResult::PtyRetired { .. } => Ok(()),
+            KernelResult::Error { code, message, .. } => Err(KernelClientError::Refused {
+                refused: "a retire",
+                code,
+                message,
+            }),
+            other => Err(KernelClientError::Unexpected {
+                waited_on: "a retire acknowledgement",
+                found: format!("{other:?}"),
+            }),
+        }
+    }
+
     /// Liveness only, for a boot-time connectivity check.
     pub async fn healthy(&mut self) -> Result<bool, KernelClientError> {
         match self.ask(KernelRequest::Health {}).await? {
@@ -175,11 +261,16 @@ impl KernelClient {
                     request_id: answered,
                     result,
                 }) if answered == request_id => return Ok(result),
-                // A batch from a subscription opened earlier on this
-                // connection can arrive between a request and its response
-                // — this client never subscribes, but the wire does not
-                // know that, so the loop still has to skip past one.
-                Some(ServerControl::EventBatch { .. } | ServerControl::StreamClosed { .. }) => {}
+                // A batch from a subscription or attach opened earlier on
+                // this connection can arrive between a request and its
+                // response — this client never opens either, but the wire
+                // does not know that, so the loop still has to skip past one.
+                Some(
+                    ServerControl::EventBatch { .. }
+                    | ServerControl::StreamClosed { .. }
+                    | ServerControl::PtyDeltaBatch { .. }
+                    | ServerControl::PtyStreamClosed { .. },
+                ) => {}
                 Some(other) => {
                     return Err(KernelClientError::Unexpected {
                         waited_on: "a response",

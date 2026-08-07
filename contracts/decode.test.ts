@@ -212,6 +212,9 @@ test("client control: tagged frames, number major, decimal-string cursor", async
     "request",
     "request",
     "request",
+    "request",
+    "request",
+    "request",
   ]);
 
   for (const frame of frames) {
@@ -285,6 +288,32 @@ test("client control: tagged frames, number major, decimal-string cursor", async
   expect(snapshotRequest["type"]).toBe("pty_snapshot");
   expect("cursor" in snapshotRequest).toBe(false);
 
+  // The host's publish half: a sequenced reseed carrying a full frame, a
+  // delta batch on the same decimal-string axis, and the explicit retire.
+  const publishSnapshot = raw[8];
+  if (!isRecord(publishSnapshot)) throw new Error("frame 8 missing");
+  const publishRequest = publishSnapshot["request"];
+  if (!isRecord(publishRequest)) throw new Error("pty publish request missing");
+  expect(publishRequest["type"]).toBe("pty_publish_snapshot");
+  expect(publishRequest["seq"]).toMatch(DECIMAL);
+  const publishedFrame = publishRequest["frame"];
+  if (!isRecord(publishedFrame)) throw new Error("published frame missing");
+  expect(Array.isArray(publishedFrame["cells"])).toBe(true);
+
+  const publishDeltas = raw[9];
+  if (!isRecord(publishDeltas)) throw new Error("frame 9 missing");
+  const deltasRequest = publishDeltas["request"];
+  if (!isRecord(deltasRequest)) throw new Error("pty deltas request missing");
+  expect(deltasRequest["type"]).toBe("pty_publish_deltas");
+  expect(deltasRequest["seq"]).toMatch(DECIMAL);
+  expect(Array.isArray(deltasRequest["deltas"])).toBe(true);
+
+  const retire = raw[10];
+  if (!isRecord(retire)) throw new Error("frame 10 missing");
+  const retireRequest = retire["request"];
+  if (!isRecord(retireRequest)) throw new Error("pty retire request missing");
+  expect(retireRequest["type"]).toBe("pty_retire");
+
   await reemit("kernel-client-control.json", frames);
 });
 
@@ -304,6 +333,8 @@ test("server control: refusals are values, cursors survive a disconnect", async 
     "response",
     "pty_delta_batch",
     "pty_stream_closed",
+    "response",
+    "response",
   ]);
 
   for (const frame of frames) {
@@ -406,6 +437,19 @@ test("server control: refusals are values, cursors survive a disconnect", async 
   for (const tier of ["ansi16", "xterm256", "truecolor"]) {
     expect(frameJson).toContain(`"type":"${tier}"`);
   }
+
+  // The publish acknowledgements: one for either publish, one for retire.
+  const published = raw[11];
+  if (!isRecord(published)) throw new Error("frame 11 missing");
+  const publishedResult = published["result"];
+  if (!isRecord(publishedResult)) throw new Error("pty published result missing");
+  expect(publishedResult["type"]).toBe("pty_published");
+
+  const retired = raw[12];
+  if (!isRecord(retired)) throw new Error("frame 12 missing");
+  const retiredResult = retired["result"];
+  if (!isRecord(retiredResult)) throw new Error("pty retired result missing");
+  expect(retiredResult["type"]).toBe("pty_retired");
 
   await reemit("kernel-server-control.json", frames);
 });

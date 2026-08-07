@@ -705,7 +705,55 @@ pub enum KernelRequest {
     /// One full styled frame at its current revision — the seed a client
     /// applies later deltas onto. Served whether or not the session is
     /// attached, like [`Self::ReadEvents`] beside [`Self::SubscribeEvents`].
+    /// A screen whose serialized form has outgrown what one response frame
+    /// carries refuses with `overloaded` rather than failing at the write —
+    /// attaching for deltas is the recovery the refusal names.
     PtySnapshot {
+        session_id: PtySessionId,
+    },
+    /// Publish a hosted session's full screen — the host's half of the PTY
+    /// surface, the family v1 reserved room for and did not carry. The first
+    /// publish of a session claims it for the publishing connection; a
+    /// session already claimed by another LIVE connection refuses with
+    /// `authority`, and a connection's sessions retire when it closes, so a
+    /// crashed host cannot leave a session nobody can reclaim. `seq` is
+    /// absent only while the session has produced no frame yet, mirroring
+    /// [`KernelResult::PtyAttached`]'s `cursor`; a re-publish at the current
+    /// head is a legal reseed (a reconnecting host re-announces from its own
+    /// mirror) that must keep the screen's dimensions — one revision names
+    /// one screen — while a `seq` behind the head refuses with
+    /// `stale_version`, the actual head in the detail: revisions never move
+    /// backwards. The frame must be rectangular with `u16` dimensions: that
+    /// shape rule is enforced here at the serving layer, per
+    /// [`crate::frame::PtyFrame`]'s own doc on the split. The kernel bounds
+    /// how many sessions it holds at once — a claim past that bound refuses
+    /// with `overloaded` and touches nothing already hosted.
+    PtyPublishSnapshot {
+        session_id: PtySessionId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[specta(optional)]
+        seq: Option<PtyFrameSeq>,
+        frame: PtyFrame,
+    },
+    /// Publish the delta batch that moves the session's screen to `seq`.
+    /// Only the connection that claimed the session may publish (`authority`
+    /// otherwise); a `seq` not strictly after the current head refuses with
+    /// `stale_version`; every update must land inside the current grid (a
+    /// `resized` delta in the batch moves the bounds for the updates after
+    /// it), a `resized` delta may not name a grid whose blank frame alone
+    /// would exceed the publish budget, and a cell's glyph is bounded — one
+    /// grapheme cluster never approaches the bound. A batch that violates
+    /// any of that is refused whole and changes nothing.
+    PtyPublishDeltas {
+        session_id: PtySessionId,
+        seq: PtyFrameSeq,
+        deltas: Vec<PtyDelta>,
+    },
+    /// Retire a hosted session the publishing connection claimed: attached
+    /// consumers see [`ServerControl::PtyStreamClosed`] and later requests
+    /// for the id answer `not_found`. The explicit form of what a publisher's
+    /// hangup does implicitly.
+    PtyRetire {
         session_id: PtySessionId,
     },
 }
@@ -834,6 +882,16 @@ pub enum KernelResult {
         session_id: PtySessionId,
         seq: PtyFrameSeq,
         frame: PtyFrame,
+    },
+    /// The publish landed: the session's screen is at the revision the
+    /// request named. One acknowledgement for both publish requests — what a
+    /// publisher does about either is the same, keep going.
+    PtyPublished {
+        session_id: PtySessionId,
+    },
+    /// The session is retired and its id now answers `not_found`.
+    PtyRetired {
+        session_id: PtySessionId,
     },
     Error {
         code: KernelErrorCode,

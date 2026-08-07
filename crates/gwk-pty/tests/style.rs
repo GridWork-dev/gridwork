@@ -266,12 +266,14 @@ fn a_dropped_attribute_fails_here_not_silently() {
     // setting — which is what lets the attribute pile below arrive as
     // several sequences instead of one over-budget parameter list — and the
     // assertion is what pins that the engine is in it.
-    // Derivation: KITTY-UNDERLINES — SGR 58 with colon-separated
-    // sub-parameters sets the underline's own color.
+    // Derivation: KITTY-UNDERLINES — SGR 58 sets the underline's own
+    // color, and works exactly like the codes 38, 48.
     // Derivation: XTERM-CTLSEQS "Character Attributes (SGR)" — in the
-    // colon sub-parameter form, `2` means a direct RGB colour and the
-    // colour-space slot between it and the components may be left empty,
-    // which is the `58:2::70:80:90` shape the pile below uses.
+    // colon sub-parameter form, `2` means a direct RGB colour, and the
+    // colour-space identifier between it and the components is ignored —
+    // which is why the `58:2::70:80:90` shape the pile below uses parses
+    // with that slot left empty. The empty slot itself is pinned by the
+    // assertion against the engine, not claimed from the page.
     let styles = styles_of(
         b"\x1b[1;2;3;4;5;7;8;9;53m\x1b[38;2;10;20;30m\x1b[48;2;40;50;60m\x1b[58:2::70:80:90mX",
     );
