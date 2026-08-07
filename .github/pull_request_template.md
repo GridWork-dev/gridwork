@@ -12,10 +12,9 @@
 - [ ] If this touches clean-room paths (`.github/cleanroom-paths.txt`): derivation citations included, and a second-reader record committed under `docs/derivation/reviews/` (CLEANROOM.md rule 4 — `./tools/cleanroom-gate.sh --subject` names the file)
 
 <!--
-Twelve checks gate the merge: test, msrv, schema, contract, site, deny, leak-scan,
-commit-messages, kernel-integration, package, macos, cleanroom-gate. `perf` and
-`advisories` also run and are NOT among them — if one of those is your only red X,
-it is not your PR.
+The stable `perf` check gates the merge. Its first hosted-runner attempt may trigger one
+fresh-runner retry; only a wholly green attempt or retry satisfies `perf`. `advisories`
+also runs and is informational — if it is your only red X, it is not your PR.
 
 `commit-messages` runs the leak scanner over commit messages, the range diff, and
 every individual commit patch — not just the final tree. Adding a bad value and
