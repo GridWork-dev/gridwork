@@ -97,14 +97,13 @@ impl Failure {
     /// A tool this program delegated to said no — today that is `gh`.
     /// Reported as `storage` because the contract has no code for another
     /// program's refusal (the same gap [`Failure::internal`] documents), and
-    /// exited as `3`: the tool printed its own reason to standard error, and
-    /// a blind retry is not the fix.
+    /// exited by the one table, as `5`: from here gw cannot tell a transient
+    /// no (expired auth, a network, checks still running) from a final one
+    /// (a closed PR) — the reason is on the tool's own standard error, which
+    /// is where a caller looks before deciding to retry. What must NOT
+    /// happen is the JSON and the exit telling two stories.
     pub fn external(message: impl Into<String>) -> Self {
-        Self {
-            code: KernelErrorCode::Storage,
-            message: message.into(),
-            exit: REFUSED,
-        }
+        Self::new(KernelErrorCode::Storage, message)
     }
 
     /// A fault in this program. Reported as `storage` because the contract has no

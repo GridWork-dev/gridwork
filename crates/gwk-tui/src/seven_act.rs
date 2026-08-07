@@ -222,6 +222,19 @@ mod tests {
                 "{tag:?} fires an audit nobody can declare"
             );
         }
+        // And the converse: every declarable tag DOES something — admits an
+        // act or fires an audit — except the one classification-only tag.
+        // A tag that validated and then silently did nothing would be the
+        // exact failure the UnknownTag refusal exists to prevent, one layer
+        // up.
+        for tag in TAGS {
+            let fires = SHIP_AUDITS.iter().any(|(audit_tag, _)| *audit_tag == tag);
+            let admits = ACTS.iter().any(|act| act.requires_tag == Some(tag));
+            assert!(
+                fires || admits || tag == "observability",
+                "{tag:?} is declarable and does nothing"
+            );
+        }
     }
 
     #[test]

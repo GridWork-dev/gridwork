@@ -197,7 +197,14 @@ fn pr_reaches_gh_as_an_argument_array_and_relays_its_refusal() {
         ("PATH", path.as_str()),
         ("GW_TEST_GH_ARGV", record_path.as_str()),
     ];
-    let out = gw_args(&["pr", "merge", "61", "--repo", "o/r"], &env);
+    // Arguments WITH spaces, through the live path — a regression that joined
+    // the argv into a shell line and re-split it would change the line count
+    // the recorder writes, so this case can actually catch the bug class the
+    // arg-array rule forbids.
+    let out = gw_args(
+        &["pr", "open", "--title", "two words", "--body", "b b"],
+        &env,
+    );
     assert_eq!(code(&out), 0, "{:?}", String::from_utf8_lossy(&out.stdout));
     // The live answer is gh's own conversation; gw adds nothing on top.
     assert!(
@@ -207,16 +214,21 @@ fn pr_reaches_gh_as_an_argument_array_and_relays_its_refusal() {
     );
     let received = std::fs::read_to_string(&record).expect("the fake gh ran");
     let received: Vec<&str> = received.lines().collect();
-    assert_eq!(received, ["pr", "merge", "61", "--squash", "--repo", "o/r"]);
+    assert_eq!(
+        received,
+        ["pr", "create", "--title", "two words", "--body", "b b"]
+    );
 
-    // And when gh says no, gw relays the fact in its own error shape: the
-    // reason was gh's to print, the machine-readable exit is ours.
+    // And when gh says no, gw relays the fact in its own error shape and the
+    // one exit table: the reason was gh's to print, the machine-readable
+    // fact of the refusal is ours.
     std::fs::write(&fake, "#!/bin/sh\nexit 7\n").expect("rewrite fake gh");
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     let out = gw_args(&["pr", "merge", "61"], &env);
-    assert_eq!(code(&out), 3);
+    assert_eq!(code(&out), 5);
     let answer = json(&out);
     assert_eq!(answer["type"], "error");
+    assert_eq!(answer["code"], "storage");
     assert!(
         answer["message"]
             .as_str()

@@ -511,6 +511,12 @@ impl Rest {
             if item == "-" || !item.starts_with('-') {
                 words.push(item.clone());
             } else if SWITCHES.contains(&item.as_str()) {
+                // The same refusal duplicate value flags get, and for the same
+                // reason: a leftover duplicate would otherwise be reported as
+                // "does not apply here" by a verb it applies to perfectly well.
+                if switches.contains(item) {
+                    return Err(Failure::usage(format!("{item} was given twice")));
+                }
                 switches.push(item.clone());
             } else if VALUE_FLAGS.contains(&item.as_str()) {
                 let value = items
@@ -703,6 +709,7 @@ mod tests {
             "pr merge 61 --strategy fast-forward",
             "pr close 61",
             "kernel health --dry-run",
+            "pr merge 61 --dry-run --dry-run",
             "nonsense",
             "kernel",
             "",
