@@ -896,6 +896,46 @@ jobs:
             exit 1
           fi
           echo "cleanroom-gate: seeded violation correctly rejected ($seed)"
+      - name: a new record carries an opaque session id (seeded violation)
+        run: |
+          set -euo pipefail
+          seed="$(grep -Ev '^[[:space:]]*(#|$)' .github/cleanroom-paths.txt | head -n1)seeded-session.rs"
+          subject="$(printf '%s\n' "$seed" | ./tools/cleanroom-gate.sh --subject)"
+          record="docs/derivation/reviews/$subject.md"
+          trap 'rm -f "$record"' EXIT
+          write_record() {
+            {
+              printf 'subject: %s\n' "$subject"
+              printf 'reviewer: seeded fresh-context lane\n'
+              if [ -n "${1:-}" ]; then
+                printf 'session: %s\n' "$1"
+              fi
+              printf '%s\n' '- [x] citations' '- [x] framing' '- [x] references' '- [x] leak'
+            } > "$record"
+          }
+
+          write_record
+          out=0
+          msg="$(printf '%s\n' "$seed" | ./tools/cleanroom-gate.sh 2>&1)" || out=$?
+          if [ "$out" -eq 0 ]; then
+            echo 'cleanroom-gate accepted a new record with no session id' >&2
+            exit 1
+          fi
+          echo "$msg" | grep -q "has no valid 'session:' line" || {
+            echo 'the session-less record failed for the wrong reason' >&2
+            printf '%s\n' "$msg" >&2
+            exit 1
+          }
+
+          write_record ../seeded/session
+          if printf '%s\n' "$seed" | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate accepted a session path instead of an opaque id' >&2
+            exit 1
+          fi
+
+          write_record seeded-session-id
+          printf '%s\n' "$seed" | ./tools/cleanroom-gate.sh
+          echo "cleanroom-gate: missing/path sessions rejected; opaque session id accepted"
       - name: a gated module prefix reaches its siblings (seeded violation)
         run: |
           set -euo pipefail

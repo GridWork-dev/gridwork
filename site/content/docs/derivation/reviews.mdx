@@ -3,7 +3,7 @@ title: Second-reader records
 description: How derivation subjects are hashed, independently reviewed, and published with scope and verdict.
 ---
 
-{/* curated-from: docs/derivation/reviews sha256=b5353e3db7285fd93b0b1d16afba528d2e88d0a5528c88e82f72c8542c09100b */}
+{/* curated-from: docs/derivation/reviews sha256=5af146dfeb782a85d8131da1a918c3fb6422e3eb7125030708f03a139a19a044 */}
 
 CLEANROOM.md rule 4: every change touching the paths in
 [`.github/cleanroom-paths.txt`](https://github.com/GridWork-dev/gridwork/blob/main/.github/cleanroom-paths.txt) gets an
@@ -60,9 +60,11 @@ cp docs/derivation/reviews/TEMPLATE.md "docs/derivation/reviews/$subject.md"
 
 Fill in `subject:`, `reviewer:`, `session:` (the reviewing session's opaque id — an id,
 never a path), and tick all four checks. Commit it in the same branch. The gate verifies
-the file exists, that it declares the matching subject, that it names a reviewer, and
-that all four checks are ticked — and, separately, that every gated source file in the
-change carries a resolving `Derivation:` marker.
+the file exists, that it declares the matching subject, that it names a reviewer and an
+opaque reviewing-session id, and that all four checks are ticked — and, separately, that
+every gated source file in the change carries a resolving `Derivation:` marker. The seven
+records that predate the `session:` field are the only grandfathered subjects; their
+session ids are permanently unrecoverable.
 
 ## What the reviewer does
 
