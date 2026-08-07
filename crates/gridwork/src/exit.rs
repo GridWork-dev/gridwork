@@ -94,6 +94,19 @@ impl Failure {
         Self::new(KernelErrorCode::Storage, message)
     }
 
+    /// A tool this program delegated to said no — today that is `gh`.
+    /// Reported as `storage` because the contract has no code for another
+    /// program's refusal (the same gap [`Failure::internal`] documents), and
+    /// exited as `3`: the tool printed its own reason to standard error, and
+    /// a blind retry is not the fix.
+    pub fn external(message: impl Into<String>) -> Self {
+        Self {
+            code: KernelErrorCode::Storage,
+            message: message.into(),
+            exit: REFUSED,
+        }
+    }
+
     /// A fault in this program. Reported as `storage` because the contract has no
     /// code for "the CLI is broken", and exited as `10` because that is what the
     /// caller needs to know. A panic still exits `101` — also a bug, just a

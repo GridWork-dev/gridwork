@@ -217,7 +217,10 @@ mod tests {
         }
         // Every audit-firing tag is a declarable tag.
         for (tag, _) in SHIP_AUDITS {
-            assert!(TAGS.contains(&tag), "{tag:?} fires an audit nobody can declare");
+            assert!(
+                TAGS.contains(&tag),
+                "{tag:?} fires an audit nobody can declare"
+            );
         }
     }
 

@@ -40,6 +40,12 @@ tokio = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+# Dev-only and path-only, which `cargo package` strips: the seven-act binding
+# test reads the walk's choreography template — gwk-tui data — against this
+# CLI's own face. NOT the dependency gwk-tui's manifest is waiting for; the
+# installed binary still carries no lens code (`cargo tree --edges normal`
+# stays clean, and CI asserts it).
+gwk-tui.workspace = true
 # The live case stands up a real daemon on a temp socket and drives the built
 # binary against it, which needs a database to point the daemon at.
 sqlx = { workspace = true, features = ["json"] }

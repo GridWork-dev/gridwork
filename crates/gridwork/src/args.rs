@@ -26,9 +26,13 @@ use crate::exit::Failure;
 /// Every flag in the tree that takes a value.
 const VALUE_FLAGS: &[&str] = &[
     "--archive-manifest-sha256",
+    "--base",
+    "--body",
+    "--body-file",
     "--cursor",
     "--cutover-id",
     "--file",
+    "--head",
     "--key",
     "--kind",
     "--limit",
@@ -36,12 +40,15 @@ const VALUE_FLAGS: &[&str] = &[
     "--output",
     "--project",
     "--reason",
+    "--repo",
     "--resolution",
     "--scratch-database",
+    "--strategy",
+    "--title",
 ];
 
 /// Every flag that is its own answer.
-const SWITCHES: &[&str] = &["--help", "--pretty", "--version", "-V", "-h"];
+const SWITCHES: &[&str] = &["--dry-run", "--help", "--pretty", "--version", "-V", "-h"];
 
 /// Rows an event page asks for when the caller names no limit.
 const DEFAULT_EVENT_LIMIT: u32 = 256;
@@ -146,6 +153,12 @@ pub enum Verb {
         project: Option<String>,
         key: Option<String>,
     },
+
+    /// The one verb that speaks to `gh` instead of the socket ([`crate::pr`]).
+    Pr {
+        what: crate::pr::Gh,
+        dry_run: bool,
+    },
 }
 
 /// The one output a human reads instead of a machine.
@@ -178,6 +191,10 @@ gw — the GridWork kernel's command line
   gw blob get <address> [--output <path|->]
   gw blob stat <address>
   gw ingest submit --kind <kind> --file <path|-> [--project <id>] [--key <key>]
+  gw pr open --title <text> [--body <text>] [--body-file <path|->]
+             [--base <branch>] [--head <branch>] [--repo <owner/repo>] [--dry-run]
+  gw pr merge <number|url|branch> [--strategy squash|merge|rebase]
+             [--repo <owner/repo>] [--dry-run]
 
   --pretty   format the JSON answer for a human; the value is unchanged
   --version  same answer as `build-info`, under the name every CLI is asked by
@@ -185,6 +202,11 @@ gw — the GridWork kernel's command line
 
 Every answer is JSON on standard output. Exits: 0 success, 2 usage or input,
 3 refused, 4 not found, 5 unavailable, 6 does not verify, 10 a fault in gw.
+
+`pr` is the one verb that speaks to `gh` instead of the socket — always an
+argument array, never a shell line — and its live answer and standard streams
+are gh's own. A body comes from exactly one of its two body flags, and
+--dry-run prints the argv as JSON instead of running anything.
 
 `daemon` and `admin` read GWK_DATABASE_URL / GWK_ADMIN_DATABASE_URL and the blob
 KEK. Every other verb uses only the socket. `admin blob rotate` also reads
@@ -256,6 +278,7 @@ fn verb(rest: &mut Rest) -> Result<Verb, Failure> {
             other => Err(unknown("authority", other)),
         },
         "blob" => blob(rest),
+        "pr" => pr(rest),
         "ingest" => match rest.word("ingest")?.as_str() {
             "submit" => Ok(Verb::IngestSubmit {
                 kind: ingestion_kind(&rest.required("--kind")?)?,
@@ -373,6 +396,49 @@ fn blob(rest: &mut Rest) -> Result<Verb, Failure> {
         }),
         other => Err(unknown("blob", other)),
     }
+}
+
+fn pr(rest: &mut Rest) -> Result<Verb, Failure> {
+    use crate::pr::{Body, Gh, Merge, Open, Strategy};
+    let what = match rest.word("pr")?.as_str() {
+        "open" => Gh::Open(Open {
+            title: rest.required("--title")?,
+            body: match (rest.flag("--body"), rest.flag("--body-file")) {
+                (Some(text), None) => Body::Text(text),
+                (None, Some(path)) => Body::File(path),
+                (Some(_), Some(_)) => {
+                    return Err(Failure::usage(
+                        "pr open takes --body or --body-file, not both",
+                    ));
+                }
+                // Refused here rather than left to `gh`, which would fall
+                // back to asking interactively — the wrong surprise for a
+                // scriptable verb.
+                (None, None) => {
+                    return Err(Failure::usage(
+                        "pr open needs a body: --body <text> or --body-file <path|->",
+                    ));
+                }
+            },
+            repo: rest.flag("--repo"),
+            base: rest.flag("--base"),
+            head: rest.flag("--head"),
+        }),
+        "merge" => Gh::Merge(Merge {
+            subject: rest.word("pr merge")?,
+            strategy: rest
+                .flag("--strategy")
+                .map(|value| Strategy::parse(&value))
+                .transpose()?
+                .unwrap_or(Strategy::Squash),
+            repo: rest.flag("--repo"),
+        }),
+        other => return Err(unknown("pr", other)),
+    };
+    Ok(Verb::Pr {
+        what,
+        dry_run: rest.switch("--dry-run"),
+    })
 }
 
 fn unknown(under: &str, what: &str) -> Failure {
@@ -527,6 +593,11 @@ impl Rest {
         if let Some((flag, _)) = self.flags.first() {
             return Err(Failure::usage(format!("{flag} does not apply here")));
         }
+        // Switches too — a `--dry-run` on a verb that has no dry form would
+        // otherwise run the real thing while claiming a rehearsal.
+        if let Some(switch) = self.switches.first() {
+            return Err(Failure::usage(format!("{switch} does not apply here")));
+        }
         Ok(())
     }
 }
@@ -625,6 +696,13 @@ mod tests {
             "ingest submit --kind nonsense --file - --project p",
             "event read --limit twelve",
             "blob stat not-an-address",
+            "pr open",
+            "pr open --title t",
+            "pr open --title t --body b --body-file -",
+            "pr merge",
+            "pr merge 61 --strategy fast-forward",
+            "pr close 61",
+            "kernel health --dry-run",
             "nonsense",
             "kernel",
             "",
@@ -636,6 +714,39 @@ mod tests {
                 "{line:?} did not exit as a usage error"
             );
         }
+    }
+
+    #[test]
+    fn the_pr_verb_resolves_to_the_gh_argv_it_advertises() {
+        use crate::pr::{Body, Gh, Merge, Open, Strategy};
+        assert_eq!(
+            parsed("pr open --title t --body-file - --repo o/r --head b --dry-run")
+                .expect("parse")
+                .verb,
+            Verb::Pr {
+                what: Gh::Open(Open {
+                    title: "t".to_owned(),
+                    body: Body::File("-".to_owned()),
+                    repo: Some("o/r".to_owned()),
+                    base: None,
+                    head: Some("b".to_owned()),
+                }),
+                dry_run: true,
+            }
+        );
+        // The default strategy is the repository's own convention, squash —
+        // and without --dry-run the invocation is the live one.
+        assert_eq!(
+            parsed("pr merge 61").expect("parse").verb,
+            Verb::Pr {
+                what: Gh::Merge(Merge {
+                    subject: "61".to_owned(),
+                    strategy: Strategy::Squash,
+                    repo: None,
+                }),
+                dry_run: false,
+            }
+        );
     }
 
     #[test]
