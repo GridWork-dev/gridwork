@@ -48,8 +48,8 @@ need README.md 'web console' "terminal-only"
 need ROADMAP.md 'No web console' "terminal-only"
 need "$landing" 'no web console' "terminal-only"
 
-# C4 — the CURRENT stage number agrees across README, the landing source nav chip, ROADMAP,
-# and the threat model. docs/contract/NAMING.md is deliberately NOT compared here:
+# C4 — the CURRENT stage number agrees across every public surface that states it.
+# docs/contract/NAMING.md and its site mirror are deliberately NOT compared here:
 # its "stage 1 of 5" says when the naming policy froze, so it is a constant, not a
 # marker. Comparing it made every stage bump red until someone renumbered a
 # sentence that must never move — C7 pins it to the constant instead.
@@ -57,19 +57,18 @@ readme_stage=$(grep -oE 'stage [0-9] of 5' README.md | grep -oE '^stage [0-9]' |
 site_stage=$(grep -oE 'stage [0-9]/5' "$landing" | grep -oE '[0-9]' | head -1 || true)
 roadmap_stage=$(grep -oE '^## [0-9] · .*\(current\)' ROADMAP.md | grep -oE '[0-9]' | head -1 || true)
 threat_stage=$(grep -oE 'stage [0-9] of 5' docs/security/THREAT_MODEL.md | grep -oE '^stage [0-9]' | grep -oE '[0-9]' | head -1 || true)
+quickstart_stage=$(grep -oE 'stage [0-9] of 5' site/content/docs/quickstart.mdx | grep -oE '^stage [0-9]' | grep -oE '[0-9]' | head -1 || true)
+site_security_stage=$(grep -oE 'stage [0-9] of 5' site/content/docs/security/index.mdx | grep -oE '^stage [0-9]' | grep -oE '[0-9]' | head -1 || true)
+site_prose_stage=$(grep -oE 'stage [0-9] of 5' "$landing" | grep -oE '^stage [0-9]' | grep -oE '[0-9]' | head -1 || true)
 if [ -z "$readme_stage" ] \
   || [ "$readme_stage" != "$site_stage" ] \
   || [ "$readme_stage" != "$roadmap_stage" ] \
-  || [ "$readme_stage" != "$threat_stage" ]; then
-  echo "check-claims: current-stage disagreement — README='$readme_stage' site='$site_stage' ROADMAP='$roadmap_stage' THREAT_MODEL='$threat_stage'" >&2
+  || [ "$readme_stage" != "$threat_stage" ] \
+  || [ "$readme_stage" != "$quickstart_stage" ] \
+  || [ "$readme_stage" != "$site_security_stage" ] \
+  || [ "$readme_stage" != "$site_prose_stage" ]; then
+  echo "check-claims: current-stage disagreement — README='$readme_stage' site-chip='$site_stage' ROADMAP='$roadmap_stage' THREAT_MODEL='$threat_stage' quickstart='$quickstart_stage' site-security='$site_security_stage' site-prose='$site_prose_stage'" >&2
   fail=1
-fi
-# The landing source states the stage TWICE — the nav chip ("stage N/5", compared above) and
-# the roadmap gauge prose ("stage N of 5", which the chip pattern cannot see). Pin
-# the prose too; otherwise a bump that misses it ships a self-contradicting page
-# with CI green.
-if [ -n "$readme_stage" ]; then
-  need "$landing" "stage ${readme_stage} of 5" "site roadmap-gauge stage"
 fi
 
 # C5 — the binary name claim
@@ -84,6 +83,7 @@ need README.md "Don.t run .main." "main is not for use"
 # stage 1 forever. Pinned to the literal so a future current-stage bump renumbering
 # it goes red — which dropping it from C4 alone would not catch.
 need docs/contract/NAMING.md 'Frozen at the Contract stage \(stage 1 of 5\)' "contract-freeze stage"
+need site/content/docs/contract/index.mdx 'Frozen at the Contract stage \(stage 1 of 5\)' "site contract-freeze stage"
 
 # C8 — the crates table names the same crate SET on both surfaces (README table,
 # landing-page array). Name-set only: wording and status drift are readable on

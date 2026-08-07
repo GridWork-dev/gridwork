@@ -668,6 +668,32 @@ fi
 
 record="docs/derivation/reviews/$subject.md"
 
+# RULING 1A(ii) made the reviewing session id forward-only. These are the seven
+# records that already existed when the field landed; their session ids are
+# permanently unrecoverable, so they are the complete legacy exemption. A
+# subject not named here is new and must carry the field. The count assertion
+# makes widening or shrinking this exemption an explicit gate change.
+legacy_session_subjects=(
+  08ad472a68f78fbd6b2764d555e10116f94ea62df6edb40e73ab9097095b4a63
+  214ce08ceff320c86aa2b7a559b77c6257e3e2c93bae4cef5c0b2291faa37a29
+  29b22771ca9ff3c7443b6a77764e423c77fbc7f7f22b136fdbe56b673f482fa8
+  7b9d5b77b4dac5f1a0113104bfe859c4a3e6baf17a6ed05afb6ce817aa79d3e6
+  a447d09f2a2a94f0af1e908c74fb1d1389a823c6379811984cbfd25b7a6f6635
+  d4cfef6ff67cc88082f3f2fe33c7a4b60e8deccb28b25a91b1011b1745a716bc
+  e2507240fd4e02c59548138b2c26a1af5c590aa1d0ffe5c8ef3e94651c0f61d5
+)
+if [[ ${#legacy_session_subjects[@]} -ne 7 ]]; then
+  echo "cleanroom-gate: the RULING 1A legacy-session exemption must contain exactly seven subjects" >&2
+  exit 2
+fi
+legacy_session_subject() {
+  local legacy
+  for legacy in "${legacy_session_subjects[@]}"; do
+    [[ "$1" == "$legacy" ]] && return 0
+  done
+  return 1
+}
+
 echo "cleanroom-gate: engine-adjacent paths touched:"
 # Same collation as the digest, so what a reader sees listed is the order that
 # was actually hashed.
@@ -697,6 +723,15 @@ if ! grep -qx "subject: $subject" "$record"; then
 fi
 if ! grep -qE '^reviewer: .*[^[:space:]]' "$record"; then
   echo "cleanroom-gate: $record has no 'reviewer:' line naming the reviewing lane" >&2
+  exit 1
+fi
+session_lines=()
+mapfile -t session_lines < <(grep -E '^session:' "$record" || true)
+if [[ ${#session_lines[@]} -eq 0 ]] && legacy_session_subject "$subject"; then
+  echo "cleanroom-gate: $record predates RULING 1A's session id — grandfathered"
+elif [[ ${#session_lines[@]} -ne 1 ]] \
+  || ! grep -qxE '^session: [[:alnum:]][[:alnum:].:_-]*$' <<< "${session_lines[0]:-}"; then
+  echo "cleanroom-gate: $record has no valid 'session:' line (expected exactly one opaque id, never a path)" >&2
   exit 1
 fi
 

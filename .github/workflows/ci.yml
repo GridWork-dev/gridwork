@@ -28,6 +28,17 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: cargo fmt --all --check
+      - name: the performance whole-job guard fails closed (seeded violation)
+        run: |
+          set -euo pipefail
+          if ./tools/perf-job-guard.sh final failure failure; then
+            echo 'perf-job-guard accepted two misses — the retry guard is broken' >&2
+            exit 1
+          fi
+          [ "$(./tools/perf-job-guard.sh attempt success success)" = 'outcome=success' ]
+          [ "$(./tools/perf-job-guard.sh attempt success failure)" = 'outcome=failure' ]
+          ./tools/perf-job-guard.sh final failure success
+          ./tools/perf-job-guard.sh final success skipped
       # DEFAULT members, not `--workspace`. `--workspace` overrides
       # `default-members` and would pull in gwk-pty, which needs Zig and a 71 MB
       # ghostty tree — and whose build script CLONES ghostty when
@@ -148,13 +159,16 @@ jobs:
       # names which half broke.
       - run: cargo test -p gridwork --locked -- --ignored
 
-  # The accepted performance bounds, in release, against the pinned
-  # postgres major. The bounds themselves are hardware numbers and the run that
-  # asserts them as written is the operator's; a hosted runner is slower and
-  # noisier, so this job carries slack and keeps the receipt as the artifact. An
-  # order-of-magnitude collapse still reds the build, runner variance does not,
-  # and nobody is tempted to repair a flaky gate by loosening what it gates.
-  perf:
+  # The accepted performance bounds, in release, against the pinned PostgreSQL
+  # major. Sample-level slack stays fixed at 3; it cannot model contention from
+  # unrelated work sharing an entire hosted runner. A miss gets one retry in a
+  # separate job — therefore on a fresh runner — and the `perf` aggregator below
+  # remains the stable required check. Two misses are a regression; one miss
+  # followed by a clean fresh run is runner noise, not a reason to widen slack.
+  perf-attempt:
+    continue-on-error: true
+    outputs:
+      outcome: ${{ steps.verdict.outputs.outcome }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     services:
@@ -180,14 +194,73 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - run: cargo test --release -p gwk-kernel --test perf -- --ignored --nocapture
+      - id: envelope
+        continue-on-error: true
+        run: cargo test --release -p gwk-kernel --test perf -- --ignored --nocapture
       # Kept even on failure: a receipt naming which bound collapsed and by how
       # much is the whole point of the job.
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - id: receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: perf-receipt
           path: gwk-perf-receipt.json
+      - id: verdict
+        if: always()
+        env:
+          ENVELOPE_OUTCOME: ${{ steps.envelope.outcome }}
+          RECEIPT_OUTCOME: ${{ steps.receipt.outcome }}
+        run: ./tools/perf-job-guard.sh attempt "$ENVELOPE_OUTCOME" "$RECEIPT_OUTCOME" >> "$GITHUB_OUTPUT"
+
+  perf-retry:
+    needs: perf-attempt
+    if: ${{ always() && needs.perf-attempt.outputs.outcome != 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16@sha256:33f923b05f64ca54ac4401c01126a6b92afe839a0aa0a52bc5aeb5cc958e5f20
+        env:
+          POSTGRES_PASSWORD: ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      GWK_TEST_ADMIN_DATABASE_URL: postgresql://postgres:ci@localhost:5432/postgres
+      GWK_PERF_RECEIPT: gwk-perf-receipt-retry.json
+      GWK_PERF_REVISION: ${{ github.sha }}
+      GWK_PERF_SLACK: "3"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - run: cargo test --release -p gwk-kernel --test perf -- --ignored --nocapture
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: perf-receipt-retry
+          path: gwk-perf-receipt-retry.json
+
+  perf:
+    needs: [perf-attempt, perf-retry]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: resolve the first attempt and fresh-runner retry
+        run: >-
+          ./tools/perf-job-guard.sh final
+          "${{ needs.perf-attempt.outputs.outcome }}"
+          "${{ needs.perf-retry.result }}"
 
   # The second platform the kernel claims. Socket behaviour is not portable by
   # assumption — `sun_path` is 104 bytes here and 108 on Linux, a parent
@@ -939,6 +1012,53 @@ jobs:
             exit 1
           fi
           echo "cleanroom-gate: seeded violation correctly rejected ($seed)"
+      - name: a new record carries an opaque session id (seeded violation)
+        run: |
+          set -euo pipefail
+          seed="$(grep -Ev '^[[:space:]]*(#|$)' .github/cleanroom-paths.txt | head -n1)seeded-session.rs"
+          subject="$(printf '%s\n' "$seed" | ./tools/cleanroom-gate.sh --subject)"
+          record="docs/derivation/reviews/$subject.md"
+          trap 'rm -f "$record"' EXIT
+          write_record() {
+            {
+              printf 'subject: %s\n' "$subject"
+              printf 'reviewer: seeded fresh-context lane\n'
+              if [ -n "${1:-}" ]; then
+                printf 'session: %s\n' "$1"
+              fi
+              printf '%s\n' '- [x] citations' '- [x] framing' '- [x] references' '- [x] leak'
+            } > "$record"
+          }
+
+          write_record
+          out=0
+          msg="$(printf '%s\n' "$seed" | ./tools/cleanroom-gate.sh 2>&1)" || out=$?
+          if [ "$out" -eq 0 ]; then
+            echo 'cleanroom-gate accepted a new record with no session id' >&2
+            exit 1
+          fi
+          echo "$msg" | grep -q "has no valid 'session:' line" || {
+            echo 'the session-less record failed for the wrong reason' >&2
+            printf '%s\n' "$msg" >&2
+            exit 1
+          }
+
+          write_record ../seeded/session
+          if printf '%s\n' "$seed" | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate accepted a session path instead of an opaque id' >&2
+            exit 1
+          fi
+
+          write_record seeded-session-id
+          printf 'session: ../seeded/session\n' >> "$record"
+          if printf '%s\n' "$seed" | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate let an opaque id mask a second path-like session' >&2
+            exit 1
+          fi
+
+          write_record seeded-session-id
+          printf '%s\n' "$seed" | ./tools/cleanroom-gate.sh
+          echo "cleanroom-gate: missing/path/duplicate sessions rejected; one opaque id accepted"
       - name: a gated module prefix reaches its siblings (seeded violation)
         run: |
           set -euo pipefail
@@ -1403,6 +1523,22 @@ jobs:
           persist-credentials: false
       - run: ./tools/leak-scan.sh
       - run: ./tools/check-claims.sh
+      - name: prove every current-stage mirror is compared (seeded violation)
+        run: |
+          set -euo pipefail
+          mirror=site/content/docs/quickstart.mdx
+          cp "$mirror" /tmp/quickstart.mdx
+          trap 'cp /tmp/quickstart.mdx "$mirror"' EXIT
+          current="$(grep -oE 'stage [0-9] of 5' README.md | grep -oE '[0-9]' | head -n1)"
+          bumped=$((current % 5 + 1))
+          sed -i -E "s/stage ${current} of 5/stage ${bumped} of 5/" "$mirror"
+          if ./tools/check-claims.sh; then
+            echo "check-claims accepted a bumped current-stage mirror ($mirror)" >&2
+            exit 1
+          fi
+          cp /tmp/quickstart.mdx "$mirror"
+          ./tools/check-claims.sh
+          echo "check-claims: bumped current-stage mirror correctly rejected"
       - name: prove the gate can fail (seeded violation)
         run: |
           seed=$(printf 'creds at /ho%s/example/data' 'me')

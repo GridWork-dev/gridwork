@@ -56,8 +56,10 @@ cp docs/derivation/reviews/TEMPLATE.md "docs/derivation/reviews/$subject.md"
 Fill in `subject:`, `reviewer:`, `session:` (the reviewing session's opaque id — an id,
 never a path), and tick all four checks. Commit it in the same
 branch. The gate verifies the file exists, that it declares the matching subject, that
-it names a reviewer, and that all four checks are ticked — and, separately, that every
-gated source file in the change carries a resolving `Derivation:` marker.
+it names a reviewer and an opaque reviewing-session id, and that all four checks are
+ticked — and, separately, that every gated source file in the change carries a resolving
+`Derivation:` marker. The seven records that predate the `session:` field are the only
+grandfathered subjects; their session ids are permanently unrecoverable.
 
 ## What the reviewer does
 
