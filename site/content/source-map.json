@@ -105,7 +105,7 @@
     },
     {
       "destination": "content/docs/roadmap.mdx",
-      "sha256": "8990776210775b5030832eadcc15bfc63522e709dc31a29c6d680cff3d0de827",
+      "sha256": "06ab5aea50b9f16e650ccf5ea55824c8f70b683bdfed449a2678ca7f0beb87ea",
       "sources": [
         {
           "path": "ROADMAP.md"
