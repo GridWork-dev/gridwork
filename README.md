@@ -35,24 +35,28 @@ allowed to do that. GridWork is an operating layer for a fleet of terminal agent
 
 ## Where it actually is
 
-Pre-alpha, at stage 3 of 5. **Stages 1 and 2 — the contract and the kernel — shipped**,
-both published on crates.io. The kernel is a daemon owning an append-only event store,
+Pre-alpha, at stage 4 of 6. **Stages 1–3 — the contract, the kernel, and the
+engines — are done**: the first two published on crates.io, stage 3 exiting with
+its twelve-cell parity matrix certified green at pinned engine versions
+([docs/PARITY.md](docs/PARITY.md)). The kernel is a daemon owning an append-only event store,
 projections written in the same transaction as their events, content-addressed
 encrypted blobs, authority evaluation that leaves a receipt, event subscriptions, and
 `gw` — the headless CLI over the same protocol the TUI will use. Certified against a
 real PostgreSQL 16 and its performance envelope measured, not asserted.
 
-Stage 3 is in flight, and its crates are in this tree: `gwk-pty` (a real server-side VT
-engine), the three `gwk-adapter-*` crates, the parity harness that measures them,
-`gwk-pty-host` (the resident host: session supervision, wire-frame conversion, and
-command origination — no consumer-facing hookup yet), and a skeleton `gwk-tui`. None of
-it is finished, none of it is published, and none of it is wired into a surface you can
-sit in front of — so the
+Stage 3's crates are in this tree, deliberately unpublished until 1.0 packaging:
+`gwk-pty` (a real server-side VT engine), the three `gwk-adapter-*` crates, the
+parity harness that certifies them, and `gwk-pty-host` (the resident host:
+session supervision, wire-frame conversion, and command origination — no
+consumer-facing attach route yet). Stage 4 — the console — is in flight:
+`gwk-tui` now carries four lenses (Queue, Board, Config, and the session
+drill-down), none of it wired into a surface you can sit in front of — so the
 terminal-native and engine-agnostic bullets above are still describing what GridWork is
 being built to be, and the daemon you can run today has a JSON command line as its only
 face.
 
-The build order — contract → kernel → engines → console → workspace — with what each
+The build order — contract → kernel → engines → console → workspace → context
+runtime — with what each
 stage delivers, is in [ROADMAP.md](ROADMAP.md). For per-boundary status, the threat
 model labels every stance *in force*, *partial*, or *designed, not yet built*.
 

@@ -5,8 +5,9 @@ mitigation lives. Written for contributors: if your change touches one of
 these boundaries, the relevant stance is review criteria, not background
 reading. Reporting: see `SECURITY.md`.
 
-GridWork is pre-alpha, at stage 3 of 5 (see `ROADMAP.md`): the kernel is built, the
-engines and the whole human surface are not — so several stances below are still
+GridWork is pre-alpha, at stage 4 of 6 (see `ROADMAP.md`): the kernel and the
+engines are built — the engine crates certified by the parity matrix — while the
+console and the rest of the human surface are not, so several stances below are still
 design commitments whose enforcing code does not exist yet. Each stance therefore
 carries a status: **in force** (enforced at HEAD), **partial** (naming what is
 enforced versus designed), or **designed, not yet built**. A design stance is a
@@ -194,8 +195,8 @@ REFUSES when full instead of queueing — overload becomes a typed answer the
 caller can act on rather than an unbounded pile of connections on one row. A
 consumer that stops reading loses its stream and is told the cursor it actually
 received, so resuming does not skip what it never got. Budgets remain contract
-data only: kill-and-alert needs a running engine host to kill, and stage 3 is in
-flight — the engine crates are in the tree, but no host process enforces budgets yet.
+data only: kill-and-alert needs a running engine host to kill, and while the
+resident host process now exists, it does not yet enforce budgets.
 
 ### 8. Provenance of agent-authored code
 
