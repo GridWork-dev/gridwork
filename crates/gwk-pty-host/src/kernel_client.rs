@@ -19,10 +19,11 @@
 
 use std::path::Path;
 
-use gwk_domain::ids::RequestId;
+use gwk_domain::ids::{DispatchNodeId, RequestId};
 use gwk_domain::protocol::{
     CONNECTION_EGRESS_BYTES_PER_WINDOW, CONNECTION_INGRESS_BYTES_PER_WINDOW, ClientControl,
-    FRAME_BODY_MAX_BYTES, FrameKind, KernelRequest, ProtocolVersion, ServerControl,
+    FRAME_BODY_MAX_BYTES, FrameKind, KernelRequest, ProjectionKind, ProjectionRecord,
+    ProtocolVersion, ServerControl,
 };
 use gwk_domain::{CommandEnvelope, KernelErrorCode, KernelResult};
 use gwk_kernel::wire::frame::{Budget, Incoming, read_frame, write_frame};
@@ -119,6 +120,35 @@ impl KernelClient {
         envelope: CommandEnvelope,
     ) -> Result<KernelResult, KernelClientError> {
         self.ask(KernelRequest::SubmitCommand { envelope }).await
+    }
+
+    /// A dispatch node's current version, or `None` when the kernel holds no
+    /// such node. This is the re-read a stale `TransitionDispatchNode` needs
+    /// before it may be re-originated — [`crate::origination::Outcome`]'s own
+    /// doc forbids guessing the next version.
+    pub async fn dispatch_node_version(
+        &mut self,
+        id: &DispatchNodeId,
+    ) -> Result<Option<u32>, KernelClientError> {
+        let request = KernelRequest::GetProjection {
+            projection: ProjectionKind::DispatchNode,
+            id: id.as_str().to_owned(),
+        };
+        match self.ask(request).await? {
+            KernelResult::Projection {
+                record: ProjectionRecord::DispatchNode { dispatch_node },
+            } => Ok(Some(dispatch_node.version)),
+            // Absent is an ANSWER on this projection, same as everywhere
+            // else in the contract — not a client-side error.
+            KernelResult::Error {
+                code: KernelErrorCode::NotFound,
+                ..
+            } => Ok(None),
+            other => Err(KernelClientError::Unexpected {
+                waited_on: "a dispatch-node projection",
+                found: format!("{other:?}"),
+            }),
+        }
     }
 
     /// Liveness only, for a boot-time connectivity check.

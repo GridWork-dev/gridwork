@@ -2,9 +2,14 @@
 //! kernel connectivity, tells a service manager it is ready, and waits to
 //! be told to stop.
 //!
-//! PTY session supervision (spawn, pump loop, restart semantics, session
-//! registry, detach/reattach routing) is not wired into this binary yet —
-//! see `crate` root doc for why this change stops here.
+//! The session runtime (spawn, pump loop, restart semantics, session
+//! registry, detach/reattach routing) lives in this crate's library —
+//! `gwk_pty_host::registry` down. The binary starts no session yet because
+//! nothing can ask it to: the kernel-side hookup that routes attach and
+//! spawn across the socket is the follow-up the crate root doc names, and a
+//! session no consumer can reach would be a child process running for no
+//! one. What the binary does today is exactly what its service unit needs
+//! it to do; the registry joins this main loop the day the hookup lands.
 //!
 //! Derivation: none — process wiring and signal handling only; no terminal
 //! byte is parsed and no engine process is supervised by this file.

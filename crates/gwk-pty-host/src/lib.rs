@@ -2,47 +2,58 @@
 //! spawn, pump loop, restart semantics, session registry, and detach/reattach
 //! routing (CLEANROOM.md's own words for what this crate is gated for).
 //!
-//! # Scope of this change
+//! # Shape of the crate
 //!
-//! This change lands the KERNEL-facing half: command origination. Every
-//! command this host mints — an envelope with a minted id and an
-//! idempotency key, submitted over the kernel's Unix socket, its result
-//! classified into something a caller can act on — lives here, including
-//! the two command families with no existing builder anywhere else in the
-//! workspace ([`ingest`] for `IngestRecord`, [`dispatch_node`] for
-//! `RegisterDispatchNode`/`TransitionDispatchNode`), both reachable from one
-//! normalized transcript record via [`ingest::originate`].
+//! Two halves, joined by the [`session`] task:
 //!
-//! **PTY session supervision itself — spawning an engine, pumping its
-//! output, session registry, restart semantics, detach/reattach routing —
-//! is NOT wired into this change**, and that is a boundary this crate
-//! records rather than blurs. Every crate that could supply it
-//! (`gwk-pty`, and `gwk-adapter-claude`/`gwk-adapter-codex`/
-//! `gwk-adapter-opencode`, all three of which depend on `gwk-pty`) needs
-//! Zig 0.15.2 plus a pinned `ghostty` checkout to BUILD at all
-//! (`crates/gwk-pty/pins.env`, `tools/pty-toolchain.sh`) — a toolchain this
-//! change's execution environment does not carry, so a Cargo dependency on
-//! any of the four would make `cargo test -p gwk-pty-host` fail to compile
-//! here regardless of what this crate's own code does. Nothing in this
-//! crate names or imports any of the four; the command-origination surface
-//! below is deliberately engine-agnostic (a `TranscriptRecord` is JSON plus
-//! an [`gwk_domain::IngestionKind`], never an adapter's own typed event
-//! enum) so wiring in a real session registry later is additive rather than
-//! a rewrite of what already works. `docs/PARITY.md`'s axis 3 (transcript
-//! ingestion) is what this crate answers for; axes 1, 2, and 4 (lifecycle,
-//! status, approval relay) all need a live session and stay with that
-//! follow-up.
+//! - **The engine-facing half** — [`session`] supervises one child on a PTY
+//!   through `gwk_pty::Session` (pump loop, recording, styled frames, restart
+//!   semantics), [`wire`] converts the engine's typed output into the wire
+//!   contract's `PtyFrame`/`PtyDelta` shapes, [`registry`] holds every live
+//!   session by id and routes the verbs (spawn, input, resize, snapshot,
+//!   attach, stop), and [`engines`] maps an engine name to its adapter's own
+//!   spawn function.
+//! - **The kernel-facing half** — command origination. Every command this
+//!   host mints — an envelope with a minted id and an idempotency key,
+//!   submitted over the kernel's Unix socket, its result classified into
+//!   something a caller can act on — lives in [`envelope`],
+//!   [`kernel_client`], and [`origination`], including the two command
+//!   families with no builder anywhere else in the workspace ([`ingest`] for
+//!   `IngestRecord`, [`dispatch_node`] for
+//!   `RegisterDispatchNode`/`TransitionDispatchNode`). One normalized
+//!   transcript record travels the whole path through
+//!   [`origination::originate_record`].
+//!
+//! Building this crate now needs the same Zig 0.15.2 + pinned `ghostty`
+//! toolchain as `gwk-pty` itself (`crates/gwk-pty/pins.env`,
+//! `tools/pty-toolchain.sh`) — the engine dependency PR #43 deferred for
+//! want of that toolchain is wired in here, and the `pty-host` CI job
+//! materializes it the same way the `pty` job does.
+//!
+//! # The boundary that remains
+//!
+//! The kernel serves `PtyAttach`/`PtySnapshot` to consumers, but v1 of the
+//! wire has no family a host can PUSH frames through — the kernel's own
+//! serve loop records that its session registry "lands with the pin-advance
+//! task that wires the PTY host in" (`crates/gwk-kernel/src/wire/serve.rs`),
+//! and frame kind `0x02` is reserved-and-refused. Until that task, this
+//! crate's [`registry`] is where attach, snapshot, and delta batches are
+//! served FROM ([`registry::SessionRegistry::attach`] returns exactly the
+//! catch-up-plus-live shape the wire contract describes); the hookup that
+//! carries them across the socket is that follow-up's, not silently absent.
+//! `docs/PARITY.md`'s axes 1, 2, and 4 (lifecycle, status, approval relay)
+//! ride the same follow-up — they need the adapters' control halves, which
+//! no 6′ verify demands of the host yet.
 //!
 //! # Clean-room scope
 //!
 //! This crate is under `CLEANROOM.md`'s second-review gate
 //! (`.github/cleanroom-paths.txt`), by the `crates/gwk-pty` prefix and by its
-//! own explicit row. Nothing in this change parses a terminal-protocol byte,
-//! spawns a process, or supervises a session — it originates kernel commands
-//! from already-normalized values — so every file here carries rule 3's
-//! declaration form rather than a citation. The day PTY supervision lands,
-//! the files that actually touch terminal bytes earn real `Derivation:`
-//! markers of their own; this one stays honest about carrying none.
+//! own explicit row. The supervision code here drives the engine crate's
+//! typed API and never parses a terminal-protocol byte itself — the parser,
+//! and every fact about PTY semantics, stays in `gwk-pty` where its
+//! `Derivation:` markers already live. Every file here carries rule 3's
+//! declaration form stating what it does instead.
 
 // Derivation: none — this file is crate-level documentation and module
 // wiring only: no process is spawned, no byte is parsed, no session is
@@ -51,8 +62,12 @@
 #![doc(html_root_url = "https://docs.rs/gwk-pty-host")]
 
 pub mod dispatch_node;
+pub mod engines;
 pub mod envelope;
 pub mod ingest;
 pub mod kernel_client;
 pub mod logging;
 pub mod origination;
+pub mod registry;
+pub mod session;
+pub mod wire;
