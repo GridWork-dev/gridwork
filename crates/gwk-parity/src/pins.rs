@@ -21,7 +21,7 @@ pub fn d_bound() -> Duration {
 /// `docs/PARITY.md`'s "Version pins" table, "CLI reports" column, Claude
 /// Code row — everything after the version number is the CLI's own
 /// parenthetical, not part of the pin this crate checks against.
-pub const CLAUDE_CLI_VERSION: &str = "2.1.220";
+pub const CLAUDE_CLI_VERSION: &str = "2.1.223";
 
 /// `docs/PARITY.md`'s "Version pins" table, Codex row.
 pub const CODEX_CLI_VERSION: &str = "0.146.0";
