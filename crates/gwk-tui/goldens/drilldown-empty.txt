@@ -1,0 +1,5 @@
+waiting for the first hosted frame
+
+
+
+ waiting  SESSION pty-demo  seq -  0x0  view 0,0
