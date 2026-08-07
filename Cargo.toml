@@ -95,7 +95,9 @@ proptest = { version = "1.11.0", default-features = false, features = ["std", "b
 # graph are two incompatible `Buffer` types that will not compile together. The
 # assertion exists now, before a second such crate is in the tree, so the bump
 # that brings one arrives at a check rather than at a type error nobody expected.
-ratatui = "0.30.2"
+# `underline-color` carries a hosted session's SGR 58 value through the
+# drill-down buffer; without it the typed wire field would disappear at paint.
+ratatui = { version = "0.30.2", features = ["underline-color"] }
 # One call: `geteuid`, for the UDS peer check. Chosen over `libc` because its
 # wrapper is SAFE — the workspace forbids `unsafe_code`, so a raw extern call
 # would not compile here — and over `nix` because it was already in the tree.
