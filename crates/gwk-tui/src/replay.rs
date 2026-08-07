@@ -56,6 +56,9 @@ pub enum ReplayError {
     /// Recorded elapsed time must not move backwards.
     #[error("elapsed time went from {previous} to {found}, which is out of order")]
     ElapsedOutOfOrder { previous: u64, found: u64 },
+    /// Real terminal recordings cannot contain a zero-sized axis.
+    #[error("a terminal cannot be {cols}x{rows}")]
+    InvalidGeometry { cols: u16, rows: u16 },
     /// An output frame declares more bytes than remain in the stream.
     #[error("output length {declared} exceeds the {remaining} bytes remaining")]
     ImpossibleLength { declared: u32, remaining: usize },
@@ -112,12 +115,19 @@ impl ReplayTimeline {
                         bytes,
                     }
                 }
-                1 => ReplayFrame::Resize {
-                    seq,
-                    elapsed_ms,
-                    cols: read_u16(&mut rest)?,
-                    rows: read_u16(&mut rest)?,
-                },
+                1 => {
+                    let cols = read_u16(&mut rest)?;
+                    let rows = read_u16(&mut rest)?;
+                    if cols == 0 || rows == 0 {
+                        return Err(ReplayError::InvalidGeometry { cols, rows });
+                    }
+                    ReplayFrame::Resize {
+                        seq,
+                        elapsed_ms,
+                        cols,
+                        rows,
+                    }
+                }
                 other => return Err(ReplayError::UnknownTag(other)),
             };
 

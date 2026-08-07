@@ -111,6 +111,14 @@ fn replay_refuses_malformed_and_out_of_order_streams() {
         })
     );
 
+    for (cols, rows) in [(0, 24), (80, 0), (0, 0)] {
+        let invalid_geometry = recording([(0, 0, Frame::Resize { cols, rows })]);
+        assert_eq!(
+            ReplayTimeline::decode(&invalid_geometry),
+            Err(ReplayError::InvalidGeometry { cols, rows })
+        );
+    }
+
     let mut impossible_length = recording([(0, 0, Frame::Output(vec![]))]);
     impossible_length[25..29].copy_from_slice(&10_u32.to_le_bytes());
     assert_eq!(
