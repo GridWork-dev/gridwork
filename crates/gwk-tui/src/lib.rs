@@ -39,5 +39,6 @@ pub mod drilldown;
 pub mod input;
 pub mod probe;
 pub mod queue;
+pub mod replay;
 pub mod seven_act;
 pub mod theme;
