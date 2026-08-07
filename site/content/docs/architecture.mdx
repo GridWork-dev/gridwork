@@ -3,7 +3,7 @@ title: Architecture
 description: Truth ownership, append serialization, storage ports, projections, blobs, crash recovery, and contract surfaces.
 ---
 
-{/* curated-from: docs/architecture.md sha256=5133eae9122a9f0891831b35fbde7f4afa07d3f4c3cb5f20ff2a679cca6ce0f1 */}
+{/* curated-from: docs/architecture.md sha256=44ade0197e2b14e35c8011c477dc1b40210367d6d1c1e6c6906e6241e4946b86 */}
 
 The implementation contract behind the roadmap: what owns truth, what the
 pieces are, and which decisions are locked versus deliberately deferred.
@@ -21,8 +21,9 @@ Locked decisions change only by a recorded amendment, not by drift.
 >
 > **In flight (in the tree, incomplete, unpublished):** the PTY engine
 > (`gwk-pty` — server-side VT, render deltas, styled cells, attach, record) and
-> the three agent adapters, with `gwk-pty-host` a skeleton whose runtime wiring
-> is in progress.
+> the three agent adapters, with `gwk-pty-host` carrying the session runtime
+> (supervision, wire-frame conversion, command origination) but not yet the
+> kernel-side hookup that serves its frames to a consumer.
 >
 > **Not built:** the TUI — the whole human surface. Anything this file says
 > about lenses, the console, or the workspace is specification.

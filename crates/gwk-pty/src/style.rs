@@ -21,13 +21,14 @@ use libghostty_vt::style::{Style as VtStyle, StyleColor, Underline as VtUnderlin
 pub enum Color {
     /// A palette index (0-255).
     ///
-    // Derivation: ECMA-48 §8.3.117 — SGR parameters 30-37/40-47 name the eight
-    // basic display/background colours as bare parameter values, unqualified
-    // by any colour space, which is what makes them palette lookups rather
-    // than direct values. XTERM-CTLSEQS "Character Attributes (SGR)" extends
-    // the same shape twice — the aixterm 90-97/100-107 range for the bright
-    // eight, and the `38;5;Ps`/`48;5;Ps` form for the full 256-entry table —
-    // and all three select a SLOT, not a colour, so this variant carries the
+    // Derivation: ECMA-48 §8.3.117 — SGR parameters 30-37/40-47 name one of
+    // the eight basic named colours for display/background as bare parameter
+    // values, unqualified by any colour space. XTERM-CTLSEQS "Character
+    // Attributes (SGR)" extends the same shape twice — the aixterm
+    // 90-97/100-107 range for the bright eight, and the `38;5;Ps`/`48;5;Ps`
+    // form for the full 256-entry table. That all three select a slot rather
+    // than a colour is this crate's reading of that shape, not a sentence
+    // either document contains — and it is why this variant carries the
     // index rather than resolving it.
     Palette(u8),
     /// A direct 24-bit color.

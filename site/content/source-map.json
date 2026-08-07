@@ -3,7 +3,7 @@
   "pages": [
     {
       "destination": "content/docs/index.mdx",
-      "sha256": "489c43444ceba65ccb6a5321e55814fd3203e3f9687038488222cd6a76b6e608",
+      "sha256": "c0042643f4314177f3b214acb39be69d0874773a306a7ce9ce37026d17c36c4a",
       "sources": [
         {
           "path": "README.md"
@@ -12,7 +12,7 @@
     },
     {
       "destination": "content/docs/quickstart.mdx",
-      "sha256": "ea4d226fdbf43877e8613521811888d26eda184551cff1707bb9058d16f15541",
+      "sha256": "30ea9c35e5ca903c18c9d18c9ad1d274d6b9dfe0b9cc24567071163da6541867",
       "sources": [
         {
           "path": "README.md"
@@ -21,7 +21,7 @@
     },
     {
       "destination": "content/docs/architecture.mdx",
-      "sha256": "5d556893dd25ac22708f77af817f4b16d8b240fbe5f20133cbf4597fe910ca83",
+      "sha256": "edc9b8389efd7d2bec0dff069cab0b83b2222a8f2c931316ff6e0d7e85ee7360",
       "sources": [
         {
           "path": "docs/architecture.md"
@@ -96,7 +96,7 @@
     },
     {
       "destination": "content/docs/derivation/reviews.mdx",
-      "sha256": "dbc0138511dc4fb9797006763fc4e01375ff8205762ae97b13cd6ca6af10a14c",
+      "sha256": "89e99e11de795b93b543d07cac4e913c013f9988feff7f8775238d417f1c946a",
       "sources": [
         {
           "path": "docs/derivation/reviews"

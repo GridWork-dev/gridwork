@@ -1,18 +1,20 @@
 # systemd unit for the gwk-pty-host resident process.
 #
-# NOT installed or enabled by landing this file — that is an operator act,
-# outside the scope of the change that added it. This describes how the
-# binary this crate builds (`crates/gwk-pty-host/src/main.rs`) is meant to
-# run once an operator chooses to.
+# This file is the SYSTEM-scope reference. A deployment may also run it as a
+# user unit (`systemctl --user`) — drop the `User=`/`Group=` lines (a user
+# manager cannot switch users; the unit already runs as its owner, which
+# satisfies the same-EUID requirement below when that owner is the kernel
+# daemon's user) and install under `default.target` instead of
+# `multi-user.target`. The reference host runs it that way.
 #
-# No in-repo packaging convention exists yet to follow: as of this change
-# neither the kernel (`crates/gwk-kernel`) nor `gw` (`crates/gridwork`)
-# ships a systemd unit in this repository, so there is nothing to copy from.
-# What follows is derived instead from `docs/operations.md`'s own
-# description of the kernel daemon's startup/shutdown contract — SIGTERM
-# handled, not just Ctrl-C; `notify_ready()`'s READY=1 datagram on
-# `$NOTIFY_SOCKET` — and this crate's own hard floor: no credential store,
-# no listening network surface of its own.
+# No in-repo packaging convention exists yet to follow: neither the kernel
+# (`crates/gwk-kernel`) nor `gw` (`crates/gridwork`) ships a systemd unit in
+# this repository, so there is nothing to copy from. What follows is derived
+# instead from `docs/operations.md`'s own description of the kernel daemon's
+# startup/shutdown contract — SIGTERM handled, not just Ctrl-C;
+# `notify_ready()`'s READY=1 datagram on `$NOTIFY_SOCKET` — and this crate's
+# own hard floor: no credential store, no listening network surface of its
+# own.
 
 [Unit]
 Description=GridWork PTY engine host (gwk-pty-host)

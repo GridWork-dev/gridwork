@@ -16,8 +16,9 @@ Locked decisions change only by a recorded amendment, not by drift.
 >
 > **In flight (in the tree, incomplete, unpublished):** the PTY engine
 > (`gwk-pty` — server-side VT, render deltas, styled cells, attach, record) and
-> the three agent adapters, with `gwk-pty-host` a skeleton whose runtime wiring
-> is in progress.
+> the three agent adapters, with `gwk-pty-host` carrying the session runtime
+> (supervision, wire-frame conversion, command origination) but not yet the
+> kernel-side hookup that serves its frames to a consumer.
 >
 > **Not built:** the TUI — the whole human surface. Anything this file says
 > about lenses, the console, or the workspace is specification.

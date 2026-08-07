@@ -42,6 +42,13 @@ pub struct Row {
     // add it if a profiled frame size ever calls for it — nothing here has
     // measured one yet.
     pub styles: Vec<CellStyle>,
+    /// The zero-based starting column of each pushed cluster, index-aligned
+    /// with `styles`. Strictly increasing; consecutive entries differ by more
+    /// than one exactly where a wide cluster's spacer cells sit (see the
+    /// UAX-11 note in the loop below), which is how a consumer converting to
+    /// a per-column shape recovers each cluster's width without re-deriving
+    /// it from the text — the engine already decided it.
+    pub cols: Vec<u16>,
 }
 
 /// What a surface has to redraw to be current with the grid.
@@ -123,8 +130,15 @@ impl Renderer {
                 if full || row_dirty {
                     let mut text = String::new();
                     let mut styles = Vec::new();
+                    let mut cols = Vec::new();
+                    let mut col = 0u16;
                     let mut cell_iter = self.cells.update(row).ok()?;
                     while let Some(cell) = cell_iter.next() {
+                        // Every iterated cell is one column, spacers included
+                        // — that is what makes the gaps in `cols` line up
+                        // with the spacer cells skipped below.
+                        let this_col = col;
+                        col += 1;
                         // Derivation: UAX-11 — East Asian Wide (W) and
                         // Fullwidth (F) characters take one Em in a fixed-pitch
                         // font against half an Em for the narrow classes, i.e.
@@ -170,6 +184,7 @@ impl Renderer {
                         } else {
                             text.push_str(&cluster);
                         }
+                        cols.push(this_col);
                         // Pushed for the same cell `text` just gained a
                         // cluster for, in the same iteration — that is what
                         // keeps `styles[i]` describing the i-th pushed cluster
@@ -178,7 +193,12 @@ impl Renderer {
                         // mode 2027 — see the note on [`Row::styles`].
                         styles.push(CellStyle::from(cell.style().ok()?));
                     }
-                    changed.push(Row { y, text, styles });
+                    changed.push(Row {
+                        y,
+                        text,
+                        styles,
+                        cols,
+                    });
                 }
                 // Marking the row clean is the caller's job, not a side effect
                 // of reading it. Skipping this leaves every row dirty forever,
@@ -236,6 +256,11 @@ mod tests {
             first.changed[0].text.chars().count(),
             20,
             "an all-narrow row is one char per column, blanks included"
+        );
+        assert_eq!(
+            first.changed[0].cols,
+            (0..20).collect::<Vec<u16>>(),
+            "an all-narrow row's clusters start at consecutive columns"
         );
 
         // Nothing has been written since, so there is nothing to repaint. This
@@ -319,6 +344,37 @@ mod tests {
             text.contains('\u{200D}'),
             "the joiner should still be there, not truncated to the base: {text:?}"
         );
+    }
+
+    #[test]
+    fn a_wide_cluster_advances_the_column_by_two() {
+        // Derivation: UAX-11 — U+5BEC is East Asian Wide, so under the
+        // two-cells-per-wide-character model the loop above reads into the
+        // annex's Em ratio, the character's cell is followed by a spacer.
+        // The spacer contributes no cluster, so the NEXT cluster's starting
+        // column must jump by two — and that jump is the fact `cols` exists
+        // to carry: without it a consumer laying `text` back onto a grid
+        // would put `b` one column early.
+        let mut grid = Grid::new(6, 1).expect("6x1");
+        let mut renderer = Renderer::new().expect("render state");
+        grid.write("a\u{5BEC}b".as_bytes());
+
+        let frame = renderer.frame(&grid, 0).expect("frame");
+        let row = &frame.changed[0];
+        assert_eq!(trimmed(&frame, 0), "a\u{5BEC}b");
+        assert_eq!(
+            row.cols[..3],
+            [0, 1, 3],
+            "the wide cluster at column 1 should push the next cluster to 3: {:?}",
+            row.cols
+        );
+        assert_eq!(
+            row.cols.len(),
+            row.styles.len(),
+            "cols and styles must stay index-aligned"
+        );
+        // The blanks after `b` are ordinary one-column clusters again.
+        assert_eq!(row.cols[3..], [4, 5]);
     }
 
     #[test]

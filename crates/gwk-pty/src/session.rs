@@ -66,13 +66,23 @@ impl Session {
     ///
     /// Returns the number of bytes taken; `0` means the child hung up and no
     /// further call will return more.
+    pub async fn pump(&mut self) -> io::Result<usize> {
+        self.pump_chunk().await.map(|chunk| chunk.len())
+    }
+
+    /// [`pump`](Self::pump), but returning the bytes that reached the parser.
+    ///
+    /// A caller that records the stream for later replay needs the chunk
+    /// itself, not its length — [`crate::record::Event::Output`] stores the
+    /// bytes exactly as read. An empty vector means the child hung up,
+    /// matching `pump`'s `0`.
     ///
     /// A chunk reaches the parser exactly as it arrived — see the derivation
     /// note on the write below.
-    pub async fn pump(&mut self) -> io::Result<usize> {
+    pub async fn pump_chunk(&mut self) -> io::Result<Vec<u8>> {
         let mut buf = [0u8; READ_CHUNK];
         match self.pty.read(&mut buf).await {
-            Ok(0) => Ok(0),
+            Ok(0) => Ok(Vec::new()),
             Ok(n) => {
                 // Derivation: ECMA-48 §5.4 — a control sequence is CSI, then
                 // parameter bytes, then intermediate bytes, then a final byte.
@@ -82,7 +92,7 @@ impl Session {
                 // "complete" it, is how a reader corrupts input the parser
                 // would have handled correctly on its own.
                 self.grid.write(&buf[..n]);
-                Ok(n)
+                Ok(buf[..n].to_vec())
             }
             // Derivation: CAP-002 — reading a PTY master whose slave has closed
             // fails with EIO on Linux instead of reporting end-of-file. The
@@ -107,7 +117,9 @@ impl Session {
             // that. The macOS job builds the default members, which do not
             // include this crate. If a platform does report end-of-file, the
             // `Ok(0)` arm already carries it.
-            Err(e) if e.raw_os_error() == Some(rustix::io::Errno::IO.raw_os_error()) => Ok(0),
+            Err(e) if e.raw_os_error() == Some(rustix::io::Errno::IO.raw_os_error()) => {
+                Ok(Vec::new())
+            }
             Err(e) => Err(e),
         }
     }
@@ -206,6 +218,17 @@ impl Session {
     pub async fn wait(&mut self) -> io::Result<std::process::ExitStatus> {
         self.child.wait().await
     }
+
+    /// Kill the child and reap it.
+    ///
+    /// Dropping a `Session` closes the PTY master, which only *signals* the
+    /// child (SIGHUP) — a child that ignores it lingers. A supervisor telling
+    /// a session to stop needs the unconditional form, and it needs the reap,
+    /// or the exit status is left for no one and the process table keeps a
+    /// zombie until the supervisor itself exits.
+    pub async fn kill(&mut self) -> io::Result<()> {
+        self.child.kill().await
+    }
 }
 
 #[cfg(test)]
@@ -260,6 +283,50 @@ mod tests {
         session.send(b"\x04").await.expect("sending EOT");
         drain(&mut session).await;
         assert!(session.wait().await.expect("waiting on cat").success());
+    }
+
+    #[tokio::test]
+    async fn pump_chunk_returns_the_bytes_the_grid_was_fed() {
+        let mut session = Session::spawn(
+            pty_process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg("printf 'hello'"),
+            80,
+            24,
+        )
+        .expect("spawning /bin/sh on a pty");
+
+        // Collect until hang-up, so the assertion sees the whole stream no
+        // matter how the reads happened to chunk it.
+        let mut collected = Vec::new();
+        loop {
+            let chunk = session.pump_chunk().await.expect("pty read failed");
+            if chunk.is_empty() {
+                break;
+            }
+            collected.extend_from_slice(&chunk);
+        }
+
+        assert_eq!(
+            collected, b"hello",
+            "the returned chunks should be exactly what the child wrote"
+        );
+        assert_eq!(
+            session.grid().row_text(0).as_deref(),
+            Some("hello"),
+            "and the same bytes should have reached the grid"
+        );
+    }
+
+    #[tokio::test]
+    async fn kill_stops_a_child_that_would_otherwise_run_forever() {
+        // `cat` with no input never exits on its own; only the kill ends it.
+        let mut session = Session::spawn(pty_process::Command::new("/bin/cat"), 80, 24)
+            .expect("spawning /bin/cat on a pty");
+
+        session.kill().await.expect("killing the child");
+        let status = session.wait().await.expect("reaping the child");
+        assert!(!status.success(), "a killed child did not exit cleanly");
     }
 
     #[tokio::test]

@@ -8,11 +8,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
-# Not published — matches gwk-pty and the gwk-adapter-* crates. Skeleton only
-# (the runtime lands in a follow-up change): this crate is under CLEANROOM.md's
-# second-review gate from its first line, both by the `crates/gwk-pty` prefix
-# match and by its own explicit row in .github/cleanroom-paths.txt — gated for
-# what it is FOR, not for what it contains yet.
+# Not published — matches gwk-pty and the gwk-adapter-* crates. This crate is
+# under CLEANROOM.md's second-review gate, both by the `crates/gwk-pty` prefix
+# match and by its own explicit row in .github/cleanroom-paths.txt.
 publish = false
 
 [[bin]]
@@ -20,8 +18,21 @@ name = "gwk-pty-host"
 path = "src/main.rs"
 
 [dependencies]
+# The engine and the three adapters. Depending on them ends this crate's
+# no-Zig build property deliberately: PR #43 kept the crate engine-free only
+# because that change's execution environment carried no Zig toolchain, and
+# the crate-root doc named supervision as the follow-up. Building or testing
+# this crate now needs the same `tools/pty-toolchain.sh` environment as
+# `gwk-pty` itself, and the `pty-host` CI job materializes it.
+gwk-adapter-claude.workspace = true
+gwk-adapter-codex.workspace = true
+gwk-adapter-opencode.workspace = true
 gwk-domain.workspace = true
 gwk-kernel.workspace = true
+gwk-pty.workspace = true
+# For the `Command` a spawn factory builds — `gwk_pty::Session::spawn` takes
+# it and does not re-export the crate.
+pty-process.workspace = true
 serde_json.workspace = true
 # The idempotency key an `IngestRecord` origination mints is a digest over
 # the record's own body — the same content-addressing `gridwork`'s CLI
@@ -37,6 +48,8 @@ tokio = { workspace = true, features = [
   "rt",
   "rt-multi-thread",
   "signal",
+  "sync",
+  "time",
 ] }
 tracing.workspace = true
 
