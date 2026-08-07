@@ -239,6 +239,17 @@ jobs:
         with:
           version: ${{ env.ZIG_VERSION }}
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      # The zig-built engine library is tuned to the CPU that built it — with
+      # no -Dtarget, `zig build` resolves the NATIVE cpu model, vector
+      # extensions and all — and GitHub's runner fleet mixes
+      # microarchitectures, so a cached lib from one runner can SIGILL on the
+      # next (observed: gwk-pty-host's test binary, signal 4, on the first
+      # restore of a cache another runner had populated). Rust artifacts are
+      # target-cpu=generic and stay cached; only the sys crate's build output
+      # and fingerprint are wiped, so the zig build reruns on THIS machine
+      # from the cached source tree and package graph.
+      - name: never reuse a machine-tuned engine lib from cache
+        run: rm -rf target/debug/build/libghostty-vt-sys-* target/debug/.fingerprint/libghostty-vt-sys-*
       # Registry crates come down here, with the network, exactly as every other
       # job gets them. Populating a package cache is not a build.
       #
@@ -442,6 +453,10 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      # Same reason as the `pty` job: the zig-built engine lib is native-CPU
+      # tuned and must not cross runners inside the rust cache.
+      - name: never reuse a machine-tuned engine lib from cache
+        run: rm -rf target/debug/build/libghostty-vt-sys-* target/debug/.fingerprint/libghostty-vt-sys-*
       - name: fetch registry dependencies
         run: cargo fetch --locked
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1013,9 +1028,10 @@ jobs:
           # decision away where the answer is already known: a crate linking
           # the PTY engine is gated by that fact, not by whether it got named
           # `gwk-pty-host` or `gwk-host`. True at HEAD with zero new rows —
-          # `crates/gwk-adapter-` already covers all three declarants — so
-          # every proof here has to be seeded.
-          trap 'git checkout -- crates/gwk-theme/Cargo.toml crates/gwk-adapter-claude/Cargo.toml crates/gwk-adapter-codex/Cargo.toml crates/gwk-adapter-opencode/Cargo.toml' EXIT
+          # `crates/gwk-adapter-` covers three declarants and `crates/gwk-pty`
+          # covers the fourth, gwk-pty-host — so every proof here has to be
+          # seeded.
+          trap 'git checkout -- crates/gwk-theme/Cargo.toml crates/gwk-adapter-claude/Cargo.toml crates/gwk-adapter-codex/Cargo.toml crates/gwk-adapter-opencode/Cargo.toml crates/gwk-pty-host/Cargo.toml' EXIT
 
           # An ungated crate quietly acquiring the dependency — the shape the
           # rule is named for.
@@ -1084,12 +1100,12 @@ jobs:
           # being deleted: with no declarant anywhere, a broken detection and a
           # clean tree look identical, so the gate must treat zero as the
           # broken one.
-          sed -i 's/^gwk-pty\.workspace = true$/# seeded removal/' crates/gwk-adapter-*/Cargo.toml
+          sed -i 's/^gwk-pty\.workspace = true$/# seeded removal/' crates/gwk-adapter-*/Cargo.toml crates/gwk-pty-host/Cargo.toml
           if : | ./tools/cleanroom-gate.sh; then
             echo 'cleanroom-gate passed with no gwk-pty declarant at all — a vacuous check' >&2
             exit 1
           fi
-          git checkout -- crates/gwk-adapter-claude/Cargo.toml crates/gwk-adapter-codex/Cargo.toml crates/gwk-adapter-opencode/Cargo.toml
+          git checkout -- crates/gwk-adapter-claude/Cargo.toml crates/gwk-adapter-codex/Cargo.toml crates/gwk-adapter-opencode/Cargo.toml crates/gwk-pty-host/Cargo.toml
           echo "cleanroom-gate: an empty declarant set correctly reads as a broken detection"
 
           : | ./tools/cleanroom-gate.sh
