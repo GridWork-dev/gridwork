@@ -3,7 +3,7 @@ title: Permitted specifications
 description: The public specification IDs and URLs that derivation markers may cite.
 ---
 
-{/* curated-from: docs/derivation/SPECS.md sha256=b452aa35257847f2bdb67f4433c01510cc8aef823be5b127bda14f5e3f151be2 */}
+{/* curated-from: docs/derivation/SPECS.md sha256=8ddcc71f2e934a96b6a8f10882dc763132f51faffbbae907765f84623f4b3356 */}
 
 Public specifications cited by clean-room derivation markers (CLEANROOM.md rule 3).
 Rule 3 admits two kinds of permitted source: a public specification, or an observation
@@ -48,9 +48,13 @@ leaked, or copyleft-licensed is a rule 1 violation.
 | `OPENCODE-SERVER` | opencode server HTTP + SSE surface: the endpoint table plus the OpenAPI 3.1 schema the server publishes at `GET /doc` ("use the spec to generate clients or inspect request and response types") — request/response/event shapes derive from that schema | opencode.ai/docs/server |
 | `POSIX-TERM` | POSIX.1-2024 (Issue 8) XBD §11, General Terminal Interface | pubs.opengroup.org/onlinepubs/9799919799/basedefs/V1_chap11.html |
 | `POSIX-WINSIZE` | POSIX.1-2024 (Issue 8) XSH, `tcsetwinsize()` | pubs.opengroup.org/onlinepubs/9799919799/functions/tcsetwinsize.html |
+| `POSIX-VI` | POSIX.1-2024 (Issue 8) XCU, `vi` — screen-oriented (visual) display editor: the command-mode / text-input-mode distinction and the visual-mode command vocabulary specified in EXTENDED DESCRIPTION | pubs.opengroup.org/onlinepubs/9799919799/utilities/vi.html |
 | `UAX-11` | Unicode Standard Annex #11, East Asian Width | unicode.org/reports/tr11/ |
 | `UAX-29` | Unicode Standard Annex #29, Text Segmentation (grapheme clusters) | unicode.org/reports/tr29/ |
 | `TERM-UNICODE-CORE` | Terminal Unicode Core (grapheme-cluster processing, DEC private mode 2027). **Draft** (rev 1, 2021-09-06), in a repository declaring no license — cite it for what it requires when the mode is SET, and for its own statement that the reset state is undefined; it defines no reset-state behavior to cite | github.com/contour-terminal/terminal-unicode-core |
+| `TMUX-MANUAL` | tmux(1) manual page: the DEFAULT KEY BINDINGS section (prefix-key convention, `C-b` default, prefix-then-command-key grammar), the KEY BINDINGS section (key-name syntax, key tables, `bind-key`/`unbind-key`), the named command vocabulary (`new-window`, `split-window`, `resize-pane`, `copy-mode`, `detach-client`, `list-keys`, …), and the configuration-file vocabulary (`set-option`, `~/.tmux.conf`, `source-file`) | man.openbsd.org/tmux.1 |
+| `ZELLIJ-KEYBINDS` | Zellij User Guide, "Configuring Keybindings": the `keybinds` configuration block — bindings divided into named modes, `bind` instructions mapping one or more keys to one or more named actions (`SwitchToMode`, `NewPane`, `MoveFocus`, …) | zellij.dev/documentation/keybindings.html |
+| `ZELLIJ-PRESETS` | Zellij User Guide, "Keybinding Presets": the two shipped default presets and their mode-entry convention — default preset (mode entered from normal mode, e.g. `Ctrl p` → Pane mode, then `n` new pane / `x` close focused pane) and the Unlock-First non-colliding preset (`Ctrl g` unlock, then single-character mode entry) | zellij.dev/documentation/keybinding-presets.html |
 
 ## Rows exist before the code that cites them
 

@@ -78,7 +78,7 @@
     },
     {
       "destination": "content/docs/derivation/specifications.mdx",
-      "sha256": "184b07b983642859c81b0201e6c9f3691efe5997144f8fca993b6497aad8047e",
+      "sha256": "403d4c5396bd794ed345bc3cd7a3657a9892ea4c679b14af8b4aa3bcf7e730c1",
       "sources": [
         {
           "path": "docs/derivation/SPECS.md"
