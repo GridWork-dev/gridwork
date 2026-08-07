@@ -29,7 +29,9 @@ use std::sync::Arc;
 
 use base64::prelude::{BASE64_STANDARD, Engine as _};
 use gwk_domain::blob::BLOB_CHUNK_BYTES;
-use gwk_domain::ids::{ByteCount, EventCount, EventId, RequestId, Seq, WriterEpoch};
+use gwk_domain::ids::{
+    ByteCount, EventCount, EventId, PtyFrameSeq, PtySessionId, RequestId, Seq, WriterEpoch,
+};
 use gwk_domain::port::{BlobError, BlobStore, EventStore, MAX_READ_LIMIT};
 use gwk_domain::protocol::{
     CONNECTION_EGRESS_BYTES_PER_WINDOW, CONNECTION_INGRESS_BYTES_PER_WINDOW, CONTRACT_VERSION,
@@ -44,6 +46,7 @@ use tokio::sync::{mpsc, watch};
 use super::frame::{Budget, Incoming, read_frame, write_frame};
 use super::hello::{self, Readiness};
 use super::listen::Listener;
+use super::pty::{self, PtyHub};
 use super::{WireError, strict, subscribe};
 use crate::blob::store::PgBlobStore;
 use crate::epoch::{
@@ -149,6 +152,9 @@ pub struct Daemon {
     /// Publishes "the log grew" to every live subscription. Held behind an `Arc`
     /// because the listener that feeds it lives in a task of its own.
     wake: Arc<watch::Sender<u64>>,
+    /// The PTY session registry — the one surface answered from memory
+    /// rather than the log; see [`pty`]'s module doc for why.
+    pty: PtyHub,
 }
 
 impl Daemon {
@@ -194,6 +200,7 @@ impl Daemon {
             public_revision,
             writer_epoch,
             wake: Arc::new(wake),
+            pty: PtyHub::default(),
         })
     }
 
@@ -263,16 +270,18 @@ impl Daemon {
     /// an error out of band — the connection stays open and the client gets a
     /// value it can branch on.
     ///
-    /// `subs` is the connection's own state, threaded in because exactly one
-    /// request needs it: a subscription is the only answer that outlives the
-    /// response carrying it.
+    /// `subs` is the connection's own state, threaded in because a
+    /// subscription or a PTY attach is an answer that outlives the response
+    /// carrying it; `connection` is the identity the PTY hub checks publish
+    /// ownership against.
     async fn answer(
         &self,
+        connection: pty::ConnectionId,
         request_id: &RequestId,
         request: &KernelRequest,
         subs: &mut Subscriptions<'_>,
     ) -> KernelResult {
-        match self.try_answer(request_id, request, subs).await {
+        match self.try_answer(connection, request_id, request, subs).await {
             Ok(result) => result,
             Err(e) => KernelResult::Error {
                 code: KernelErrorCode::Storage,
@@ -284,30 +293,40 @@ impl Daemon {
 
     async fn try_answer(
         &self,
+        connection: pty::ConnectionId,
         request_id: &RequestId,
         request: &KernelRequest,
         subs: &mut Subscriptions<'_>,
     ) -> Result<KernelResult> {
-        let readiness = self.readiness().await?;
+        // Readiness costs two database round trips, so each arm that consumes
+        // it resolves it itself — the PTY family in particular is answered
+        // from memory at delta-batch cadence, and a readiness it never reads
+        // would tax every keystroke with the log's latency.
         Ok(match request {
             // Liveness. A sealed kernel is READY — it is serving, it simply
             // admits no business command yet, and conflating the two would make
             // a health check fail every deployment between genesis and cutover.
             KernelRequest::Health {} => KernelResult::Health {
                 ready: true,
-                sealed: readiness.sealed,
+                sealed: self.readiness().await?.sealed,
             },
-            KernelRequest::Status {} => KernelResult::Status {
-                sealed: readiness.sealed,
-                watermark: readiness.watermark,
-                writer_epoch: self.writer_epoch,
-                contract_version: CONTRACT_VERSION,
-                public_revision: self.public_revision.clone(),
-            },
+            KernelRequest::Status {} => {
+                let readiness = self.readiness().await?;
+                KernelResult::Status {
+                    sealed: readiness.sealed,
+                    watermark: readiness.watermark,
+                    writer_epoch: self.writer_epoch,
+                    contract_version: CONTRACT_VERSION,
+                    public_revision: self.public_revision.clone(),
+                }
+            }
             KernelRequest::Watermark {} => KernelResult::Watermark {
-                watermark: readiness.watermark,
+                watermark: self.readiness().await?.watermark,
             },
-            KernelRequest::VerifySealed {} => self.verify_sealed(readiness.sealed).await?,
+            KernelRequest::VerifySealed {} => {
+                let readiness = self.readiness().await?;
+                self.verify_sealed(readiness.sealed).await?
+            }
 
             // Forwarded, not gated. `submit` reads the epoch inside its own
             // transaction and under the writer lock, so the sealed allowlist is
@@ -340,6 +359,10 @@ impl Daemon {
                 cursor,
                 limit,
             } => {
+                // Resolved BEFORE the page query: a watermark read after it
+                // could land the other side of an append and report the page
+                // as fresher than it is.
+                let readiness = self.readiness().await?;
                 // Clamped, never refused — the same rule the event read
                 // documents, so a client that asks for everything gets a page
                 // and a cursor rather than a rejection it has to special-case.
@@ -361,10 +384,6 @@ impl Daemon {
                         .map(|record| cursor_key(record, key))
                         .transpose()?
                 };
-                // The same watermark `Watermark {}` would answer with, read
-                // from the readiness this request already resolved rather than
-                // re-queried: a second read could land the other side of an
-                // append and report a page as fresher than it is.
                 KernelResult::ProjectionPage {
                     records,
                     next_cursor,
@@ -373,6 +392,9 @@ impl Daemon {
             }
 
             KernelRequest::ReadEvents { cursor, limit } => {
+                // Before the event read, for the same page-freshness reason
+                // as `ListProjection`.
+                let readiness = self.readiness().await?;
                 let events = self
                     .store
                     .read_from(*cursor, *limit as usize)
@@ -471,22 +493,64 @@ impl Daemon {
                 Err(e) => blob_refusal(&e),
             },
 
-            // The PTY half. This kernel holds no session registry yet — that
-            // lands with the pin-advance task that wires the PTY host in.
-            // Until then every session id is unknown, which the contract
-            // already has an honest answer for: the same refusal
-            // `GetProjection`/`BlobStat` give an absent id above, not a new
-            // "unimplemented" code invented just for this arm.
-            KernelRequest::PtyAttach { session_id, .. } => KernelResult::Error {
-                code: KernelErrorCode::NotFound,
-                message: format!("no pty session {session_id}"),
-                detail: None,
+            // The PTY half, answered from the hub rather than the log — the
+            // session registry the pin-advance comment here used to promise.
+            // An attach is admitted like a subscription and started by the
+            // request loop, for the same first-batch-after-the-ack ordering.
+            KernelRequest::PtyAttach { session_id, cursor } => subs.admit_pty(
+                &self.pty,
+                request_id,
+                session_id,
+                cursor.map(|seq| seq.value()),
+            ),
+            KernelRequest::PtySnapshot { session_id } => match self.pty.snapshot(session_id) {
+                Ok((seq, frame)) => KernelResult::PtySnapshot {
+                    session_id: session_id.clone(),
+                    seq: PtyFrameSeq::new(seq),
+                    frame,
+                },
+                Err(refusal) => refusal.into_result(),
             },
-            KernelRequest::PtySnapshot { session_id } => KernelResult::Error {
-                code: KernelErrorCode::NotFound,
-                message: format!("no pty session {session_id}"),
-                detail: None,
-            },
+            KernelRequest::PtyPublishSnapshot {
+                session_id,
+                seq,
+                frame,
+            } => {
+                match self.pty.publish_snapshot(
+                    connection,
+                    session_id,
+                    seq.map(|seq| seq.value()),
+                    frame.clone(),
+                ) {
+                    Ok(()) => KernelResult::PtyPublished {
+                        session_id: session_id.clone(),
+                    },
+                    Err(refusal) => refusal.into_result(),
+                }
+            }
+            KernelRequest::PtyPublishDeltas {
+                session_id,
+                seq,
+                deltas,
+            } => {
+                match self
+                    .pty
+                    .publish_deltas(connection, session_id, seq.value(), deltas.clone())
+                {
+                    Ok(()) => KernelResult::PtyPublished {
+                        session_id: session_id.clone(),
+                    },
+                    Err(refusal) => refusal.into_result(),
+                }
+            }
+            KernelRequest::PtyRetire { session_id } => {
+                match self.pty.retire(connection, session_id) {
+                    Ok(()) => KernelResult::PtyRetired {
+                        session_id: session_id.clone(),
+                    },
+                    Err(refusal) => refusal.into_result(),
+                }
+            }
         })
     }
 
@@ -622,21 +686,36 @@ impl Daemon {
     }
 }
 
-/// The live subscriptions of one connection, and the queues they write through.
+/// One admitted stream waiting to be started — an event subscription or a
+/// PTY attach, which share the admission flow because they share its reason:
+/// the first unasked-for frame must not overtake the response announcing it.
+enum Admitted {
+    Events(RequestId, Option<Seq>),
+    Pty {
+        request_id: RequestId,
+        session_id: PtySessionId,
+        attached: pty::Attached,
+    },
+}
+
+/// The live streams of one connection, and the queues they write through.
 ///
 /// Per-connection rather than per-daemon because every bound here is about one
 /// client's behaviour: how many streams it may hold, and how much the kernel
-/// will buffer for it before deciding it has stopped reading.
+/// will buffer for it before deciding it has stopped reading. PTY attaches
+/// count against the same cap as event subscriptions: each is a cursor, a
+/// task, and a queue slot, and a cap that only counted one kind would let a
+/// client double its buffered footprint by asking in two vocabularies.
 struct Subscriptions<'a> {
     daemon: &'a Daemon,
-    /// Dropping this aborts every subscription on it, which is what makes a
+    /// Dropping this aborts every stream on it, which is what makes a
     /// closed connection stop reading the database — a stream parked between
     /// polls has nothing to notice a hangup by.
     live: tokio::task::JoinSet<()>,
     batches: mpsc::Sender<Outgoing>,
     responses: mpsc::Sender<ServerControl>,
-    /// An admitted subscription waiting to be started. See [`Self::admit`].
-    admitted: Option<(RequestId, Option<Seq>)>,
+    /// An admitted stream waiting to be started. See [`Self::admit`].
+    admitted: Option<Admitted>,
 }
 
 impl<'a> Subscriptions<'a> {
@@ -662,48 +741,111 @@ impl<'a> Subscriptions<'a> {
     /// drains that queue first, so the client sees the acknowledgement before
     /// anything acknowledged by it.
     fn admit(&mut self, request_id: &RequestId, cursor: Option<Seq>) -> KernelResult {
-        // Ended subscriptions are still in the set until something reaps them,
-        // and counting a slow consumer's corpse against a client's allowance
-        // would make the cap tighten over the life of a connection.
-        while self.live.try_join_next().is_some() {}
-        if self.live.len() >= MAX_SUBSCRIPTIONS_PER_CONNECTION {
-            // The connection and every stream already on it are untouched: this
-            // refuses one request, it does not punish the session.
-            return KernelResult::Error {
-                code: KernelErrorCode::Overloaded,
-                message: format!(
-                    "this connection already holds {MAX_SUBSCRIPTIONS_PER_CONNECTION} subscriptions"
-                ),
-                detail: None,
-            };
+        if let Some(refusal) = self.full() {
+            return refusal;
         }
-        self.admitted = Some((request_id.clone(), cursor));
+        self.admitted = Some(Admitted::Events(request_id.clone(), cursor));
         // Echoes the cursor asked for, which is where the stream starts. A
         // client that sent none gets none back and learns where it is from the
         // first batch.
         KernelResult::Subscribed { cursor }
     }
 
-    /// Start whatever [`Self::admit`] took, now that its response is queued.
-    fn start(&mut self) {
-        let Some((request_id, cursor)) = self.admitted.take() else {
-            return;
+    /// Take a PTY attach, without starting it — the same two-step admission
+    /// as an event subscription, for the same ordering reason. The hub is
+    /// consulted HERE so the answer can carry the session's dimensions and
+    /// the resume revision; what waits for [`Self::start`] is only the
+    /// delivery task.
+    fn admit_pty(
+        &mut self,
+        hub: &PtyHub,
+        request_id: &RequestId,
+        session_id: &PtySessionId,
+        cursor: Option<u64>,
+    ) -> KernelResult {
+        if let Some(refusal) = self.full() {
+            return refusal;
+        }
+        let attached = match hub.attach(session_id, cursor) {
+            Ok(attached) => attached,
+            Err(refusal) => return refusal.into_result(),
         };
-        // Seeded with where the stream starts, so a subscription that ends
-        // before a single frame left reports its own starting point rather than
-        // sending the client back to the beginning of the log.
-        let delivered = Arc::new(std::sync::atomic::AtomicU64::new(
-            cursor.map_or(0, |seq| seq.value()),
-        ));
-        self.live.spawn(subscribe::run(
-            Arc::clone(&self.daemon.store),
-            request_id,
-            cursor,
-            self.batches.clone(),
-            self.responses.clone(),
-            self.daemon.wake.subscribe(),
-            delivered,
-        ));
+        let result = KernelResult::PtyAttached {
+            session_id: session_id.clone(),
+            rows: attached.rows,
+            cols: attached.cols,
+            cursor: attached.cursor.map(PtyFrameSeq::new),
+        };
+        self.admitted = Some(Admitted::Pty {
+            request_id: request_id.clone(),
+            session_id: session_id.clone(),
+            attached,
+        });
+        result
+    }
+
+    /// The cap refusal both admissions share, after reaping ended streams —
+    /// counting a slow consumer's corpse against a client's allowance would
+    /// make the cap tighten over the life of a connection.
+    fn full(&mut self) -> Option<KernelResult> {
+        while self.live.try_join_next().is_some() {}
+        if self.live.len() < MAX_SUBSCRIPTIONS_PER_CONNECTION {
+            return None;
+        }
+        // The connection and every stream already on it are untouched: this
+        // refuses one request, it does not punish the session.
+        Some(KernelResult::Error {
+            code: KernelErrorCode::Overloaded,
+            message: format!(
+                "this connection already holds {MAX_SUBSCRIPTIONS_PER_CONNECTION} subscriptions"
+            ),
+            detail: None,
+        })
+    }
+
+    /// Start whatever admission took, now that its response is queued.
+    fn start(&mut self) {
+        match self.admitted.take() {
+            None => {}
+            Some(Admitted::Events(request_id, cursor)) => {
+                // Seeded with where the stream starts, so a subscription that
+                // ends before a single frame left reports its own starting
+                // point rather than sending the client back to the beginning
+                // of the log.
+                let delivered = Arc::new(std::sync::atomic::AtomicU64::new(
+                    cursor.map_or(0, |seq| seq.value()),
+                ));
+                self.live.spawn(subscribe::run(
+                    Arc::clone(&self.daemon.store),
+                    request_id,
+                    cursor,
+                    self.batches.clone(),
+                    self.responses.clone(),
+                    self.daemon.wake.subscribe(),
+                    delivered,
+                ));
+            }
+            Some(Admitted::Pty {
+                request_id,
+                session_id,
+                attached,
+            }) => {
+                // Seeded with the resume revision as `seq + 1` (0 = nothing),
+                // because revision 0 is real — the engine's first — and the
+                // event path's 0-means-none trick would conflate the two.
+                let delivered = Arc::new(std::sync::atomic::AtomicU64::new(
+                    attached.cursor.map_or(0, |seq| seq.saturating_add(1)),
+                ));
+                self.live.spawn(pty::run_attach(
+                    request_id,
+                    session_id,
+                    attached,
+                    self.batches.clone(),
+                    self.responses.clone(),
+                    delivered,
+                ));
+            }
+        }
     }
 }
 
@@ -771,15 +913,22 @@ where
     let (batches_tx, batches_rx) = mpsc::channel(BATCH_QUEUE_DEPTH);
     let mut subs = Subscriptions::new(daemon, responses_tx, batches_tx);
 
-    tokio::select! {
-        read = read_requests(daemon, reader, &mut ingress, &mut subs) => read,
+    // The identity PTY publish ownership binds to. Minted per connection and
+    // released below whichever way the connection ends, so a host's sessions
+    // never outlive the socket that was publishing them.
+    let connection = daemon.pty.connection();
+    let served = tokio::select! {
+        read = read_requests(daemon, connection, reader, &mut ingress, &mut subs) => read,
         written = write_frames(writer, responses_rx, batches_rx, &mut egress) => written,
-    }
+    };
+    daemon.pty.disconnect(connection);
+    served
 }
 
 /// Read requests and queue their answers, until the peer hangs up.
 async fn read_requests<R>(
     daemon: &Daemon,
+    connection: pty::ConnectionId,
     reader: &mut R,
     budget: &mut Budget,
     subs: &mut Subscriptions<'_>,
@@ -816,7 +965,7 @@ where
             }
         };
 
-        let result = daemon.answer(&request_id, &request, subs).await;
+        let result = daemon.answer(connection, &request_id, &request, subs).await;
         let response = ServerControl::Response { request_id, result };
         if subs.responses.send(response).await.is_err() {
             // The writer is gone, so nothing can be answered any more. Its own

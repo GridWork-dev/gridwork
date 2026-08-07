@@ -1290,3 +1290,392 @@ async fn the_accept_loop_stops_taking_work_and_takes_its_socket_with_it() {
     let _ = std::fs::remove_dir_all(&blob_root);
     drop_database(&maintenance, &name).await;
 }
+
+// ---- The PTY surface: a host publishes, a viewer attaches ----
+
+/// A blank all-false-style cell for building publishable frames.
+fn pty_cell(glyph: &str) -> gwk_domain::frame::StyledCell {
+    gwk_domain::frame::StyledCell {
+        glyph: glyph.to_owned(),
+        style: gwk_domain::frame::CellStyle {
+            bold: false,
+            dim: false,
+            italic: false,
+            blink: false,
+            inverse: false,
+            invisible: false,
+            strikethrough: false,
+            overline: false,
+            underline: None,
+            fg: None,
+            bg: None,
+            underline_color: None,
+        },
+    }
+}
+
+fn pty_frame(rows: usize, cols: usize) -> gwk_domain::frame::PtyFrame {
+    gwk_domain::frame::PtyFrame {
+        cells: vec![vec![pty_cell(" "); cols]; rows],
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn a_published_pty_session_is_served_end_to_end_and_a_foreign_writer_is_refused() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_sealed_store(&maintenance, "wire_pty", 8).await;
+    let served = Running::open(store, "pty").await;
+
+    // Two connections on purpose: the publishing host must not be the viewer,
+    // or the batch the publish causes and the publish's own response arrive on
+    // one wire with nothing in the protocol deciding their order.
+    let mut host = served.client().await;
+    let mut viewer = served.client().await;
+
+    // The host claims the session with its screen at revision 0.
+    let frame = serde_json::to_string(&pty_frame(2, 4)).expect("serialize frame");
+    match host
+        .ask(
+            "h-seed",
+            &format!(
+                r#"{{"type":"pty_publish_snapshot","session_id":"pty-console","seq":"0","frame":{frame}}}"#
+            ),
+        )
+        .await
+    {
+        KernelResult::PtyPublished { session_id } => {
+            assert_eq!(session_id.as_str(), "pty-console");
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // A snapshot serves the published screen back, byte for byte.
+    match viewer
+        .ask(
+            "v-snap",
+            r#"{"type":"pty_snapshot","session_id":"pty-console"}"#,
+        )
+        .await
+    {
+        KernelResult::PtySnapshot {
+            session_id,
+            seq,
+            frame,
+        } => {
+            assert_eq!(session_id.as_str(), "pty-console");
+            assert_eq!(seq, gwk_domain::ids::PtyFrameSeq::new(0));
+            assert_eq!(frame.cells.len(), 2);
+            assert!(frame.cells.iter().all(|row| row.len() == 4));
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // A fresh attach answers the dimensions and the revision deltas resume
+    // from, before any batch.
+    match viewer
+        .ask(
+            "v-attach",
+            r#"{"type":"pty_attach","session_id":"pty-console"}"#,
+        )
+        .await
+    {
+        KernelResult::PtyAttached {
+            session_id,
+            rows,
+            cols,
+            cursor,
+        } => {
+            assert_eq!(session_id.as_str(), "pty-console");
+            assert_eq!((rows, cols), (2, 4));
+            assert_eq!(cursor, Some(gwk_domain::ids::PtyFrameSeq::new(0)));
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // The host moves the screen; the viewer's live stream carries the batch,
+    // tagged with the attach's own request id.
+    let update = serde_json::to_string(&gwk_domain::frame::PtyDelta::CellsChanged {
+        updates: vec![gwk_domain::frame::PtyCellUpdate {
+            row: 0,
+            col: 0,
+            cell: pty_cell("x"),
+        }],
+    })
+    .expect("serialize delta");
+    match host
+        .ask(
+            "h-delta",
+            &format!(
+                r#"{{"type":"pty_publish_deltas","session_id":"pty-console","seq":"1","deltas":[{update}]}}"#
+            ),
+        )
+        .await
+    {
+        KernelResult::PtyPublished { .. } => {}
+        other => panic!("{other:?}"),
+    }
+    let batch = tokio::time::timeout(std::time::Duration::from_secs(3), viewer.recv())
+        .await
+        .expect("a published batch reaches an attached viewer promptly")
+        .expect("the connection stayed open");
+    match batch {
+        ServerControl::PtyDeltaBatch {
+            request_id,
+            session_id,
+            deltas,
+            seq,
+        } => {
+            assert_eq!(request_id.as_str(), "v-attach");
+            assert_eq!(session_id.as_str(), "pty-console");
+            assert_eq!(seq, gwk_domain::ids::PtyFrameSeq::new(1));
+            // The batch's CONTENT survives the trip, not just its count.
+            match &deltas[..] {
+                [gwk_domain::frame::PtyDelta::CellsChanged { updates }] => {
+                    assert_eq!(updates.len(), 1);
+                    assert_eq!((updates[0].row, updates[0].col), (0, 0));
+                    assert_eq!(updates[0].cell.glyph, "x");
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // The viewer's connection never claimed the session, so its publish is
+    // refused as `authority` — single-writer coherence, not identity (the
+    // peer credential already settled identity at accept time), and not
+    // `validation` either: the request's shape is fine, the actor is not.
+    match viewer
+        .ask(
+            "v-poach",
+            &format!(
+                r#"{{"type":"pty_publish_snapshot","session_id":"pty-console","seq":"9","frame":{frame}}}"#
+            ),
+        )
+        .await
+    {
+        KernelResult::Error { code, .. } => assert_eq!(code, KernelErrorCode::Authority),
+        other => panic!("{other:?}"),
+    }
+
+    // The seeded negative the exit condition names: an attach to a session
+    // nobody hosts is refused typed, on the same code an absent projection
+    // answers with.
+    match viewer
+        .ask(
+            "v-ghost",
+            r#"{"type":"pty_attach","session_id":"pty-ghost"}"#,
+        )
+        .await
+    {
+        KernelResult::Error { code, message, .. } => {
+            assert_eq!(code, KernelErrorCode::NotFound);
+            assert!(message.contains("pty-ghost"), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // Retire closes the viewer's stream typed, with the last revision that
+    // actually reached it.
+    match host
+        .ask(
+            "h-retire",
+            r#"{"type":"pty_retire","session_id":"pty-console"}"#,
+        )
+        .await
+    {
+        KernelResult::PtyRetired { session_id } => {
+            assert_eq!(session_id.as_str(), "pty-console");
+        }
+        other => panic!("{other:?}"),
+    }
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(3), viewer.recv())
+        .await
+        .expect("a retire reaches attached viewers promptly")
+        .expect("the connection stayed open");
+    match closed {
+        ServerControl::PtyStreamClosed {
+            request_id,
+            code,
+            last_seq,
+        } => {
+            assert_eq!(request_id.as_str(), "v-attach");
+            assert_eq!(code, KernelErrorCode::NotFound);
+            assert_eq!(last_seq, Some(gwk_domain::ids::PtyFrameSeq::new(1)));
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // And the id is gone from the request/response surface too.
+    match viewer
+        .ask(
+            "v-after",
+            r#"{"type":"pty_snapshot","session_id":"pty-console"}"#,
+        )
+        .await
+    {
+        KernelResult::Error { code, .. } => assert_eq!(code, KernelErrorCode::NotFound),
+        other => panic!("{other:?}"),
+    }
+
+    // ---- The reclaim: a successor connection, the same id, a later head ----
+    // The engine kept running while the host's connection was down, so the
+    // reclaim seeds at revision 5 with revisions 1..=5 gone with the old entry.
+    let mut host2 = served.client().await;
+    match host2
+        .ask(
+            "h2-seed",
+            &format!(
+                r#"{{"type":"pty_publish_snapshot","session_id":"pty-console","seq":"5","frame":{frame}}}"#
+            ),
+        )
+        .await
+    {
+        KernelResult::PtyPublished { .. } => {}
+        other => panic!("{other:?}"),
+    }
+
+    // A viewer still holding the OLD life's cursor is reseeded at the head:
+    // answering the cursor back would claim gap-free continuity over a hole.
+    match viewer
+        .ask(
+            "v-re",
+            r#"{"type":"pty_attach","session_id":"pty-console","cursor":"1"}"#,
+        )
+        .await
+    {
+        KernelResult::PtyAttached { cursor, .. } => {
+            assert_eq!(
+                cursor,
+                Some(gwk_domain::ids::PtyFrameSeq::new(5)),
+                "a stale cursor must be answered at the reclaim head — reseed"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // The next batch reaches the reattached viewer live…
+    match host2
+        .ask(
+            "h2-delta",
+            &format!(
+                r#"{{"type":"pty_publish_deltas","session_id":"pty-console","seq":"6","deltas":[{update}]}}"#
+            ),
+        )
+        .await
+    {
+        KernelResult::PtyPublished { .. } => {}
+        other => panic!("{other:?}"),
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(3), viewer.recv())
+        .await
+        .expect("the post-reclaim batch reaches the viewer")
+        .expect("open")
+    {
+        ServerControl::PtyDeltaBatch {
+            request_id, seq, ..
+        } => {
+            assert_eq!(request_id.as_str(), "v-re");
+            assert_eq!(seq, gwk_domain::ids::PtyFrameSeq::new(6));
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // …and REPLAYS to a second viewer whose cursor is inside the retained
+    // window: the catch-up path itself crossing the wire, not just the live one.
+    let mut viewer2 = served.client().await;
+    match viewer2
+        .ask(
+            "v2-attach",
+            r#"{"type":"pty_attach","session_id":"pty-console","cursor":"5"}"#,
+        )
+        .await
+    {
+        KernelResult::PtyAttached { cursor, .. } => {
+            assert_eq!(cursor, Some(gwk_domain::ids::PtyFrameSeq::new(5)));
+        }
+        other => panic!("{other:?}"),
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(3), viewer2.recv())
+        .await
+        .expect("the retained batch replays to a cursor attach")
+        .expect("open")
+    {
+        ServerControl::PtyDeltaBatch {
+            request_id, seq, ..
+        } => {
+            assert_eq!(request_id.as_str(), "v2-attach");
+            assert_eq!(seq, gwk_domain::ids::PtyFrameSeq::new(6));
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // The publisher HANGS UP without retiring — the crashed-host path. Every
+    // attached viewer is closed typed, exactly as an explicit retire closes.
+    drop(host2);
+    for (viewer, request_id) in [(&mut viewer, "v-re"), (&mut viewer2, "v2-attach")] {
+        match tokio::time::timeout(std::time::Duration::from_secs(3), viewer.recv())
+            .await
+            .expect("a hangup retires promptly")
+            .expect("open")
+        {
+            ServerControl::PtyStreamClosed {
+                request_id: closed,
+                code,
+                last_seq,
+            } => {
+                assert_eq!(closed.as_str(), request_id);
+                assert_eq!(code, KernelErrorCode::NotFound);
+                assert_eq!(last_seq, Some(gwk_domain::ids::PtyFrameSeq::new(6)));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    // ---- PTY attaches share the subscription cap ----
+    let mut host3 = served.client().await;
+    match host3
+        .ask(
+            "h3-seed",
+            &format!(
+                r#"{{"type":"pty_publish_snapshot","session_id":"pty-cap","seq":"0","frame":{frame}}}"#
+            ),
+        )
+        .await
+    {
+        KernelResult::PtyPublished { .. } => {}
+        other => panic!("{other:?}"),
+    }
+    let mut viewer3 = served.client().await;
+    for n in 0..gwk_domain::protocol::MAX_SUBSCRIPTIONS_PER_CONNECTION {
+        match viewer3
+            .ask(
+                &format!("cap-{n}"),
+                r#"{"type":"pty_attach","session_id":"pty-cap"}"#,
+            )
+            .await
+        {
+            KernelResult::PtyAttached { .. } => {}
+            other => panic!("attach {n} under the cap: {other:?}"),
+        }
+    }
+    match viewer3
+        .ask(
+            "cap-over",
+            r#"{"type":"pty_attach","session_id":"pty-cap"}"#,
+        )
+        .await
+    {
+        KernelResult::Error { code, .. } => assert_eq!(code, KernelErrorCode::Overloaded),
+        other => panic!("{other:?}"),
+    }
+
+    drop(host);
+    drop(host3);
+    drop(viewer);
+    drop(viewer2);
+    drop(viewer3);
+    served.close().await;
+    drop_database(&maintenance, &name).await;
+}

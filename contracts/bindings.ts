@@ -1423,29 +1423,29 @@ export type KernelRequest = KernelRequest_Serialize | KernelRequest_Deserialize;
  */
 export type KernelRequest_Deserialize = 
 /**  Liveness only. Served sealed and active. */
-({ type: "health" }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | 
+({ type: "health" }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; deltas?: never; envelope?: never; frame?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never } | 
 /**  Full readiness detail. Served sealed and active. */
-({ type: "status" }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | 
+({ type: "status" }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; deltas?: never; envelope?: never; frame?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never } | 
 /**  How far the log goes, without a subscription. Served sealed and active. */
-({ type: "watermark" }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | 
+({ type: "watermark" }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; deltas?: never; envelope?: never; frame?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never } | 
 /**
  *  Prove the fresh epoch: exactly one genesis event, zero business rows.
  *  Served sealed and active.
  */
-({ type: "verify_sealed" }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | 
+({ type: "verify_sealed" }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; deltas?: never; envelope?: never; frame?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never } | 
 /**  The only mutation path. Sealed kernels admit `activate_kernel` alone. */
-({ type: "submit_command"; envelope: CommandEnvelope_Deserialize }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | ({ type: "get_projection"; projection: ProjectionKind; id: string }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; length?: never; limit?: never; media_type?: never; offset?: never; sequence?: never; session_id?: never; upload_id?: never } | ({ type: "list_projection"; projection: ProjectionKind; cursor?: string | null; limit?: number | null }) & { address?: never; byte_size?: never; data_base64?: never; envelope?: never; id?: never; length?: never; media_type?: never; offset?: never; sequence?: never; session_id?: never; upload_id?: never } | 
+({ type: "submit_command"; envelope: CommandEnvelope_Deserialize }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; deltas?: never; frame?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never } | ({ type: "get_projection"; projection: ProjectionKind; id: string }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; deltas?: never; envelope?: never; frame?: never; length?: never; limit?: never; media_type?: never; offset?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never } | ({ type: "list_projection"; projection: ProjectionKind; cursor?: string | null; limit?: number | null }) & { address?: never; byte_size?: never; data_base64?: never; deltas?: never; envelope?: never; frame?: never; id?: never; length?: never; media_type?: never; offset?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never } | 
 /**
  *  One page of events strictly after `cursor` (absent = from the
  *  beginning). `limit` is CLAMPED, not refused
  *  ([`MAX_READ_LIMIT`](crate::port::MAX_READ_LIMIT)).
  */
-({ type: "read_events"; cursor?: string | null; limit: number }) & { address?: never; byte_size?: never; data_base64?: never; envelope?: never; id?: never; length?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | 
+({ type: "read_events"; cursor?: string | null; limit: number }) & { address?: never; byte_size?: never; data_base64?: never; deltas?: never; envelope?: never; frame?: never; id?: never; length?: never; media_type?: never; offset?: never; projection?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never } | 
 /**
  *  Durable-cursor subscription. Delivery is at-least-once; a reconnect
  *  from the last cursor recovers everything, in order.
  */
-({ type: "subscribe_events"; cursor?: string | null }) & { address?: never; byte_size?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | ({ type: "blob_begin"; media_type: string; byte_size: string }) & { address?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; offset?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | 
+({ type: "subscribe_events"; cursor?: string | null }) & { address?: never; byte_size?: never; data_base64?: never; deltas?: never; envelope?: never; frame?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never } | ({ type: "blob_begin"; media_type: string; byte_size: string }) & { address?: never; cursor?: never; data_base64?: never; deltas?: never; envelope?: never; frame?: never; id?: never; length?: never; limit?: never; offset?: never; projection?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never } | 
 /**
  *  One plaintext chunk, base64 in a bounded control frame — blob bytes
  *  never ride an ordinary payload (ADR 0001). Chunks are
@@ -1454,12 +1454,12 @@ export type KernelRequest_Deserialize =
  */
 ({ type: "blob_chunk"; upload_id: BlobUploadId; 
 /**  Contiguous from 0; a gap or repeat is a refusal. */
-sequence: number; data_base64: string }) & { address?: never; byte_size?: never; cursor?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; session_id?: never } | 
+sequence: number; data_base64: string }) & { address?: never; byte_size?: never; cursor?: never; deltas?: never; envelope?: never; frame?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; seq?: never; session_id?: never } | 
 /**
  *  Finish an upload. The kernel recomputes the plaintext digest and
  *  refuses if it is not `address`.
  */
-({ type: "blob_commit"; upload_id: BlobUploadId; address: string }) & { byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never } | ({ type: "blob_abort"; upload_id: BlobUploadId }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never } | ({ type: "blob_read"; address: string; offset: string; length: string }) & { byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; limit?: never; media_type?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | ({ type: "blob_stat"; address: string }) & { byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | 
+({ type: "blob_commit"; upload_id: BlobUploadId; address: string }) & { byte_size?: never; cursor?: never; data_base64?: never; deltas?: never; envelope?: never; frame?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; seq?: never; sequence?: never; session_id?: never } | ({ type: "blob_abort"; upload_id: BlobUploadId }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; deltas?: never; envelope?: never; frame?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; seq?: never; sequence?: never; session_id?: never } | ({ type: "blob_read"; address: string; offset: string; length: string }) & { byte_size?: never; cursor?: never; data_base64?: never; deltas?: never; envelope?: never; frame?: never; id?: never; limit?: never; media_type?: never; projection?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never } | ({ type: "blob_stat"; address: string }) & { byte_size?: never; cursor?: never; data_base64?: never; deltas?: never; envelope?: never; frame?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never } | 
 /**
  *  Attach to a hosted PTY session's live output. Durable-cursor delivery,
  *  mirroring [`Self::SubscribeEvents`]: an absent `cursor` is a fresh
@@ -1467,13 +1467,55 @@ sequence: number; data_base64: string }) & { address?: never; byte_size?: never;
  *  [`PtyFrameSeq`] without a gap. Deltas for this request follow as
  *  [`ServerControl::PtyDeltaBatch`], tagged with the same `request_id`.
  */
-({ type: "pty_attach"; session_id: PtySessionId; cursor?: string | null }) & { address?: never; byte_size?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; upload_id?: never } | 
+({ type: "pty_attach"; session_id: PtySessionId; cursor?: string | null }) & { address?: never; byte_size?: never; data_base64?: never; deltas?: never; envelope?: never; frame?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; seq?: never; sequence?: never; upload_id?: never } | 
 /**
  *  One full styled frame at its current revision — the seed a client
  *  applies later deltas onto. Served whether or not the session is
  *  attached, like [`Self::ReadEvents`] beside [`Self::SubscribeEvents`].
+ *  A screen whose serialized form has outgrown what one response frame
+ *  carries refuses with `overloaded` rather than failing at the write —
+ *  attaching for deltas is the recovery the refusal names.
  */
-({ type: "pty_snapshot"; session_id: PtySessionId }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; upload_id?: never };
+({ type: "pty_snapshot"; session_id: PtySessionId }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; deltas?: never; envelope?: never; frame?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; seq?: never; sequence?: never; upload_id?: never } | 
+/**
+ *  Publish a hosted session's full screen — the host's half of the PTY
+ *  surface, the family v1 reserved room for and did not carry. The first
+ *  publish of a session claims it for the publishing connection; a
+ *  session already claimed by another LIVE connection refuses with
+ *  `authority`, and a connection's sessions retire when it closes, so a
+ *  crashed host cannot leave a session nobody can reclaim. `seq` is
+ *  absent only while the session has produced no frame yet, mirroring
+ *  [`KernelResult::PtyAttached`]'s `cursor`; a re-publish at the current
+ *  head is a legal reseed (a reconnecting host re-announces from its own
+ *  mirror) that must keep the screen's dimensions — one revision names
+ *  one screen — while a `seq` behind the head refuses with
+ *  `stale_version`, the actual head in the detail: revisions never move
+ *  backwards. The frame must be rectangular with `u16` dimensions: that
+ *  shape rule is enforced here at the serving layer, per
+ *  [`crate::frame::PtyFrame`]'s own doc on the split. The kernel bounds
+ *  how many sessions it holds at once — a claim past that bound refuses
+ *  with `overloaded` and touches nothing already hosted.
+ */
+({ type: "pty_publish_snapshot"; session_id: PtySessionId; seq?: string | null; frame: PtyFrame_Deserialize }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; deltas?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; upload_id?: never } | 
+/**
+ *  Publish the delta batch that moves the session's screen to `seq`.
+ *  Only the connection that claimed the session may publish (`authority`
+ *  otherwise); a `seq` not strictly after the current head refuses with
+ *  `stale_version`; every update must land inside the current grid (a
+ *  `resized` delta in the batch moves the bounds for the updates after
+ *  it), a `resized` delta may not name a grid whose blank frame alone
+ *  would exceed the publish budget, and a cell's glyph is bounded — one
+ *  grapheme cluster never approaches the bound. A batch that violates
+ *  any of that is refused whole and changes nothing.
+ */
+({ type: "pty_publish_deltas"; session_id: PtySessionId; seq: string; deltas: PtyDelta_Deserialize[] }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; frame?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; upload_id?: never } | 
+/**
+ *  Retire a hosted session the publishing connection claimed: attached
+ *  consumers see [`ServerControl::PtyStreamClosed`] and later requests
+ *  for the id answer `not_found`. The explicit form of what a publisher's
+ *  hangup does implicitly.
+ */
+({ type: "pty_retire"; session_id: PtySessionId }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; deltas?: never; envelope?: never; frame?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; seq?: never; sequence?: never; upload_id?: never };
 
 /**
  *  What a client asks for. Tagged by `type`.
@@ -1488,29 +1530,29 @@ sequence: number; data_base64: string }) & { address?: never; byte_size?: never;
  */
 export type KernelRequest_Serialize = 
 /**  Liveness only. Served sealed and active. */
-({ type: "health" }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | 
+({ type: "health" }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; deltas?: never; envelope?: never; frame?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never } | 
 /**  Full readiness detail. Served sealed and active. */
-({ type: "status" }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | 
+({ type: "status" }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; deltas?: never; envelope?: never; frame?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never } | 
 /**  How far the log goes, without a subscription. Served sealed and active. */
-({ type: "watermark" }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | 
+({ type: "watermark" }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; deltas?: never; envelope?: never; frame?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never } | 
 /**
  *  Prove the fresh epoch: exactly one genesis event, zero business rows.
  *  Served sealed and active.
  */
-({ type: "verify_sealed" }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | 
+({ type: "verify_sealed" }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; deltas?: never; envelope?: never; frame?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never } | 
 /**  The only mutation path. Sealed kernels admit `activate_kernel` alone. */
-({ type: "submit_command"; envelope: CommandEnvelope_Serialize }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | ({ type: "get_projection"; projection: ProjectionKind; id: string }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; length?: never; limit?: never; media_type?: never; offset?: never; sequence?: never; session_id?: never; upload_id?: never } | ({ type: "list_projection"; projection: ProjectionKind; cursor?: string | null; limit?: number | null }) & { address?: never; byte_size?: never; data_base64?: never; envelope?: never; id?: never; length?: never; media_type?: never; offset?: never; sequence?: never; session_id?: never; upload_id?: never } | 
+({ type: "submit_command"; envelope: CommandEnvelope_Serialize }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; deltas?: never; frame?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never } | ({ type: "get_projection"; projection: ProjectionKind; id: string }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; deltas?: never; envelope?: never; frame?: never; length?: never; limit?: never; media_type?: never; offset?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never } | ({ type: "list_projection"; projection: ProjectionKind; cursor?: string | null; limit?: number | null }) & { address?: never; byte_size?: never; data_base64?: never; deltas?: never; envelope?: never; frame?: never; id?: never; length?: never; media_type?: never; offset?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never } | 
 /**
  *  One page of events strictly after `cursor` (absent = from the
  *  beginning). `limit` is CLAMPED, not refused
  *  ([`MAX_READ_LIMIT`](crate::port::MAX_READ_LIMIT)).
  */
-({ type: "read_events"; cursor?: string | null; limit: number }) & { address?: never; byte_size?: never; data_base64?: never; envelope?: never; id?: never; length?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | 
+({ type: "read_events"; cursor?: string | null; limit: number }) & { address?: never; byte_size?: never; data_base64?: never; deltas?: never; envelope?: never; frame?: never; id?: never; length?: never; media_type?: never; offset?: never; projection?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never } | 
 /**
  *  Durable-cursor subscription. Delivery is at-least-once; a reconnect
  *  from the last cursor recovers everything, in order.
  */
-({ type: "subscribe_events"; cursor?: string | null }) & { address?: never; byte_size?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | ({ type: "blob_begin"; media_type: string; byte_size: string }) & { address?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; offset?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | 
+({ type: "subscribe_events"; cursor?: string | null }) & { address?: never; byte_size?: never; data_base64?: never; deltas?: never; envelope?: never; frame?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never } | ({ type: "blob_begin"; media_type: string; byte_size: string }) & { address?: never; cursor?: never; data_base64?: never; deltas?: never; envelope?: never; frame?: never; id?: never; length?: never; limit?: never; offset?: never; projection?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never } | 
 /**
  *  One plaintext chunk, base64 in a bounded control frame — blob bytes
  *  never ride an ordinary payload (ADR 0001). Chunks are
@@ -1519,12 +1561,12 @@ export type KernelRequest_Serialize =
  */
 ({ type: "blob_chunk"; upload_id: BlobUploadId; 
 /**  Contiguous from 0; a gap or repeat is a refusal. */
-sequence: number; data_base64: string }) & { address?: never; byte_size?: never; cursor?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; session_id?: never } | 
+sequence: number; data_base64: string }) & { address?: never; byte_size?: never; cursor?: never; deltas?: never; envelope?: never; frame?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; seq?: never; session_id?: never } | 
 /**
  *  Finish an upload. The kernel recomputes the plaintext digest and
  *  refuses if it is not `address`.
  */
-({ type: "blob_commit"; upload_id: BlobUploadId; address: string }) & { byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never } | ({ type: "blob_abort"; upload_id: BlobUploadId }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never } | ({ type: "blob_read"; address: string; offset: string; length: string }) & { byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; limit?: never; media_type?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | ({ type: "blob_stat"; address: string }) & { byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; session_id?: never; upload_id?: never } | 
+({ type: "blob_commit"; upload_id: BlobUploadId; address: string }) & { byte_size?: never; cursor?: never; data_base64?: never; deltas?: never; envelope?: never; frame?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; seq?: never; sequence?: never; session_id?: never } | ({ type: "blob_abort"; upload_id: BlobUploadId }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; deltas?: never; envelope?: never; frame?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; seq?: never; sequence?: never; session_id?: never } | ({ type: "blob_read"; address: string; offset: string; length: string }) & { byte_size?: never; cursor?: never; data_base64?: never; deltas?: never; envelope?: never; frame?: never; id?: never; limit?: never; media_type?: never; projection?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never } | ({ type: "blob_stat"; address: string }) & { byte_size?: never; cursor?: never; data_base64?: never; deltas?: never; envelope?: never; frame?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; seq?: never; sequence?: never; session_id?: never; upload_id?: never } | 
 /**
  *  Attach to a hosted PTY session's live output. Durable-cursor delivery,
  *  mirroring [`Self::SubscribeEvents`]: an absent `cursor` is a fresh
@@ -1532,13 +1574,55 @@ sequence: number; data_base64: string }) & { address?: never; byte_size?: never;
  *  [`PtyFrameSeq`] without a gap. Deltas for this request follow as
  *  [`ServerControl::PtyDeltaBatch`], tagged with the same `request_id`.
  */
-({ type: "pty_attach"; session_id: PtySessionId; cursor?: string | null }) & { address?: never; byte_size?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; upload_id?: never } | 
+({ type: "pty_attach"; session_id: PtySessionId; cursor?: string | null }) & { address?: never; byte_size?: never; data_base64?: never; deltas?: never; envelope?: never; frame?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; seq?: never; sequence?: never; upload_id?: never } | 
 /**
  *  One full styled frame at its current revision — the seed a client
  *  applies later deltas onto. Served whether or not the session is
  *  attached, like [`Self::ReadEvents`] beside [`Self::SubscribeEvents`].
+ *  A screen whose serialized form has outgrown what one response frame
+ *  carries refuses with `overloaded` rather than failing at the write —
+ *  attaching for deltas is the recovery the refusal names.
  */
-({ type: "pty_snapshot"; session_id: PtySessionId }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; upload_id?: never };
+({ type: "pty_snapshot"; session_id: PtySessionId }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; deltas?: never; envelope?: never; frame?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; seq?: never; sequence?: never; upload_id?: never } | 
+/**
+ *  Publish a hosted session's full screen — the host's half of the PTY
+ *  surface, the family v1 reserved room for and did not carry. The first
+ *  publish of a session claims it for the publishing connection; a
+ *  session already claimed by another LIVE connection refuses with
+ *  `authority`, and a connection's sessions retire when it closes, so a
+ *  crashed host cannot leave a session nobody can reclaim. `seq` is
+ *  absent only while the session has produced no frame yet, mirroring
+ *  [`KernelResult::PtyAttached`]'s `cursor`; a re-publish at the current
+ *  head is a legal reseed (a reconnecting host re-announces from its own
+ *  mirror) that must keep the screen's dimensions — one revision names
+ *  one screen — while a `seq` behind the head refuses with
+ *  `stale_version`, the actual head in the detail: revisions never move
+ *  backwards. The frame must be rectangular with `u16` dimensions: that
+ *  shape rule is enforced here at the serving layer, per
+ *  [`crate::frame::PtyFrame`]'s own doc on the split. The kernel bounds
+ *  how many sessions it holds at once — a claim past that bound refuses
+ *  with `overloaded` and touches nothing already hosted.
+ */
+({ type: "pty_publish_snapshot"; session_id: PtySessionId; seq?: string | null; frame: PtyFrame_Serialize }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; deltas?: never; envelope?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; upload_id?: never } | 
+/**
+ *  Publish the delta batch that moves the session's screen to `seq`.
+ *  Only the connection that claimed the session may publish (`authority`
+ *  otherwise); a `seq` not strictly after the current head refuses with
+ *  `stale_version`; every update must land inside the current grid (a
+ *  `resized` delta in the batch moves the bounds for the updates after
+ *  it), a `resized` delta may not name a grid whose blank frame alone
+ *  would exceed the publish budget, and a cell's glyph is bounded — one
+ *  grapheme cluster never approaches the bound. A batch that violates
+ *  any of that is refused whole and changes nothing.
+ */
+({ type: "pty_publish_deltas"; session_id: PtySessionId; seq: string; deltas: PtyDelta_Serialize[] }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; envelope?: never; frame?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; sequence?: never; upload_id?: never } | 
+/**
+ *  Retire a hosted session the publishing connection claimed: attached
+ *  consumers see [`ServerControl::PtyStreamClosed`] and later requests
+ *  for the id answer `not_found`. The explicit form of what a publisher's
+ *  hangup does implicitly.
+ */
+({ type: "pty_retire"; session_id: PtySessionId }) & { address?: never; byte_size?: never; cursor?: never; data_base64?: never; deltas?: never; envelope?: never; frame?: never; id?: never; length?: never; limit?: never; media_type?: never; offset?: never; projection?: never; seq?: never; sequence?: never; upload_id?: never };
 
 /**
  *  What one request answered with, tagged by `type`. [`KernelResult::Error`]
@@ -1601,7 +1685,15 @@ deduplicated: boolean }) & { address?: never; code?: never; cols?: never; comman
  *  The attach succeeded. `cursor` is the frame revision deltas resume
  *  from — absent only for a session that has not produced a frame yet.
  */
-({ type: "pty_attached"; session_id: PtySessionId; rows: number; cols: number; cursor?: string | null }) & { address?: never; code?: never; command_id?: never; contract_version?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; sealed?: never; seq?: never; sequence?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "pty_snapshot"; session_id: PtySessionId; seq: string; frame: PtyFrame_Deserialize }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; sealed?: never; sequence?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "error"; code: KernelErrorCode; message: string; 
+({ type: "pty_attached"; session_id: PtySessionId; rows: number; cols: number; cursor?: string | null }) & { address?: never; code?: never; command_id?: never; contract_version?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; sealed?: never; seq?: never; sequence?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "pty_snapshot"; session_id: PtySessionId; seq: string; frame: PtyFrame_Deserialize }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; sealed?: never; sequence?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | 
+/**
+ *  The publish landed: the session's screen is at the revision the
+ *  request named. One acknowledgement for both publish requests — what a
+ *  publisher does about either is the same, keep going.
+ */
+({ type: "pty_published"; session_id: PtySessionId }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | 
+/**  The session is retired and its id now answers `not_found`. */
+({ type: "pty_retired"; session_id: PtySessionId }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "error"; code: KernelErrorCode; message: string; 
 /**
  *  Machine-readable specifics the code alone cannot carry — the actual
  *  version behind a `stale_version`, the offending field behind a
@@ -1664,7 +1756,15 @@ deduplicated: boolean }) & { address?: never; code?: never; cols?: never; comman
  *  The attach succeeded. `cursor` is the frame revision deltas resume
  *  from — absent only for a session that has not produced a frame yet.
  */
-({ type: "pty_attached"; session_id: PtySessionId; rows: number; cols: number; cursor?: string | null }) & { address?: never; code?: never; command_id?: never; contract_version?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; sealed?: never; seq?: never; sequence?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "pty_snapshot"; session_id: PtySessionId; seq: string; frame: PtyFrame_Serialize }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; sealed?: never; sequence?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "error"; code: KernelErrorCode; message: string; 
+({ type: "pty_attached"; session_id: PtySessionId; rows: number; cols: number; cursor?: string | null }) & { address?: never; code?: never; command_id?: never; contract_version?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; sealed?: never; seq?: never; sequence?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "pty_snapshot"; session_id: PtySessionId; seq: string; frame: PtyFrame_Serialize }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; sealed?: never; sequence?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | 
+/**
+ *  The publish landed: the session's screen is at the revision the
+ *  request named. One acknowledgement for both publish requests — what a
+ *  publisher does about either is the same, keep going.
+ */
+({ type: "pty_published"; session_id: PtySessionId }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | 
+/**  The session is retired and its id now answers `not_found`. */
+({ type: "pty_retired"; session_id: PtySessionId }) & { address?: never; code?: never; cols?: never; command_id?: never; contract_version?: never; cursor?: never; data_base64?: never; deduplicated?: never; descriptor?: never; detail?: never; event_count?: never; events?: never; frame?: never; genesis_event_id?: never; genesis_watermark?: never; message?: never; next_cursor?: never; offset?: never; public_revision?: never; ready?: never; record?: never; records?: never; rows?: never; sealed?: never; seq?: never; sequence?: never; upload_id?: never; watermark?: never; writer_epoch?: never } | ({ type: "error"; code: KernelErrorCode; message: string; 
 /**
  *  Machine-readable specifics the code alone cannot carry — the actual
  *  version behind a `stale_version`, the offending field behind a

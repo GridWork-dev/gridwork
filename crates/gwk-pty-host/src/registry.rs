@@ -1,6 +1,9 @@
-//! The session registry: every hosted PTY session by id, and the verbs the
-//! kernel-facing surface will route to them — spawn, input, resize,
-//! snapshot, attach, stop.
+//! The session registry: every hosted PTY session by id, and the verbs
+//! routed to them — spawn, input, resize, snapshot, attach, stop. Attach
+//! reaches the kernel socket today through [`crate::publish`] (a fresh
+//! attach carries the snapshot seed, so the kernel's own snapshot verb is
+//! served without this registry's ever crossing the wire); the rest stay
+//! local until the lifecycle follow-up the crate root doc scopes.
 //!
 //! Ids are host-minted [`PtySessionId`]s per that type's own contract ("a
 //! caller only echoes an id an earlier spawn handed back"); the registry is
@@ -45,6 +48,28 @@ pub enum RegistryError {
 struct Entry {
     commands: mpsc::Sender<SessionCommand>,
     task: JoinHandle<SessionExit>,
+}
+
+/// One session's attach handle, detached from the registry — see
+/// [`SessionRegistry::attacher`].
+#[derive(Clone)]
+pub struct Attacher {
+    id: PtySessionId,
+    commands: mpsc::Sender<SessionCommand>,
+}
+
+impl Attacher {
+    /// Exactly [`SessionRegistry::attach`], without the registry.
+    pub async fn attach(&self, cursor: Option<u64>) -> Result<Attached, RegistryError> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(SessionCommand::Attach { cursor, reply })
+            .await
+            .map_err(|_| RegistryError::Ended(self.id.clone()))?;
+        answer
+            .await
+            .map_err(|_| RegistryError::Ended(self.id.clone()))
+    }
 }
 
 /// Every hosted session, by id.
@@ -166,10 +191,26 @@ impl SessionRegistry {
         id: &PtySessionId,
         cursor: Option<u64>,
     ) -> Result<Attached, RegistryError> {
-        let (reply, answer) = oneshot::channel();
-        self.send(id, SessionCommand::Attach { cursor, reply })
-            .await?;
-        answer.await.map_err(|_| RegistryError::Ended(id.clone()))
+        self.attacher(id)?.attach(cursor).await
+    }
+
+    /// A standalone attach handle for one session — a clone of its command
+    /// channel, usable without the registry or any lock around it. This
+    /// exists for the publisher tasks: an attach round-trips through the
+    /// session's own thread, and a caller that held a shared registry lock
+    /// across that await would stall every other caller on one session's
+    /// worst moment (a restart backoff, a child that will not reap). The
+    /// handle outlives nothing — once the session's task ends, every verb
+    /// on it answers [`RegistryError::Ended`].
+    pub fn attacher(&self, id: &PtySessionId) -> Result<Attacher, RegistryError> {
+        let entry = self
+            .sessions
+            .get(id)
+            .ok_or_else(|| RegistryError::NotFound(id.clone()))?;
+        Ok(Attacher {
+            id: id.clone(),
+            commands: entry.commands.clone(),
+        })
     }
 
     /// Stop a session — kill its child, reap it, and remove the entry —

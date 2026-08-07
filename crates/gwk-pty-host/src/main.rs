@@ -1,23 +1,31 @@
 //! `gwk-pty-host`: the resident process. Installs the tracing sink, proves
-//! kernel connectivity, tells a service manager it is ready, and waits to
-//! be told to stop.
+//! kernel connectivity, starts every operator-declared session, publishes
+//! each across the kernel socket, tells a service manager it is ready, and
+//! waits to be told to stop.
 //!
-//! The session runtime (spawn, pump loop, restart semantics, session
-//! registry, detach/reattach routing) lives in this crate's library —
-//! `gwk_pty_host::registry` down. The binary starts no session yet because
-//! nothing can ask it to: the kernel-side hookup that routes attach and
-//! spawn across the socket is the follow-up the crate root doc names, and a
-//! session no consumer can reach would be a child process running for no
-//! one. What the binary does today is exactly what its service unit needs
-//! it to do; the registry joins this main loop the day the hookup lands.
+//! The registry joined this main loop when the attach hookup landed: each
+//! declared session runs under [`gwk_pty_host::registry`], and a
+//! [`gwk_pty_host::publish`] task per session carries its snapshot and
+//! delta batches to the kernel, where `PtyAttach`/`PtySnapshot` serve them
+//! to any consumer on the socket. What no one declares, this binary still
+//! does not run — an empty declaration is a legal resident state, and was
+//! the only state before the hookup existed.
 //!
 //! Derivation: none — process wiring and signal handling only; no terminal
-//! byte is parsed and no engine process is supervised by this file.
+//! byte is parsed and no engine process is supervised by this file (the
+//! registry and session modules own that).
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use gwk_domain::ids::PtySessionId;
+use gwk_pty_host::publish::{self, SessionDecl};
+use gwk_pty_host::registry::SessionRegistry;
+use tokio::sync::{Mutex, watch};
 
 /// Where the kernel's socket lives — the same lookup `gw`'s own CLI uses
-/// (`crates/gridwork/src/main.rs`'s `socket_path`), so a deployment sets
+/// (`crates/gridwork/src/lib.rs`'s `socket_path`), so a deployment sets
 /// one variable for every kernel client on the box rather than one per
 /// binary.
 fn socket_path() -> PathBuf {
@@ -25,6 +33,15 @@ fn socket_path() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(gwk_kernel::DEFAULT_SOCKET_PATH))
 }
+
+/// How long shutdown waits for the publishers' parting retires before the
+/// process exits anyway — the kernel retires on hangup regardless, so this
+/// buys a typed close for consumers, not correctness.
+const PUBLISHER_DRAIN: Duration = Duration::from_secs(5);
+
+/// How long shutdown waits for the sessions themselves — child kills and
+/// thread joins — before exiting anyway.
+const SESSION_STOP: Duration = Duration::from_secs(10);
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
@@ -36,8 +53,37 @@ async fn main() -> std::process::ExitCode {
         eprintln!("gwk-pty-host: could not install the tracing sink: {e}");
     }
 
+    // The operator's declarations, refused loudly and whole: a service that
+    // came up serving half of what its unit says would fail quieter than one
+    // that did not come up. `var_os` so a non-UTF8 value is ALSO loud —
+    // `var()`'s error would fold it into "unset" and silently run nothing.
+    let declared = match std::env::var_os(publish::SESSIONS_ENV) {
+        None => String::new(),
+        Some(value) => match value.into_string() {
+            Ok(value) => value,
+            Err(_) => {
+                tracing::error!(
+                    env = publish::SESSIONS_ENV,
+                    "session declaration refused: the value is not UTF-8"
+                );
+                return std::process::ExitCode::FAILURE;
+            }
+        },
+    };
+    let declared = match publish::parse_sessions(&declared) {
+        Ok(declared) => declared,
+        Err(why) => {
+            tracing::error!(%why, env = publish::SESSIONS_ENV, "session declaration refused");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+
     let socket = socket_path();
-    tracing::info!(socket = %socket.display(), "gwk-pty-host starting");
+    tracing::info!(
+        socket = %socket.display(),
+        sessions = declared.len(),
+        "gwk-pty-host starting"
+    );
 
     match gwk_pty_host::kernel_client::KernelClient::connect(&socket).await {
         Ok(mut client) => match client.healthy().await {
@@ -50,6 +96,39 @@ async fn main() -> std::process::ExitCode {
         Err(error) => tracing::warn!(%error, "could not reach the kernel at startup"),
     }
 
+    let registry = Arc::new(Mutex::new(SessionRegistry::new()));
+    for decl in &declared {
+        if let Err(why) = start_session(&registry, decl).await {
+            tracing::error!(session = %decl.id, %why, "a declared session could not start");
+            stop_sessions(&registry, &declared).await;
+            return std::process::ExitCode::FAILURE;
+        }
+        tracing::info!(session = %decl.id, engine = %decl.engine, "session started");
+    }
+
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let mut publishers = tokio::task::JoinSet::new();
+    for decl in &declared {
+        // Each publisher gets its own attach handle instead of the shared
+        // registry: its attach round-trips through the session's thread, and
+        // a shared lock held across that would let one stuck session starve
+        // every other publisher's reconnect.
+        let attacher = match registry.lock().await.attacher(&decl.id) {
+            Ok(attacher) => attacher,
+            Err(why) => {
+                tracing::error!(session = %decl.id, %why, "a started session vanished");
+                stop_sessions(&registry, &declared).await;
+                return std::process::ExitCode::FAILURE;
+            }
+        };
+        publishers.spawn(publish::publish_session(
+            attacher,
+            socket.clone(),
+            decl.id.clone(),
+            stop_rx.clone(),
+        ));
+    }
+
     // Reused rather than reimplemented: the exact `sd_notify` datagram this
     // process's own service unit expects, already implemented once for the
     // kernel daemon (`crates/gwk-kernel/src/wire/listen.rs`). A daemon
@@ -60,7 +139,60 @@ async fn main() -> std::process::ExitCode {
 
     wait_for_stop().await;
     tracing::info!("gwk-pty-host stopping");
+
+    // Order matters: sessions stop FIRST, so their broadcasts close and each
+    // publisher's last act is a typed retire rather than a mid-stream hangup;
+    // the drain is bounded because the hangup retires just as surely. The
+    // stop itself is bounded too — it joins each session's thread, and a
+    // child that will not reap must not hold shutdown hostage (the service
+    // manager's stop timeout would eventually win, but by SIGKILL).
+    let _ = stop_tx.send(true);
+    if tokio::time::timeout(SESSION_STOP, stop_sessions(&registry, &declared))
+        .await
+        .is_err()
+    {
+        tracing::warn!("session shutdown exceeded its bound; exiting anyway");
+    }
+    let _ = tokio::time::timeout(PUBLISHER_DRAIN, async {
+        while publishers.join_next().await.is_some() {}
+    })
+    .await;
     std::process::ExitCode::SUCCESS
+}
+
+/// Start one declared session, resolving its engine to the adapter's own
+/// spawn function.
+async fn start_session(
+    registry: &Arc<Mutex<SessionRegistry>>,
+    decl: &SessionDecl,
+) -> Result<(), String> {
+    let spawn = gwk_pty_host::engines::spawn_fn(&decl.engine)
+        .ok_or_else(|| format!("no adapter claims the engine name {:?}", decl.engine))?;
+    registry
+        .lock()
+        .await
+        .spawn(decl.id.clone(), spawn, decl.config())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Kill and reap every declared session, logging how each ended.
+async fn stop_sessions(registry: &Arc<Mutex<SessionRegistry>>, declared: &[SessionDecl]) {
+    let mut registry = registry.lock().await;
+    for decl in declared {
+        // An Err is already-gone — it ended on its own and was reaped, or it
+        // never started; neither is a shutdown problem.
+        if let Ok(exit) = registry.stop(&decl.id).await {
+            tracing::info!(session = %decl.id, ?exit, "session stopped");
+        }
+    }
+    let _ = registry
+        .reap()
+        .into_iter()
+        .map(|(id, exit): (PtySessionId, _)| {
+            tracing::info!(session = %id, ?exit, "session reaped");
+        })
+        .count();
 }
 
 /// `SIGTERM` (a service manager's ask) or Ctrl-C, whichever arrives first —

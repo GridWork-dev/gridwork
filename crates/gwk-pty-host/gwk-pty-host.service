@@ -50,23 +50,46 @@ RestartSec=2s
 # deployment moved it.
 # Environment=GWK_SOCKET_PATH=/run/gridwork/gwk.sock
 
+# The sessions this host runs and publishes: comma-separated
+# name=engine:COLSxROWS entries (see `crates/gwk-pty-host/src/publish.rs`).
+# Omit or leave empty to run none — a legal resident state. A malformed
+# value, an engine no adapter claims, or a child that cannot spawn fails
+# the unit loudly at start rather than serving half a declaration.
+# Environment=GWK_PTY_HOST_SESSIONS=console=opencode:100x30
+
 # This process adds no credential store and no listening network surface of
-# its own (see `crates/gwk-pty-host/src/lib.rs`) — it only ever CONNECTS out,
-# on a Unix-domain socket. `RestrictAddressFamilies=AF_UNIX` is not
-# decorative: a future change that tried to bind a TCP/UDP listener would
-# fail at the syscall rather than merely going undocumented.
+# its own (see `crates/gwk-pty-host/src/lib.rs`) — it only ever CONNECTS out.
+# Its CHILDREN are another matter, and three of the original hardening lines
+# moved the day the host began supervising real engine TUIs instead of
+# nothing, because a child shares the unit's namespace:
+#
+#   * RestrictAddressFamilies gains AF_INET/AF_INET6 — an engine TUI talks
+#     to its own provider. The host still binds nothing; the family list is
+#     about who a child may DIAL, and a host build that tried to bind a
+#     listener would still fail review before it failed a syscall.
+#   * MemoryDenyWriteExecute is gone — the engines are JIT runtimes.
+#   * The home becomes writable (ReadWritePaths under ProtectSystem=strict)
+#     — every engine keeps its own state under it. Point it at the
+#     deployment user's real home.
+#   * PrivateDevices is gone — putting a child on a pseudo-terminal
+#     allocates from the real pty subsystem, and the private /dev this
+#     flag substitutes refuses that allocation (the spawn fails with
+#     ENOENT before any session exists).
+#
+# The engines' TUIs also consult TERM, which a service manager does not
+# set; the value here is a deployment choice for what the sessions report,
+# not a fact about any engine.
+Environment=TERM=xterm-256color
 NoNewPrivileges=yes
 ProtectSystem=strict
-ProtectHome=yes
+ReadWritePaths=/home/gridwork
 PrivateTmp=yes
-PrivateDevices=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
-RestrictAddressFamilies=AF_UNIX
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=yes
 LockPersonality=yes
-MemoryDenyWriteExecute=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
 

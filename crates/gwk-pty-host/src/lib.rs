@@ -11,8 +11,9 @@
 //!   semantics), [`wire`] converts the engine's typed output into the wire
 //!   contract's `PtyFrame`/`PtyDelta` shapes, [`registry`] holds every live
 //!   session by id and routes the verbs (spawn, input, resize, snapshot,
-//!   attach, stop), and [`engines`] maps an engine name to its adapter's own
-//!   spawn function.
+//!   attach, stop), [`engines`] maps an engine name to its adapter's own
+//!   spawn function, and [`publish`] carries each session's snapshot and
+//!   delta batches to the kernel, one forwarding task per session.
 //! - **The kernel-facing half** — command origination. Every command this
 //!   host mints — an envelope with a minted id and an idempotency key,
 //!   submitted over the kernel's Unix socket, its result classified into
@@ -32,18 +33,19 @@
 //!
 //! # The boundary that remains
 //!
-//! The kernel serves `PtyAttach`/`PtySnapshot` to consumers, but v1 of the
-//! wire has no family a host can PUSH frames through — the kernel's own
-//! serve loop records that its session registry "lands with the pin-advance
-//! task that wires the PTY host in" (`crates/gwk-kernel/src/wire/serve.rs`),
-//! and frame kind `0x02` is reserved-and-refused. Until that task, this
-//! crate's [`registry`] is where attach, snapshot, and delta batches are
-//! served FROM ([`registry::SessionRegistry::attach`] returns exactly the
-//! catch-up-plus-live shape the wire contract describes); the hookup that
-//! carries them across the socket is that follow-up's, not silently absent.
-//! `docs/PARITY.md`'s axes 1, 2, and 4 (lifecycle, status, approval relay)
-//! ride the same follow-up — they need the adapters' control halves, which
-//! no 6′ verify demands of the host yet.
+//! The attach hookup is in: the wire's `pty_publish_snapshot` /
+//! `pty_publish_deltas` / `pty_retire` family is how [`publish`] pushes
+//! what [`registry::SessionRegistry::attach`] serves locally into the
+//! kernel's own session registry (`crates/gwk-kernel/src/wire/pty.rs`),
+//! and `PtyAttach`/`PtySnapshot` answer consumers from there. Frame kind
+//! `0x02` stays reserved-and-refused — the family rides ordinary JSON
+//! control frames. What remains is the rest of the verb set: nothing on
+//! the wire yet carries a consumer's input, resize, or stop to a hosted
+//! session, and sessions START from the operator's own declaration
+//! ([`publish::SESSIONS_ENV`]) rather than from a request — routing
+//! lifecycle across the socket is `docs/PARITY.md` axes 1, 2, and 4's
+//! follow-up, which needs the adapters' control halves that no 6′ verify
+//! demands of the host yet.
 //!
 //! # Clean-room scope
 //!
@@ -68,6 +70,7 @@ pub mod ingest;
 pub mod kernel_client;
 pub mod logging;
 pub mod origination;
+pub mod publish;
 pub mod registry;
 pub mod session;
 pub mod wire;
