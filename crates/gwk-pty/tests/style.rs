@@ -266,8 +266,12 @@ fn a_dropped_attribute_fails_here_not_silently() {
     // setting — which is what lets the attribute pile below arrive as
     // several sequences instead of one over-budget parameter list — and the
     // assertion is what pins that the engine is in it.
-    // Derivation: KITTY-UNDERLINES — SGR 58 with the colon-separated `2`
-    // sub-parameter form sets the underline's own direct-RGB color.
+    // Derivation: KITTY-UNDERLINES — SGR 58 with colon-separated
+    // sub-parameters sets the underline's own color.
+    // Derivation: XTERM-CTLSEQS "Character Attributes (SGR)" — in the
+    // colon sub-parameter form, `2` means a direct RGB colour and the
+    // colour-space slot between it and the components may be left empty,
+    // which is the `58:2::70:80:90` shape the pile below uses.
     let styles = styles_of(
         b"\x1b[1;2;3;4;5;7;8;9;53m\x1b[38;2;10;20;30m\x1b[48;2;40;50;60m\x1b[58:2::70:80:90mX",
     );
@@ -302,9 +306,11 @@ fn a_dropped_attribute_fails_here_not_silently() {
 
 #[test]
 fn a_zwj_sequence_spans_two_style_entries_by_default() {
-    // Derivation: UAX-29 — an extended grapheme cluster does not break
-    // before or after ZERO WIDTH JOINER (rules GB9/GB11), so WOMAN + ZWJ +
-    // ROCKET segments as one grapheme of `text`.
+    // Derivation: UAX-29 — GB9 does not break before ZERO WIDTH JOINER,
+    // unconditionally; after one, breaking is the default (GB999) except
+    // between extended pictographics, where GB11 forbids it. WOMAN and
+    // ROCKET are both extended pictographic, so WOMAN + ZWJ + ROCKET
+    // segments as one grapheme of `text`.
     // Derivation: CAP-004 — measured, not specified: with mode 2027 reset the
     // pinned engine segments the joined sequence across separate cells.
     // TERM-UNICODE-CORE is deliberately NOT cited for this half — it calls the
