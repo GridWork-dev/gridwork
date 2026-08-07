@@ -13,9 +13,10 @@ const architecture = [
 const stages = [
   ["01", "Contract", "shipped", "The shared language and conformance surface."],
   ["02", "Kernel", "shipped", "The sole writer, projections, blobs, attention, and authority."],
-  ["03", "Engines", "current", "PTY and agent-control adapters are the work in flight."],
-  ["04", "Console", "planned", "Queue, Board, fleet view, and time-synced replay."],
+  ["03", "Engines", "shipped", "PTY and agent-control adapters, certified by the parity matrix."],
+  ["04", "Console", "current", "Queue, Board, fleet view, and time-synced replay."],
   ["05", "Workspace", "planned", "A daily-driver terminal multiplexer."],
+  ["06", "Context runtime", "planned", "Skills, memory, and knowledge as measured, receipted surfaces."],
 ] as const;
 
 const crates = [
@@ -105,7 +106,7 @@ export default function HomePage() {
             apache-2.0
           </span>
           <a className="landing-stage" href="/docs/roadmap">
-            stage 3/5 · engines
+            stage 4/6 · console
           </a>
           <span className="landing-status-segment landing-status-optional">
             pre-1.0
@@ -220,8 +221,8 @@ $ gw kernel health
           <div className="landing-section-heading">
             <h2 id="truth-title">Where it actually is</h2>
             <p>
-              Pre-alpha, at <strong>stage 3 of 5</strong>. The contract and kernel
-              are in the tree; engines and the human interface are the work now.
+              Pre-alpha, at <strong>stage 4 of 6</strong>. The contract, kernel,
+              and engines are done; the console is the work now.
             </p>
           </div>
 
@@ -290,10 +291,10 @@ $ gw kernel health
           aria-labelledby="roadmap-title"
         >
           <div className="landing-section-heading">
-            <h2 id="roadmap-title">Five stages, in order</h2>
+            <h2 id="roadmap-title">Six stages, in order</h2>
             <p>
-              Stages land when their gates are green. Contract and kernel have
-              shipped; engine work is current.
+              Stages land when their gates are green. Contract, kernel, and
+              engines have shipped; console work is current.
             </p>
           </div>
 

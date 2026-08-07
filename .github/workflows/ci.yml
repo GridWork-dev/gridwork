@@ -1529,9 +1529,9 @@ jobs:
           mirror=site/content/docs/quickstart.mdx
           cp "$mirror" /tmp/quickstart.mdx
           trap 'cp /tmp/quickstart.mdx "$mirror"' EXIT
-          current="$(grep -oE 'stage [0-9] of 5' README.md | grep -oE '[0-9]' | head -n1)"
-          bumped=$((current % 5 + 1))
-          sed -i -E "s/stage ${current} of 5/stage ${bumped} of 5/" "$mirror"
+          current="$(grep -oE 'stage [0-9] of 6' README.md | grep -oE '[0-9]' | head -n1)"
+          bumped=$((current % 6 + 1))
+          sed -i -E "s/stage ${current} of 6/stage ${bumped} of 6/" "$mirror"
           if ./tools/check-claims.sh; then
             echo "check-claims accepted a bumped current-stage mirror ($mirror)" >&2
             exit 1

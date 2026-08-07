@@ -53,13 +53,13 @@ need "$landing" 'no web console' "terminal-only"
 # its "stage 1 of 5" says when the naming policy froze, so it is a constant, not a
 # marker. Comparing it made every stage bump red until someone renumbered a
 # sentence that must never move — C7 pins it to the constant instead.
-readme_stage=$(grep -oE 'stage [0-9] of 5' README.md | grep -oE '^stage [0-9]' | grep -oE '[0-9]' | head -1 || true)
-site_stage=$(grep -oE 'stage [0-9]/5' "$landing" | grep -oE '[0-9]' | head -1 || true)
+readme_stage=$(grep -oE 'stage [0-9] of 6' README.md | grep -oE '^stage [0-9]' | grep -oE '[0-9]' | head -1 || true)
+site_stage=$(grep -oE 'stage [0-9]/6' "$landing" | grep -oE '[0-9]' | head -1 || true)
 roadmap_stage=$(grep -oE '^## [0-9] · .*\(current\)' ROADMAP.md | grep -oE '[0-9]' | head -1 || true)
-threat_stage=$(grep -oE 'stage [0-9] of 5' docs/security/THREAT_MODEL.md | grep -oE '^stage [0-9]' | grep -oE '[0-9]' | head -1 || true)
-quickstart_stage=$(grep -oE 'stage [0-9] of 5' site/content/docs/quickstart.mdx | grep -oE '^stage [0-9]' | grep -oE '[0-9]' | head -1 || true)
-site_security_stage=$(grep -oE 'stage [0-9] of 5' site/content/docs/security/index.mdx | grep -oE '^stage [0-9]' | grep -oE '[0-9]' | head -1 || true)
-site_prose_stage=$(grep -oE 'stage [0-9] of 5' "$landing" | grep -oE '^stage [0-9]' | grep -oE '[0-9]' | head -1 || true)
+threat_stage=$(grep -oE 'stage [0-9] of 6' docs/security/THREAT_MODEL.md | grep -oE '^stage [0-9]' | grep -oE '[0-9]' | head -1 || true)
+quickstart_stage=$(grep -oE 'stage [0-9] of 6' site/content/docs/quickstart.mdx | grep -oE '^stage [0-9]' | grep -oE '[0-9]' | head -1 || true)
+site_security_stage=$(grep -oE 'stage [0-9] of 6' site/content/docs/security/index.mdx | grep -oE '^stage [0-9]' | grep -oE '[0-9]' | head -1 || true)
+site_prose_stage=$(grep -oE 'stage [0-9] of 6' "$landing" | grep -oE '^stage [0-9]' | grep -oE '[0-9]' | head -1 || true)
 if [ -z "$readme_stage" ] \
   || [ "$readme_stage" != "$site_stage" ] \
   || [ "$readme_stage" != "$roadmap_stage" ] \

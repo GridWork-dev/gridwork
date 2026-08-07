@@ -48,16 +48,20 @@ which is what made `cargo install gridwork` work.
 Certified against a real PostgreSQL 16, including crash, race and process-boundary
 cases, with the performance envelope measured and receipted per run.
 
-## 3 · Engines *(current)*
+## 3 · Engines *(shipped)*
 
 - PTY engine: authoritative server-side virtual terminal, render-state deltas,
   detach/reattach, recording
 - Agent adapters for Claude Code, Codex, and opencode over ACP + engine hooks —
   control never rides synthetic keystrokes
 - A parity matrix per engine, including permission-prompt relay — defined in
-  [docs/PARITY.md](docs/PARITY.md)
+  [docs/PARITY.md](docs/PARITY.md), certified green across all twelve cells at
+  pinned engine versions (2026-08-06)
 
-## 4 · Console
+Shipped means the stage's gates are green, not that its crates are published:
+the engine crates stay in-tree, unpublished until 1.0 packaging.
+
+## 4 · Console *(current)*
 
 - The orchestration TUI: Queue (attention), Board (work), and a live view of the
   running fleet
@@ -67,6 +71,13 @@ cases, with the performance envelope measured and receipted per run.
 
 - A full terminal multiplexer: workspaces, tabs, splits, scrollback, detach
 - Daily-driver quality — the stage where GridWork becomes the terminal you live in
+
+## 6 · Context runtime
+
+- The instruction and intelligence plane: skills, memory, and knowledge as
+  first-class, measured surfaces — what an agent is told becomes an inspectable,
+  receipted artifact instead of loose convention
+- The last stage before 1.0: packaging and the ignition kit follow its exit
 
 ## 1.0
 

@@ -1,9 +1,9 @@
 ---
 title: Roadmap
-description: Five ordered stages to GridWork 1.0, with shipped, current, and planned work stated separately.
+description: Six ordered stages to GridWork 1.0, with shipped, current, and planned work stated separately.
 ---
 
-{/* curated-from: ROADMAP.md sha256=046cb650564cfb01fcda6aabbd33d551aa2c30d5a3ae91437d1fe5b4598abdf5 */}
+{/* curated-from: ROADMAP.md sha256=8df3c57f07cd681b35577ae25e054b5bf0d7e6698c59dd3a486355b7b47d6718 */}
 
 GridWork is built in public, pre-1.0. Stages land in order, and each stage exits with
 working, tested code — there are no aspirational branches.
@@ -53,16 +53,20 @@ which is what made `cargo install gridwork` work.
 Certified against a real PostgreSQL 16, including crash, race and process-boundary
 cases, with the performance envelope measured and receipted per run.
 
-## 3 · Engines *(current)*
+## 3 · Engines *(shipped)*
 
 - PTY engine: authoritative server-side virtual terminal, render-state deltas,
   detach/reattach, recording
 - Agent adapters for Claude Code, Codex, and opencode over ACP + engine hooks —
   control never rides synthetic keystrokes
 - A parity matrix per engine, including permission-prompt relay — defined in
-  [Engine parity](/docs/parity)
+  [Engine parity](/docs/parity), certified green across all twelve cells at
+  pinned engine versions (2026-08-06)
 
-## 4 · Console
+Shipped means the stage's gates are green, not that its crates are published:
+the engine crates stay in-tree, unpublished until 1.0 packaging.
+
+## 4 · Console *(current)*
 
 - The orchestration TUI: Queue (attention), Board (work), and a live view of the
   running fleet
@@ -72,6 +76,13 @@ cases, with the performance envelope measured and receipted per run.
 
 - A full terminal multiplexer: workspaces, tabs, splits, scrollback, detach
 - Daily-driver quality — the stage where GridWork becomes the terminal you live in
+
+## 6 · Context runtime
+
+- The instruction and intelligence plane: skills, memory, and knowledge as
+  first-class, measured surfaces — what an agent is told becomes an inspectable,
+  receipted artifact instead of loose convention
+- The last stage before 1.0: packaging and the ignition kit follow its exit
 
 ## 1.0
 
