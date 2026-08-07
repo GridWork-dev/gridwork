@@ -43,9 +43,11 @@ encrypted blobs, authority evaluation that leaves a receipt, event subscriptions
 real PostgreSQL 16 and its performance envelope measured, not asserted.
 
 Stage 3 is in flight, and its crates are in this tree: `gwk-pty` (a real server-side VT
-engine), the three `gwk-adapter-*` crates, the parity harness that measures them, a
-skeleton `gwk-pty-host`, and a skeleton `gwk-tui`. None of it is finished, none of it is
-published, and none of it is wired into a surface you can sit in front of — so the
+engine), the three `gwk-adapter-*` crates, the parity harness that measures them,
+`gwk-pty-host` (the resident host: session supervision, wire-frame conversion, and
+command origination — no consumer-facing hookup yet), and a skeleton `gwk-tui`. None of
+it is finished, none of it is published, and none of it is wired into a surface you can
+sit in front of — so the
 terminal-native and engine-agnostic bullets above are still describing what GridWork is
 being built to be, and the daemon you can run today has a JSON command line as its only
 face.
@@ -145,7 +147,7 @@ code.
 | [`gwk`](https://docs.rs/gwk) | Namespace root for the `gwk-*` crates. **No API** | 0.0.2, name only |
 | `xtask` | Codegen and release glue. Not published | in-tree |
 | `gwk-pty` | PTY engine: server-side VT, render-state deltas, reattach | in tree, unpublished |
-| `gwk-pty-host` | Resident PTY engine host: session registry, spawn, detach/reattach routing | in tree, unpublished — skeleton, and not part of `cargo install gridwork` until its own release |
+| `gwk-pty-host` | Resident PTY engine host: session registry, spawn, detach/reattach routing | in tree, unpublished — not part of `cargo install gridwork` until its own release |
 | `gwk-adapter-*` | Per-engine ACP + hooks adapters | in tree, unpublished |
 | `gwk-parity` | The engine parity matrix harness — runs locally against logged-in engines, never in CI | in tree, unpublished |
 | `gwk-tui` | The client: modes, lenses, palette | in tree, unpublished — skeleton |
