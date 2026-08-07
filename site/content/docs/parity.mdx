@@ -3,7 +3,7 @@ title: Engine parity
 description: The four acceptance axes, version pins, harness, and live inventory used to prove adapter parity.
 ---
 
-{/* curated-from: docs/PARITY.md sha256=c4bd440d45501f427092009ce8fb084b66a273ac581087de24fd196762d80878 */}
+{/* curated-from: docs/PARITY.md sha256=f2d684c8b0eb0916c3850d7ebdf18ed3859037d4d2176a7f1c3e80c7815453a7 */}
 
 What "done" means for the agent adapters — the parity matrix the roadmap promises
 for stage 3, defined before any adapter exists to measure. Four axes, each with an
@@ -13,12 +13,13 @@ the matrix is green when all twelve cells are.
 
 > Like `docs/architecture.md`, this is a design contract written in the present
 > tense: it specifies what the adapters must prove. The three adapter crates now
-> exist in the tree and are measured against it — the matrix, not the crates, is
-> what does not fully pass yet.
+> exist in the tree, are measured against it, and have the certified green run
+> recorded below.
 > The per-engine inventory at the bottom is the exception — it records what each
 > engine's control surface actually exposes, captured live on 2026-08-01 against
-> the pinned versions below, because an acceptance test against an unstated
-> capability is unfalsifiable.
+> the versions pinned at capture time and re-verified for Claude Code 2.1.223 on
+> 2026-08-06, because an acceptance test against an unstated capability is
+> unfalsifiable.
 
 The matrix runs **locally, never in public CI**. Its tests need three logged-in
 engine CLIs; public CI proves the adapter crates build and their protocol handling
@@ -34,7 +35,7 @@ against an unpinned version is void.
 
 | Engine | CLI reports | Protocol driven |
 | --- | --- | --- |
-| Claude Code | `2.1.220 (Claude Code)` | bidirectional stream-json (`--input-format stream-json --output-format stream-json`) for the transcript; lifecycle/permission hooks for control |
+| Claude Code | `2.1.223 (Claude Code)` | bidirectional stream-json (`--input-format stream-json --output-format stream-json`) for the transcript; lifecycle/permission hooks for control |
 | Codex | `codex-cli 0.146.0` | `codex app-server` — JSON-RPC 2.0, newline-delimited over stdio; schemas emitted by `codex app-server generate-json-schema` and vendored in-repo |
 | opencode | `1.18.3` | ACP wire v1 (`opencode acp`, JSON-RPC over stdio) for the agent loop; the server event bus (SSE `/event`) for lifecycle and approval |
 
@@ -177,6 +178,25 @@ can fail. For Claude Code the harness exercises both control channels the
 adapter depends on — the stream-json transcript and the PreToolUse decision
 path — since the two can regress independently.
 
+From a clean target directory, build both harness binaries before running the
+matrix so the Claude `PreToolUse` helper is present:
+
+```text
+cargo build -p gwk-parity --bins --locked
+cargo run -p gwk-parity --bin parity --locked
+```
+
+## Certified matrix (2026-08-06)
+
+Run locally against the live kernel with Claude Code 2.1.223, Codex 0.146.0,
+and opencode 1.18.3. The runner reported `all_green: true`:
+
+| engine | lifecycle | status_truth | transcript_ingestion | approval_relay |
+| --- | --- | --- | --- | --- |
+| opencode | pass | pass | pass | pass |
+| claude | pass | pass | pass | pass |
+| codex | pass | pass | pass | pass |
+
 ## What the matrix does not measure
 
 Style truth — colors, attributes, animation cadence, wide-glyph rendering. The
@@ -186,18 +206,22 @@ acquire one. And the matrix measures **adapter fidelity per engine**, not engine
 equivalence: engines differ in what they expose, the inventory records those
 differences, and a cell is judged against its own engine's column only.
 
-## Inventory notes (captured 2026-08-01)
+## Inventory notes (captured 2026-08-01; Claude re-verified 2026-08-06)
 
 Facts from the live capture that bound what the adapters may assume, kept here
 because each one either shaped an acceptance test above or will shape the
 adapter that meets it:
 
-- **Claude Code** exposes no machine-readable per-child cost anywhere; the only
-  per-subagent attribution is an interactive-terminal percentage view. Hooks are
-  step one of a single permission-evaluation order and run in every mode,
-  including modes that bypass interactive prompting. `total_cost_usd` is a
-  client-side list-rate estimate with no stated error bound — the ledger stores
-  it as reported and treats the token counts as the accounting fact.
+- **Claude Code** 2.1.223 still exposes no machine-readable per-child cost;
+  `--forward-subagent-text` still attributes forwarded child messages through
+  `parent_tool_use_id`, while `result.usage`, `modelUsage`, and
+  `total_cost_usd` remain whole-invocation or per-model aggregates. Hooks still
+  run in every mode, including modes that bypass interactive prompting, and the
+  CLI exposes their stream projection through `--include-hook-events`.
+  `total_cost_usd` remains a client-side list-rate estimate with no stated error
+  bound — the ledger stores it as reported and treats token counts as the
+  accounting fact. The 2.1.223 changelog contains no stream-json, hook,
+  attribution, or cost-reporting change from the previous pin.
 - **Codex** build 0.146.0 ships two protocol generations in one schema bundle
   (a legacy surface and the thread/turn/item surface). The adapter speaks the
   thread/turn/item generation; the vendored schemas record exactly which

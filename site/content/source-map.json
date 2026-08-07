@@ -39,7 +39,7 @@
     },
     {
       "destination": "content/docs/parity.mdx",
-      "sha256": "720f25309747c1971037f4c9f1f48841acc76a444a92069daab0fe7e1a1b7475",
+      "sha256": "bc358c507018380a4aaa435bcf83514e0616ac6187bded7c193f113ad203b0c2",
       "sources": [
         {
           "path": "docs/PARITY.md"
