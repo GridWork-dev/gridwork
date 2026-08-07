@@ -51,17 +51,20 @@ jobs:
       # Ruling 9: `cargo install gridwork` must not require Zig. That holds only
       # while gwk-pty stays out of the CLI's dependency closure, so assert it
       # rather than trusting that nobody wires them together later.
-      - name: the installable crate stays free of the PTY toolchain
+      - name: the installable crate stays free of the PTY toolchain and the lens stack
         run: |
           set -euo pipefail
-          if cargo tree -p gridwork --edges normal --prefix none | grep -qE 'libghostty|gwk-pty'; then
-            echo 'gridwork depends on the PTY stack — that makes `cargo install gridwork` need Zig' >&2
+          if cargo tree -p gridwork --edges normal --prefix none | grep -qE 'libghostty|gwk-pty|gwk-tui'; then
+            echo 'gridwork grew the PTY stack or the lens crate — `cargo install gridwork` stays a thin kernel CLI until the deliberate flip that publishes the lenses' >&2
             exit 1
           fi
-          # Positive control: the same grep against the crate that DOES depend on
-          # it must match, or the check above passes by not working.
+          # Positive controls: the same greps against trees that DO carry the
+          # matches, or the check above passes by not working. gwk-tui is a DEV
+          # edge of gridwork (the seven-act binding test), so it is visible
+          # under --edges all and must stay invisible to the install closure.
           cargo tree -p gwk-pty --edges normal --prefix none | grep -q libghostty
-          echo "gridwork is Zig-free; the grep that proves it is live"
+          cargo tree -p gridwork --edges all --prefix none | grep -q gwk-tui
+          echo "gridwork is Zig-free and lens-free; the greps that prove it are live"
       # P6(a): the console is a THIN CLIENT. PTY sessions and engine adapters
       # live server-side in their own host crate and the console consumes frames
       # as wire data, which is what makes attach-from-anywhere fall out instead

@@ -94,6 +94,18 @@ impl Failure {
         Self::new(KernelErrorCode::Storage, message)
     }
 
+    /// A tool this program delegated to said no — today that is `gh`.
+    /// Reported as `storage` because the contract has no code for another
+    /// program's refusal (the same gap [`Failure::internal`] documents), and
+    /// exited by the one table, as `5`: from here gw cannot tell a transient
+    /// no (expired auth, a network, checks still running) from a final one
+    /// (a closed PR) — the reason is on the tool's own standard error, which
+    /// is where a caller looks before deciding to retry. What must NOT
+    /// happen is the JSON and the exit telling two stories.
+    pub fn external(message: impl Into<String>) -> Self {
+        Self::new(KernelErrorCode::Storage, message)
+    }
+
     /// A fault in this program. Reported as `storage` because the contract has no
     /// code for "the CLI is broken", and exited as `10` because that is what the
     /// caller needs to know. A panic still exits `101` — also a bug, just a

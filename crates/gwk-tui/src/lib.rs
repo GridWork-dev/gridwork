@@ -8,7 +8,9 @@
 //! one function that turns a resolved token into a renderer colour;
 //! [`probe`], which measures what the drawing terminal does with the glyph
 //! inventory; and [`input`], the session bracket, click hit-testing, and the
-//! OSC 52 copy path.
+//! OSC 52 copy path. Beside them sits [`seven_act`]: the phase lifecycle as
+//! client-side template data over the kernel's generic tasks and gates —
+//! a convention the demonstration walks, not a domain object.
 //!
 //! # What the crate is
 //!
@@ -37,4 +39,5 @@ pub mod drilldown;
 pub mod input;
 pub mod probe;
 pub mod queue;
+pub mod seven_act;
 pub mod theme;
