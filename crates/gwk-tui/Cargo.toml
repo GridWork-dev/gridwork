@@ -33,6 +33,15 @@ gwk-theme.workspace = true
 # first consumer so the single-`ratatui-core` lockfile assertion in CI had
 # something to assert before any widget existed.
 ratatui.workspace = true
+# Typed failures at the filesystem/process boundary. Callers must be able to
+# distinguish an off-allowlist refusal from an editor or git failure.
+thiserror.workspace = true
+# Atomic same-directory replacement for policy files and isolated editor
+# scratch copies. Already present in the lockfile through xtask's tests.
+tempfile.workspace = true
+# Forms serialize TOML, but the write boundary parses it again before either
+# routing or commit so comments/escapes cannot bypass the env-source rule.
+toml.workspace = true
 # Width is presentation data here: right-aligned tails must compare terminal
 # cells, not UTF-8 bytes. Already present through ratatui, so this adds one
 # direct edge and no crate to the lockfile.
