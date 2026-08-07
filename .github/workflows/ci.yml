@@ -1359,6 +1359,22 @@ jobs:
           persist-credentials: false
       - run: ./tools/leak-scan.sh
       - run: ./tools/check-claims.sh
+      - name: prove every current-stage mirror is compared (seeded violation)
+        run: |
+          set -euo pipefail
+          mirror=site/content/docs/quickstart.mdx
+          cp "$mirror" /tmp/quickstart.mdx
+          trap 'cp /tmp/quickstart.mdx "$mirror"' EXIT
+          current="$(grep -oE 'stage [0-9] of 5' README.md | grep -oE '[0-9]' | head -n1)"
+          bumped=$((current % 5 + 1))
+          sed -i -E "s/stage ${current} of 5/stage ${bumped} of 5/" "$mirror"
+          if ./tools/check-claims.sh; then
+            echo "check-claims accepted a bumped current-stage mirror ($mirror)" >&2
+            exit 1
+          fi
+          cp /tmp/quickstart.mdx "$mirror"
+          ./tools/check-claims.sh
+          echo "check-claims: bumped current-stage mirror correctly rejected"
       - name: prove the gate can fail (seeded violation)
         run: |
           seed=$(printf 'creds at /ho%s/example/data' 'me')
