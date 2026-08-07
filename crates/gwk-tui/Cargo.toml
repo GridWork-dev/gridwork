@@ -8,11 +8,12 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
-# Not published at this commit: the crate has no API and no consumer yet, and an
-# empty crate on crates.io advertises a surface that does not exist. It flips
-# publishable in the change that first makes `gridwork` depend on it — the
-# install carries kernel + CLI + lenses — and the README crates-table row rides
-# that same change rather than landing ahead of the thing it describes.
+# Not published at this commit. It flips publishable in the change that first
+# makes `gridwork` depend on it as a NORMAL dependency — the install carries
+# kernel + CLI + lenses — and the README crates-table row rides that same
+# change rather than landing ahead of the thing it describes. The seven-act
+# binding test's dev-dep is not that change: packaging strips it, the install
+# still carries no lens code, and CI's tree guard holds the line.
 publish = false
 
 [dependencies]

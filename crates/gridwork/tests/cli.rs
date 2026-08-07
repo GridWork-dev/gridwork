@@ -35,8 +35,15 @@ fn gw(socket: &Path, line: &str) -> Output {
 /// case needs go to the child, rather than into a variable every other case in
 /// this binary would see.
 fn gw_env(line: &str, env: &[(&str, &str)]) -> Output {
+    let args: Vec<&str> = line.split_whitespace().collect();
+    gw_args(&args, env)
+}
+
+/// The same, with the argv given piece by piece — for the cases whose whole
+/// point is an argument that contains a space.
+fn gw_args(args: &[&str], env: &[(&str, &str)]) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_gw"));
-    command.args(line.split_whitespace());
+    command.args(args);
     for (name, value) in env {
         command.env(name, value);
     }
@@ -123,6 +130,110 @@ fn a_daemon_that_is_not_there_is_unavailable_rather_than_a_crash() {
             .as_str()
             .expect("message")
             .contains("absent.sock"),
+        "{answer}"
+    );
+}
+
+#[test]
+fn pr_dry_run_prints_the_gh_argv_it_would_run() {
+    let out = gw_args(
+        &[
+            "pr",
+            "open",
+            "--dry-run",
+            "--title",
+            "two words",
+            "--body-file",
+            "-",
+            "--repo",
+            "o/r",
+            "--head",
+            "b",
+        ],
+        &[],
+    );
+    assert_eq!(code(&out), 0);
+    let answer = json(&out);
+    assert_eq!(answer["type"], "gh_argv");
+    // The two-word title is ONE element. This is the arg-array claim made
+    // inspectable: no shell line exists anywhere for it to have been split by.
+    assert_eq!(
+        answer["argv"],
+        serde_json::json!([
+            "pr",
+            "create",
+            "--title",
+            "two words",
+            "--body-file",
+            "-",
+            "--head",
+            "b",
+            "--repo",
+            "o/r"
+        ])
+    );
+}
+
+#[test]
+fn pr_reaches_gh_as_an_argument_array_and_relays_its_refusal() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = private_dir("gh");
+    let record = dir.join("argv");
+
+    // A `gh` that records the argv it received, one element per line — so an
+    // argument that was split or joined on the way through shows up as the
+    // wrong number of lines.
+    let fake = dir.join("gh");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$GW_TEST_GH_ARGV\"\nexit 0\n",
+    )
+    .expect("write fake gh");
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    let path = dir.to_string_lossy().into_owned();
+    let record_path = record.to_string_lossy().into_owned();
+    let env = [
+        ("PATH", path.as_str()),
+        ("GW_TEST_GH_ARGV", record_path.as_str()),
+    ];
+    // Arguments WITH spaces, through the live path — a regression that joined
+    // the argv into a shell line and re-split it would change the line count
+    // the recorder writes, so this case can actually catch the bug class the
+    // arg-array rule forbids.
+    let out = gw_args(
+        &["pr", "open", "--title", "two words", "--body", "b b"],
+        &env,
+    );
+    assert_eq!(code(&out), 0, "{:?}", String::from_utf8_lossy(&out.stdout));
+    // The live answer is gh's own conversation; gw adds nothing on top.
+    assert!(
+        out.stdout.is_empty(),
+        "{:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let received = std::fs::read_to_string(&record).expect("the fake gh ran");
+    let received: Vec<&str> = received.lines().collect();
+    assert_eq!(
+        received,
+        ["pr", "create", "--title", "two words", "--body", "b b"]
+    );
+
+    // And when gh says no, gw relays the fact in its own error shape and the
+    // one exit table: the reason was gh's to print, the machine-readable
+    // fact of the refusal is ours.
+    std::fs::write(&fake, "#!/bin/sh\nexit 7\n").expect("rewrite fake gh");
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let out = gw_args(&["pr", "merge", "61"], &env);
+    assert_eq!(code(&out), 5);
+    let answer = json(&out);
+    assert_eq!(answer["type"], "error");
+    assert_eq!(answer["code"], "storage");
+    assert!(
+        answer["message"]
+            .as_str()
+            .expect("message")
+            .contains("gh exited 7"),
         "{answer}"
     );
 }

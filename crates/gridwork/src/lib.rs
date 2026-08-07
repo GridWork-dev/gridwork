@@ -16,12 +16,16 @@
 //!   the refusal's own code, so the exit and the JSON can never disagree.
 //! * **No database, no key material.** Every verb here goes through the socket.
 //!   The database and the KEK belong to `daemon` and `admin`, which is the whole
-//!   reason those two are separate verbs.
+//!   reason those two are separate verbs. One verb goes through something else
+//!   entirely: [`pr`] shells `gh`, because SHIP's PR and merge belong to the
+//!   forge, not the kernel — it holds no secret of its own, and the
+//!   conversation it relays is gh's.
 
 pub mod admin;
 pub mod args;
 pub mod client;
 pub mod exit;
+pub mod pr;
 
 use std::path::{Path, PathBuf};
 
@@ -208,6 +212,8 @@ async fn execute(verb: Verb, pretty: bool) -> Result<(), Failure> {
             );
             ask(KernelRequest::SubmitCommand { envelope }, pretty).await
         }
+
+        Verb::Pr { what, dry_run } => pr::run(&what, dry_run, pretty),
     }
 }
 

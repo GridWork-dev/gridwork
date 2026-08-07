@@ -1102,6 +1102,7 @@ dependencies = [
  "base64 0.23.0",
  "gwk-domain",
  "gwk-kernel",
+ "gwk-tui",
  "secrecy",
  "serde",
  "serde_json",
