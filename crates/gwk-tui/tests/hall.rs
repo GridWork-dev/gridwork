@@ -223,6 +223,49 @@ fn one_agent_input(state: AgentState) -> FrameInput {
     }
 }
 
+fn reorder_input() -> FrameInput {
+    FrameInput {
+        districts: vec![
+            district(
+                "district-a",
+                "A",
+                vec![station(
+                    "station-a",
+                    1,
+                    "a",
+                    vec![agent("agent-z", Some("reviewer"), AgentState::Idle, 1)],
+                    1,
+                )],
+                1,
+            ),
+            district(
+                "district-b",
+                "B",
+                vec![station(
+                    "station-b",
+                    1,
+                    "b",
+                    vec![agent(
+                        "agent-a",
+                        Some("implementer"),
+                        AgentState::Running,
+                        2,
+                    )],
+                    2,
+                )],
+                2,
+            ),
+        ],
+        attention: vec![Attention {
+            id: attention_id("attention-b"),
+            district: district_id("district-b"),
+            unresolved: true,
+            changed_seq: Seq::new(3),
+        }],
+        ..empty_input()
+    }
+}
+
 fn motion(
     entity: MotionEntity,
     changed_seq: u64,
@@ -471,6 +514,13 @@ fn hall_attention_only_district_is_visible_without_motion() {
     assert!(rendered.contains("Shell !1"), "{rendered}");
     assert!(!rendered.contains("No active work yet"), "{rendered}");
     assert_eq!(hits.targets().count(), 0);
+
+    let narrow = dump_frame(7, 3, &input).0;
+    assert!(narrow.contains("!1"), "narrow cue disappeared:\n{narrow}");
+    let paged = dump_frame(7, 1, &input).0;
+    assert!(paged.contains("!1"), "paging cue disappeared:\n{paged}");
+    let tiny = dump_frame(1, 1, &input).0;
+    assert!(tiny.contains('!'), "tiny cue disappeared:\n{tiny}");
 }
 
 #[test]
@@ -787,46 +837,7 @@ fn hall_pulse_translates_before_canvas_and_keeps_hits_aligned() {
 
 #[test]
 fn hall_reorder_pulse_keeps_moving_pair_above_stationary_character_effects() {
-    let input = FrameInput {
-        districts: vec![
-            district(
-                "district-a",
-                "A",
-                vec![station(
-                    "station-a",
-                    1,
-                    "a",
-                    vec![agent("agent-z", Some("reviewer"), AgentState::Idle, 1)],
-                    1,
-                )],
-                1,
-            ),
-            district(
-                "district-b",
-                "B",
-                vec![station(
-                    "station-b",
-                    1,
-                    "b",
-                    vec![agent(
-                        "agent-a",
-                        Some("implementer"),
-                        AgentState::Running,
-                        2,
-                    )],
-                    2,
-                )],
-                2,
-            ),
-        ],
-        attention: vec![Attention {
-            id: attention_id("attention-b"),
-            district: district_id("district-b"),
-            unresolved: true,
-            changed_seq: Seq::new(3),
-        }],
-        ..empty_input()
-    };
+    let input = reorder_input();
     let target = HallTarget::Agent(agent_id("agent-a"));
 
     for elapsed in [Duration::ZERO, PULSE_DURATION / 2, PULSE_DURATION] {
@@ -882,6 +893,122 @@ fn hall_reorder_pulse_keeps_moving_pair_above_stationary_character_effects() {
             "⠋",
             "stationary character effects reclaimed the moving expression at {elapsed:?}:\n{rendered}"
         );
+    }
+}
+
+#[test]
+fn hall_persistent_driver_drops_character_effects_at_their_previous_geometry() {
+    let input = reorder_input();
+    let base = dump_frame(12, 6, &input).2;
+    let static_target = HallTarget::Agent(agent_id("agent-z"));
+
+    for (verb, first_elapsed, second_elapsed) in [
+        (
+            MotionVerb::Tick,
+            gwk_tui::input::TICK,
+            gwk_tui::input::TICK.saturating_mul(2),
+        ),
+        (
+            MotionVerb::Decay,
+            DECAY_DURATION / 2,
+            (DECAY_DURATION / 2).saturating_add(gwk_tui::input::TICK),
+        ),
+    ] {
+        let mut driver = MotionDriver::new(MotionMode::Full);
+        let start = motion(
+            MotionEntity::Attention(attention_id("attention-b")),
+            3,
+            MotionVerb::Pulse,
+            Duration::ZERO,
+            Duration::ZERO,
+            Rect::new(0, 3, 12, 3),
+            Rect::new(0, 0, 12, 3),
+        );
+        let first_character = motion(
+            MotionEntity::Agent(agent_id("agent-a")),
+            2,
+            verb,
+            first_elapsed,
+            gwk_tui::input::TICK,
+            Rect::new(1, 5, 1, 1),
+            Rect::new(1, 5, 1, 1),
+        );
+        let _ = dump_motion(
+            12,
+            6,
+            &input,
+            GlyphSet::Unicode,
+            &mut driver,
+            &[start, first_character],
+        );
+
+        let midpoint = motion(
+            MotionEntity::Attention(attention_id("attention-b")),
+            3,
+            MotionVerb::Pulse,
+            PULSE_DURATION / 2,
+            gwk_tui::input::TICK,
+            Rect::new(0, 3, 12, 3),
+            Rect::new(0, 0, 12, 3),
+        );
+        let second_character = motion(
+            MotionEntity::Agent(agent_id("agent-a")),
+            2,
+            verb,
+            second_elapsed,
+            gwk_tui::input::TICK,
+            Rect::new(1, 5, 1, 1),
+            Rect::new(1, 5, 1, 1),
+        );
+        let (rendered, hits, buffer) = dump_motion(
+            12,
+            6,
+            &input,
+            GlyphSet::Unicode,
+            &mut driver,
+            &[midpoint, second_character],
+        );
+
+        assert_eq!(
+            hits.hit(0, 5),
+            Some(&static_target),
+            "{verb:?}:\n{rendered}"
+        );
+        assert_eq!(
+            buffer[(1, 5)].symbol(),
+            base[(1, 5)].symbol(),
+            "stale {verb:?} touched its previous geometry:\n{rendered}"
+        );
+    }
+}
+
+#[test]
+fn hall_character_effects_reject_non_agent_entities() {
+    let input = one_agent_input(AgentState::Running);
+    let base = dump_frame(12, 3, &input).0;
+
+    for entity in [
+        MotionEntity::District(district_id("district-a")),
+        MotionEntity::Attention(attention_id("attention-a")),
+    ] {
+        for (verb, elapsed) in [
+            (MotionVerb::Tick, gwk_tui::input::TICK),
+            (MotionVerb::Decay, DECAY_DURATION),
+        ] {
+            let character = motion(
+                entity.clone(),
+                8,
+                verb,
+                elapsed,
+                gwk_tui::input::TICK,
+                Rect::new(1, 2, 1, 1),
+                Rect::new(1, 2, 1, 1),
+            );
+            let mut driver = MotionDriver::new(MotionMode::Full);
+            let rendered =
+                dump_motion(12, 3, &input, GlyphSet::Unicode, &mut driver, &[character]).0;
+            assert_eq!(rendered, base, "{entity:?} {verb:?} changed the frame");
+        }
     }
 }
 

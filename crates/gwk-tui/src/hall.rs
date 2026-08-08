@@ -467,10 +467,23 @@ fn collapsed_text(district: &District, budget: u16) -> String {
 
 fn district_heading(district: &District, input: &FrameInput, budget: u16) -> String {
     let attention = unresolved_attention_count(input, &district.id);
+    attention_text(&district.label, attention, budget)
+}
+
+fn attention_text(label: &str, attention: usize, budget: u16) -> String {
     if attention == 0 {
-        bounded(&district.label, budget)
+        return bounded(label, budget);
+    }
+    let cue = format!("!{attention}");
+    let cue_width = safe_width(&cue, budget);
+    if cue_width >= budget {
+        return bounded(&cue, budget);
+    }
+    let label = bounded(label, budget.saturating_sub(cue_width.saturating_add(1)));
+    if label.is_empty() {
+        bounded(&cue, budget)
     } else {
-        bounded(&format!("{} !{attention}", district.label), budget)
+        format!("{label} {cue}")
     }
 }
 
@@ -489,7 +502,16 @@ fn district_width(
         .iter()
         .map(|station| station_width(station, gutter, budget))
         .fold(0u16, u16::saturating_add);
-    safe_width(&district_heading(district, input, budget), budget).max(
+    let heading_budget = if unresolved_attention_count(input, &district.id) == 0 {
+        budget
+    } else {
+        budget.saturating_sub(1)
+    };
+    safe_width(
+        &district_heading(district, input, heading_budget),
+        heading_budget,
+    )
+    .max(
         station_widths.saturating_add(
             u16::try_from(stations.len().saturating_sub(1))
                 .unwrap_or(u16::MAX)
@@ -633,7 +655,6 @@ struct EffectSlot {
 #[derive(Clone, Copy)]
 struct MotionGeometry<'a> {
     lens: Rect,
-    transforms: &'a [PulseTransform],
     agent_regions: &'a BTreeMap<AgentId, Rect>,
     hits: &'a HitMap<HallTarget>,
 }
@@ -694,6 +715,12 @@ impl MotionDriver {
         }
     }
 
+    fn admits(&self, motion: &MotionInput) -> bool {
+        self.allows(motion.verb)
+            && (motion.verb == MotionVerb::Pulse
+                || matches!(&motion.key.entity, MotionEntity::Agent(_)))
+    }
+
     fn begin_frame(&mut self, motions: &[MotionInput]) {
         if self.mode == MotionMode::Off {
             self.slots.clear();
@@ -701,7 +728,7 @@ impl MotionDriver {
         }
         let active: BTreeSet<MotionKey> = motions
             .iter()
-            .filter(|motion| self.allows(motion.verb))
+            .filter(|motion| self.admits(motion))
             .map(|motion| motion.key.clone())
             .collect();
         self.slots.retain(|key, _| active.contains(key));
@@ -709,7 +736,7 @@ impl MotionDriver {
 
     fn active_inputs(&self, motions: &[MotionInput]) -> Vec<MotionInput> {
         let mut latest = BTreeMap::new();
-        for motion in motions.iter().filter(|motion| self.allows(motion.verb)) {
+        for motion in motions.iter().filter(|motion| self.admits(motion)) {
             latest.insert(motion.key.clone(), motion.clone());
         }
         latest.into_values().collect()
@@ -720,6 +747,9 @@ impl MotionDriver {
             .slots
             .entry(motion.key.clone())
             .or_insert_with(|| EffectSlot::new(motion.verb));
+        // Absolute elapsed reconstructs the shader each frame; retaining it would
+        // let tachyonfx process a cancelled effect once at stale geometry.
+        slot.manager = EffectManager::default();
         slot.verb = motion.verb;
         slot.elapsed = motion.elapsed;
         slot
@@ -777,21 +807,16 @@ impl MotionDriver {
             {
                 continue;
             }
+            let MotionEntity::Agent(id) = &motion.key.entity else {
+                continue;
+            };
+            let Some(area) = agent_expression_area(id, geometry.agent_regions, geometry.hits)
+            else {
+                continue;
+            };
             match motion.verb {
                 MotionVerb::Tick => {
-                    let target = match &motion.key.entity {
-                        MotionEntity::Agent(id) => {
-                            agent_expression_area(id, geometry.agent_regions, geometry.hits)
-                        }
-                        MotionEntity::District(_) | MotionEntity::Attention(_) => {
-                            transform_region(geometry.lens, motion.target, geometry.transforms)
-                                .and_then(|target| expression_area(target, geometry.lens))
-                        }
-                    };
-                    let Some(area) = target else {
-                        continue;
-                    };
-                    let mark = tick_mark(frame, &motion.key.entity);
+                    let mark = tick_mark(frame, id);
                     let delta = motion.frame_delta.min(motion.elapsed);
                     let state = TickState {
                         elapsed: motion.elapsed.saturating_sub(delta),
@@ -817,17 +842,6 @@ impl MotionDriver {
                     slot.manager.process_effects(delta, buf, geometry.lens);
                 }
                 MotionVerb::Decay => {
-                    let area = match &motion.key.entity {
-                        MotionEntity::Agent(id) => {
-                            agent_expression_area(id, geometry.agent_regions, geometry.hits)
-                        }
-                        MotionEntity::District(_) | MotionEntity::Attention(_) => {
-                            transform_region(geometry.lens, motion.target, geometry.transforms)
-                        }
-                    };
-                    let Some(area) = area else {
-                        continue;
-                    };
                     let mut effect = fx::effect_fn((), DECAY_DURATION, |_state, context, cells| {
                         for (_, cell) in cells {
                             if context.alpha() >= 1.0 {
@@ -875,10 +889,6 @@ fn split_elapsed(motion: &MotionInput, boundary: Duration) -> (Duration, Duratio
     (elapsed.saturating_sub(delta), delta)
 }
 
-fn expression_area(target: Rect, lens: Rect) -> Option<Rect> {
-    intersect_rect(Rect::new(target.x, target.y, 1, 1), lens)
-}
-
 fn agent_expression_area(
     id: &AgentId,
     regions: &BTreeMap<AgentId, Rect>,
@@ -893,17 +903,14 @@ fn agent_expression_area(
     owns_pair.then(|| Rect::new(pair.x.saturating_add(1), pair.y, 1, 1))
 }
 
-fn tick_mark(frame: &FrameInput, entity: &MotionEntity) -> &'static Mark {
-    let state = match entity {
-        MotionEntity::Agent(id) => frame
-            .districts
-            .iter()
-            .flat_map(|district| &district.stations)
-            .flat_map(|station| &station.agents)
-            .find(|agent| agent.id == *id)
-            .map_or(AgentState::Unknown, |agent| agent.state),
-        MotionEntity::District(_) | MotionEntity::Attention(_) => AgentState::Unknown,
-    };
+fn tick_mark(frame: &FrameInput, id: &AgentId) -> &'static Mark {
+    let state = frame
+        .districts
+        .iter()
+        .flat_map(|district| &district.stations)
+        .flat_map(|station| &station.agents)
+        .find(|agent| agent.id == *id)
+        .map_or(AgentState::Unknown, |agent| agent.state);
     expression_mark(state)
 }
 
@@ -1109,7 +1116,6 @@ pub fn render_with_motion(
         buf,
         MotionGeometry {
             lens: area,
-            transforms: &transforms,
             agent_regions: &agent_regions,
             hits,
         },
@@ -1160,11 +1166,17 @@ fn render_frame(
     }
 
     if plan.rung == DensityRung::Paging {
+        let attention = input
+            .attention
+            .iter()
+            .filter(|attention| attention.unresolved)
+            .count();
         text.push(CanvasText {
             x: 0,
             y: 0,
-            text: bounded(
+            text: attention_text(
                 &format!("+{} districts need paging", plan.paging),
+                attention,
                 area.width,
             ),
             style: theme::state_style(theme::binding("needs_attention"), tier),
