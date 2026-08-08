@@ -1,11 +1,11 @@
-//! The Board lens — the two work views of the demo cut.
+//! The Board lens — work structure, message flow, and terminal replay.
 //!
-//! The task/attempt DAG and the A2A message flow, and nothing else: the
-//! other Board panels — fleet, cost/health, evidence, brain — are out of
-//! this phase by ruling, not omission. Both views are row surfaces: a Board
-//! row has room for words, so the state is printed as a word and the mark
-//! cell carries the graph tier — WHAT KIND of node the row is — from the
-//! same admitted inventory as every other glyph.
+//! The task/attempt DAG, A2A message flow, and persisted PTY replay, and
+//! nothing else: the other Board panels — fleet, cost/health, evidence,
+//! brain — are out of this phase by ruling, not omission. All three are row
+//! surfaces. Work rows print state as a word and use the mark cell for the
+//! graph tier; replay rows carry elapsed time, event kind, and sequence from
+//! the typed recording reader without inventing a fifth graph-tier mark.
 //!
 //! # The DAG is layered, and the layers are indentation
 //!
@@ -50,16 +50,38 @@ use ratatui::style::{Modifier, Style};
 use unicode_width::UnicodeWidthStr;
 
 use crate::input::HitMap;
+use crate::replay::{ReplayFrame, ReplayTimeline};
 use crate::theme;
 
-/// Which work view the frame shows. One lens, two views, one visible at a
-/// time — the other is a keystroke away, never a second pane fighting for
+/// Which Board panel the frame shows. One lens, three views, one visible at
+/// a time — the others are a keystroke away, never extra panes fighting for
 /// the same columns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BoardView {
     #[default]
     Dag,
     Flow,
+    Replay,
+}
+
+impl BoardView {
+    /// The next panel in the Board's stable navigation order.
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Dag => Self::Flow,
+            Self::Flow => Self::Replay,
+            Self::Replay => Self::Dag,
+        }
+    }
+
+    /// The previous panel in the Board's stable navigation order.
+    pub const fn previous(self) -> Self {
+        match self {
+            Self::Dag => Self::Replay,
+            Self::Flow => Self::Dag,
+            Self::Replay => Self::Flow,
+        }
+    }
 }
 
 /// Everything the lens paints, assembled by the caller from projection
@@ -71,6 +93,8 @@ pub struct BoardState {
     pub attempts: Vec<Attempt>,
     pub nodes: Vec<DispatchNode>,
     pub messages: Vec<Message>,
+    /// The persisted recording selected for the replay panel.
+    pub replay: ReplayTimeline,
     /// The projector's as-of stamp from the page this state was read at.
     pub watermark: Option<Seq>,
 }
@@ -83,6 +107,7 @@ pub enum BoardTarget {
     Attempt(AttemptId),
     Node(DispatchNodeId),
     Message(MessageId),
+    ReplayFrame(u64),
 }
 
 /// A spawn chain deeper than this stops indenting further: the tree is
@@ -92,6 +117,10 @@ const INDENT_CAP: u16 = 6;
 
 /// Cells per layer of the DAG.
 const INDENT_STEP: u16 = 2;
+
+/// Raw output bytes shown in a replay row or detail preview. The frame still
+/// owns every byte; presentation stays bounded independently of pane width.
+const OUTPUT_PREVIEW_BYTES: usize = 64;
 
 /// `HH:MM` out of an RFC 3339 timestamp, for the compact stamps rows carry.
 fn hhmm(ts: &Timestamp) -> &str {
@@ -652,10 +681,78 @@ fn message_row(message: &Message, indent: u16, tier: ColorTier) -> Row {
     }
 }
 
+fn replay_seq(frame: &ReplayFrame) -> u64 {
+    match frame {
+        ReplayFrame::Output { seq, .. } | ReplayFrame::Resize { seq, .. } => *seq,
+    }
+}
+
+fn replay_elapsed_ms(frame: &ReplayFrame) -> u64 {
+    match frame {
+        ReplayFrame::Output { elapsed_ms, .. } | ReplayFrame::Resize { elapsed_ms, .. } => {
+            *elapsed_ms
+        }
+    }
+}
+
+fn output_preview(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return "(empty)".to_owned();
+    }
+    let visible = bytes.len().min(OUTPUT_PREVIEW_BYTES);
+    let mut preview = String::from_utf8_lossy(&bytes[..visible]).into_owned();
+    if visible < bytes.len() {
+        preview.push_str(&format!("... (+{} bytes)", bytes.len() - visible));
+    }
+    preview
+}
+
+fn replay_rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
+    let frames = state.replay.frames();
+    let muted = theme::state_style(theme::binding("idle"), tier);
+    if frames.is_empty() {
+        return vec![Row::plain(
+            "no replay frames -- nothing recorded".to_owned(),
+            muted,
+        )];
+    }
+
+    let span = frames.last().map(replay_elapsed_ms).unwrap_or(0);
+    let mut out = vec![Row::plain(
+        format!("{} replay frames  {span}ms span", frames.len()),
+        muted,
+    )];
+    out.extend(frames.iter().map(|frame| {
+        let seq = replay_seq(frame);
+        let elapsed_ms = replay_elapsed_ms(frame);
+        let text = match frame {
+            ReplayFrame::Output { bytes, .. } => format!(
+                "{elapsed_ms}ms  output  {} bytes  {}",
+                bytes.len(),
+                output_preview(bytes)
+            ),
+            ReplayFrame::Resize { cols, rows, .. } => {
+                format!("{elapsed_ms}ms  resize  {cols}x{rows}")
+            }
+        };
+        Row {
+            indent: 0,
+            mark: None,
+            text,
+            right: Some(format!("seq {seq}")),
+            style: Style::default(),
+            target: Some(BoardTarget::ReplayFrame(seq)),
+            diagnostic: false,
+        }
+    }));
+    out
+}
+
 fn rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
     match state.view {
         BoardView::Dag => dag_rows(state, tier),
         BoardView::Flow => flow_rows(state, tier),
+        BoardView::Replay => replay_rows(state, tier),
     }
 }
 
@@ -812,6 +909,25 @@ fn detail_lines(state: &BoardState, target: &BoardTarget) -> Option<Vec<String>>
                     message.updated_at.as_str()
                 ),
             ])
+        }
+        BoardTarget::ReplayFrame(seq) => {
+            let frame = state
+                .replay
+                .frames()
+                .iter()
+                .find(|frame| replay_seq(frame) == *seq)?;
+            let elapsed_ms = replay_elapsed_ms(frame);
+            Some(match frame {
+                ReplayFrame::Output { bytes, .. } => vec![
+                    format!("frame {seq}  elapsed {elapsed_ms}ms"),
+                    format!("output {} bytes", bytes.len()),
+                    format!("preview {}", output_preview(bytes)),
+                ],
+                ReplayFrame::Resize { cols, rows, .. } => vec![
+                    format!("frame {seq}  elapsed {elapsed_ms}ms"),
+                    format!("resize {cols}x{rows}"),
+                ],
+            })
         }
     }
 }
@@ -1027,8 +1143,9 @@ pub fn render(
     // as-of stamp. The inactive view's name stays visible — the other half
     // of the demo cut is one keystroke away, and the bar says so.
     let tabs = match state.view {
-        BoardView::Dag => "[dag] flow",
-        BoardView::Flow => "dag [flow]",
+        BoardView::Dag => "[dag] flow replay",
+        BoardView::Flow => "dag [flow] replay",
+        BoardView::Replay => "dag flow [replay]",
     };
     let as_of = state
         .watermark
@@ -1159,6 +1276,7 @@ mod tests {
             attempts: Vec::new(),
             nodes: Vec::new(),
             messages: Vec::new(),
+            replay: ReplayTimeline::empty(),
             watermark: None,
         }
     }
@@ -1266,6 +1384,7 @@ mod tests {
                 node("d-2", Some("at-01"), Some("d-1"), "lint", "registered"),
             ],
             messages: vec![brief, findings, dead, pending],
+            replay: ReplayTimeline::empty(),
             watermark: Some(Seq::new(407)),
         }
     }
@@ -2124,7 +2243,7 @@ mod tests {
         let (dump, _, _) = dump_frame(72, 18, &state, None);
         assert_eq!(
             dump.lines().nth(17),
-            Some("BOARD  [dag] flow  2 running  as-of 407"),
+            Some("BOARD  [dag] flow replay  2 running  as-of 407"),
             "the bar names the view, the pulse, and the page:\n{dump}"
         );
         assert!(
@@ -2137,7 +2256,7 @@ mod tests {
         let (dump, _, _) = dump_frame(72, 18, &flow, None);
         assert_eq!(
             dump.lines().nth(17),
-            Some("BOARD  dag [flow]  2 running  as-of 407"),
+            Some("BOARD  dag [flow] replay  2 running  as-of 407"),
             "the flow view keeps the ambient pulse:\n{dump}"
         );
     }

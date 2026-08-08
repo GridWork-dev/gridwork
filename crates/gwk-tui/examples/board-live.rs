@@ -20,6 +20,7 @@ use gwk_theme::marks::GlyphSet;
 use gwk_theme::tier::ColorTier;
 use gwk_tui::board::{BoardState, BoardView, render};
 use gwk_tui::input::HitMap;
+use gwk_tui::replay::ReplayTimeline;
 use gwk_tui::theme::safe_text;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -53,6 +54,7 @@ fn empty_state() -> BoardState {
         attempts: Vec::new(),
         nodes: Vec::new(),
         messages: Vec::new(),
+        replay: ReplayTimeline::empty(),
         watermark: None,
     }
 }
@@ -134,7 +136,7 @@ fn main() -> ExitCode {
     };
 
     let area = Rect::new(0, 0, 100, 30);
-    for view in [BoardView::Dag, BoardView::Flow] {
+    for view in [BoardView::Dag, BoardView::Flow, BoardView::Replay] {
         state.view = view;
         let mut buf = Buffer::empty(area);
         let mut hits: HitMap<gwk_tui::board::BoardTarget> = HitMap::new();
