@@ -36,6 +36,7 @@
 pub mod board;
 pub mod config;
 pub mod drilldown;
+pub mod hall;
 pub mod input;
 pub mod probe;
 pub mod queue;

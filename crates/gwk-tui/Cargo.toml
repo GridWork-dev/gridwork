@@ -34,6 +34,8 @@ gwk-theme.workspace = true
 # first consumer so the single-`ratatui-core` lockfile assertion in CI had
 # something to assert before any widget existed.
 ratatui.workspace = true
+# Layout stays on Canvas; this edge owns all character and movement effects.
+tachyonfx.workspace = true
 # Typed failures at the filesystem/process boundary. Callers must be able to
 # distinguish an off-allowlist refusal from an editor or git failure.
 thiserror.workspace = true
