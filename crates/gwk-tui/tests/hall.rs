@@ -455,6 +455,25 @@ fn hall_empty_epoch_matches_its_golden() {
 }
 
 #[test]
+fn hall_attention_only_district_is_visible_without_motion() {
+    let input = FrameInput {
+        districts: vec![district("district-shell", "Shell", Vec::new(), 1)],
+        attention: vec![Attention {
+            id: attention_id("attention-shell"),
+            district: district_id("district-shell"),
+            unresolved: true,
+            changed_seq: Seq::new(2),
+        }],
+        ..empty_input()
+    };
+
+    let (rendered, hits, _) = dump_frame(24, 3, &input);
+    assert!(rendered.contains("Shell !1"), "{rendered}");
+    assert!(!rendered.contains("No active work yet"), "{rendered}");
+    assert_eq!(hits.targets().count(), 0);
+}
+
+#[test]
 fn hall_representative_estate_matches_its_golden() {
     let input = representative_input();
     let (estate, _, _) = dump_frame(72, 8, &input);
@@ -764,6 +783,77 @@ fn hall_pulse_translates_before_canvas_and_keeps_hits_aligned() {
         hits.hit(0, 2),
         Some(&HallTarget::Agent(agent_id("agent-a")))
     );
+}
+
+#[test]
+fn hall_reorder_pulse_keeps_moving_pair_above_an_occupied_source_row() {
+    let input = FrameInput {
+        districts: vec![
+            district(
+                "district-a",
+                "A",
+                vec![station(
+                    "station-a",
+                    1,
+                    "a",
+                    vec![agent("agent-a", Some("reviewer"), AgentState::Idle, 1)],
+                    1,
+                )],
+                1,
+            ),
+            district(
+                "district-b",
+                "B",
+                vec![station(
+                    "station-b",
+                    1,
+                    "b",
+                    vec![agent(
+                        "agent-b",
+                        Some("implementer"),
+                        AgentState::Running,
+                        2,
+                    )],
+                    2,
+                )],
+                2,
+            ),
+        ],
+        attention: vec![Attention {
+            id: attention_id("attention-b"),
+            district: district_id("district-b"),
+            unresolved: true,
+            changed_seq: Seq::new(3),
+        }],
+        ..empty_input()
+    };
+    let target = HallTarget::Agent(agent_id("agent-b"));
+
+    for elapsed in [Duration::ZERO, PULSE_DURATION / 2, PULSE_DURATION] {
+        let pulse = motion(
+            MotionEntity::Attention(attention_id("attention-b")),
+            3,
+            MotionVerb::Pulse,
+            elapsed,
+            gwk_tui::input::TICK,
+            Rect::new(0, 3, 12, 3),
+            Rect::new(0, 0, 12, 3),
+        );
+        let mut driver = MotionDriver::new(MotionMode::Full);
+        let (rendered, hits, buffer) =
+            dump_motion(12, 6, &input, GlyphSet::Unicode, &mut driver, &[pulse]);
+        let cells: Vec<_> = (0..6)
+            .flat_map(|y| (0..12).map(move |x| (x, y)))
+            .filter(|(x, y)| hits.hit(*x, *y) == Some(&target))
+            .collect();
+
+        assert_eq!(cells.len(), 2, "pulse elapsed {elapsed:?}:\n{rendered}");
+        assert_eq!(
+            buffer[cells[0]].symbol(),
+            "▸",
+            "moving district lost paint ownership at {elapsed:?}:\n{rendered}"
+        );
+    }
 }
 
 #[test]

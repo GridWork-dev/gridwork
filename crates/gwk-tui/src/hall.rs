@@ -324,6 +324,14 @@ fn unresolved_districts(input: &FrameInput) -> BTreeSet<&str> {
         .collect()
 }
 
+fn unresolved_attention_count(input: &FrameInput, district: &DistrictId) -> usize {
+    input
+        .attention
+        .iter()
+        .filter(|attention| attention.unresolved && attention.district == *district)
+        .count()
+}
+
 /// District stack order: attention first, then the typed id byte order.
 pub fn district_stack_order(input: &FrameInput) -> Vec<DistrictId> {
     let pinned = unresolved_districts(input);
@@ -382,12 +390,12 @@ pub fn agent_order(station: &Station) -> Vec<AgentId> {
     agents.into_iter().map(|agent| agent.id.clone()).collect()
 }
 
-fn ordered_active_districts(input: &FrameInput) -> Vec<&District> {
+fn ordered_visible_districts(input: &FrameInput) -> Vec<&District> {
     let pinned = unresolved_districts(input);
     let mut districts: Vec<&District> = input
         .districts
         .iter()
-        .filter(|district| active(district))
+        .filter(|district| active(district) || pinned.contains(district.id.as_str()))
         .collect();
     districts.sort_by(|left, right| {
         (!pinned.contains(left.id.as_str()))
@@ -457,7 +465,22 @@ fn collapsed_text(district: &District, budget: u16) -> String {
     format!("+ {label}{suffix}")
 }
 
-fn district_width(district: &District, gutter: u16, collapsed: bool, budget: u16) -> u16 {
+fn district_heading(district: &District, input: &FrameInput, budget: u16) -> String {
+    let attention = unresolved_attention_count(input, &district.id);
+    if attention == 0 {
+        bounded(&district.label, budget)
+    } else {
+        bounded(&format!("{} !{attention}", district.label), budget)
+    }
+}
+
+fn district_width(
+    district: &District,
+    input: &FrameInput,
+    gutter: u16,
+    collapsed: bool,
+    budget: u16,
+) -> u16 {
     if collapsed {
         return safe_width(&collapsed_text(district, budget), budget);
     }
@@ -466,7 +489,7 @@ fn district_width(district: &District, gutter: u16, collapsed: bool, budget: u16
         .iter()
         .map(|station| station_width(station, gutter, budget))
         .fold(0u16, u16::saturating_add);
-    safe_width(&district.label, budget).max(
+    safe_width(&district_heading(district, input, budget), budget).max(
         station_widths.saturating_add(
             u16::try_from(stations.len().saturating_sub(1))
                 .unwrap_or(u16::MAX)
@@ -475,7 +498,13 @@ fn district_width(district: &District, gutter: u16, collapsed: bool, budget: u16
     )
 }
 
-fn fits(area: Rect, districts: &[&District], gutter: u16, collapsed: &BTreeSet<String>) -> bool {
+fn fits(
+    area: Rect,
+    input: &FrameInput,
+    districts: &[&District],
+    gutter: u16,
+    collapsed: &BTreeSet<String>,
+) -> bool {
     if area.width == 0 || area.height == 0 {
         return false;
     }
@@ -491,6 +520,7 @@ fn fits(area: Rect, districts: &[&District], gutter: u16, collapsed: &BTreeSet<S
         && districts.iter().all(|district| {
             district_width(
                 district,
+                input,
                 gutter,
                 collapsed.contains(district.id.as_str()),
                 measure_budget,
@@ -500,6 +530,7 @@ fn fits(area: Rect, districts: &[&District], gutter: u16, collapsed: &BTreeSet<S
 
 fn paging_count(
     area: Rect,
+    input: &FrameInput,
     districts: &[&District],
     gutter: u16,
     collapsed: &BTreeSet<String>,
@@ -515,7 +546,7 @@ fn paging_count(
             EXPANDED_DISTRICT_HEIGHT
         };
         let fits_width =
-            district_width(district, gutter, is_collapsed, measure_budget) <= area.width;
+            district_width(district, input, gutter, is_collapsed, measure_budget) <= area.width;
         let fits_height = used_height.saturating_add(height) <= area.height;
         if !fits_width || !fits_height {
             break;
@@ -528,7 +559,7 @@ fn paging_count(
 
 /// Walk the fixed density ladder: baseline, gutter shrink, then collapses.
 pub fn solve_density(area: Rect, input: &FrameInput) -> DensityPlan {
-    let districts = ordered_active_districts(input);
+    let districts = ordered_visible_districts(input);
     if districts.is_empty() {
         return DensityPlan {
             rung: DensityRung::Empty,
@@ -538,14 +569,14 @@ pub fn solve_density(area: Rect, input: &FrameInput) -> DensityPlan {
     }
 
     let mut collapsed = BTreeSet::new();
-    if fits(area, &districts, 1, &collapsed) {
+    if fits(area, input, &districts, 1, &collapsed) {
         return DensityPlan {
             rung: DensityRung::Baseline,
             collapsed: Vec::new(),
             paging: 0,
         };
     }
-    if fits(area, &districts, 0, &collapsed) {
+    if fits(area, input, &districts, 0, &collapsed) {
         return DensityPlan {
             rung: DensityRung::GutterShrink,
             collapsed: Vec::new(),
@@ -556,7 +587,7 @@ pub fn solve_density(area: Rect, input: &FrameInput) -> DensityPlan {
     let candidates = collapse_order(input);
     for candidate in &candidates {
         collapsed.insert(candidate.as_str().to_owned());
-        if fits(area, &districts, 0, &collapsed) {
+        if fits(area, input, &districts, 0, &collapsed) {
             return DensityPlan {
                 rung: DensityRung::DistrictCollapse,
                 collapsed: candidates
@@ -573,14 +604,14 @@ pub fn solve_density(area: Rect, input: &FrameInput) -> DensityPlan {
     DensityPlan {
         rung: DensityRung::Paging,
         collapsed: candidates,
-        paging: paging_count(area, &districts, 0, &collapsed),
+        paging: paging_count(area, input, &districts, 0, &collapsed),
     }
 }
 
 /// Full deterministic keyboard order, including agents hidden by density.
 pub fn target_order(input: &FrameInput) -> Vec<HallTarget> {
     let mut targets = Vec::new();
-    for district in ordered_active_districts(input) {
+    for district in ordered_visible_districts(input) {
         for station in ordered_stations(district) {
             targets.extend(
                 ordered_agents(station)
@@ -960,17 +991,30 @@ fn paint_frame(
     regions: &[(Rect, HallTarget)],
     transforms: &[PulseTransform],
 ) -> BTreeMap<AgentId, Rect> {
-    let transformed: Vec<CanvasText> = text
-        .iter()
-        .filter_map(|item| transform_text(area, item, transforms))
-        .collect();
+    let mut transformed = Vec::new();
+    for moving in [false, true] {
+        for item in text {
+            let position = Position::new(area.x + item.x, area.y + item.y);
+            if pulse_for(position, transforms).is_some() != moving {
+                continue;
+            }
+            if let Some(item) = transform_text(area, item, transforms) {
+                transformed.push(item);
+            }
+        }
+    }
     canvas_paint(area, buf, &transformed);
     let mut visible_agents = BTreeMap::new();
-    for (region, target) in regions {
-        if let Some(region) = transform_region(area, *region, transforms) {
-            hits.register(region, target.clone());
-            let HallTarget::Agent(id) = target;
-            visible_agents.insert(id.clone(), region);
+    for moving in [false, true] {
+        for (region, target) in regions {
+            if pulse_for(Position::new(region.x, region.y), transforms).is_some() != moving {
+                continue;
+            }
+            if let Some(region) = transform_region(area, *region, transforms) {
+                hits.register(region, target.clone());
+                let HallTarget::Agent(id) = target;
+                visible_agents.insert(id.clone(), region);
+            }
         }
     }
     visible_agents
@@ -1121,7 +1165,7 @@ fn render_frame(
     let gutter = u16::from(plan.rung == DensityRung::Baseline);
     let collapsed: BTreeSet<&str> = plan.collapsed.iter().map(DistrictId::as_str).collect();
     let mut y = 0u16;
-    for district in ordered_active_districts(input) {
+    for district in ordered_visible_districts(input) {
         if collapsed.contains(district.id.as_str()) {
             text.push(CanvasText {
                 x: 0,
@@ -1137,7 +1181,7 @@ fn render_frame(
         text.push(CanvasText {
             x: 0,
             y,
-            text: bounded(&district.label, area.width),
+            text: district_heading(district, input, area.width),
             style: Style::default().add_modifier(Modifier::BOLD),
             agent_pair: false,
         });
