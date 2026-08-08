@@ -883,6 +883,58 @@ fn hall_pulse_clips_at_the_lens_without_splitting_the_agent_pair() {
 }
 
 #[test]
+fn hall_clipped_pulse_suppresses_tick_and_decay_with_the_agent_pair() {
+    let input = one_agent_input(AgentState::Running);
+    let lens = Rect::new(1, 0, 12, 3);
+
+    for (verb, elapsed) in [
+        (MotionVerb::Tick, gwk_tui::input::TICK),
+        (MotionVerb::Decay, DECAY_DURATION / 2),
+    ] {
+        let pulse = motion(
+            MotionEntity::Attention(attention_id("attention-edge")),
+            9,
+            MotionVerb::Pulse,
+            Duration::ZERO,
+            Duration::ZERO,
+            Rect::new(0, 0, 12, 3),
+            lens,
+        );
+        let character = motion(
+            MotionEntity::Agent(agent_id("agent-a")),
+            7,
+            verb,
+            elapsed,
+            gwk_tui::input::TICK,
+            Rect::new(2, 2, 1, 1),
+            Rect::new(2, 2, 1, 1),
+        );
+        let mut driver = MotionDriver::new(MotionMode::Full);
+        let mut hits = HitMap::new();
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 14, 3));
+        render_with_motion(
+            lens,
+            &mut buffer,
+            &input,
+            ColorTier::Mono,
+            GlyphSet::Unicode,
+            &mut hits,
+            MotionFrame {
+                driver: &mut driver,
+                inputs: &[pulse, character],
+            },
+        );
+
+        assert_eq!(hits.targets().count(), 0, "{verb:?} kept a clipped hit");
+        assert_eq!(
+            buffer[(1, 2)].symbol(),
+            " ",
+            "{verb:?} survived after its two-cell agent pair was clipped"
+        );
+    }
+}
+
+#[test]
 fn hall_decay_is_character_only_and_confined_to_its_cell() {
     let input = one_agent_input(AgentState::Running);
     let decay = motion(

@@ -599,6 +599,13 @@ struct EffectSlot {
     elapsed: Duration,
 }
 
+#[derive(Clone, Copy)]
+struct MotionGeometry<'a> {
+    lens: Rect,
+    transforms: &'a [PulseTransform],
+    agent_regions: &'a BTreeMap<AgentId, Rect>,
+}
+
 impl EffectSlot {
     fn new(verb: MotionVerb) -> Self {
         Self {
@@ -730,8 +737,7 @@ impl MotionDriver {
         frame: &FrameInput,
         glyphs: GlyphSet,
         buf: &mut Buffer,
-        lens: Rect,
-        transforms: &[PulseTransform],
+        geometry: MotionGeometry<'_>,
     ) {
         for motion in motions {
             if !matches!(motion.verb, MotionVerb::Tick | MotionVerb::Decay)
@@ -741,10 +747,16 @@ impl MotionDriver {
             }
             match motion.verb {
                 MotionVerb::Tick => {
-                    let Some(target) = transform_region(lens, motion.target, transforms) else {
-                        continue;
+                    let target = match &motion.key.entity {
+                        MotionEntity::Agent(id) => {
+                            agent_expression_area(id, geometry.agent_regions)
+                        }
+                        MotionEntity::District(_) | MotionEntity::Attention(_) => {
+                            transform_region(geometry.lens, motion.target, geometry.transforms)
+                                .and_then(|target| expression_area(target, geometry.lens))
+                        }
                     };
-                    let Some(area) = expression_area(target, lens) else {
+                    let Some(area) = target else {
                         continue;
                     };
                     let mark = tick_mark(frame, &motion.key.entity);
@@ -770,10 +782,18 @@ impl MotionDriver {
                     );
                     let slot = self.slot(motion);
                     slot.manager.add_unique_effect(motion.key.clone(), effect);
-                    slot.manager.process_effects(delta, buf, lens);
+                    slot.manager.process_effects(delta, buf, geometry.lens);
                 }
                 MotionVerb::Decay => {
-                    let Some(area) = transform_region(lens, motion.target, transforms) else {
+                    let area = match &motion.key.entity {
+                        MotionEntity::Agent(id) => {
+                            agent_expression_area(id, geometry.agent_regions)
+                        }
+                        MotionEntity::District(_) | MotionEntity::Attention(_) => {
+                            transform_region(geometry.lens, motion.target, geometry.transforms)
+                        }
+                    };
+                    let Some(area) = area else {
                         continue;
                     };
                     let mut effect = fx::effect_fn((), DECAY_DURATION, |_state, context, cells| {
@@ -793,7 +813,7 @@ impl MotionDriver {
                     }
                     let slot = self.slot(motion);
                     slot.manager.add_unique_effect(motion.key.clone(), effect);
-                    slot.manager.process_effects(delta, buf, lens);
+                    slot.manager.process_effects(delta, buf, geometry.lens);
                 }
                 MotionVerb::Pulse => {}
             }
@@ -825,6 +845,11 @@ fn split_elapsed(motion: &MotionInput, boundary: Duration) -> (Duration, Duratio
 
 fn expression_area(target: Rect, lens: Rect) -> Option<Rect> {
     intersect_rect(Rect::new(target.x, target.y, 1, 1), lens)
+}
+
+fn agent_expression_area(id: &AgentId, regions: &BTreeMap<AgentId, Rect>) -> Option<Rect> {
+    let pair = *regions.get(id)?;
+    (pair.width == 2 && pair.height == 1).then(|| Rect::new(pair.x.saturating_add(1), pair.y, 1, 1))
 }
 
 fn tick_mark(frame: &FrameInput, entity: &MotionEntity) -> &'static Mark {
@@ -934,17 +959,21 @@ fn paint_frame(
     text: &[CanvasText],
     regions: &[(Rect, HallTarget)],
     transforms: &[PulseTransform],
-) {
+) -> BTreeMap<AgentId, Rect> {
     let transformed: Vec<CanvasText> = text
         .iter()
         .filter_map(|item| transform_text(area, item, transforms))
         .collect();
     canvas_paint(area, buf, &transformed);
+    let mut visible_agents = BTreeMap::new();
     for (region, target) in regions {
         if let Some(region) = transform_region(area, *region, transforms) {
             hits.register(region, target.clone());
+            let HallTarget::Agent(id) = target;
+            visible_agents.insert(id.clone(), region);
         }
     }
+    visible_agents
 }
 
 fn canvas_paint(area: Rect, buf: &mut Buffer, text: &[CanvasText]) {
@@ -1018,10 +1047,18 @@ pub fn render_with_motion(
     let active = motion.driver.active_inputs(motion.inputs);
     motion.driver.begin_frame(&active);
     let transforms = motion.driver.prepare_pulses(&active, buf, area);
-    render_frame(area, buf, input, tier, glyphs, hits, &transforms);
-    motion
-        .driver
-        .apply_characters(&active, input, glyphs, buf, area, &transforms);
+    let agent_regions = render_frame(area, buf, input, tier, glyphs, hits, &transforms);
+    motion.driver.apply_characters(
+        &active,
+        input,
+        glyphs,
+        buf,
+        MotionGeometry {
+            lens: area,
+            transforms: &transforms,
+            agent_regions: &agent_regions,
+        },
+    );
 }
 
 fn render_frame(
@@ -1032,10 +1069,10 @@ fn render_frame(
     glyphs: GlyphSet,
     hits: &mut HitMap<HallTarget>,
     transforms: &[PulseTransform],
-) {
+) -> BTreeMap<AgentId, Rect> {
     hits.clear();
     if area.width == 0 || area.height == 0 {
-        return;
+        return BTreeMap::new();
     }
 
     let plan = solve_density(area, input);
@@ -1064,8 +1101,7 @@ fn render_frame(
                 agent_pair: false,
             });
         }
-        paint_frame(area, buf, hits, &text, &regions, transforms);
-        return;
+        return paint_frame(area, buf, hits, &text, &regions, transforms);
     }
 
     if plan.rung == DensityRung::Paging {
@@ -1079,8 +1115,7 @@ fn render_frame(
             style: theme::state_style(theme::binding("needs_attention"), tier),
             agent_pair: false,
         });
-        paint_frame(area, buf, hits, &text, &regions, transforms);
-        return;
+        return paint_frame(area, buf, hits, &text, &regions, transforms);
     }
 
     let gutter = u16::from(plan.rung == DensityRung::Baseline);
@@ -1157,5 +1192,5 @@ fn render_frame(
         }
         y = y.saturating_add(EXPANDED_DISTRICT_HEIGHT);
     }
-    paint_frame(area, buf, hits, &text, &regions, transforms);
+    paint_frame(area, buf, hits, &text, &regions, transforms)
 }
