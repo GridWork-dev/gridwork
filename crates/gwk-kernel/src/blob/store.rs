@@ -64,7 +64,7 @@ macro_rules! blob_columns {
     };
 }
 
-/// Blobs no event references and no evidence pins.
+/// Blobs no live reference or evidence pin protects.
 ///
 /// The reference test is a lookup against `event_payload_ref_digest`, the
 /// expression index migration 0003 creates — the same extraction, spelled the
@@ -80,15 +80,26 @@ macro_rules! blob_columns {
 /// the checkpoint row, so a rolled-back append leaves a records blob nothing
 /// points at — reclaiming that is the whole reason this runs. Reclaiming a
 /// blob a LIVE checkpoint still names is a recovery that cannot run.
+///
+/// Evidence is the third holder. Ordinary evidence keeps its bytes without an
+/// age limit. PTY recordings are the one bounded class: their evidence row
+/// keeps the blob for the configured full-fidelity window, while `blob_pin`
+/// remains the independent forever override. The evidence row itself is never
+/// deleted, so a swept recording remains an auditable pointer to bytes whose
+/// retention elapsed.
 macro_rules! unreferenced {
     () => {
         "SELECT b.digest FROM gwk_internal.blob b \
          WHERE b.tombstoned_at IS NULL \
            AND NOT EXISTS (SELECT 1 FROM gwk_internal.blob_pin p WHERE p.digest = b.digest) \
-           AND NOT EXISTS (SELECT 1 FROM gwk.event e \
-                           WHERE e.payload_ref ->> 'digest' = 'sha256:' || b.digest) \
-           AND NOT EXISTS (SELECT 1 FROM gwk_internal.checkpoint c \
-                           WHERE c.records_ref ->> 'digest' = 'sha256:' || b.digest)"
+            AND NOT EXISTS (SELECT 1 FROM gwk.event e \
+                            WHERE e.payload_ref ->> 'digest' = 'sha256:' || b.digest) \
+            AND NOT EXISTS (SELECT 1 FROM gwk_internal.checkpoint c \
+                            WHERE c.records_ref ->> 'digest' = 'sha256:' || b.digest) \
+            AND NOT EXISTS (SELECT 1 FROM gwk.evidence e \
+                            WHERE e.ref = 'sha256:' || b.digest \
+                              AND (e.kind <> 'pty_recording' \
+                                   OR e.created_at >= now() - make_interval(days => $1)))"
     };
 }
 
@@ -900,6 +911,7 @@ impl BlobStore for PgBlobStore {
             unreferenced!(),
             ") RETURNING digest"
         ))
+        .bind(self.config.pty_recording_retention_days())
         .fetch_all(&self.pool)
         .await
         .map_err(|e| storage("sweep blobs", e))?;
