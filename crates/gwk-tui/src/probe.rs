@@ -23,16 +23,24 @@
 //! to stop relying on.
 
 use std::io::{self, Read, Write};
+#[cfg(target_os = "linux")]
+use std::time::{Duration, Instant};
 
+#[cfg(not(target_os = "linux"))]
+use crossterm::cursor::position;
 use gwk_theme::probe::{CellReport, ProbeOutcome, evaluate, inventory_codepoints};
+#[cfg(target_os = "linux")]
+use rustix::event::{PollFd, PollFlags, Timespec, poll};
+#[cfg(target_os = "linux")]
+use std::os::fd::AsFd as _;
 
 /// How many bytes we will read chasing a single reply before giving up.
 ///
-/// A terminal that answers at all answers within a few bytes. This bound is what
-/// stops a terminal that never answers from hanging the console at startup —
-/// the caller gets `Inconclusive` and degrades, which is the designed outcome
-/// rather than an error path.
+/// A terminal that answers at all answers within a few bytes. This bounds reply
+/// parsing; [`probe_terminal`] separately bounds how long production waits.
 const REPLY_BUDGET: usize = 32;
+#[cfg(target_os = "linux")]
+const REPLY_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Ask the terminal how wide one glyph is.
 ///
@@ -92,6 +100,96 @@ pub fn probe<W: Write, R: Read>(out: &mut W, inp: &mut R) -> ProbeOutcome {
     let _ = write!(out, "\r\x1b[2K");
     let _ = out.flush();
 
+    evaluate(&reports)
+}
+
+/// Probe the active terminal through a bounded cursor-position query. Linux
+/// waits at most 250ms through `poll`; other targets use crossterm's bounded
+/// position query. The first unanswered glyph degrades the whole inventory.
+pub fn probe_terminal<W: Write>(out: &mut W) -> ProbeOutcome {
+    #[cfg(target_os = "linux")]
+    {
+        let stdin = io::stdin();
+        let mut input = stdin.lock();
+        probe_timed(out, &mut input)
+    }
+    #[cfg(not(target_os = "linux"))]
+    probe_positions(out, || position().map(|(column, _row)| column))
+}
+
+#[cfg(target_os = "linux")]
+fn probe_timed<W, R>(out: &mut W, input: &mut R) -> ProbeOutcome
+where
+    W: Write,
+    R: Read + std::os::fd::AsFd,
+{
+    let mut reports = Vec::new();
+    for glyph in inventory_codepoints() {
+        if let Some(cells) = measure_one_timed(out, input, glyph) {
+            reports.push(CellReport { glyph, cells });
+        } else {
+            break;
+        }
+    }
+    let _ = write!(out, "\r\x1b[2K");
+    let _ = out.flush();
+    evaluate(&reports)
+}
+
+#[cfg(target_os = "linux")]
+fn measure_one_timed<W, R>(out: &mut W, input: &mut R, glyph: char) -> Option<u16>
+where
+    W: Write,
+    R: Read + std::os::fd::AsFd,
+{
+    write!(out, "\r{glyph}\x1b[6n").ok()?;
+    out.flush().ok()?;
+    let deadline = Instant::now() + REPLY_TIMEOUT;
+    let mut buf = Vec::with_capacity(REPLY_BUDGET);
+    let mut byte = [0u8; 1];
+    while buf.len() < REPLY_BUDGET {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let timeout = Timespec::try_from(remaining).ok()?;
+        let mut ready = [PollFd::from_borrowed_fd(input.as_fd(), PollFlags::IN)];
+        if poll(&mut ready, Some(&timeout)).ok()? == 0 {
+            break;
+        }
+        match input.read(&mut byte) {
+            Ok(0) => break,
+            Ok(_) => {
+                buf.push(byte[0]);
+                if byte[0] == b'R' {
+                    break;
+                }
+            }
+            Err(ref error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+    parse_cpr(&buf).map(|column| column.saturating_sub(1))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn probe_positions<W, F>(out: &mut W, mut cursor_column: F) -> ProbeOutcome
+where
+    W: Write,
+    F: FnMut() -> io::Result<u16>,
+{
+    let mut reports = Vec::new();
+    for glyph in inventory_codepoints() {
+        if write!(out, "\r{glyph}").and_then(|()| out.flush()).is_err() {
+            break;
+        }
+        let Ok(cells) = cursor_column() else {
+            break;
+        };
+        reports.push(CellReport { glyph, cells });
+    }
+    let _ = write!(out, "\r\x1b[2K");
+    let _ = out.flush();
     evaluate(&reports)
 }
 
@@ -179,6 +277,19 @@ mod tests {
         let mut inp = Fake::silent();
         let outcome = probe(&mut out, &mut inp);
         assert!(matches!(outcome, ProbeOutcome::Inconclusive(_)));
+        assert_eq!(outcome.glyph_set(), GlyphSet::Ascii);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn terminal_probe_stops_after_the_first_unanswered_position() {
+        let mut out = Vec::new();
+        let mut calls = 0;
+        let outcome = probe_positions(&mut out, || {
+            calls += 1;
+            Err(io::Error::new(io::ErrorKind::TimedOut, "silent terminal"))
+        });
+        assert_eq!(calls, 1);
         assert_eq!(outcome.glyph_set(), GlyphSet::Ascii);
     }
 

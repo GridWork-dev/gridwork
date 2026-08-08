@@ -8,13 +8,8 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
-# Not published at this commit. It flips publishable in the change that first
-# makes `gridwork` depend on it as a NORMAL dependency — the install carries
-# kernel + CLI + lenses — and the README crates-table row rides that same
-# change rather than landing ahead of the thing it describes. The seven-act
-# binding test's dev-dep is not that change: packaging strips it, the install
-# still carries no lens code, and CI's tree guard holds the line.
-publish = false
+# The installed `gw` binary carries this crate as its terminal surface.
+publish = true
 
 [dependencies]
 # Direct, not just ratatui's transitive backend: [`input`] needs the `osc52`
@@ -34,6 +29,12 @@ gwk-theme.workspace = true
 # first consumer so the single-`ratatui-core` lockfile assertion in CI had
 # something to assert before any widget existed.
 ratatui.workspace = true
+# Linux terminal probing waits on stdin readiness through safe poll bindings;
+# silence must degrade instead of blocking raw mode indefinitely.
+rustix = { workspace = true, features = ["event"] }
+# Opaque kernel IDs are digest-normalized into bounded cell-safe view IDs.
+# Already in the workspace graph through the kernel and CLI.
+sha2.workspace = true
 # Layout stays on Canvas; this edge owns all character and movement effects.
 tachyonfx.workspace = true
 # Typed failures at the filesystem/process boundary. Callers must be able to

@@ -69,11 +69,8 @@ gwk-kernel = { path = "crates/gwk-kernel", version = "0.0.3" }
 # crates that depend on it.
 gwk-pty = { path = "crates/gwk-pty" }
 gwk-theme = { path = "crates/gwk-theme", version = "0.0.3" }
-# Path-only, no version: unpublished (`publish = false`). Its one consumer
-# today is a DEV dependency — the `gridwork` seven-act binding test — which
-# packaging strips; the change that makes `gridwork` depend on it for real is
-# still the one that flips it publishable (see the crate's own manifest).
-gwk-tui = { path = "crates/gwk-tui" }
+# The installed `gw` binary carries the production terminal loop.
+gwk-tui = { path = "crates/gwk-tui", version = "0.0.2" }
 # The SAFE wrapper, not the raw `-sys` bindings: this workspace forbids
 # `unsafe_code`, so raw FFI would not compile here at all. Exact-pinned because
 # libghostty-vt is pre-1.0 and its own docs promise breaking changes — a caret

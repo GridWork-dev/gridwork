@@ -4,9 +4,8 @@
 //! the walk it enables must run **without leaving `gw`** — which holds only
 //! if everything the template names is expressible through this crate: the
 //! generic kernel commands for tasks, gates, and evidence, and the `pr` verb
-//! for SHIP's PR and merge. These cases pin that seam. `gwk-tui` is a dev
-//! dependency here for exactly this file; the installed binary still carries
-//! no lens code.
+//! for SHIP's PR and merge. These cases pin that seam through the same normal
+//! `gwk-tui` dependency the installed interactive binary now carries.
 
 use gridwork::pr::{Body, Gh, Merge, Open, Strategy};
 use gwk_domain::command::KernelCommand;

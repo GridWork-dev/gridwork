@@ -9,9 +9,9 @@
 //!
 //! Three rules hold everywhere:
 //!
-//! * **The answer is JSON on standard output.** `--pretty` changes the
-//!   formatting and never the value. `--help` is the single exception, because a
-//!   caller asking for the command tree is asking for prose.
+//! * **Command answers are JSON on standard output.** `--pretty` changes the
+//!   formatting and never the value. `--help` is prose and `tui` owns the
+//!   interactive terminal; neither is a command answer.
 //! * **The exit says what to do about it** ([`exit`]). One table, derived from
 //!   the refusal's own code, so the exit and the JSON can never disagree.
 //! * **No database, no key material.** Every verb here goes through the socket.
@@ -26,6 +26,7 @@ pub mod args;
 pub mod client;
 pub mod exit;
 pub mod pr;
+pub mod tui;
 
 use std::path::{Path, PathBuf};
 
@@ -162,6 +163,7 @@ async fn execute(verb: Verb, pretty: bool) -> Result<(), Failure> {
             ask(KernelRequest::ReadEvents { cursor, limit }, pretty).await
         }
         Verb::EventFollow { cursor } => follow(cursor, pretty).await,
+        Verb::Tui { motion } => tui::run(motion).await,
 
         Verb::AttentionResolve { id, resolution } => {
             let command = KernelCommand::ResolveAttention {
