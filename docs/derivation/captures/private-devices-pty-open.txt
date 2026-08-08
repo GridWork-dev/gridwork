@@ -1,0 +1,63 @@
+capture: PTY allocation inside a transient systemd unit with PrivateDevices=yes
+platform: Linux 7.1.5-arch1-2 x86_64 GNU/Linux
+
+probe (python3 standard library plus the process libc):
+
+    import ctypes
+    import errno
+    import os
+
+
+    def outcome(label, operation):
+        try:
+            fd = operation()
+        except OSError as error:
+            name = errno.errorcode.get(error.errno, "UNKNOWN")
+            print(f"{label}: errno {error.errno} ({name})")
+        else:
+            os.close(fd)
+            print(f"{label}: success")
+
+
+    for path in ["/dev/ptmx", "/dev/pts", "/dev/pts/ptmx"]:
+        print(f"exists {path}: {'yes' if os.path.exists(path) else 'no'}")
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.posix_openpt.argtypes = [ctypes.c_int]
+    libc.posix_openpt.restype = ctypes.c_int
+
+
+    def posix_openpt():
+        fd = libc.posix_openpt(os.O_RDWR | os.O_NOCTTY)
+        if fd < 0:
+            value = ctypes.get_errno()
+            raise OSError(value, os.strerror(value))
+        return fd
+
+
+    outcome("posix_openpt", posix_openpt)
+    outcome("open /dev/ptmx", lambda: os.open("/dev/ptmx", os.O_RDWR | os.O_NOCTTY))
+
+commands:
+
+    systemd-run --user --quiet --wait --pipe --collect --property=PrivateDevices=yes \
+      /usr/bin/python3 /tmp/opencode/pty-private-devices-probe.py
+
+    systemd-run --user --quiet --wait --pipe --collect \
+      /usr/bin/python3 /tmp/opencode/pty-private-devices-probe.py
+
+observed with PrivateDevices=yes:
+
+    exists /dev/ptmx: yes
+    exists /dev/pts: yes
+    exists /dev/pts/ptmx: yes
+    posix_openpt: errno 2 (ENOENT)
+    open /dev/ptmx: errno 2 (ENOENT)
+
+observed in the control unit without PrivateDevices:
+
+    exists /dev/ptmx: yes
+    exists /dev/pts: yes
+    exists /dev/pts/ptmx: yes
+    posix_openpt: success
+    open /dev/ptmx: success
