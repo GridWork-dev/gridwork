@@ -103,6 +103,10 @@ proptest = { version = "1.11.0", default-features = false, features = ["std", "b
 # `underline-color` carries a hosted session's SGR 58 value through the
 # drill-down buffer; without it the typed wire field would disappear at paint.
 ratatui = { version = "0.30.2", features = ["underline-color"] }
+# Every Hall motion verb runs through this one effects engine. Exact-pinned to
+# the ratatui-core-compatible release measured by the motion spike; std-duration
+# lets the frame consume the console's existing std::time::Duration cadence.
+tachyonfx = { version = "=0.25.1", features = ["std-duration"] }
 # One call: `geteuid`, for the UDS peer check. Chosen over `libc` because its
 # wrapper is SAFE — the workspace forbids `unsafe_code`, so a raw extern call
 # would not compile here — and over `nix` because it was already in the tree.

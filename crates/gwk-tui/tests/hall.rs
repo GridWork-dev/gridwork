@@ -2,15 +2,18 @@ use gwk_domain::ids::Seq;
 use gwk_theme::marks::GlyphSet;
 use gwk_theme::tier::ColorTier;
 use gwk_tui::hall::{
-    Agent, AgentId, AgentState, Attention, AttentionId, DensityRung, District, DistrictId, Focus,
-    FrameInput, HallTarget, Station, StationId, agent_order, collapse_order, district_stack_order,
-    render, solve_density, station_order, target_order,
+    Agent, AgentId, AgentState, Attention, AttentionId, DECAY_DURATION, DensityRung, District,
+    DistrictId, Focus, FrameInput, HallTarget, MotionDriver, MotionEntity, MotionFrame,
+    MotionInput, MotionKey, MotionMode, MotionVerb, PULSE_DURATION, Station, StationId, TICK_CYCLE,
+    agent_order, collapse_order, district_stack_order, render, render_with_motion, solve_density,
+    station_order, target_order,
 };
 use gwk_tui::input::HitMap;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use std::time::Duration;
 
 fn district_id(value: &str) -> DistrictId {
     DistrictId::new(value).expect("district id")
@@ -33,6 +36,7 @@ fn agent(id: &str, role: Option<&str>, state: AgentState, seq: u64) -> Agent {
         id: agent_id(id),
         role: role.map(str::to_owned),
         state,
+        duration: None,
         changed_seq: Seq::new(seq),
     }
 }
@@ -160,6 +164,85 @@ fn dump_frame(width: u16, height: u16, input: &FrameInput) -> (String, HitMap<Ha
         rendered.push('\n');
     }
     (rendered, hits, buffer)
+}
+
+fn dump_motion(
+    width: u16,
+    height: u16,
+    input: &FrameInput,
+    glyphs: GlyphSet,
+    driver: &mut MotionDriver,
+    motions: &[MotionInput],
+) -> (String, HitMap<HallTarget>, Buffer) {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+    let mut hits = HitMap::new();
+    terminal
+        .draw(|frame| {
+            render_with_motion(
+                frame.area(),
+                frame.buffer_mut(),
+                input,
+                ColorTier::Mono,
+                glyphs,
+                &mut hits,
+                MotionFrame {
+                    driver,
+                    inputs: motions,
+                },
+            );
+        })
+        .expect("draw");
+    let buffer = terminal.backend().buffer().clone();
+    let mut rendered = String::new();
+    for y in 0..buffer.area.height {
+        let mut line = String::new();
+        for x in 0..buffer.area.width {
+            line.push_str(buffer[(x, y)].symbol());
+        }
+        rendered.push_str(line.trim_end());
+        rendered.push('\n');
+    }
+    (rendered, hits, buffer)
+}
+
+fn one_agent_input(state: AgentState) -> FrameInput {
+    FrameInput {
+        districts: vec![district(
+            "district-a",
+            "A",
+            vec![station(
+                "station-a",
+                1,
+                "s",
+                vec![agent("agent-a", Some("implementer"), state, 7)],
+                7,
+            )],
+            7,
+        )],
+        ..empty_input()
+    }
+}
+
+fn motion(
+    entity: MotionEntity,
+    changed_seq: u64,
+    verb: MotionVerb,
+    elapsed: Duration,
+    frame_delta: Duration,
+    source: Rect,
+    target: Rect,
+) -> MotionInput {
+    MotionInput {
+        key: MotionKey {
+            entity,
+            changed_seq: Seq::new(changed_seq),
+        },
+        verb,
+        elapsed,
+        frame_delta,
+        source,
+        target,
+    }
 }
 
 fn assert_matches_golden(name: &str, rendered: &str) {
@@ -541,4 +624,238 @@ fn hall_gutter_shrink_keeps_adjacent_two_cell_targets_exact() {
     assert_eq!(hits.hit(1, 2), Some(&first), "{rendered}");
     assert_eq!(hits.hit(2, 2), Some(&second), "{rendered}");
     assert_eq!(hits.hit(3, 2), Some(&second), "{rendered}");
+}
+
+#[test]
+fn hall_motion_constants_pin_all_three_verb_boundaries() {
+    assert_eq!(TICK_CYCLE, Duration::from_millis(8 * 33));
+    assert_eq!(TICK_CYCLE, gwk_tui::input::TICK.saturating_mul(8));
+    assert_eq!(PULSE_DURATION, Duration::from_millis(400));
+    assert_eq!(DECAY_DURATION, Duration::from_millis(600));
+}
+
+#[test]
+fn hall_tick_cycles_only_the_expression_cell_and_wraps_at_eight_frames() {
+    let input = one_agent_input(AgentState::Running);
+    let base = dump_frame(12, 3, &input).2;
+    assert_eq!(base[(0, 2)].symbol(), "▸");
+    assert_eq!(base[(1, 2)].symbol(), "⠋");
+
+    for (elapsed, expected) in [(33, "⠙"), (7 * 33, "⠆"), (8 * 33, "⠋")] {
+        let mut driver = MotionDriver::new(MotionMode::Full);
+        let tick = motion(
+            MotionEntity::Agent(agent_id("agent-a")),
+            7,
+            MotionVerb::Tick,
+            Duration::from_millis(elapsed),
+            gwk_tui::input::TICK,
+            Rect::new(1, 2, 1, 1),
+            Rect::new(1, 2, 1, 1),
+        );
+        let (_, _, animated) = dump_motion(12, 3, &input, GlyphSet::Unicode, &mut driver, &[tick]);
+        assert_eq!(animated[(0, 2)].symbol(), "▸", "identity cell moved");
+        assert_eq!(animated[(1, 2)].symbol(), expected, "elapsed {elapsed}");
+        assert_eq!(animated[(2, 2)].symbol(), " ", "neighbor changed");
+    }
+}
+
+#[test]
+fn hall_motion_off_and_absent_driver_are_frame_zero_equivalent() {
+    let mut input = one_agent_input(AgentState::Running);
+    input.districts[0].stations[0].agents[0].duration = Some("12m".into());
+    let (base, base_hits, _) = dump_frame(12, 3, &input);
+    assert!(
+        base.contains("12m"),
+        "duration must carry liveness:\n{base}"
+    );
+    let tick = motion(
+        MotionEntity::Agent(agent_id("agent-a")),
+        7,
+        MotionVerb::Tick,
+        Duration::from_millis(99),
+        gwk_tui::input::TICK,
+        Rect::new(1, 2, 1, 1),
+        Rect::new(1, 2, 1, 1),
+    );
+    let mut off = MotionDriver::new(MotionMode::Off);
+    let (rendered, hits, _) = dump_motion(12, 3, &input, GlyphSet::Unicode, &mut off, &[tick]);
+    assert_eq!(rendered, base);
+    assert_eq!(
+        hits.targets().collect::<Vec<_>>(),
+        base_hits.targets().collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn hall_reduced_motion_keeps_tick_and_drops_one_shots() {
+    let input = one_agent_input(AgentState::Running);
+    let tick = motion(
+        MotionEntity::Agent(agent_id("agent-a")),
+        7,
+        MotionVerb::Tick,
+        Duration::from_millis(33),
+        gwk_tui::input::TICK,
+        Rect::new(1, 2, 1, 1),
+        Rect::new(1, 2, 1, 1),
+    );
+    let pulse = motion(
+        MotionEntity::Attention(attention_id("attention-a")),
+        8,
+        MotionVerb::Pulse,
+        Duration::ZERO,
+        Duration::ZERO,
+        Rect::new(0, 3, 12, 3),
+        Rect::new(0, 0, 12, 3),
+    );
+    let mut reduced = MotionDriver::new(MotionMode::Reduced);
+    let (_, hits, buffer) = dump_motion(
+        12,
+        6,
+        &input,
+        GlyphSet::Unicode,
+        &mut reduced,
+        &[tick, pulse],
+    );
+    assert_eq!(buffer[(1, 2)].symbol(), "⠙");
+    assert_eq!(
+        hits.hit(0, 2),
+        Some(&HallTarget::Agent(agent_id("agent-a")))
+    );
+    assert_eq!(hits.hit(0, 5), None, "reduced mode applied the pulse");
+    assert_eq!(reduced.active_one_shots(), 0);
+}
+
+#[test]
+fn hall_pulse_translates_before_canvas_and_keeps_hits_aligned() {
+    let input = one_agent_input(AgentState::Running);
+    let key_entity = MotionEntity::Attention(attention_id("attention-a"));
+
+    let mut at_start = MotionDriver::new(MotionMode::Full);
+    let start = motion(
+        key_entity.clone(),
+        8,
+        MotionVerb::Pulse,
+        Duration::ZERO,
+        Duration::ZERO,
+        Rect::new(0, 3, 12, 3),
+        Rect::new(0, 0, 12, 3),
+    );
+    let (_, hits, buffer) = dump_motion(12, 6, &input, GlyphSet::Unicode, &mut at_start, &[start]);
+    assert_eq!(buffer[(0, 5)].symbol(), "▸");
+    assert_eq!(
+        hits.hit(0, 5),
+        Some(&HallTarget::Agent(agent_id("agent-a")))
+    );
+    assert_eq!(hits.hit(0, 2), None);
+
+    let mut at_end = MotionDriver::new(MotionMode::Full);
+    let end = motion(
+        key_entity,
+        8,
+        MotionVerb::Pulse,
+        PULSE_DURATION,
+        gwk_tui::input::TICK,
+        Rect::new(0, 3, 12, 3),
+        Rect::new(0, 0, 12, 3),
+    );
+    let (_, hits, buffer) = dump_motion(12, 6, &input, GlyphSet::Unicode, &mut at_end, &[end]);
+    assert_eq!(buffer[(0, 2)].symbol(), "▸");
+    assert_eq!(
+        hits.hit(0, 2),
+        Some(&HallTarget::Agent(agent_id("agent-a")))
+    );
+}
+
+#[test]
+fn hall_pulse_clips_at_the_lens_without_splitting_the_agent_pair() {
+    let input = one_agent_input(AgentState::Running);
+    let pulse = motion(
+        MotionEntity::Attention(attention_id("attention-edge")),
+        9,
+        MotionVerb::Pulse,
+        Duration::ZERO,
+        Duration::ZERO,
+        Rect::new(11, 0, 12, 3),
+        Rect::new(0, 0, 12, 3),
+    );
+    let mut driver = MotionDriver::new(MotionMode::Full);
+    let (_, hits, buffer) = dump_motion(12, 3, &input, GlyphSet::Unicode, &mut driver, &[pulse]);
+    assert_eq!(buffer[(11, 2)].symbol(), " ");
+    assert_eq!(hits.targets().count(), 0);
+}
+
+#[test]
+fn hall_decay_is_character_only_and_confined_to_its_cell() {
+    let input = one_agent_input(AgentState::Running);
+    let decay = motion(
+        MotionEntity::Agent(agent_id("agent-a")),
+        8,
+        MotionVerb::Decay,
+        DECAY_DURATION,
+        gwk_tui::input::TICK,
+        Rect::new(1, 2, 1, 1),
+        Rect::new(1, 2, 1, 1),
+    );
+    let mut driver = MotionDriver::new(MotionMode::Full);
+    let (_, hits, buffer) = dump_motion(12, 3, &input, GlyphSet::Unicode, &mut driver, &[decay]);
+    assert_eq!(buffer[(0, 2)].symbol(), "▸");
+    assert_eq!(buffer[(1, 2)].symbol(), " ");
+    assert_eq!(buffer[(2, 2)].symbol(), " ");
+    assert_eq!(
+        hits.hit(0, 2),
+        Some(&HallTarget::Agent(agent_id("agent-a"))),
+        "decay must not erase the pair target"
+    );
+}
+
+#[test]
+fn hall_ascii_tick_stays_inside_the_admitted_escape_set() {
+    let input = one_agent_input(AgentState::Running);
+    let tick = motion(
+        MotionEntity::Agent(agent_id("agent-a")),
+        7,
+        MotionVerb::Tick,
+        Duration::from_millis(7 * 33),
+        gwk_tui::input::TICK,
+        Rect::new(1, 2, 1, 1),
+        Rect::new(1, 2, 1, 1),
+    );
+    let mut driver = MotionDriver::new(MotionMode::Full);
+    let (rendered, _, buffer) = dump_motion(12, 3, &input, GlyphSet::Ascii, &mut driver, &[tick]);
+    assert_eq!(buffer[(0, 2)].symbol(), "I");
+    assert_eq!(buffer[(1, 2)].symbol(), "-");
+    assert!(rendered.is_ascii());
+}
+
+#[test]
+fn hall_same_entity_and_sequence_replaces_the_one_shot() {
+    let input = one_agent_input(AgentState::Running);
+    let first = motion(
+        MotionEntity::Agent(agent_id("agent-a")),
+        9,
+        MotionVerb::Decay,
+        DECAY_DURATION,
+        gwk_tui::input::TICK,
+        Rect::new(1, 2, 1, 1),
+        Rect::new(1, 2, 1, 1),
+    );
+    let replacement = MotionInput {
+        elapsed: Duration::from_millis(100),
+        ..first.clone()
+    };
+    let mut driver = MotionDriver::new(MotionMode::Full);
+    let (_, _, buffer) = dump_motion(
+        12,
+        3,
+        &input,
+        GlyphSet::Unicode,
+        &mut driver,
+        &[first, replacement],
+    );
+    assert_eq!(driver.active_one_shots(), 1);
+    assert_eq!(
+        buffer[(1, 2)].symbol(),
+        "⠋",
+        "the replaced completed decay must never touch the frame"
+    );
 }

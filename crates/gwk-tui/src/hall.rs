@@ -5,19 +5,24 @@
 //! a frame. Districts stack vertically, stations run horizontally, and every
 //! visible agent occupies the same two cells used by hit testing.
 
-use std::collections::BTreeSet;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::rc::Rc;
+use std::time::Duration;
 
 use gwk_domain::ids::Seq;
 use gwk_theme::marks::{GlyphSet, Mark};
 use gwk_theme::tier::ColorTier;
 use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
+use ratatui::layout::{Offset, Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::symbols::Marker;
 use ratatui::text::Span;
 use ratatui::widgets::Widget;
 use ratatui::widgets::canvas::Canvas;
+use tachyonfx::fx::RepeatMode;
+use tachyonfx::{EffectManager, fx};
 use unicode_width::UnicodeWidthStr;
 
 use crate::input::HitMap;
@@ -26,6 +31,13 @@ use crate::theme;
 const VIEW_ID_BUDGET: usize = 64;
 const STATION_GUTTER: u16 = 2;
 const EXPANDED_DISTRICT_HEIGHT: u16 = 3;
+
+/// One full eight-frame expression cycle at the ruled console cadence.
+pub const TICK_CYCLE: Duration = crate::input::TICK.saturating_mul(8);
+/// The attention reorder movement boundary.
+pub const PULSE_DURATION: Duration = Duration::from_millis(400);
+/// The character-domain departure boundary.
+pub const DECAY_DURATION: Duration = Duration::from_millis(600);
 
 /// Why a normalized view identifier cannot enter the frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,6 +174,8 @@ pub struct Agent {
     pub id: AgentId,
     pub role: Option<String>,
     pub state: AgentState,
+    /// Caller-formatted standing liveness text, visible even with motion off.
+    pub duration: Option<String>,
     pub changed_seq: Seq,
 }
 
@@ -213,6 +227,67 @@ pub struct FrameInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HallTarget {
     Agent(AgentId),
+}
+
+/// The caller-resolved motion posture for this frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MotionMode {
+    Off,
+    Reduced,
+    Full,
+}
+
+/// The three ratified motion verbs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MotionVerb {
+    Tick,
+    Pulse,
+    Decay,
+}
+
+/// A typed namespace for the ledger entity that owns an effect.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MotionEntity {
+    Agent(AgentId),
+    District(DistrictId),
+    Attention(AttentionId),
+}
+
+/// Effect identity: entity plus the exact ledger change that triggered it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MotionKey {
+    pub entity: MotionEntity,
+    pub changed_seq: Seq,
+}
+
+// tachyonfx 0.25.1's derived EffectManager default unnecessarily carries a
+// K: Default bound. The manager never reads this value; real effects always
+// enter through add_unique_effect with a caller-provided provenance key.
+impl Default for MotionKey {
+    fn default() -> Self {
+        Self {
+            entity: MotionEntity::Agent(AgentId("agent-effect-manager".into())),
+            changed_seq: Seq::new(0),
+        }
+    }
+}
+
+/// One caller-timed effect input. Sequence is provenance only; both time axes
+/// are explicit durations and are never derived from sequence subtraction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MotionInput {
+    pub key: MotionKey,
+    pub verb: MotionVerb,
+    pub elapsed: Duration,
+    pub frame_delta: Duration,
+    pub source: Rect,
+    pub target: Rect,
+}
+
+/// The stateful effects driver and active inputs for one rendered frame.
+pub struct MotionFrame<'a> {
+    pub driver: &'a mut MotionDriver,
+    pub inputs: &'a [MotionInput],
 }
 
 /// The literal density rung selected for the frame.
@@ -347,15 +422,27 @@ fn safe_width(text: &str, budget: u16) -> u16 {
     u16::try_from(UnicodeWidthStr::width(safe.as_ref())).unwrap_or(u16::MAX)
 }
 
-fn agent_row_width(count: usize, gutter: u16) -> u16 {
-    let count = u16::try_from(count).unwrap_or(u16::MAX);
-    count
-        .saturating_mul(2)
-        .saturating_add(count.saturating_sub(1).saturating_mul(gutter))
+fn agent_slot_width(agent: &Agent, budget: u16) -> u16 {
+    agent.duration.as_deref().map_or(2, |duration| {
+        3u16.saturating_add(safe_width(duration, budget.saturating_sub(3)))
+    })
+}
+
+fn agent_row_width(station: &Station, gutter: u16, budget: u16) -> u16 {
+    let agents = ordered_agents(station);
+    let slots = agents
+        .iter()
+        .map(|agent| agent_slot_width(agent, budget))
+        .fold(0u16, u16::saturating_add);
+    slots.saturating_add(
+        u16::try_from(agents.len().saturating_sub(1))
+            .unwrap_or(u16::MAX)
+            .saturating_mul(gutter),
+    )
 }
 
 fn station_width(station: &Station, gutter: u16, budget: u16) -> u16 {
-    safe_width(&station.label, budget).max(agent_row_width(station.agents.len(), gutter))
+    safe_width(&station.label, budget).max(agent_row_width(station, gutter, budget))
 }
 
 fn collapsed_text(district: &District, budget: u16) -> String {
@@ -506,11 +593,354 @@ pub fn target_order(input: &FrameInput) -> Vec<HallTarget> {
 }
 
 #[derive(Debug)]
+struct EffectSlot {
+    manager: EffectManager<MotionKey>,
+    verb: MotionVerb,
+    elapsed: Duration,
+}
+
+impl EffectSlot {
+    fn new(verb: MotionVerb) -> Self {
+        Self {
+            manager: EffectManager::default(),
+            verb,
+            elapsed: Duration::ZERO,
+        }
+    }
+}
+
+/// Frame-scoped tachyonfx managers keyed by entity plus ledger provenance.
+#[derive(Debug)]
+pub struct MotionDriver {
+    mode: MotionMode,
+    slots: BTreeMap<MotionKey, EffectSlot>,
+}
+
+impl MotionDriver {
+    pub fn new(mode: MotionMode) -> Self {
+        Self {
+            mode,
+            slots: BTreeMap::new(),
+        }
+    }
+
+    pub fn mode(&self) -> MotionMode {
+        self.mode
+    }
+
+    pub fn set_mode(&mut self, mode: MotionMode) {
+        self.mode = mode;
+        if mode == MotionMode::Off {
+            self.slots.clear();
+        }
+    }
+
+    /// Active PULSE/DECAY keys after same-key replacement.
+    pub fn active_one_shots(&self) -> usize {
+        self.slots
+            .values()
+            .filter(|slot| match slot.verb {
+                MotionVerb::Tick => false,
+                MotionVerb::Pulse => slot.elapsed < PULSE_DURATION,
+                MotionVerb::Decay => slot.elapsed < DECAY_DURATION,
+            })
+            .count()
+    }
+
+    fn allows(&self, verb: MotionVerb) -> bool {
+        match self.mode {
+            MotionMode::Off => false,
+            MotionMode::Reduced => verb == MotionVerb::Tick,
+            MotionMode::Full => true,
+        }
+    }
+
+    fn begin_frame(&mut self, motions: &[MotionInput]) {
+        if self.mode == MotionMode::Off {
+            self.slots.clear();
+            return;
+        }
+        let active: BTreeSet<MotionKey> = motions
+            .iter()
+            .filter(|motion| self.allows(motion.verb))
+            .map(|motion| motion.key.clone())
+            .collect();
+        self.slots.retain(|key, _| active.contains(key));
+    }
+
+    fn active_inputs(&self, motions: &[MotionInput]) -> Vec<MotionInput> {
+        let mut latest = BTreeMap::new();
+        for motion in motions.iter().filter(|motion| self.allows(motion.verb)) {
+            latest.insert(motion.key.clone(), motion.clone());
+        }
+        latest.into_values().collect()
+    }
+
+    fn slot(&mut self, motion: &MotionInput) -> &mut EffectSlot {
+        let slot = self
+            .slots
+            .entry(motion.key.clone())
+            .or_insert_with(|| EffectSlot::new(motion.verb));
+        slot.verb = motion.verb;
+        slot.elapsed = motion.elapsed;
+        slot
+    }
+
+    fn prepare_pulses(
+        &mut self,
+        motions: &[MotionInput],
+        buf: &mut Buffer,
+        lens: Rect,
+    ) -> Vec<PulseTransform> {
+        let mut transforms = Vec::new();
+        for motion in motions {
+            if motion.verb != MotionVerb::Pulse || !self.allows(motion.verb) {
+                continue;
+            }
+            let current = Rc::new(RefCell::new(None));
+            let probe = Rc::clone(&current);
+            let inner = fx::effect_fn((), PULSE_DURATION, move |_state, context, _cells| {
+                *probe.borrow_mut() = Some(context.area)
+            });
+            let offset = Offset {
+                x: i32::from(motion.target.x) - i32::from(motion.source.x),
+                y: i32::from(motion.target.y) - i32::from(motion.source.y),
+            };
+            let mut effect = fx::translate(inner, offset, PULSE_DURATION).with_area(motion.source);
+            let (warm, delta) = split_elapsed(motion, PULSE_DURATION);
+            if !warm.is_zero() {
+                let mut scratch = Buffer::empty(buf.area);
+                effect.process(warm, &mut scratch, motion.source);
+            }
+            let slot = self.slot(motion);
+            slot.manager.add_unique_effect(motion.key.clone(), effect);
+            slot.manager.process_effects(delta, buf, lens);
+            let translated = *current.borrow();
+            transforms.push(PulseTransform {
+                target: motion.target,
+                current: translated,
+            });
+        }
+        transforms
+    }
+
+    fn apply_characters(
+        &mut self,
+        motions: &[MotionInput],
+        frame: &FrameInput,
+        glyphs: GlyphSet,
+        buf: &mut Buffer,
+        lens: Rect,
+    ) {
+        for motion in motions {
+            if !matches!(motion.verb, MotionVerb::Tick | MotionVerb::Decay)
+                || !self.allows(motion.verb)
+            {
+                continue;
+            }
+            match motion.verb {
+                MotionVerb::Tick => {
+                    let Some(area) = expression_area(motion.target, lens) else {
+                        continue;
+                    };
+                    let mark = tick_mark(frame, &motion.key.entity);
+                    let delta = motion.frame_delta.min(motion.elapsed);
+                    let state = TickState {
+                        elapsed: motion.elapsed.saturating_sub(delta),
+                        mark,
+                        glyphs,
+                    };
+                    let effect = fx::repeat(
+                        fx::effect_fn(state, TICK_CYCLE, |state, context, cells| {
+                            state.elapsed = state.elapsed.saturating_add(context.last_tick);
+                            let tick_ms = crate::input::TICK.as_millis();
+                            let frame = usize::try_from((state.elapsed.as_millis() / tick_ms) % 8)
+                                .unwrap_or_default();
+                            let glyph = theme::glyph(state.mark, frame, state.glyphs);
+                            for (_, cell) in cells {
+                                cell.set_char(glyph);
+                            }
+                        })
+                        .with_area(area),
+                        RepeatMode::Forever,
+                    );
+                    let slot = self.slot(motion);
+                    slot.manager.add_unique_effect(motion.key.clone(), effect);
+                    slot.manager.process_effects(delta, buf, lens);
+                }
+                MotionVerb::Decay => {
+                    let Some(area) = intersect_rect(motion.target, lens) else {
+                        continue;
+                    };
+                    let mut effect = fx::effect_fn((), DECAY_DURATION, |_state, context, cells| {
+                        for (_, cell) in cells {
+                            if context.alpha() >= 1.0 {
+                                cell.set_char(' ');
+                            } else if context.alpha() >= 0.5 {
+                                cell.set_char('.');
+                            }
+                        }
+                    })
+                    .with_area(area);
+                    let (warm, delta) = split_elapsed(motion, DECAY_DURATION);
+                    if !warm.is_zero() {
+                        let mut scratch = Buffer::empty(buf.area);
+                        effect.process(warm, &mut scratch, area);
+                    }
+                    let slot = self.slot(motion);
+                    slot.manager.add_unique_effect(motion.key.clone(), effect);
+                    slot.manager.process_effects(delta, buf, lens);
+                }
+                MotionVerb::Pulse => {}
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PulseTransform {
+    target: Rect,
+    current: Option<Rect>,
+}
+
+#[derive(Clone)]
+struct TickState {
+    elapsed: Duration,
+    mark: &'static Mark,
+    glyphs: GlyphSet,
+}
+
+fn split_elapsed(motion: &MotionInput, boundary: Duration) -> (Duration, Duration) {
+    let elapsed = motion.elapsed.min(boundary);
+    let mut delta = motion.frame_delta.min(elapsed);
+    if delta.is_zero() && !elapsed.is_zero() {
+        delta = crate::input::TICK.min(elapsed);
+    }
+    (elapsed.saturating_sub(delta), delta)
+}
+
+fn expression_area(target: Rect, lens: Rect) -> Option<Rect> {
+    intersect_rect(Rect::new(target.x, target.y, 1, 1), lens)
+}
+
+fn tick_mark(frame: &FrameInput, entity: &MotionEntity) -> &'static Mark {
+    let state = match entity {
+        MotionEntity::Agent(id) => frame
+            .districts
+            .iter()
+            .flat_map(|district| &district.stations)
+            .flat_map(|station| &station.agents)
+            .find(|agent| agent.id == *id)
+            .map_or(AgentState::Unknown, |agent| agent.state),
+        MotionEntity::District(_) | MotionEntity::Attention(_) => AgentState::Unknown,
+    };
+    expression_mark(state)
+}
+
+#[derive(Debug, Clone)]
 struct CanvasText {
     x: u16,
     y: u16,
     text: String,
     style: Style,
+    agent_pair: bool,
+}
+
+fn intersect_rect(left: Rect, right: Rect) -> Option<Rect> {
+    let x = left.x.max(right.x);
+    let y = left.y.max(right.y);
+    let right_edge = left.right().min(right.right());
+    let bottom_edge = left.bottom().min(right.bottom());
+    (right_edge > x && bottom_edge > y).then(|| Rect::new(x, y, right_edge - x, bottom_edge - y))
+}
+
+fn rect_inside(inner: Rect, outer: Rect) -> bool {
+    inner.width > 0
+        && inner.height > 0
+        && inner.x >= outer.x
+        && inner.y >= outer.y
+        && inner.right() <= outer.right()
+        && inner.bottom() <= outer.bottom()
+}
+
+fn shift_rect(rect: Rect, dx: i32, dy: i32) -> Option<Rect> {
+    let x = i32::from(rect.x).checked_add(dx)?;
+    let y = i32::from(rect.y).checked_add(dy)?;
+    Some(Rect::new(
+        u16::try_from(x).ok()?,
+        u16::try_from(y).ok()?,
+        rect.width,
+        rect.height,
+    ))
+}
+
+fn pulse_for(position: Position, transforms: &[PulseTransform]) -> Option<PulseTransform> {
+    transforms
+        .iter()
+        .rev()
+        .find(|transform| transform.target.contains(position))
+        .copied()
+}
+
+fn transform_text(
+    area: Rect,
+    item: &CanvasText,
+    transforms: &[PulseTransform],
+) -> Option<CanvasText> {
+    let absolute = Position::new(area.x + item.x, area.y + item.y);
+    let Some(transform) = pulse_for(absolute, transforms) else {
+        return Some(item.clone());
+    };
+    let current = transform.current?;
+    let dx = i32::from(current.x) - i32::from(transform.target.x);
+    let dy = i32::from(current.y) - i32::from(transform.target.y);
+    let footprint = Rect::new(absolute.x, absolute.y, u16::from(item.agent_pair) + 1, 1);
+    let shifted = shift_rect(footprint, dx, dy)?;
+    let visible = intersect_rect(current, area)?;
+    if item.agent_pair {
+        if !rect_inside(shifted, visible) || !rect_inside(shifted, area) {
+            return None;
+        }
+    } else if !visible.contains(Position::new(shifted.x, shifted.y)) {
+        return None;
+    }
+    Some(CanvasText {
+        x: shifted.x - area.x,
+        y: shifted.y - area.y,
+        ..item.clone()
+    })
+}
+
+fn transform_region(area: Rect, region: Rect, transforms: &[PulseTransform]) -> Option<Rect> {
+    let Some(transform) = pulse_for(Position::new(region.x, region.y), transforms) else {
+        return rect_inside(region, area).then_some(region);
+    };
+    let current = transform.current?;
+    let dx = i32::from(current.x) - i32::from(transform.target.x);
+    let dy = i32::from(current.y) - i32::from(transform.target.y);
+    let shifted = shift_rect(region, dx, dy)?;
+    let visible = intersect_rect(current, area)?;
+    (rect_inside(shifted, visible) && rect_inside(shifted, area)).then_some(shifted)
+}
+
+fn paint_frame(
+    area: Rect,
+    buf: &mut Buffer,
+    hits: &mut HitMap<HallTarget>,
+    text: &[CanvasText],
+    regions: &[(Rect, HallTarget)],
+    transforms: &[PulseTransform],
+) {
+    let transformed: Vec<CanvasText> = text
+        .iter()
+        .filter_map(|item| transform_text(area, item, transforms))
+        .collect();
+    canvas_paint(area, buf, &transformed);
+    for (region, target) in regions {
+        if let Some(region) = transform_region(area, *region, transforms) {
+            hits.register(region, target.clone());
+        }
+    }
 }
 
 fn canvas_paint(area: Rect, buf: &mut Buffer, text: &[CanvasText]) {
@@ -559,7 +989,7 @@ fn expression_mark(state: AgentState) -> &'static Mark {
     gwk_theme::marks::mark(binding.mark).expect("state binding mark is pinned")
 }
 
-/// Paint one estate frame and rebuild the frame-scoped two-cell hit map.
+/// Paint one frame with every expression frozen at inventory frame zero.
 pub fn render(
     area: Rect,
     buf: &mut Buffer,
@@ -567,6 +997,37 @@ pub fn render(
     tier: ColorTier,
     glyphs: GlyphSet,
     hits: &mut HitMap<HallTarget>,
+) {
+    render_frame(area, buf, input, tier, glyphs, hits, &[]);
+}
+
+/// Paint one frame with caller-timed tachyonfx motion.
+pub fn render_with_motion(
+    area: Rect,
+    buf: &mut Buffer,
+    input: &FrameInput,
+    tier: ColorTier,
+    glyphs: GlyphSet,
+    hits: &mut HitMap<HallTarget>,
+    motion: MotionFrame<'_>,
+) {
+    let active = motion.driver.active_inputs(motion.inputs);
+    motion.driver.begin_frame(&active);
+    let transforms = motion.driver.prepare_pulses(&active, buf, area);
+    render_frame(area, buf, input, tier, glyphs, hits, &transforms);
+    motion
+        .driver
+        .apply_characters(&active, input, glyphs, buf, area);
+}
+
+fn render_frame(
+    area: Rect,
+    buf: &mut Buffer,
+    input: &FrameInput,
+    tier: ColorTier,
+    glyphs: GlyphSet,
+    hits: &mut HitMap<HallTarget>,
+    transforms: &[PulseTransform],
 ) {
     hits.clear();
     if area.width == 0 || area.height == 0 {
@@ -576,6 +1037,7 @@ pub fn render(
     let plan = solve_density(area, input);
     let muted = theme::state_style(theme::binding("idle"), tier);
     let mut text = Vec::new();
+    let mut regions = Vec::new();
     if plan.rung == DensityRung::Empty {
         let first_y = area.height.saturating_sub(2) / 2;
         let x = u16::from(area.width > 2);
@@ -584,6 +1046,7 @@ pub fn render(
             y: first_y,
             text: bounded("No active work yet", area.width.saturating_sub(x)),
             style: Style::default().add_modifier(Modifier::BOLD),
+            agent_pair: false,
         });
         if first_y + 1 < area.height {
             text.push(CanvasText {
@@ -594,9 +1057,10 @@ pub fn render(
                     area.width.saturating_sub(x),
                 ),
                 style: muted,
+                agent_pair: false,
             });
         }
-        canvas_paint(area, buf, &text);
+        paint_frame(area, buf, hits, &text, &regions, transforms);
         return;
     }
 
@@ -609,8 +1073,9 @@ pub fn render(
                 area.width,
             ),
             style: theme::state_style(theme::binding("needs_attention"), tier),
+            agent_pair: false,
         });
-        canvas_paint(area, buf, &text);
+        paint_frame(area, buf, hits, &text, &regions, transforms);
         return;
     }
 
@@ -624,6 +1089,7 @@ pub fn render(
                 y,
                 text: collapsed_text(district, area.width),
                 style: muted,
+                agent_pair: false,
             });
             y = y.saturating_add(1);
             continue;
@@ -634,6 +1100,7 @@ pub fn render(
             y,
             text: bounded(&district.label, area.width),
             style: Style::default().add_modifier(Modifier::BOLD),
+            agent_pair: false,
         });
         let mut station_x = 0u16;
         for station in ordered_stations(district) {
@@ -643,12 +1110,11 @@ pub fn render(
                 y: y + 1,
                 text: bounded(&station.label, width),
                 style: muted,
+                agent_pair: false,
             });
-            for (index, agent) in ordered_agents(station).into_iter().enumerate() {
-                let offset = u16::try_from(index)
-                    .unwrap_or(u16::MAX)
-                    .saturating_mul(2 + gutter);
-                let x = station_x.saturating_add(offset);
+            let mut agent_x = station_x;
+            for agent in ordered_agents(station) {
+                let x = agent_x;
                 let binding = theme::binding(agent.state.binding_name());
                 let style = theme::state_style(binding, tier);
                 let pair = String::from_iter([
@@ -660,11 +1126,26 @@ pub fn render(
                     y: y + 2,
                     text: pair,
                     style,
+                    agent_pair: true,
                 });
-                hits.register(
+                regions.push((
                     Rect::new(area.x + x, area.y + y + 2, 2, 1),
                     HallTarget::Agent(agent.id.clone()),
-                );
+                ));
+                if let Some(duration) = &agent.duration {
+                    let duration_x = x.saturating_add(3);
+                    let duration_budget = agent_slot_width(agent, area.width).saturating_sub(3);
+                    text.push(CanvasText {
+                        x: duration_x,
+                        y: y + 2,
+                        text: bounded(duration, duration_budget),
+                        style: muted,
+                        agent_pair: false,
+                    });
+                }
+                agent_x = agent_x
+                    .saturating_add(agent_slot_width(agent, area.width))
+                    .saturating_add(gutter);
             }
             station_x = station_x
                 .saturating_add(width)
@@ -672,5 +1153,5 @@ pub fn render(
         }
         y = y.saturating_add(EXPANDED_DISTRICT_HEIGHT);
     }
-    canvas_paint(area, buf, &text);
+    paint_frame(area, buf, hits, &text, &regions, transforms);
 }
