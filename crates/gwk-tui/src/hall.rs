@@ -731,6 +731,7 @@ impl MotionDriver {
         glyphs: GlyphSet,
         buf: &mut Buffer,
         lens: Rect,
+        transforms: &[PulseTransform],
     ) {
         for motion in motions {
             if !matches!(motion.verb, MotionVerb::Tick | MotionVerb::Decay)
@@ -740,7 +741,10 @@ impl MotionDriver {
             }
             match motion.verb {
                 MotionVerb::Tick => {
-                    let Some(area) = expression_area(motion.target, lens) else {
+                    let Some(target) = transform_region(lens, motion.target, transforms) else {
+                        continue;
+                    };
+                    let Some(area) = expression_area(target, lens) else {
                         continue;
                     };
                     let mark = tick_mark(frame, &motion.key.entity);
@@ -769,7 +773,7 @@ impl MotionDriver {
                     slot.manager.process_effects(delta, buf, lens);
                 }
                 MotionVerb::Decay => {
-                    let Some(area) = intersect_rect(motion.target, lens) else {
+                    let Some(area) = transform_region(lens, motion.target, transforms) else {
                         continue;
                     };
                     let mut effect = fx::effect_fn((), DECAY_DURATION, |_state, context, cells| {
@@ -1017,7 +1021,7 @@ pub fn render_with_motion(
     render_frame(area, buf, input, tier, glyphs, hits, &transforms);
     motion
         .driver
-        .apply_characters(&active, input, glyphs, buf, area);
+        .apply_characters(&active, input, glyphs, buf, area, &transforms);
 }
 
 fn render_frame(

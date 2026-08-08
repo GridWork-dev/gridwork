@@ -767,6 +767,104 @@ fn hall_pulse_translates_before_canvas_and_keeps_hits_aligned() {
 }
 
 #[test]
+fn hall_tick_tracks_a_pulsing_agent_at_start_midpoint_and_end() {
+    let input = one_agent_input(AgentState::Running);
+    let target = HallTarget::Agent(agent_id("agent-a"));
+
+    for pulse_elapsed in [Duration::ZERO, PULSE_DURATION / 2, PULSE_DURATION] {
+        let pulse = motion(
+            MotionEntity::Attention(attention_id("attention-a")),
+            8,
+            MotionVerb::Pulse,
+            pulse_elapsed,
+            gwk_tui::input::TICK,
+            Rect::new(0, 3, 12, 3),
+            Rect::new(0, 0, 12, 3),
+        );
+        let tick = motion(
+            MotionEntity::Agent(agent_id("agent-a")),
+            7,
+            MotionVerb::Tick,
+            gwk_tui::input::TICK,
+            gwk_tui::input::TICK,
+            Rect::new(1, 2, 1, 1),
+            Rect::new(1, 2, 1, 1),
+        );
+        let mut driver = MotionDriver::new(MotionMode::Full);
+        let (_, hits, buffer) = dump_motion(
+            12,
+            6,
+            &input,
+            GlyphSet::Unicode,
+            &mut driver,
+            &[pulse, tick],
+        );
+        let cells: Vec<_> = (0..6)
+            .flat_map(|y| (0..12).map(move |x| (x, y)))
+            .filter(|(x, y)| hits.hit(*x, *y) == Some(&target))
+            .collect();
+
+        assert_eq!(cells.len(), 2, "pulse elapsed {pulse_elapsed:?}");
+        assert_eq!(buffer[cells[0]].symbol(), "▸");
+        assert_eq!(
+            buffer[cells[1]].symbol(),
+            "⠙",
+            "tick detached at pulse elapsed {pulse_elapsed:?}"
+        );
+        if cells[0].1 != 2 {
+            assert_eq!(
+                buffer[(1, 2)].symbol(),
+                " ",
+                "tick left a ghost at the untransformed target"
+            );
+        }
+    }
+}
+
+#[test]
+fn hall_decay_tracks_a_pulsing_agent() {
+    let input = one_agent_input(AgentState::Running);
+    let pulse = motion(
+        MotionEntity::Attention(attention_id("attention-a")),
+        8,
+        MotionVerb::Pulse,
+        Duration::ZERO,
+        Duration::ZERO,
+        Rect::new(0, 3, 12, 3),
+        Rect::new(0, 0, 12, 3),
+    );
+    let decay = motion(
+        MotionEntity::Agent(agent_id("agent-a")),
+        7,
+        MotionVerb::Decay,
+        DECAY_DURATION,
+        gwk_tui::input::TICK,
+        Rect::new(1, 2, 1, 1),
+        Rect::new(1, 2, 1, 1),
+    );
+    let mut driver = MotionDriver::new(MotionMode::Full);
+    let (_, hits, buffer) = dump_motion(
+        12,
+        6,
+        &input,
+        GlyphSet::Unicode,
+        &mut driver,
+        &[pulse, decay],
+    );
+
+    assert_eq!(
+        hits.hit(0, 5),
+        Some(&HallTarget::Agent(agent_id("agent-a")))
+    );
+    assert_eq!(buffer[(0, 5)].symbol(), "▸");
+    assert_eq!(
+        buffer[(1, 5)].symbol(),
+        " ",
+        "decay detached from the pulsing expression cell"
+    );
+}
+
+#[test]
 fn hall_pulse_clips_at_the_lens_without_splitting_the_agent_pair() {
     let input = one_agent_input(AgentState::Running);
     let pulse = motion(
