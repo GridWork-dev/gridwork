@@ -786,7 +786,7 @@ fn hall_pulse_translates_before_canvas_and_keeps_hits_aligned() {
 }
 
 #[test]
-fn hall_reorder_pulse_keeps_moving_pair_above_an_occupied_source_row() {
+fn hall_reorder_pulse_keeps_moving_pair_above_stationary_character_effects() {
     let input = FrameInput {
         districts: vec![
             district(
@@ -796,7 +796,7 @@ fn hall_reorder_pulse_keeps_moving_pair_above_an_occupied_source_row() {
                     "station-a",
                     1,
                     "a",
-                    vec![agent("agent-a", Some("reviewer"), AgentState::Idle, 1)],
+                    vec![agent("agent-z", Some("reviewer"), AgentState::Idle, 1)],
                     1,
                 )],
                 1,
@@ -809,7 +809,7 @@ fn hall_reorder_pulse_keeps_moving_pair_above_an_occupied_source_row() {
                     1,
                     "b",
                     vec![agent(
-                        "agent-b",
+                        "agent-a",
                         Some("implementer"),
                         AgentState::Running,
                         2,
@@ -827,7 +827,7 @@ fn hall_reorder_pulse_keeps_moving_pair_above_an_occupied_source_row() {
         }],
         ..empty_input()
     };
-    let target = HallTarget::Agent(agent_id("agent-b"));
+    let target = HallTarget::Agent(agent_id("agent-a"));
 
     for elapsed in [Duration::ZERO, PULSE_DURATION / 2, PULSE_DURATION] {
         let pulse = motion(
@@ -839,9 +839,33 @@ fn hall_reorder_pulse_keeps_moving_pair_above_an_occupied_source_row() {
             Rect::new(0, 3, 12, 3),
             Rect::new(0, 0, 12, 3),
         );
+        let tick = motion(
+            MotionEntity::Agent(agent_id("agent-z")),
+            1,
+            MotionVerb::Tick,
+            gwk_tui::input::TICK,
+            gwk_tui::input::TICK,
+            Rect::new(1, 5, 1, 1),
+            Rect::new(1, 5, 1, 1),
+        );
+        let decay = motion(
+            MotionEntity::Agent(agent_id("agent-z")),
+            2,
+            MotionVerb::Decay,
+            DECAY_DURATION,
+            gwk_tui::input::TICK,
+            Rect::new(1, 5, 1, 1),
+            Rect::new(1, 5, 1, 1),
+        );
         let mut driver = MotionDriver::new(MotionMode::Full);
-        let (rendered, hits, buffer) =
-            dump_motion(12, 6, &input, GlyphSet::Unicode, &mut driver, &[pulse]);
+        let (rendered, hits, buffer) = dump_motion(
+            12,
+            6,
+            &input,
+            GlyphSet::Unicode,
+            &mut driver,
+            &[pulse, tick, decay],
+        );
         let cells: Vec<_> = (0..6)
             .flat_map(|y| (0..12).map(move |x| (x, y)))
             .filter(|(x, y)| hits.hit(*x, *y) == Some(&target))
@@ -851,7 +875,12 @@ fn hall_reorder_pulse_keeps_moving_pair_above_an_occupied_source_row() {
         assert_eq!(
             buffer[cells[0]].symbol(),
             "▸",
-            "moving district lost paint ownership at {elapsed:?}:\n{rendered}"
+            "moving district lost identity ownership at {elapsed:?}:\n{rendered}"
+        );
+        assert_eq!(
+            buffer[cells[1]].symbol(),
+            "⠋",
+            "stationary character effects reclaimed the moving expression at {elapsed:?}:\n{rendered}"
         );
     }
 }

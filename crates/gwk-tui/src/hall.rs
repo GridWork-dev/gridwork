@@ -635,6 +635,7 @@ struct MotionGeometry<'a> {
     lens: Rect,
     transforms: &'a [PulseTransform],
     agent_regions: &'a BTreeMap<AgentId, Rect>,
+    hits: &'a HitMap<HallTarget>,
 }
 
 impl EffectSlot {
@@ -780,7 +781,7 @@ impl MotionDriver {
                 MotionVerb::Tick => {
                     let target = match &motion.key.entity {
                         MotionEntity::Agent(id) => {
-                            agent_expression_area(id, geometry.agent_regions)
+                            agent_expression_area(id, geometry.agent_regions, geometry.hits)
                         }
                         MotionEntity::District(_) | MotionEntity::Attention(_) => {
                             transform_region(geometry.lens, motion.target, geometry.transforms)
@@ -818,7 +819,7 @@ impl MotionDriver {
                 MotionVerb::Decay => {
                     let area = match &motion.key.entity {
                         MotionEntity::Agent(id) => {
-                            agent_expression_area(id, geometry.agent_regions)
+                            agent_expression_area(id, geometry.agent_regions, geometry.hits)
                         }
                         MotionEntity::District(_) | MotionEntity::Attention(_) => {
                             transform_region(geometry.lens, motion.target, geometry.transforms)
@@ -878,9 +879,18 @@ fn expression_area(target: Rect, lens: Rect) -> Option<Rect> {
     intersect_rect(Rect::new(target.x, target.y, 1, 1), lens)
 }
 
-fn agent_expression_area(id: &AgentId, regions: &BTreeMap<AgentId, Rect>) -> Option<Rect> {
+fn agent_expression_area(
+    id: &AgentId,
+    regions: &BTreeMap<AgentId, Rect>,
+    hits: &HitMap<HallTarget>,
+) -> Option<Rect> {
     let pair = *regions.get(id)?;
-    (pair.width == 2 && pair.height == 1).then(|| Rect::new(pair.x.saturating_add(1), pair.y, 1, 1))
+    if pair.width != 2 || pair.height != 1 {
+        return None;
+    }
+    let owns_pair = (pair.x..pair.right())
+        .all(|x| matches!(hits.hit(x, pair.y), Some(HallTarget::Agent(owner)) if owner == id));
+    owns_pair.then(|| Rect::new(pair.x.saturating_add(1), pair.y, 1, 1))
 }
 
 fn tick_mark(frame: &FrameInput, entity: &MotionEntity) -> &'static Mark {
@@ -1101,6 +1111,7 @@ pub fn render_with_motion(
             lens: area,
             transforms: &transforms,
             agent_regions: &agent_regions,
+            hits,
         },
     );
 }
