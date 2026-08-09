@@ -29,9 +29,12 @@
 //! [`input`]; this file owns the structure, not the verbs. **No wire and no
 //! content.** Nothing here talks to the kernel or hosts a session; panes are
 //! structural leaves until the elements that bind sessions to them land.
-//! **No persistence.** The durable arrangement authority is server-side
-//! design work; this model is the client's in-memory floor.
+//! **No persistence.** The durable arrangement authority is the kernel's
+//! `workspace_node` projection; [`arrange`] rebuilds this model from those
+//! rows, and everything the rows do not carry is transient geometry that
+//! dies with the client.
 
+pub mod arrange;
 pub mod input;
 pub mod render;
 
