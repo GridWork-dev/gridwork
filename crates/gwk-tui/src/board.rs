@@ -71,12 +71,13 @@
 //! never followed: absence is a fact, and facts get words.
 
 use gwk_domain::entity::{
-    Attempt, CostEntry, DispatchNode, EngineSession, IngestedRecord, Lease, Message, Task, Worktree,
+    Attempt, CostEntry, DispatchNode, EngineSession, IngestedRecord, Lease, Message, Receipt, Task,
+    Worktree,
 };
 use gwk_domain::fsm::{AttemptState, LeaseState, MessageState, TaskState};
 use gwk_domain::ids::{
     AttemptId, CostEntryId, DispatchNodeId, EngineSessionId, IngestedRecordId, LeaseId, MessageId,
-    Seq, TaskId, Timestamp, WorktreeId,
+    ReceiptId, Seq, TaskId, Timestamp, WorktreeId,
 };
 use gwk_domain::ingestion::IngestionKind;
 use gwk_theme::marks::{GlyphSet, Mark, StateBinding};
@@ -101,17 +102,19 @@ pub enum BoardView {
     Replay,
     Fleet,
     CostHealth,
+    Audit,
 }
 
 impl BoardView {
     /// Every panel in the Board's stable navigation order — the order
     /// [`Self::next`] walks, and the order the status bar's tab strip prints.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Dag,
         Self::Flow,
         Self::Replay,
         Self::Fleet,
         Self::CostHealth,
+        Self::Audit,
     ];
 
     /// The tab strip's name for this panel.
@@ -122,6 +125,7 @@ impl BoardView {
             Self::Replay => "replay",
             Self::Fleet => "fleet",
             Self::CostHealth => "cost",
+            Self::Audit => "audit",
         }
     }
 
@@ -132,18 +136,20 @@ impl BoardView {
             Self::Flow => Self::Replay,
             Self::Replay => Self::Fleet,
             Self::Fleet => Self::CostHealth,
-            Self::CostHealth => Self::Dag,
+            Self::CostHealth => Self::Audit,
+            Self::Audit => Self::Dag,
         }
     }
 
     /// The previous panel in the Board's stable navigation order.
     pub const fn previous(self) -> Self {
         match self {
-            Self::Dag => Self::CostHealth,
+            Self::Dag => Self::Audit,
             Self::Flow => Self::Dag,
             Self::Replay => Self::Flow,
             Self::Fleet => Self::Replay,
             Self::CostHealth => Self::Fleet,
+            Self::Audit => Self::CostHealth,
         }
     }
 }
@@ -168,6 +174,10 @@ pub struct BoardState {
     /// Usage rows for the cost panel. Append-only spend facts, never an
     /// accumulator: the total is this fold and nothing else.
     pub costs: Vec<CostEntry>,
+    /// The attestation ledger the audit panel reads. One row per action an
+    /// actor performed, minted by the kernel in the same transaction as the
+    /// action itself.
+    pub receipts: Vec<Receipt>,
     /// Ingested records for the health and session halves. One projection
     /// carries all twelve kinds and the wire offers no filter, so the panel
     /// selects by [`IngestedRecord::kind`] here rather than at the socket.
@@ -196,6 +206,7 @@ pub enum BoardTarget {
     Lease(LeaseId),
     Cost(CostEntryId),
     Ingested(IngestedRecordId),
+    Receipt(ReceiptId),
 }
 
 /// A spawn chain deeper than this stops indenting further: the tree is
@@ -1360,6 +1371,124 @@ fn cost_health_rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
     out
 }
 
+/// `kind:id` for an actor, or the word for an actor that named no id.
+fn actor_face(actor: &gwk_domain::envelope::Actor) -> String {
+    match &actor.id {
+        Some(id) => format!("{}:{id}", actor.kind),
+        None => actor.kind.clone(),
+    }
+}
+
+/// The attestation ledger: who did what to which subject, and on what basis.
+///
+/// The kernel mints a receipt in the same transaction as the action it
+/// attests, so this is not a log a writer could forget to append to — which
+/// is the property that makes it an audit ledger rather than a diary.
+fn audit_rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
+    let muted = theme::state_style(theme::binding("idle"), tier);
+    let (receipts, duplicate_receipts) =
+        unique_by_id(&state.receipts, |receipt| receipt.id.as_str());
+
+    let findings: Vec<String> = duplicate_finding(duplicate_receipts, "receipt")
+        .into_iter()
+        .collect();
+
+    let basisless = receipts
+        .iter()
+        .filter(|receipt| receipt.observed_basis.is_none())
+        .count();
+    let mut unknowns = Vec::new();
+    if basisless > 0 {
+        unknowns.push(UnknownNote {
+            subject: "basis",
+            why: format!(
+                "{basisless} of {} name no observed basis",
+                plural(receipts.len(), "receipt", "receipts"),
+            ),
+        });
+    }
+    if !state.complete {
+        unknowns.push(UnknownNote {
+            subject: "the ledger",
+            why: "read short of the last page -- counts are floors".to_owned(),
+        });
+    }
+
+    let mut out = pinned_block(findings, unknowns, muted);
+    if receipts.is_empty() {
+        out.push(Row::plain(
+            "no receipts -- nothing attested on this page".to_owned(),
+            muted,
+        ));
+        return out;
+    }
+
+    let mut by_action: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for receipt in &receipts {
+        *by_action.entry(receipt.action.as_str()).or_default() += 1;
+    }
+    out.push(Row::plain(
+        format!(
+            "{}  {} across {}",
+            plural(receipts.len(), "receipt", "receipts"),
+            fold_word(state.complete),
+            plural(by_action.len(), "action", "actions"),
+        ),
+        muted,
+    ));
+
+    // Newest first among the rows read. The wire pages by id in byte order
+    // and offers no time ordering, so this recency is over the page — the
+    // pinned block says so when the page was a prefix.
+    let mut recent: Vec<&&Receipt> = receipts.iter().collect();
+    recent.sort_by(|left, right| {
+        right
+            .ts
+            .as_str()
+            .cmp(left.ts.as_str())
+            .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+    });
+    out.extend(recent.into_iter().map(|receipt| {
+        // The edge when the receipt records one, because "queued -> running"
+        // is the whole content of a state-flip attestation and printing the
+        // action alone would drop it.
+        let edge = match (&receipt.from, &receipt.to) {
+            (Some(from), Some(to)) => format!("  {from} -> {to}"),
+            (None, Some(to)) => format!("  -> {to}"),
+            (Some(from), None) => format!("  {from} ->"),
+            (None, None) => String::new(),
+        };
+        Row {
+            indent: 0,
+            mark: None,
+            text: format!(
+                "{}  {}  {} {}{edge}",
+                hhmm(&receipt.ts),
+                receipt.action,
+                receipt.subject_type,
+                receipt.subject_id,
+            ),
+            right: Some(actor_face(&receipt.actor)),
+            style: Style::default(),
+            target: Some(BoardTarget::Receipt(receipt.id.clone())),
+            diagnostic: false,
+        }
+    }));
+
+    out.push(Row::plain("by action".to_owned(), muted));
+    out.extend(by_action.into_iter().map(|(action, count)| Row {
+        indent: INDENT_STEP,
+        mark: None,
+        text: action.to_owned(),
+        right: Some(plural(count, "receipt", "receipts")),
+        style: Style::default(),
+        target: None,
+        diagnostic: false,
+    }));
+
+    out
+}
+
 fn rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
     match state.view {
         BoardView::Dag => dag_rows(state, tier),
@@ -1367,6 +1496,7 @@ fn rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
         BoardView::Replay => replay_rows(state, tier),
         BoardView::Fleet => fleet_rows(state, tier),
         BoardView::CostHealth => cost_health_rows(state, tier),
+        BoardView::Audit => audit_rows(state, tier),
     }
 }
 
@@ -1672,6 +1802,30 @@ fn detail_lines(state: &BoardState, target: &BoardTarget) -> Option<Vec<String>>
                 // the opaque value it is rather than naming fields nothing
                 // guarantees.
                 format!("payload {}", record.payload),
+            ])
+        }
+        BoardTarget::Receipt(id) => {
+            let receipt = state
+                .receipts
+                .iter()
+                .find(|receipt| receipt.id.as_str() == id.as_str())?;
+            Some(vec![
+                format!("receipt {}  {}", receipt.id.as_str(), receipt.ts.as_str()),
+                format!("{} by {}", receipt.action, actor_face(&receipt.actor)),
+                format!("subject {} {}", receipt.subject_type, receipt.subject_id),
+                match (&receipt.from, &receipt.to) {
+                    (Some(from), Some(to)) => format!("edge {from} -> {to}"),
+                    (None, Some(to)) => format!("edge -> {to}"),
+                    (Some(from), None) => format!("edge {from} ->"),
+                    (None, None) => "edge none -- this action moved no state".to_owned(),
+                },
+                // Absent basis is a sentence: the field is where a flip
+                // records what it observed, and a blank line would read as a
+                // basis of nothing rather than as a receipt that named none.
+                receipt.observed_basis.as_deref().map_or_else(
+                    || "observed basis not recorded".to_owned(),
+                    |basis| format!("observed basis {basis}"),
+                ),
             ])
         }
         BoardTarget::ReplayFrame(seq) => {
@@ -2053,6 +2207,7 @@ mod tests {
             leases: Vec::new(),
             costs: Vec::new(),
             ingested: Vec::new(),
+            receipts: Vec::new(),
             complete: true,
             watermark: None,
         }
@@ -2144,6 +2299,55 @@ mod tests {
             event_seq: Seq::new(seq),
             ingested_at: ts(at),
         }
+    }
+
+    fn receipt(
+        id: &str,
+        action: &str,
+        subject: (&str, &str),
+        edge: (Option<&str>, Option<&str>),
+        basis: Option<&str>,
+        at: &str,
+    ) -> Receipt {
+        Receipt {
+            id: ReceiptId::new(id),
+            actor: gwk_domain::envelope::Actor {
+                kind: "orchestrator".into(),
+                id: Some("gw".into()),
+            },
+            action: action.into(),
+            subject_type: subject.0.into(),
+            subject_id: subject.1.into(),
+            from: edge.0.map(Into::into),
+            to: edge.1.map(Into::into),
+            observed_basis: basis.map(Into::into),
+            ts: ts(at),
+        }
+    }
+
+    fn audit_state() -> BoardState {
+        let mut state = empty_state();
+        state.view = BoardView::Audit;
+        state.watermark = Some(Seq::new(407));
+        state.receipts = vec![
+            receipt(
+                "rc-01",
+                "state_flip",
+                ("attempt", "at-01"),
+                (Some("queued"), Some("running")),
+                Some("engine reported a pid"),
+                "2026-08-06T09:41:00Z",
+            ),
+            receipt(
+                "rc-02",
+                "auto_answer",
+                ("gate", "g-1"),
+                (None, None),
+                None,
+                "2026-08-06T09:52:00Z",
+            ),
+        ];
+        state
     }
 
     fn fleet_state() -> BoardState {
@@ -2297,6 +2501,7 @@ mod tests {
             leases: Vec::new(),
             costs: Vec::new(),
             ingested: Vec::new(),
+            receipts: Vec::new(),
             complete: true,
             watermark: Some(Seq::new(407)),
         }
@@ -2564,6 +2769,55 @@ mod tests {
                 "{target:?} detail pane missing {expected:?}:\n{dump}"
             );
         }
+    }
+
+    #[test]
+    fn board_audit_prints_the_edge_and_names_a_missing_basis() {
+        let (dump, hits, _) = dump_frame(78, 22, &audit_state(), None);
+        assert!(
+            dump.contains("2 receipts  total across 2 actions"),
+            "the summary folds the ledger:\n{dump}"
+        );
+        assert!(
+            dump.contains("09:41  state_flip  attempt at-01  queued -> running"),
+            "a state flip prints its edge, which is its whole content:\n{dump}"
+        );
+        assert!(
+            dump.contains("basis: 1 of 2 receipts name no observed basis"),
+            "a missing basis is counted in the pinned block:\n{dump}"
+        );
+        assert!(
+            hits.targets()
+                .any(|t| *t == BoardTarget::Receipt(ReceiptId::new("rc-01"))),
+            "a receipt row opens the detail pane:\n{dump}"
+        );
+
+        let selected = BoardTarget::Receipt(ReceiptId::new("rc-02"));
+        let (dump, _, _) = dump_frame(78, 22, &audit_state(), Some(&selected));
+        for expected in [
+            "auto_answer by orchestrator:gw",
+            "edge none -- this action moved no state",
+            "observed basis not recorded",
+        ] {
+            assert!(dump.contains(expected), "missing {expected:?}:\n{dump}");
+        }
+    }
+
+    #[test]
+    fn board_an_empty_audit_ledger_says_so_in_words() {
+        let mut state = empty_state();
+        state.view = BoardView::Audit;
+        let (dump, _, _) = dump_frame(72, 8, &state, None);
+        assert!(
+            dump.contains("no receipts -- nothing attested on this page"),
+            "absence in words:\n{dump}"
+        );
+    }
+
+    #[test]
+    fn board_an_audit_frame_matches_its_golden() {
+        let (dump, _, _) = dump_frame(78, 16, &audit_state(), None);
+        assert_matches_golden("board-audit", &dump);
     }
 
     #[test]
@@ -3351,7 +3605,7 @@ mod tests {
         let (dump, _, _) = dump_frame(72, 18, &state, None);
         assert_eq!(
             dump.lines().nth(17),
-            Some("BOARD  [dag] flow replay fleet cost  2 running  as-of 407"),
+            Some("BOARD  [dag] flow replay fleet cost audit  2 running  as-of 407"),
             "the bar names the view, the pulse, and the page:\n{dump}"
         );
         assert!(
@@ -3364,7 +3618,7 @@ mod tests {
         let (dump, _, _) = dump_frame(72, 18, &flow, None);
         assert_eq!(
             dump.lines().nth(17),
-            Some("BOARD  dag [flow] replay fleet cost  2 running  as-of 407"),
+            Some("BOARD  dag [flow] replay fleet cost audit  2 running  as-of 407"),
             "the flow view keeps the ambient pulse:\n{dump}"
         );
     }

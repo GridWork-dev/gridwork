@@ -114,6 +114,38 @@ pub fn mute(target: &QueueTarget, until: Timestamp) -> Option<KernelCommand> {
     }
 }
 
+/// Make the selected attention item audible again.
+///
+/// The mirror of [`mute`], and it exists because the contract has the verb:
+/// an item quieted until next week and fixed this afternoon otherwise stays
+/// silent with no way back short of resolving it, which would close an item
+/// nobody closed.
+pub fn unmute(target: &QueueTarget) -> Option<KernelCommand> {
+    match target {
+        QueueTarget::Attention(id) => Some(KernelCommand::UnmuteAttention {
+            attention_item_id: id.clone(),
+        }),
+        QueueTarget::Gate(_) => None,
+    }
+}
+
+/// Close the selected attention item.
+///
+/// The only act that frees the `(kind, subject_ref)` dedup slot, which is why
+/// it is a separate verb rather than a third flavour of quiet: ack and mute
+/// leave the item open on purpose, so the same problem cannot raise itself a
+/// second time while it is still the problem.
+pub fn resolve(target: &QueueTarget, resolution: Option<String>) -> Option<KernelCommand> {
+    match target {
+        QueueTarget::Attention(id) => Some(KernelCommand::ResolveAttention {
+            attention_item_id: id.clone(),
+            resolution,
+        }),
+        // A gate is decided, never resolved — the same reason ack refuses it.
+        QueueTarget::Gate(_) => None,
+    }
+}
+
 /// Is this item asking out loud right now?
 ///
 /// Unresolved, not acked, and not muted into the future. Ack and mute quiet
@@ -963,9 +995,62 @@ mod tests {
                 muted_until: until,
             })
         );
-        // A gate is decided, never quieted.
-        assert_eq!(ack(&gate_target), None);
-        assert_eq!(mute(&gate_target, ts(NOW)), None);
+        assert_eq!(
+            unmute(&attention),
+            Some(KernelCommand::UnmuteAttention {
+                attention_item_id: AttentionItemId::new("a-1"),
+            })
+        );
+        assert_eq!(
+            resolve(&attention, Some("fixed in #71".into())),
+            Some(KernelCommand::ResolveAttention {
+                attention_item_id: AttentionItemId::new("a-1"),
+                resolution: Some("fixed in #71".into()),
+            })
+        );
+        assert_eq!(
+            resolve(&attention, None),
+            Some(KernelCommand::ResolveAttention {
+                attention_item_id: AttentionItemId::new("a-1"),
+                resolution: None,
+            }),
+            "a close with no words is still a close, never an empty string"
+        );
+        // A gate is decided, never quieted and never resolved.
+        for refused in [
+            ack(&gate_target),
+            mute(&gate_target, ts(NOW)),
+            unmute(&gate_target),
+            resolve(&gate_target, None),
+        ] {
+            assert_eq!(refused, None);
+        }
+    }
+
+    #[test]
+    fn queue_reaches_every_attention_verb_the_contract_carries() {
+        // The lifecycle is four commands and the lens now issues all four.
+        // Two of them had no TUI verb and one had no CLI twin; a half-covered
+        // lifecycle is how a decommission silently drops an act.
+        let attention = QueueTarget::Attention(AttentionItemId::new("a-1"));
+        let issued: Vec<&'static str> = [
+            ack(&attention),
+            mute(&attention, ts(NOW)),
+            unmute(&attention),
+            resolve(&attention, None),
+        ]
+        .into_iter()
+        .map(|command| command.expect("attention verb").command_type())
+        .collect();
+        assert_eq!(
+            issued,
+            [
+                "ack_attention",
+                "mute_attention",
+                "unmute_attention",
+                "resolve_attention"
+            ]
+        );
     }
 
     #[test]
