@@ -186,6 +186,19 @@ impl SessionRegistry {
     /// `Some(seq)` to resume after that revision. Detaching is dropping the
     /// returned subscription; reattaching is calling this again with the
     /// last seq the consumer actually received.
+    ///
+    /// Two boundary facts, recorded where a later hand would reach to
+    /// change them. A detach is a consumer-side event only — the child
+    /// cannot observe one, because the session task's side of the PTY
+    /// outlives every attachment (`tests/detach.rs` demonstrates each
+    /// absent consequence). And there is no authorization here to extend:
+    /// an attach carries a cursor and nothing else — no principal, no
+    /// token, no per-consumer check. What admits a consumer at all is the
+    /// kernel socket's peer-credential boundary (the kernel's listener
+    /// refuses any peer that is not its own effective uid before a single
+    /// byte is parsed — `gwk-kernel`'s `wire::listen`), and this host
+    /// neither narrows nor widens that. A verb here that appeared to
+    /// authorize would be claiming a boundary the host does not hold.
     pub async fn attach(
         &self,
         id: &PtySessionId,
