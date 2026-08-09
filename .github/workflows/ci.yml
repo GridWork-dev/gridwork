@@ -202,6 +202,8 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: perf-release
       - id: envelope
         continue-on-error: true
         run: cargo test --release -p gwk-kernel --test perf -- --ignored --nocapture
@@ -246,6 +248,8 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: perf-release
       - run: cargo test --release -p gwk-kernel --test perf -- --ignored --nocapture
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
@@ -318,6 +322,8 @@ jobs:
         with:
           version: ${{ env.ZIG_VERSION }}
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: pty
       # The zig-built engine library is tuned to the CPU that built it — with
       # no -Dtarget, `zig build` resolves the NATIVE cpu model, vector
       # extensions and all — and GitHub's runner fleet mixes
@@ -532,6 +538,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: pty
       # Same reason as the `pty` job: the zig-built engine lib is native-CPU
       # tuned and must not cross runners inside the rust cache.
       - name: never reuse a machine-tuned engine lib from cache
