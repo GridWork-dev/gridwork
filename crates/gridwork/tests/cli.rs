@@ -88,6 +88,78 @@ fn the_command_tree_is_printed_as_prose_and_everything_else_as_json() {
 }
 
 #[test]
+fn the_chrome_theme_resolves_without_a_daemon_and_refuses_an_invisible_remap() {
+    let dir = private_dir("theme");
+    let socket = dir.join("absent.sock");
+
+    // No socket, no daemon, no database: the slot is a local file against a
+    // ratified palette, so its twin answers with the daemon down.
+    let bare = gw(&socket, "theme");
+    assert_eq!(
+        code(&bare),
+        0,
+        "{:?}",
+        String::from_utf8_lossy(&bare.stdout)
+    );
+    let answer = json(&bare);
+    assert_eq!(answer["type"], "chrome_theme");
+    assert_eq!(answer["signal"], true, "an unset variable is the default");
+    let roles = answer["roles"].as_array().expect("roles");
+    assert_eq!(roles.len(), 7, "{answer}");
+    assert_eq!(roles[0]["role"], "pane_border");
+    assert_eq!(roles[0]["token"], roles[0]["default"]);
+
+    // The twin reports exactly what the workspace would paint, remap and all.
+    let file = dir.join("chrome.toml");
+    std::fs::write(&file, "tab_active = \"ok\"\n").expect("write theme");
+    let themed = gw_env("theme", &[("GWK_CHROME_THEME", &file.to_string_lossy())]);
+    assert_eq!(code(&themed), 0);
+    let answer = json(&themed);
+    assert_eq!(answer["signal"], false, "a remap is not the default");
+    let active = answer["roles"]
+        .as_array()
+        .expect("roles")
+        .iter()
+        .find(|role| role["role"] == "tab_active")
+        .expect("tab_active");
+    assert_eq!(active["token"], "ok");
+    assert_eq!(active["default"], "hue_bright");
+
+    // An elevation step paints nothing at any tier, so a role pointed at one
+    // would be invisible rather than differently coloured. Refused, with the
+    // reason, rather than accepted into a workspace that looks broken.
+    let bad = dir.join("bad.toml");
+    std::fs::write(&bad, "pane_border = \"bg\"\n").expect("write theme");
+    let refused = gw_env("theme", &[("GWK_CHROME_THEME", &bad.to_string_lossy())]);
+    assert_eq!(
+        code(&refused),
+        6,
+        "{:?}",
+        String::from_utf8_lossy(&refused.stdout)
+    );
+    let answer = json(&refused);
+    assert_eq!(answer["type"], "error");
+    let message = answer["message"].as_str().expect("message");
+    assert!(message.contains("elevation step"), "{message}");
+
+    // A named path that is not there is an error, never a silent revert to
+    // Signal — those two look identical to an operator otherwise.
+    let absent = gw_env(
+        "theme",
+        &[("GWK_CHROME_THEME", &dir.join("gone.toml").to_string_lossy())],
+    );
+    assert_ne!(code(&absent), 0);
+    assert!(
+        json(&absent)["message"]
+            .as_str()
+            .expect("message")
+            .contains("could not be read"),
+        "{:?}",
+        String::from_utf8_lossy(&absent.stdout)
+    );
+}
+
+#[test]
 fn a_mistake_exits_two_and_says_what_it_was() {
     let dir = private_dir("usage");
     let socket = dir.join("absent.sock");

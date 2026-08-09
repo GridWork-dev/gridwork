@@ -129,6 +129,10 @@ pub enum Verb {
         motion: MotionMode,
     },
 
+    /// The resolved workspace chrome theme — every role, the Signal token it
+    /// carries, and whether an operator file moved it.
+    Theme,
+
     AttentionResolve {
         id: String,
         resolution: Option<String>,
@@ -189,6 +193,7 @@ gw — the GridWork kernel's command line
   gw event read [--cursor <seq>] [--limit <n>]
   gw event follow [--cursor <seq>]
   gw tui [--motion=off|reduced|full]
+  gw theme
   gw attention list [--cursor <key>] [--limit <n>]
   gw attention resolve <id> [--resolution <text>]
   gw authority list [--cursor <key>] [--limit <n>]
@@ -214,6 +219,10 @@ Every command answer is JSON on standard output; `tui` is interactive. Exits: 0 
 argument array, never a shell line — and its live answer and standard streams
 are gh's own. A body comes from exactly one of its two body flags, and
 --dry-run prints the argv as JSON instead of running anything.
+
+`theme` resolves the workspace chrome slot from GWK_CHROME_THEME and asks
+nothing of the socket. Orchestration stays SIGNAL: the slot themes the
+workspace's own furniture, never a lens and never a pane's contents.
 
 `daemon` and `admin` read GWK_DATABASE_URL / GWK_ADMIN_DATABASE_URL and the blob
 KEK. Every other verb uses only the socket. `admin blob rotate` also reads
@@ -294,6 +303,10 @@ fn verb(rest: &mut Rest) -> Result<Verb, Failure> {
             }),
             other => Err(unknown("authority", other)),
         },
+        // The one verb that asks nothing of the kernel and nothing of the
+        // forge: the workspace chrome slot is a local file resolved against a
+        // ratified palette, so its twin resolves it locally too.
+        "theme" => Ok(Verb::Theme),
         "blob" => blob(rest),
         "pr" => pr(rest),
         "ingest" => match rest.word("ingest")?.as_str() {
