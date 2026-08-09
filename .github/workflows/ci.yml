@@ -224,6 +224,9 @@ jobs:
         run: ./tools/perf-job-guard.sh attempt "$ENVELOPE_OUTCOME" "$RECEIPT_OUTCOME" >> "$GITHUB_OUTPUT"
 
   perf-retry:
+    continue-on-error: true
+    outputs:
+      outcome: ${{ steps.verdict.outputs.outcome }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     services:
@@ -251,12 +254,21 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: perf-release
-      - run: cargo test --release -p gwk-kernel --test perf -- --ignored --nocapture
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - id: envelope
+        continue-on-error: true
+        run: cargo test --release -p gwk-kernel --test perf -- --ignored --nocapture
+      - id: receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: perf-receipt-retry
           path: gwk-perf-receipt-retry.json
+      - id: verdict
+        if: always()
+        env:
+          ENVELOPE_OUTCOME: ${{ steps.envelope.outcome }}
+          RECEIPT_OUTCOME: ${{ steps.receipt.outcome }}
+        run: ./tools/perf-job-guard.sh attempt "$ENVELOPE_OUTCOME" "$RECEIPT_OUTCOME" >> "$GITHUB_OUTPUT"
 
   perf:
     needs: [perf-attempt, perf-retry]
@@ -267,11 +279,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: resolve the first attempt and fresh-runner retry
+      - name: resolve the two fresh-runner measurements
         run: >-
           ./tools/perf-job-guard.sh final
           "${{ needs.perf-attempt.outputs.outcome }}"
-          "${{ needs.perf-retry.result }}"
+          "${{ needs.perf-retry.outputs.outcome }}"
 
   # The second platform the kernel claims. Socket behaviour is not portable by
   # assumption — `sun_path` is 104 bytes here and 108 on Linux, a parent
