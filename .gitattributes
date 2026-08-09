@@ -1,0 +1,2 @@
+# Preserve the official Unicode fixture byte-for-byte, including two header lines with trailing spaces.
+crates/gwk-text/fixtures/ucd-17.0.0/GraphemeBreakTest.txt text eol=lf whitespace=-trailing-space
