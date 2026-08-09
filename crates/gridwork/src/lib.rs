@@ -407,18 +407,27 @@ mod key_tests {
     /// send the SAME idempotency key. The kernel answers a repeated key by
     /// replaying the first command's events WITHOUT running the projector, so
     /// the second unmute exited 0 and left the item muted.
+    ///
+    /// A thousand calls with no sleep between them, deliberately. Two calls
+    /// was not a discriminating check: the first version of this fix leaned on
+    /// the clock alone, and two calls happened to straddle a nanosecond tick
+    /// on Linux while landing inside one microsecond tick on macOS — so the
+    /// test agreed with the bug on the machine it was written on. A volume
+    /// that cannot fit in one tick anywhere is what makes it a check.
     #[test]
     fn reversible_quieting_acts_never_reuse_an_idempotency_key() {
+        const CALLS: usize = 1024;
         for build in [
             (|| format!("ack_attention:a-1:{}", nonce())) as fn() -> String,
             || format!("mute_attention:a-1:2026-08-09T12:00:00Z:{}", nonce()),
             || format!("unmute_attention:a-1:{}", nonce()),
         ] {
-            let first = build();
-            let second = build();
-            assert_ne!(
-                first, second,
-                "two calls of a reversible act shared a key: {first}"
+            let keys: std::collections::BTreeSet<String> = (0..CALLS).map(|_| build()).collect();
+            assert_eq!(
+                keys.len(),
+                CALLS,
+                "calls of a reversible act shared a key, e.g. {:?}",
+                keys.first()
             );
         }
     }
@@ -661,21 +670,19 @@ fn hex_lower(bytes: &[u8]) -> String {
     out
 }
 
-/// Now, as RFC 3339 in UTC.
+/// A per-call nonce for the idempotency keys of commands that must NOT dedup
+/// across separate calls (see the attention-quieting arms above).
 ///
-/// Written out rather than taken from a date library, because this is the only
-/// place the CLI needs a calendar and the conversion is a dozen lines. UTC only:
-/// a local offset in an `issued_at` would be a second thing to reconcile against
-/// the kernel's own UTC-pinned clock.
-/// A per-invocation nonce for the idempotency keys of commands that must NOT
-/// dedup across separate calls (see the attention-quieting arms above).
-///
-/// Wall-clock nanoseconds carry the cross-invocation uniqueness — the process
-/// is one invocation long, so a counter alone would restart at zero on every
-/// call and collide immediately. But the clock alone is not enough either:
-/// macOS ticks `SystemTime` in microseconds, so two calls inside one process
-/// (or two invocations landing in the same tick) read the same value. The low
-/// 32 bits fold in the pid and an in-process counter to break those ties.
+/// Every one of the three parts is load-bearing, and CI proved the middle one.
+/// Wall-clock nanoseconds carry uniqueness ACROSS invocations — the process is
+/// one invocation long, so a counter alone restarts at zero every time. But
+/// the clock alone is not enough either: `as_nanos()` reports whatever
+/// resolution the host has, and macOS ticks `SystemTime` in MICROseconds, so
+/// two calls in one tick read the same value — which is exactly how the first
+/// version of this fix passed on Linux and failed on the macOS job. The low 32
+/// bits therefore fold in the pid and an in-process counter to break those
+/// ties. Truncating the pid to 16 bits is safe here because it is a tiebreak
+/// within a tick, not the uniqueness itself.
 fn nonce() -> u128 {
     static CALL: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
     let nanos = std::time::SystemTime::now()
@@ -686,6 +693,12 @@ fn nonce() -> u128 {
     (nanos << 32) | u128::from(std::process::id() as u16) << 16 | u128::from(call)
 }
 
+/// Now, as RFC 3339 in UTC.
+///
+/// Written out rather than taken from a date library, because this is the only
+/// place the CLI needs a calendar and the conversion is a dozen lines. UTC only:
+/// a local offset in an `issued_at` would be a second thing to reconcile against
+/// the kernel's own UTC-pinned clock.
 fn now() -> Timestamp {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
