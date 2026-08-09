@@ -16,8 +16,10 @@ second_outcome="$3"
 if [[ "$mode" == "attempt" ]]; then
   if [[ "$first_outcome" == "success" && "$second_outcome" == "success" ]]; then
     echo "outcome=success"
-  else
+  elif [[ "$first_outcome" == "failure" && "$second_outcome" == "success" ]]; then
     echo "outcome=failure"
+  else
+    echo "outcome=invalid"
   fi
   exit 0
 fi
@@ -31,11 +33,11 @@ if [[ "$mode" == "final" ]]; then
     echo "perf-job-guard: first runner passed; second fresh runner missed"
     exit 0
   fi
-  if [[ "$first_outcome" != "success" && "$second_outcome" == "success" ]]; then
-    echo "perf-job-guard: first runner missed; fresh-runner retry passed"
+  if [[ "$first_outcome" == "failure" && "$second_outcome" == "success" ]]; then
+    echo "perf-job-guard: first runner missed; second fresh runner passed"
     exit 0
   fi
-  echo "perf-job-guard: first runner outcome '$first_outcome'; fresh-runner retry '$second_outcome'" >&2
+  echo "perf-job-guard: first runner outcome '$first_outcome'; second fresh runner '$second_outcome'" >&2
   exit 1
 fi
 
