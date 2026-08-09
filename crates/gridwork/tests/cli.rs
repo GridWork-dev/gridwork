@@ -71,6 +71,17 @@ fn the_command_tree_is_printed_as_prose_and_everything_else_as_json() {
     // why this case exists: to pin the exception rather than let it spread.
     assert!(text.starts_with("gw —"), "{text}");
     assert!(text.contains("gw kernel health"), "{text}");
+    assert!(text.contains("gw estate overview"), "{text}");
+    assert!(text.contains("gw activity brief"), "{text}");
+    assert!(text.contains("gw cost rollup"), "{text}");
+    assert!(text.contains("gw event tail"), "{text}");
+    assert!(text.contains("gw agent fleet"), "{text}");
+    assert!(text.contains("gw attempt stop"), "{text}");
+    assert!(text.contains("gw attempt budget"), "{text}");
+    assert!(text.contains("gw session list"), "{text}");
+    assert!(text.contains("gw session inspect"), "{text}");
+    assert!(text.contains("gw session snapshot"), "{text}");
+    assert!(text.contains("gw session attach"), "{text}");
 
     let info = gw(&socket, "build-info");
     assert_eq!(code(&info), 0);
@@ -204,6 +215,22 @@ fn a_daemon_that_is_not_there_is_unavailable_rather_than_a_crash() {
             .contains("absent.sock"),
         "{answer}"
     );
+
+    for line in [
+        "cost rollup",
+        "attempt stop at-1",
+        "attempt budget at-1",
+        "attempt budget clear at-1 --expected-version 1",
+    ] {
+        let out = gw(&socket, line);
+        assert_eq!(
+            code(&out),
+            5,
+            "{line}: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        assert_eq!(json(&out)["code"], "storage", "{line}");
+    }
 }
 
 #[test]
@@ -399,6 +426,15 @@ async fn the_binary_talks_to_a_real_daemon() {
         let status = gw(socket, "kernel status");
         let events = gw(socket, "event read --limit 1");
         let tasks = gw(socket, "projection list task");
+        let estate = gw(socket, "estate overview");
+        let activity = gw(socket, "activity brief");
+        let cost_rollup = gw(socket, "cost rollup");
+        let agent_fleet = gw(socket, "agent fleet");
+        let attempt_budget_missing = gw(socket, "attempt budget at-nope");
+        let sessions = gw(socket, "session list");
+        let session_missing = gw(socket, "session inspect es-nope");
+        let pty_missing = gw(socket, "session snapshot pty-nope");
+        let pty_attach_missing = gw(socket, "session attach pty-nope");
         let missing = gw(socket, "projection get task t-nope");
 
         // A blob, all the way there and back through the built binary.
@@ -415,12 +451,50 @@ async fn the_binary_talks_to_a_real_daemon() {
             ),
         );
         (
-            health, status, events, tasks, missing, put, plaintext, payload,
+            health,
+            status,
+            events,
+            tasks,
+            estate,
+            activity,
+            missing,
+            put,
+            plaintext,
+            payload,
+            (
+                agent_fleet,
+                sessions,
+                session_missing,
+                pty_missing,
+                pty_attach_missing,
+                cost_rollup,
+                attempt_budget_missing,
+            ),
         )
     })
     .await
     .expect("join");
-    let (health, status, events, tasks, missing, put, plaintext, payload) = answers;
+    let (
+        health,
+        status,
+        events,
+        tasks,
+        estate,
+        activity,
+        missing,
+        put,
+        plaintext,
+        payload,
+        (
+            agent_fleet,
+            sessions,
+            session_missing,
+            pty_missing,
+            pty_attach_missing,
+            cost_rollup,
+            attempt_budget_missing,
+        ),
+    ) = answers;
 
     assert_eq!(
         code(&health),
@@ -453,6 +527,50 @@ async fn the_binary_talks_to_a_real_daemon() {
     assert_eq!(code(&tasks), 0);
     // An empty page is an answer, and a cursor that says the walk is over.
     assert_eq!(json(&tasks)["records"], serde_json::json!([]));
+
+    assert_eq!(code(&estate), 0);
+    let estate = json(&estate);
+    assert_eq!(estate["type"], "estate_overview");
+    assert_eq!(estate["counts"]["tasks"], 0);
+    assert_eq!(estate["counts"]["unresolved_attention"], 0);
+
+    assert_eq!(code(&activity), 0);
+    let activity = json(&activity);
+    assert_eq!(activity["type"], "activity_brief");
+    assert_eq!(activity["owed_total"], 0);
+    assert_eq!(activity["cost"]["entries"], 0);
+
+    assert_eq!(code(&cost_rollup), 0);
+    let cost_rollup = json(&cost_rollup);
+    assert_eq!(cost_rollup["type"], "cost_rollup");
+    assert_eq!(cost_rollup["headline"]["entries"], 0);
+    assert!(
+        cost_rollup["unknowns"]
+            .as_array()
+            .expect("cost unknowns")
+            .iter()
+            .any(|note| note["why"]
+                .as_str()
+                .is_some_and(|note| note.contains("no entries"))),
+        "{cost_rollup}"
+    );
+
+    assert_eq!(code(&agent_fleet), 0);
+    let agent_fleet = json(&agent_fleet);
+    assert_eq!(agent_fleet["type"], "agent_fleet");
+    assert_eq!(agent_fleet["counts"]["sessions"], 0);
+    assert_eq!(agent_fleet["dispatch_nodes"], serde_json::json!([]));
+
+    assert_eq!(code(&sessions), 0);
+    assert_eq!(json(&sessions)["records"], serde_json::json!([]));
+    assert_eq!(code(&session_missing), 4);
+    assert_eq!(json(&session_missing)["code"], "not_found");
+    assert_eq!(code(&pty_missing), 4);
+    assert_eq!(json(&pty_missing)["code"], "not_found");
+    assert_eq!(code(&pty_attach_missing), 4);
+    assert_eq!(json(&pty_attach_missing)["code"], "not_found");
+    assert_eq!(code(&attempt_budget_missing), 4);
+    assert_eq!(json(&attempt_budget_missing)["code"], "not_found");
 
     // Absent exits 4, distinctly from a refusal and from unavailability.
     assert_eq!(code(&missing), 4);

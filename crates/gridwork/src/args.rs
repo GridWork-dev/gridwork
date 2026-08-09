@@ -16,7 +16,8 @@
 use std::path::PathBuf;
 
 use gwk_domain::blob::BlobAddress;
-use gwk_domain::ids::Seq;
+use gwk_domain::entity::Budget;
+use gwk_domain::ids::{CostMicros, Seq};
 use gwk_domain::ingestion::IngestionKind;
 use gwk_domain::protocol::ProjectionKind;
 use gwk_tui::hall::MotionMode;
@@ -26,18 +27,25 @@ use crate::exit::Failure;
 
 /// Every flag in the tree that takes a value.
 const VALUE_FLAGS: &[&str] = &[
+    "--aggregate-type",
     "--archive-manifest-sha256",
     "--base",
     "--body",
     "--body-file",
     "--cursor",
     "--cutover-id",
+    "--event-type",
+    "--expected-version",
     "--file",
     "--head",
     "--key",
     "--kind",
     "--limit",
     "--media-type",
+    "--max-cost-micros",
+    "--max-tokens",
+    "--max-tool-calls",
+    "--max-wall-ms",
     "--motion",
     "--output",
     "--project",
@@ -125,6 +133,35 @@ pub enum Verb {
     EventFollow {
         cursor: Option<Seq>,
     },
+    EventTail {
+        cursor: Option<Seq>,
+        aggregate_type: Option<String>,
+        event_type: Option<String>,
+    },
+
+    /// A coherent fold over the projections that describe current work.
+    EstateOverview,
+    /// The newest projection facts and the work those same pages leave owed.
+    ActivityBrief,
+    CostRollup,
+    AgentFleet,
+    AttemptStop {
+        id: String,
+    },
+    AttemptBudget {
+        id: String,
+    },
+    AttemptBudgetUpdate {
+        id: String,
+        expected_version: u32,
+        budget: Budget,
+    },
+    SessionSnapshot {
+        id: String,
+    },
+    SessionAttach {
+        id: String,
+    },
 
     Tui {
         motion: MotionMode,
@@ -208,6 +245,20 @@ gw — the GridWork kernel's command line
   gw projection list <type> [--cursor <key>] [--limit <n>]
   gw event read [--cursor <seq>] [--limit <n>]
   gw event follow [--cursor <seq>]
+  gw event tail [--cursor <seq>] [--aggregate-type <type>] [--event-type <type>]
+  gw estate overview
+  gw activity brief
+  gw cost rollup
+  gw agent fleet
+  gw attempt stop <attempt-id>
+  gw attempt budget <attempt-id>
+  gw attempt budget set <attempt-id> --expected-version <n>
+      [--max-tokens <n>] [--max-tool-calls <n>] [--max-wall-ms <n>] [--max-cost-micros <n>]
+  gw attempt budget clear <attempt-id> --expected-version <n>
+  gw session list [--cursor <key>] [--limit <n>]
+  gw session inspect <engine-session-id>
+  gw session snapshot <pty-session-id>
+  gw session attach <pty-session-id>
   gw tui [--motion=off|reduced|full]
   gw theme
   gw attention list [--cursor <key>] [--limit <n>]
@@ -231,7 +282,7 @@ gw — the GridWork kernel's command line
   --version  same answer as `build-info`, under the name every CLI is asked by
   --help     this
 
-Every command answer is JSON on standard output; `tui` is interactive. Exits: 0 success, 2 usage or input,
+Every command answer is JSON on standard output; `tui`, `event tail`, and `session attach` are interactive. Exits: 0 success, 2 usage or input,
 3 refused, 4 not found, 5 unavailable, 6 does not verify, 10 a fault in gw.
 
 `pr` is the one verb that speaks to `gh` instead of the socket — always an
@@ -271,8 +322,15 @@ pub fn parse(argv: &[String]) -> Result<Invocation, Failure> {
     let pretty = rest.switch("--pretty");
     let verb = verb(&mut rest)?;
     rest.done()?;
-    if pretty && matches!(verb, Verb::Tui { .. }) {
-        return Err(Failure::usage("--pretty does not apply to tui"));
+    if pretty
+        && matches!(
+            verb,
+            Verb::Tui { .. } | Verb::EventTail { .. } | Verb::SessionAttach { .. }
+        )
+    {
+        return Err(Failure::usage(
+            "--pretty does not apply to interactive views",
+        ));
     }
     Ok(Invocation { verb, pretty })
 }
@@ -293,6 +351,37 @@ fn verb(rest: &mut Rest) -> Result<Verb, Failure> {
         },
         "projection" => projection(rest),
         "event" => event(rest),
+        "estate" => match rest.word("estate")?.as_str() {
+            "overview" => Ok(Verb::EstateOverview),
+            other => Err(unknown("estate", other)),
+        },
+        "activity" => match rest.word("activity")?.as_str() {
+            "brief" => Ok(Verb::ActivityBrief),
+            other => Err(unknown("activity", other)),
+        },
+        "cost" => match rest.word("cost")?.as_str() {
+            "rollup" => Ok(Verb::CostRollup),
+            other => Err(unknown("cost", other)),
+        },
+        "agent" => match rest.word("agent")?.as_str() {
+            "fleet" => Ok(Verb::AgentFleet),
+            other => Err(unknown("agent", other)),
+        },
+        "attempt" => attempt(rest),
+        "session" => match rest.word("session")?.as_str() {
+            "list" => rest.page(ProjectionKind::EngineSession),
+            "inspect" => Ok(Verb::ProjectionGet {
+                kind: ProjectionKind::EngineSession,
+                id: rest.word("session inspect")?,
+            }),
+            "snapshot" => Ok(Verb::SessionSnapshot {
+                id: rest.word("session snapshot")?,
+            }),
+            "attach" => Ok(Verb::SessionAttach {
+                id: rest.word("session attach")?,
+            }),
+            other => Err(unknown("session", other)),
+        },
         "tui" => Ok(Verb::Tui {
             motion: rest
                 .flag("--motion")
@@ -431,7 +520,63 @@ fn event(rest: &mut Rest) -> Result<Verb, Failure> {
                 .unwrap_or(DEFAULT_EVENT_LIMIT),
         }),
         "follow" => Ok(Verb::EventFollow { cursor }),
+        "tail" => Ok(Verb::EventTail {
+            cursor,
+            aggregate_type: rest.flag("--aggregate-type"),
+            event_type: rest.flag("--event-type"),
+        }),
         other => Err(unknown("event", other)),
+    }
+}
+
+fn attempt(rest: &mut Rest) -> Result<Verb, Failure> {
+    match rest.word("attempt")?.as_str() {
+        "stop" => Ok(Verb::AttemptStop {
+            id: rest.word("attempt stop")?,
+        }),
+        "budget" => {
+            let sub_or_id = rest.word("attempt budget")?;
+            match sub_or_id.as_str() {
+                "set" => {
+                    let id = rest.word("attempt budget set")?;
+                    let budget = Budget {
+                        max_tokens: optional_u32(rest, "--max-tokens")?,
+                        max_tool_calls: optional_u32(rest, "--max-tool-calls")?,
+                        max_wall_ms: optional_u32(rest, "--max-wall-ms")?,
+                        max_cost_micros: rest
+                            .flag("--max-cost-micros")
+                            .map(|value| unsigned(&value, "--max-cost-micros").map(CostMicros::new))
+                            .transpose()?,
+                    };
+                    if budget.max_tokens.is_none()
+                        && budget.max_tool_calls.is_none()
+                        && budget.max_wall_ms.is_none()
+                        && budget.max_cost_micros.is_none()
+                    {
+                        return Err(Failure::usage(
+                            "attempt budget set needs at least one cap; use attempt budget clear to uncap every axis",
+                        ));
+                    }
+                    Ok(Verb::AttemptBudgetUpdate {
+                        id,
+                        expected_version: required_u32(rest, "--expected-version")?,
+                        budget,
+                    })
+                }
+                "clear" => Ok(Verb::AttemptBudgetUpdate {
+                    id: rest.word("attempt budget clear")?,
+                    expected_version: required_u32(rest, "--expected-version")?,
+                    budget: Budget {
+                        max_tokens: None,
+                        max_tool_calls: None,
+                        max_wall_ms: None,
+                        max_cost_micros: None,
+                    },
+                }),
+                id => Ok(Verb::AttemptBudget { id: id.to_owned() }),
+            }
+        }
+        other => Err(unknown("attempt", other)),
     }
 }
 
@@ -511,6 +656,29 @@ fn count(value: &str) -> Result<u32, Failure> {
     value
         .parse()
         .map_err(|_| Failure::usage(format!("a limit is a count, not {value:?}")))
+}
+
+fn unsigned(value: &str, name: &str) -> Result<u64, Failure> {
+    value
+        .parse()
+        .map_err(|_| Failure::usage(format!("{name} is an unsigned integer, not {value:?}")))
+}
+
+fn optional_u32(rest: &mut Rest, name: &str) -> Result<Option<u32>, Failure> {
+    rest.flag(name)
+        .map(|value| {
+            value
+                .parse()
+                .map_err(|_| Failure::usage(format!("{name} is a u32, not {value:?}")))
+        })
+        .transpose()
+}
+
+fn required_u32(rest: &mut Rest, name: &str) -> Result<u32, Failure> {
+    let value = rest.required(name)?;
+    value
+        .parse()
+        .map_err(|_| Failure::usage(format!("{name} is a u32, not {value:?}")))
 }
 
 /// A cursor as a caller writes it: decimal, because that is what the wire
@@ -705,6 +873,79 @@ mod tests {
     fn the_documented_tree_parses() {
         assert_eq!(parsed("build-info").expect("parse").verb, Verb::BuildInfo);
         assert_eq!(
+            parsed("estate overview").expect("parse").verb,
+            Verb::EstateOverview
+        );
+        assert_eq!(
+            parsed("activity brief").expect("parse").verb,
+            Verb::ActivityBrief
+        );
+        assert_eq!(parsed("cost rollup").expect("parse").verb, Verb::CostRollup);
+        assert_eq!(
+            parsed("attempt stop at-1").expect("parse").verb,
+            Verb::AttemptStop { id: "at-1".into() }
+        );
+        assert_eq!(
+            parsed("attempt budget at-1").expect("parse").verb,
+            Verb::AttemptBudget { id: "at-1".into() }
+        );
+        assert_eq!(
+            parsed(
+                "attempt budget set at-1 --expected-version 3 --max-tokens 100 --max-cost-micros 999"
+            )
+            .expect("parse")
+            .verb,
+            Verb::AttemptBudgetUpdate {
+                id: "at-1".into(),
+                expected_version: 3,
+                budget: Budget {
+                    max_tokens: Some(100),
+                    max_tool_calls: None,
+                    max_wall_ms: None,
+                    max_cost_micros: Some(CostMicros::new(999)),
+                },
+            }
+        );
+        assert_eq!(
+            parsed("attempt budget clear at-1 --expected-version 3")
+                .expect("parse")
+                .verb,
+            Verb::AttemptBudgetUpdate {
+                id: "at-1".into(),
+                expected_version: 3,
+                budget: Budget {
+                    max_tokens: None,
+                    max_tool_calls: None,
+                    max_wall_ms: None,
+                    max_cost_micros: None,
+                },
+            }
+        );
+        assert_eq!(parsed("agent fleet").expect("parse").verb, Verb::AgentFleet);
+        assert_eq!(
+            parsed("session list").expect("parse").verb,
+            Verb::ProjectionList {
+                kind: ProjectionKind::EngineSession,
+                cursor: None,
+                limit: None,
+            }
+        );
+        assert_eq!(
+            parsed("session inspect es-1").expect("parse").verb,
+            Verb::ProjectionGet {
+                kind: ProjectionKind::EngineSession,
+                id: "es-1".into(),
+            }
+        );
+        assert_eq!(
+            parsed("session snapshot pty-1").expect("parse").verb,
+            Verb::SessionSnapshot { id: "pty-1".into() }
+        );
+        assert_eq!(
+            parsed("session attach pty-1").expect("parse").verb,
+            Verb::SessionAttach { id: "pty-1".into() }
+        );
+        assert_eq!(
             parsed("tui --motion=reduced").expect("parse").verb,
             Verb::Tui {
                 motion: MotionMode::Reduced
@@ -789,6 +1030,16 @@ mod tests {
                 limit: DEFAULT_EVENT_LIMIT
             }
         );
+        assert_eq!(
+            parsed("event tail --cursor 40 --aggregate-type attempt --event-type attempt_started")
+                .expect("parse")
+                .verb,
+            Verb::EventTail {
+                cursor: Some(Seq::new(40)),
+                aggregate_type: Some("attempt".into()),
+                event_type: Some("attempt_started".into()),
+            }
+        );
     }
 
     #[test]
@@ -841,6 +1092,14 @@ mod tests {
             "tui --motion=fast",
             "tui --motion=",
             "tui --pretty",
+            "event tail --pretty",
+            "session attach pty-1 --pretty",
+            "attempt budget set at-1 --expected-version 1",
+            "attempt budget set at-1 --max-tokens 1",
+            "attempt budget clear at-1",
+            "attempt budget at-1 --max-tokens 1",
+            "attempt budget set at-1 --expected-version nope --max-tokens 1",
+            "attempt budget set at-1 --expected-version 1 --max-cost-micros nope",
             "blob stat not-an-address",
             "pr open",
             "pr open --title t",

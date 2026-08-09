@@ -82,7 +82,7 @@ pub const RECORDS_MEDIA_TYPE: &str = "application/x-ndjson";
 /// A hash over those tables could never be reproduced by a replay, so a
 /// checkpoint carrying them would fail every scratch rebuild forever and the
 /// failure would say nothing. They stay in the canonical dump — that is where
-/// the DDL-to-contract parity check happens, and it must cover all fifteen —
+/// the DDL-to-contract parity check happens, and it must cover every table —
 /// and stay OUT of the digest. What guards them instead is what always did:
 /// `receipt_append_only` and the delete guards, which no privilege can bypass.
 struct Projection {
@@ -346,6 +346,17 @@ const PROJECTIONS: &[Projection] = &[
          FROM gwk.task t ORDER BY t.id",
         "SELECT jsonb_build_object('projection_type', 'task', 'task', to_jsonb(t))::text \
          FROM gwk.task t \
+         WHERE ($1::text IS NULL OR t.id COLLATE \"C\" > $1) \
+           AND ($2::text IS NULL OR t.id = $2) \
+         ORDER BY t.id COLLATE \"C\" LIMIT $3",
+    ),
+    derived(
+        "workspace_node",
+        "id",
+        "SELECT jsonb_build_object('projection_type', 'workspace_node', 'workspace_node', \
+           to_jsonb(t))::text FROM gwk.workspace_node t ORDER BY t.id",
+        "SELECT jsonb_build_object('projection_type', 'workspace_node', 'workspace_node', \
+           to_jsonb(t))::text FROM gwk.workspace_node t \
          WHERE ($1::text IS NULL OR t.id COLLATE \"C\" > $1) \
            AND ($2::text IS NULL OR t.id = $2) \
          ORDER BY t.id COLLATE \"C\" LIMIT $3",

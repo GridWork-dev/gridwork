@@ -1,10 +1,11 @@
 //! Render every Board view from real kernel pages — the task's smoke run.
 //!
 //! ```text
-//! for k in task attempt dispatch_node message engine_session worktree \
-//!          lease cost_entry ingested_record receipt; do
-//!   gw projection list $k --limit 256
-//! done | jq -s . | cargo run -p gwk-tui --example board-live
+//! { gw event read --limit 256; \
+//!   for k in task attempt attention_item dispatch_node message engine_session \
+//!            worktree lease cost_entry ingested_record receipt; do \
+//!     gw projection list $k --limit 256; \
+//!   done; } | jq -s . | cargo run -p gwk-tui --example board-live
 //! ```
 //!
 //! Standard input is a JSON array of `projection_page` answers (each
@@ -20,6 +21,7 @@
 use std::io::Read;
 use std::process::ExitCode;
 
+use gwk_domain::envelope::EventEnvelope;
 use gwk_domain::ids::Seq;
 use gwk_domain::protocol::ProjectionRecord;
 use gwk_theme::marks::GlyphSet;
@@ -33,7 +35,7 @@ use ratatui::layout::Rect;
 
 const MAX_INPUT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_DIAGNOSTIC_CELLS: usize = 512;
-const MAX_RECORDS: usize = 10 * 256;
+const MAX_RECORDS: usize = 12 * 256;
 
 fn diagnostic(why: &str) -> String {
     safe_text(why, MAX_DIAGNOSTIC_CELLS).into_owned()
@@ -60,6 +62,9 @@ fn empty_state() -> BoardState {
         attempts: Vec::new(),
         nodes: Vec::new(),
         messages: Vec::new(),
+        events: Vec::new(),
+        event_tail: gwk_tui::board::EventTail::default(),
+        attention: Vec::new(),
         replay: ReplayTimeline::empty(),
         sessions: Vec::new(),
         worktrees: Vec::new(),
@@ -93,6 +98,7 @@ fn add_record(
         ProjectionRecord::Attempt { attempt } => state.attempts.push(attempt),
         ProjectionRecord::DispatchNode { dispatch_node } => state.nodes.push(dispatch_node),
         ProjectionRecord::Message { message } => state.messages.push(message),
+        ProjectionRecord::AttentionItem { attention_item } => state.attention.push(attention_item),
         ProjectionRecord::EngineSession { engine_session } => state.sessions.push(engine_session),
         ProjectionRecord::Worktree { worktree } => state.worktrees.push(worktree),
         ProjectionRecord::Lease { lease } => state.leases.push(lease),
@@ -103,6 +109,23 @@ fn add_record(
         ProjectionRecord::Receipt { receipt } => state.receipts.push(receipt),
         _ => {}
     }
+    Ok(())
+}
+
+fn add_event(
+    state: &mut BoardState,
+    value: serde_json::Value,
+    record_count: &mut usize,
+) -> Result<(), String> {
+    *record_count += 1;
+    if *record_count > MAX_RECORDS {
+        return Err(format!(
+            "input exceeds the {MAX_RECORDS}-record smoke-run limit"
+        ));
+    }
+    let event = serde_json::from_value::<EventEnvelope>(value)
+        .map_err(|why| format!("an event failed the contract: {why}"))?;
+    state.events.push(event);
     Ok(())
 }
 
@@ -129,6 +152,12 @@ fn load_state(input: serde_json::Value) -> Result<BoardState, String> {
             let seq = serde_json::from_value::<Seq>(mark.clone())
                 .map_err(|why| format!("a page watermark failed the contract: {why}"))?;
             state.watermark = Some(state.watermark.map_or(seq, |current| current.min(seq)));
+        }
+        if let Some(events) = page.get("events").and_then(serde_json::Value::as_array) {
+            for value in events {
+                add_event(&mut state, value.clone(), &mut record_count)?;
+            }
+            continue;
         }
         let records = page
             .get("records")
@@ -190,8 +219,9 @@ mod tests {
     use std::io::Cursor;
 
     use gwk_domain::entity::Task;
+    use gwk_domain::envelope::{Actor, Origin};
     use gwk_domain::fsm::TaskState;
-    use gwk_domain::ids::{TaskId, Timestamp};
+    use gwk_domain::ids::{AggregateId, EventId, ProjectId, TaskId, Timestamp};
 
     use super::*;
 
@@ -214,6 +244,35 @@ mod tests {
         .expect("record serializes")
     }
 
+    fn event_value() -> serde_json::Value {
+        serde_json::to_value(EventEnvelope {
+            event_id: EventId::new("ev-1"),
+            project_id: ProjectId::new("system"),
+            aggregate_type: "attempt".into(),
+            aggregate_id: AggregateId::new("at-1"),
+            aggregate_version: 1,
+            event_type: "attempt_started".into(),
+            schema_version: 1,
+            global_sequence: Seq::new(1),
+            occurred_at: Timestamp::new("2026-08-09T12:00:00Z"),
+            appended_at: Timestamp::new("2026-08-09T12:00:00Z"),
+            actor: Actor {
+                kind: "kernel".into(),
+                id: None,
+            },
+            origin: Origin {
+                system: "gwk".into(),
+                r#ref: None,
+            },
+            causation_id: None,
+            correlation_id: None,
+            idempotency_key: None,
+            payload: serde_json::Value::Null,
+            payload_ref: None,
+        })
+        .expect("event serializes")
+    }
+
     #[test]
     fn bare_record_arrays_walk_the_contract() {
         let state = load_state(serde_json::json!([task_record("t-1")])).expect("bare records");
@@ -229,6 +288,20 @@ mod tests {
         ]))
         .expect("pages");
         assert_eq!(state.watermark, Some(Seq::new(9)));
+    }
+
+    #[test]
+    fn event_answers_feed_the_event_tail_view() {
+        let state = load_state(serde_json::json!({
+            "type": "events",
+            "events": [event_value()],
+            "cursor": "1",
+            "watermark": "1"
+        }))
+        .expect("event page");
+        assert_eq!(state.events.len(), 1);
+        assert_eq!(state.events[0].event_type, "attempt_started");
+        assert_eq!(state.watermark, Some(Seq::new(1)));
     }
 
     #[test]
@@ -253,7 +326,7 @@ mod tests {
     }
 
     #[test]
-    fn projection_records_are_bounded_to_the_documented_ten_pages() {
+    fn projection_records_are_bounded_to_the_documented_twelve_pages() {
         let records = vec![task_record("t-1"); MAX_RECORDS + 1];
         let error = load_state(serde_json::Value::Array(records)).expect_err("too many records");
         assert!(error.contains("record smoke-run limit"));
