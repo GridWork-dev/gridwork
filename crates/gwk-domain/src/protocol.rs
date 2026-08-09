@@ -25,7 +25,7 @@
 use crate::blob::{BlobAddress, BlobDescriptor};
 use crate::entity::{
     Attempt, AttentionItem, AuthorityGrant, Command, CostEntry, DispatchNode, EngineSession,
-    Evidence, Gate, IngestedRecord, Lease, Message, Receipt, Task, Worktree,
+    Evidence, Gate, IngestedRecord, Lease, Message, Receipt, Task, WorkspaceNode, Worktree,
 };
 use crate::envelope::{CommandEnvelope, EventEnvelope, JsonValue};
 use crate::frame::{PtyDelta, PtyFrame};
@@ -460,6 +460,7 @@ pub enum ProjectionKind {
     OrchestratorCheckpoint,
     IngestedRecord,
     CostEntry,
+    WorkspaceNode,
 }
 
 impl ProjectionKind {
@@ -481,6 +482,7 @@ impl ProjectionKind {
         Self::OrchestratorCheckpoint,
         Self::IngestedRecord,
         Self::CostEntry,
+        Self::WorkspaceNode,
     ];
 
     /// The wire name — the same string `serde` writes, and the same one that
@@ -506,6 +508,7 @@ impl ProjectionKind {
             Self::OrchestratorCheckpoint => "orchestrator_checkpoint",
             Self::IngestedRecord => "ingested_record",
             Self::CostEntry => "cost_entry",
+            Self::WorkspaceNode => "workspace_node",
         }
     }
 }
@@ -574,6 +577,9 @@ pub enum ProjectionRecord {
     CostEntry {
         cost_entry: CostEntry,
     },
+    WorkspaceNode {
+        workspace_node: WorkspaceNode,
+    },
 }
 
 impl ProjectionRecord {
@@ -597,6 +603,7 @@ impl ProjectionRecord {
             Self::OrchestratorCheckpoint { .. } => ProjectionKind::OrchestratorCheckpoint,
             Self::IngestedRecord { .. } => ProjectionKind::IngestedRecord,
             Self::CostEntry { .. } => ProjectionKind::CostEntry,
+            Self::WorkspaceNode { .. } => ProjectionKind::WorkspaceNode,
         }
     }
 }
@@ -1492,6 +1499,17 @@ mod tests {
                     cost_micros: None,
                     cost_is_estimate: None,
                     recorded_at: ts(),
+                },
+            },
+            ProjectionRecord::WorkspaceNode {
+                workspace_node: WorkspaceNode {
+                    id: crate::ids::WorkspaceNodeId::new("pane-1"),
+                    version: 3,
+                    kind: crate::entity::WorkspaceNodeKind::Pane,
+                    parent_id: Some(crate::ids::WorkspaceNodeId::new("tab-1")),
+                    session_id: Some(crate::ids::PtySessionId::new("pty-1")),
+                    created_at: ts(),
+                    updated_at: ts(),
                 },
             },
         ]

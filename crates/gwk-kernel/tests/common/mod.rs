@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 
 use gwk_domain::blob::{BLOB_CHUNK_BYTES, BlobAddress};
 use gwk_domain::command::KernelCommand;
+use gwk_domain::entity::WorkspaceNodeKind;
 use gwk_domain::envelope::{
     Actor, CommandEnvelope, ENVELOPE_SCHEMA_VERSION, EventEnvelope, Origin, PayloadRef,
 };
@@ -27,7 +28,8 @@ use gwk_domain::fsm::LeaseMode;
 use gwk_domain::ids::{
     AttemptId, AttentionItemId, AuthorityGrantId, ByteCount, CommandId, CostEntryId, CostMicros,
     DispatchNodeId, EngineId, EngineSessionId, EvidenceId, GateId, IdempotencyKey, LeaseId,
-    MessageId, ProjectId, Seq, TaskId, Timestamp, TokenCount, WorktreeId,
+    MessageId, ProjectId, PtySessionId, Seq, TaskId, Timestamp, TokenCount, WorkspaceNodeId,
+    WorktreeId,
 };
 use gwk_domain::ingestion::IngestionKind;
 use gwk_domain::inherited::OrchestratorCheckpoint;
@@ -736,6 +738,42 @@ pub async fn populate(store: &PgEventStore) {
             reasoning_tokens: None,
             cost_micros: Some(CostMicros::new(125_000)),
             cost_is_estimate: Some(true),
+        },
+    )
+    .await;
+    // A minimal legal tree — root, tab, bound pane — so the parity check
+    // exercises the kind column, the self-referential parent, and the pane's
+    // session binding in one pass.
+    apply(
+        store,
+        "ws",
+        KernelCommand::CreateWorkspaceNode {
+            workspace_node_id: WorkspaceNodeId::new("ws-1"),
+            kind: WorkspaceNodeKind::Workspace,
+            parent_id: None,
+            session_id: None,
+        },
+    )
+    .await;
+    apply(
+        store,
+        "ws-tab",
+        KernelCommand::CreateWorkspaceNode {
+            workspace_node_id: WorkspaceNodeId::new("wtab-1"),
+            kind: WorkspaceNodeKind::Tab,
+            parent_id: Some(WorkspaceNodeId::new("ws-1")),
+            session_id: None,
+        },
+    )
+    .await;
+    apply(
+        store,
+        "ws-pane",
+        KernelCommand::CreateWorkspaceNode {
+            workspace_node_id: WorkspaceNodeId::new("wpane-1"),
+            kind: WorkspaceNodeKind::Pane,
+            parent_id: Some(WorkspaceNodeId::new("wtab-1")),
+            session_id: Some(PtySessionId::new("pty-1")),
         },
     )
     .await;

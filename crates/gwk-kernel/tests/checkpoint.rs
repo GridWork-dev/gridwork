@@ -74,15 +74,18 @@ async fn every_projection_round_trips_through_its_contract_type() {
         "attention_item",
         "authority_grant",
         "command",
+        "cost_entry",
         "dispatch_node",
         "engine_session",
         "evidence",
         "gate",
+        "ingested_record",
         "lease",
         "message",
         "orchestrator_checkpoint",
         "receipt",
         "task",
+        "workspace_node",
         "worktree",
     ] {
         assert!(
