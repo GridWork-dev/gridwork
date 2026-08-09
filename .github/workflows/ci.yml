@@ -40,8 +40,22 @@ jobs:
             echo 'perf-job-guard accepted a skipped parallel run - the retry guard is broken' >&2
             exit 1
           fi
+          if ./tools/perf-job-guard.sh final skipped success; then
+            echo 'perf-job-guard accepted a skipped parallel run - the retry guard is broken' >&2
+            exit 1
+          fi
+          if ./tools/perf-job-guard.sh final invalid success; then
+            echo 'perf-job-guard accepted invalid first-run evidence' >&2
+            exit 1
+          fi
+          if ./tools/perf-job-guard.sh final success invalid; then
+            echo 'perf-job-guard accepted invalid second-run evidence' >&2
+            exit 1
+          fi
           [ "$(./tools/perf-job-guard.sh attempt success success)" = 'outcome=success' ]
-          [ "$(./tools/perf-job-guard.sh attempt success failure)" = 'outcome=failure' ]
+          [ "$(./tools/perf-job-guard.sh attempt failure success)" = 'outcome=failure' ]
+          [ "$(./tools/perf-job-guard.sh attempt success failure)" = 'outcome=invalid' ]
+          [ "$(./tools/perf-job-guard.sh attempt skipped success)" = 'outcome=invalid' ]
           ./tools/perf-job-guard.sh final success success
           ./tools/perf-job-guard.sh final success failure
           ./tools/perf-job-guard.sh final failure success
@@ -1005,9 +1019,18 @@ jobs:
           # The gate diffs against the merge base, which a shallow clone does not have.
           fetch-depth: 0
       - name: engine-adjacent changes carry their second-reader record
+        env:
+          MERGE_GROUP_BASE: ${{ github.event.merge_group.base_sha }}
+          MERGE_GROUP_HEAD: ${{ github.event.merge_group.head_sha }}
         run: |
           set -euo pipefail
-          if [ -n "${GITHUB_BASE_REF:-}" ]; then
+          target=HEAD
+          if [ "$GITHUB_EVENT_NAME" = merge_group ]; then
+            base="$MERGE_GROUP_BASE"
+            target="$MERGE_GROUP_HEAD"
+            git cat-file -e "${base}^{commit}"
+            git cat-file -e "${target}^{commit}"
+          elif [ -n "${GITHUB_BASE_REF:-}" ]; then
             # FETCH_HEAD, not origin/<ref>: the checkout action fetches the PR merge
             # ref, so a remote-tracking branch for the base may not exist locally.
             git fetch --no-tags origin "$GITHUB_BASE_REF"
@@ -1021,7 +1044,7 @@ jobs:
           # put no registry path in this list at all — the reviewer of the
           # row binding defeated the first version exactly that way. With
           # renames off, the canonical path always appears as a deletion.
-          git diff --no-renames --name-only "$base" HEAD > /tmp/changed-paths
+          git diff --no-renames --name-only "$base" "$target" > /tmp/changed-paths
           # Fail CLOSED. An empty set from a diff that failed would otherwise read
           # as "nothing engine-adjacent was touched" — the gate passing because it
           # could not look, which is the failure mode this whole job exists for.
@@ -1582,7 +1605,9 @@ jobs:
   # Commit messages and every line added or deleted inside the PR range publish
   # too — the final tracked tree is not the whole exposure. Same seeded proof.
   # Direct pushes to main (including the very first publication push, which
-  # carries the entire history) get their pushed range scanned as well.
+  # carries the entire history) get their pushed range scanned as well. Merge
+  # groups use the payload's explicit parent/head range rather than guessing
+  # from a temporary queue ref.
   commit-messages:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -1643,6 +1668,18 @@ jobs:
             git log --format=%B "${BEFORE}..${AFTER}" | ./tools/leak-scan.sh --stdin
             ./tools/leak-scan.sh --history "${BEFORE}..${AFTER}"
           fi
+      - name: scan merge-group commit messages and content
+        if: github.event_name == 'merge_group'
+        shell: bash
+        env:
+          BASE: ${{ github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+        run: |
+          set -euo pipefail
+          git cat-file -e "${BASE}^{commit}"
+          git cat-file -e "${HEAD_SHA}^{commit}"
+          git log --format=%B "${BASE}..${HEAD_SHA}" | ./tools/leak-scan.sh --stdin
+          ./tools/leak-scan.sh --history "${BASE}..${HEAD_SHA}"
       - name: prove the gate can fail (seeded violation)
         run: |
           seed=$(printf 'see claude.ai/code/ses%s_EXAMPLE' 'sion')
