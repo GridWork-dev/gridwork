@@ -16,7 +16,7 @@ use gwk_domain::blob::{BlobAddress, BlobDescriptor};
 use gwk_domain::checkpoint::{CHECKPOINT_SCHEMA_VERSION, Checkpoint};
 use gwk_domain::command::KernelCommand;
 use gwk_domain::entity::{
-    Attempt, Budget, Command, Message, Task, WorkspaceNode, WorkspaceNodeKind,
+    Attempt, Budget, Command, Message, Task, WorkflowRun, WorkspaceNode, WorkspaceNodeKind,
 };
 use gwk_domain::envelope::{Actor, CommandEnvelope, EventEnvelope, Origin, PayloadRef};
 use gwk_domain::frame::{
@@ -26,7 +26,8 @@ use gwk_domain::fsm::{AttemptState, CommandState, MessageState, Outcome, TaskSta
 use gwk_domain::ids::{
     AggregateId, AttemptId, BlobUploadId, ByteCount, CommandId, CorrelationId, CostMicros,
     EngineId, EventCount, EventId, IdempotencyKey, LeaseId, MessageId, ProjectId, PtyFrameSeq,
-    PtySessionGeneration, PtySessionId, RequestId, Seq, TaskId, Timestamp, WorkspaceNodeId,
+    PtySessionGeneration, PtySessionId, RequestId, Seq, TaskId, Timestamp, WorkflowRunId,
+    WorkspaceNodeId,
 };
 use gwk_domain::inherited::{BudgetCursor, OrchestratorCheckpoint, PendingApproval};
 use gwk_domain::protocol::{
@@ -78,6 +79,7 @@ fn bindings() -> String {
         .register::<gwk_domain::entity::Budget>()
         .register::<gwk_domain::entity::Worktree>()
         .register::<gwk_domain::entity::WorkspaceNode>()
+        .register::<gwk_domain::entity::WorkflowRun>()
         .register::<gwk_domain::entity::Lease>()
         .register::<gwk_domain::entity::DispatchNode>()
         .register::<TransitionResult<TaskState>>()
@@ -295,6 +297,24 @@ fn golden_workspace_node() -> WorkspaceNode {
         session_id: Some(PtySessionId::new("pty-1")),
         created_at: Timestamp::new("2026-08-09T12:00:00Z"),
         updated_at: Timestamp::new("2026-08-09T12:05:00Z"),
+    }
+}
+
+fn golden_workflow_run() -> WorkflowRun {
+    WorkflowRun {
+        id: WorkflowRunId::new("wfr-0001"),
+        version: 4,
+        state: "completed".to_owned(),
+        step: Some("ship".to_owned()),
+        template_ref: "seven-act@1".to_owned(),
+        template_sha256: Some(
+            "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08".to_owned(),
+        ),
+        task_id: Some(TaskId::new("task-0001")),
+        title: Some("wire the replay lens".to_owned()),
+        opened_at: Timestamp::new("2026-08-09T12:00:00Z"),
+        updated_at: Timestamp::new("2026-08-09T13:00:00Z"),
+        closed_at: Some(Timestamp::new("2026-08-09T13:00:00Z")),
     }
 }
 
@@ -729,6 +749,7 @@ fn goldens() -> Vec<(&'static str, String)> {
             pretty(&golden_command_terminal()),
         ),
         ("workspace-node.json", pretty(&golden_workspace_node())),
+        ("workflow-run.json", pretty(&golden_workflow_run())),
         (
             "transition-results.json",
             pretty(&golden_transition_results()),
@@ -892,6 +913,11 @@ pub fn run(check: bool) {
             &ts_goldens_dir,
             find("workspace-node.json"),
         ),
+        round_trip::<WorkflowRun>(
+            "workflow-run.json",
+            &ts_goldens_dir,
+            find("workflow-run.json"),
+        ),
         round_trip::<Vec<TransitionResult<TaskState>>>(
             "transition-results.json",
             &ts_goldens_dir,
@@ -942,7 +968,7 @@ mod tests {
     /// manual root registry described in its doc comment. Update this
     /// constant AND the `.register()` chain together in the same change;
     /// a mismatch means one moved without the other.
-    const REGISTERED_ROOT_COUNT: usize = 25;
+    const REGISTERED_ROOT_COUNT: usize = 26;
 
     #[test]
     fn bindings_registry_matches_its_pin() {

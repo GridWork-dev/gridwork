@@ -25,7 +25,8 @@
 use crate::blob::{BlobAddress, BlobDescriptor};
 use crate::entity::{
     Attempt, AttentionItem, AuthorityGrant, Command, CostEntry, DispatchNode, EngineSession,
-    Evidence, Gate, IngestedRecord, Lease, Message, Receipt, Task, WorkspaceNode, Worktree,
+    Evidence, Gate, IngestedRecord, Lease, Message, Receipt, Task, WorkflowRun, WorkspaceNode,
+    Worktree,
 };
 use crate::envelope::{CommandEnvelope, EventEnvelope, JsonValue};
 use crate::frame::{PtyDelta, PtyFrame};
@@ -461,6 +462,7 @@ pub enum ProjectionKind {
     IngestedRecord,
     CostEntry,
     WorkspaceNode,
+    WorkflowRun,
 }
 
 impl ProjectionKind {
@@ -483,6 +485,7 @@ impl ProjectionKind {
         Self::IngestedRecord,
         Self::CostEntry,
         Self::WorkspaceNode,
+        Self::WorkflowRun,
     ];
 
     /// The wire name — the same string `serde` writes, and the same one that
@@ -509,6 +512,7 @@ impl ProjectionKind {
             Self::IngestedRecord => "ingested_record",
             Self::CostEntry => "cost_entry",
             Self::WorkspaceNode => "workspace_node",
+            Self::WorkflowRun => "workflow_run",
         }
     }
 }
@@ -580,6 +584,9 @@ pub enum ProjectionRecord {
     WorkspaceNode {
         workspace_node: WorkspaceNode,
     },
+    WorkflowRun {
+        workflow_run: WorkflowRun,
+    },
 }
 
 impl ProjectionRecord {
@@ -604,6 +611,7 @@ impl ProjectionRecord {
             Self::IngestedRecord { .. } => ProjectionKind::IngestedRecord,
             Self::CostEntry { .. } => ProjectionKind::CostEntry,
             Self::WorkspaceNode { .. } => ProjectionKind::WorkspaceNode,
+            Self::WorkflowRun { .. } => ProjectionKind::WorkflowRun,
         }
     }
 }
@@ -1510,6 +1518,21 @@ mod tests {
                     session_id: Some(crate::ids::PtySessionId::new("pty-1")),
                     created_at: ts(),
                     updated_at: ts(),
+                },
+            },
+            ProjectionRecord::WorkflowRun {
+                workflow_run: WorkflowRun {
+                    id: crate::ids::WorkflowRunId::new("run-1"),
+                    version: 2,
+                    state: "running".into(),
+                    step: Some("verify".into()),
+                    template_ref: "phase-lifecycle".into(),
+                    template_sha256: None,
+                    task_id: Some(TaskId::new("task-1")),
+                    title: None,
+                    opened_at: ts(),
+                    updated_at: ts(),
+                    closed_at: None,
                 },
             },
         ]
