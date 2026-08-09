@@ -1,0 +1,13 @@
+{
+  "id": "wfr-0001",
+  "version": 4,
+  "state": "completed",
+  "step": "ship",
+  "template_ref": "seven-act@1",
+  "template_sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+  "task_id": "task-0001",
+  "title": "wire the replay lens",
+  "opened_at": "2026-08-09T12:00:00Z",
+  "updated_at": "2026-08-09T13:00:00Z",
+  "closed_at": "2026-08-09T13:00:00Z"
+}

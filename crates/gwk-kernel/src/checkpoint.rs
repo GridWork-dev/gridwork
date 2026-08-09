@@ -351,6 +351,17 @@ const PROJECTIONS: &[Projection] = &[
          ORDER BY t.id COLLATE \"C\" LIMIT $3",
     ),
     derived(
+        "workflow_run",
+        "id",
+        "SELECT jsonb_build_object('projection_type', 'workflow_run', 'workflow_run', \
+           to_jsonb(t))::text FROM gwk.workflow_run t ORDER BY t.id",
+        "SELECT jsonb_build_object('projection_type', 'workflow_run', 'workflow_run', \
+           to_jsonb(t))::text FROM gwk.workflow_run t \
+         WHERE ($1::text IS NULL OR t.id COLLATE \"C\" > $1) \
+           AND ($2::text IS NULL OR t.id = $2) \
+         ORDER BY t.id COLLATE \"C\" LIMIT $3",
+    ),
+    derived(
         "workspace_node",
         "id",
         "SELECT jsonb_build_object('projection_type', 'workspace_node', 'workspace_node', \

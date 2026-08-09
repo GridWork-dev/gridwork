@@ -17,7 +17,7 @@ use crate::ids::{
     AttemptId, AttentionItemId, AuthorityGrantId, ByteCount, CommandId, CorrelationId, CostEntryId,
     CostMicros, DispatchNodeId, EngineId, EngineSessionId, EvidenceId, FenceToken, GateId,
     IdempotencyKey, IngestedRecordId, LeaseId, MessageId, ReceiptId, Seq, TaskId, Timestamp,
-    TokenCount, WorkspaceNodeId, WorktreeId,
+    TokenCount, WorkflowRunId, WorkspaceNodeId, WorktreeId,
 };
 use crate::ingestion::IngestionKind;
 
@@ -539,6 +539,45 @@ pub struct WorkspaceNode {
     pub session_id: Option<crate::ids::PtySessionId>,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
+}
+
+/// One run of a workflow: the choreography as a kernel ledger object.
+///
+/// The RUN, not the template (S3): `template_ref` is an opaque reference to
+/// client-side data, and `step` is an open string because the act taxonomy is
+/// template data (decision 17) — the kernel asserts nothing about what the
+/// steps are called. Closed runs keep their row; the Board reads history from
+/// it and a replay rebuilds it from the log.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowRun {
+    pub id: WorkflowRunId,
+    pub version: u32,
+    /// `running` until closed; a close records the caller's outcome here.
+    pub state: String,
+    /// The current step of the choreography — template data, never a kernel
+    /// vocabulary. Absent until the first advance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub step: Option<String>,
+    /// Which client-side template this run follows. Opaque to the kernel.
+    pub template_ref: String,
+    /// The template content digest at open time, when the caller pinned one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub template_sha256: Option<String>,
+    /// The task this run advances, when it advances one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub task_id: Option<TaskId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub title: Option<String>,
+    pub opened_at: Timestamp,
+    pub updated_at: Timestamp,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub closed_at: Option<Timestamp>,
 }
 
 /// An advisory lease over a scope (worktree, file set, singleton role).
