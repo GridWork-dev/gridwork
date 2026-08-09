@@ -234,9 +234,10 @@ impl Session {
     // weakens, this method's reason to exist. That closing the master
     // side presents a disconnect to the slave side is this crate's reading
     // of the PTY pairing, not a sentence the chapter contains (its
-    // pseudo-terminal mentions — the §11.1.1 open path and the control
-    // modes — are silent on it); CAP-002 registers the mirror direction
-    // of the same pairing for the same reason. `kill()` is
+    // pseudo-terminal mentions — the §11.1.1 open path, §11.2.1's
+    // O_TTY_INIT parenthetical, and §11.2.4's two control-mode mentions —
+    // are silent on it); CAP-002 registers the mirror direction of the same
+    // pairing for the same reason. `kill()` is
     // `child.kill()`, which does not ride the hangup path.
     pub async fn kill(&mut self) -> io::Result<()> {
         self.child.kill().await

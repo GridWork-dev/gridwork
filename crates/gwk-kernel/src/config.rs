@@ -31,6 +31,8 @@ pub const BLOB_ROOT_ENV: &str = "GWK_BLOB_ROOT";
 pub const BLOB_KEK_ENV: &str = "GWK_BLOB_KEK";
 /// The nonsecret label recorded beside every blob this KEK wraps.
 pub const BLOB_KEK_ID_ENV: &str = "GWK_BLOB_KEK_ID";
+/// Full-fidelity age retained for unpinned `pty_recording` evidence blobs.
+pub const PTY_RECORDING_RETENTION_DAYS_ENV: &str = "GWK_PTY_RECORDING_RETENTION_DAYS";
 /// The key a rotation is moving TO, same encoding as [`BLOB_KEK_ENV`].
 ///
 /// Its own variable, read only by `gw admin blob rotate`, because a rotation is
@@ -38,6 +40,9 @@ pub const BLOB_KEK_ID_ENV: &str = "GWK_BLOB_KEK_ID";
 /// needs exactly one. Carrying the incoming key in the running key's variable
 /// would leave nothing able to say which of the two it was holding.
 pub const BLOB_KEK_NEXT_ENV: &str = "GWK_BLOB_KEK_NEXT";
+
+/// The recorded policy default. Evidence pins override this age indefinitely.
+pub const DEFAULT_PTY_RECORDING_RETENTION_DAYS: i32 = 30;
 
 /// The default socket path (ADR 0002: UDS only, no network listener).
 pub const DEFAULT_SOCKET_PATH: &str = "/run/gridwork/gwk.sock";
@@ -146,6 +151,7 @@ pub struct BlobConfig {
     root: PathBuf,
     kek: SecretBox<[u8; DEK_BYTES]>,
     kek_id: String,
+    pty_recording_retention_days: i32,
 }
 
 impl BlobConfig {
@@ -175,10 +181,25 @@ impl BlobConfig {
             .ok_or_else(|| KernelError::Config(format!("{BLOB_KEK_ID_ENV} is not set")))?;
         validate_kek_id(&kek_id)?;
 
+        let pty_recording_retention_days = match get(PTY_RECORDING_RETENTION_DAYS_ENV) {
+            None => DEFAULT_PTY_RECORDING_RETENTION_DAYS,
+            Some(value) => value
+                .trim()
+                .parse::<i32>()
+                .ok()
+                .filter(|days| *days > 0)
+                .ok_or_else(|| {
+                    KernelError::Config(format!(
+                        "{PTY_RECORDING_RETENTION_DAYS_ENV} must be a positive whole number of days"
+                    ))
+                })?,
+        };
+
         Ok(Self {
             root,
             kek: SecretBox::new(kek),
             kek_id,
+            pty_recording_retention_days,
         })
     }
 
@@ -206,6 +227,7 @@ impl BlobConfig {
             root,
             kek: SecretBox::new(Box::new(kek)),
             kek_id,
+            pty_recording_retention_days: DEFAULT_PTY_RECORDING_RETENTION_DAYS,
         })
     }
 
@@ -219,6 +241,10 @@ impl BlobConfig {
 
     pub fn kek_id(&self) -> &str {
         &self.kek_id
+    }
+
+    pub fn pty_recording_retention_days(&self) -> i32 {
+        self.pty_recording_retention_days
     }
 }
 
@@ -431,6 +457,10 @@ mod tests {
         assert_eq!(cfg.root(), Path::new("/var/lib/gridwork/blobs"));
         assert_eq!(cfg.kek_id(), "kek-2026-07");
         assert_eq!(cfg.kek().expose_secret(), &[7u8; DEK_BYTES]);
+        assert_eq!(
+            cfg.pty_recording_retention_days(),
+            DEFAULT_PTY_RECORDING_RETENTION_DAYS
+        );
 
         // Each variable is required on its own: a deployment missing one must
         // be told which, not handed a default that silently stores blobs it
@@ -450,6 +480,35 @@ mod tests {
         for bad_root in ["", "   ", "blobs", "./blobs", "../blobs"] {
             BlobConfig::from_lookup(lookup_owned(full(bad_root)))
                 .expect_err(&format!("{bad_root:?} must be refused"));
+        }
+    }
+
+    #[test]
+    fn the_pty_recording_retention_age_is_configurable_and_bounded() {
+        let configured = |days: &str| {
+            let days = days.to_owned();
+            BlobConfig::from_lookup(move |key| match key {
+                BLOB_ROOT_ENV => Some("/var/lib/gridwork/blobs".to_owned()),
+                BLOB_KEK_ENV => Some(kek_b64()),
+                BLOB_KEK_ID_ENV => Some("kek-2026-07".to_owned()),
+                PTY_RECORDING_RETENTION_DAYS_ENV => Some(days.clone()),
+                _ => None,
+            })
+        };
+
+        for days in ["1", "30", "365", " 45 "] {
+            let config = configured(days).unwrap_or_else(|e| panic!("{days:?}: {e}"));
+            assert_eq!(
+                config.pty_recording_retention_days(),
+                days.trim().parse::<i32>().expect("test integer")
+            );
+        }
+        for days in ["", "0", "-1", "1.5", "forever", "2147483648"] {
+            let error = configured(days).expect_err("invalid retention age must refuse");
+            assert!(
+                error.to_string().contains(PTY_RECORDING_RETENTION_DAYS_ENV),
+                "{days:?}: {error}"
+            );
         }
     }
 

@@ -70,6 +70,26 @@ async fn teardown(maintenance: &sqlx::PgPool, name: &str, root: &std::path::Path
     let _ = std::fs::remove_dir_all(root);
 }
 
+async fn insert_evidence_ref(
+    store: &gwk_kernel::PgEventStore,
+    id: &str,
+    kind: &str,
+    address: &BlobAddress,
+    age_days: i32,
+) {
+    sqlx::query(
+        "INSERT INTO gwk.evidence (id, kind, ref, digest, byte_size, created_at) \
+         VALUES ($1, $2, $3, $3, 1, now() - make_interval(days => $4))",
+    )
+    .bind(id)
+    .bind(kind)
+    .bind(address.as_str())
+    .bind(age_days)
+    .execute(store.pool())
+    .await
+    .expect("insert evidence reference");
+}
+
 #[tokio::test]
 #[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
 async fn a_blob_survives_chunked_upload_and_every_ranged_read_of_it() {
@@ -377,6 +397,67 @@ async fn sweep_reclaims_what_the_log_stopped_pointing_at() {
     assert_eq!(blobs.sweep().await.expect("sweep"), vec![held.clone()]);
     // The referenced one is never in reach of a sweep at all.
     assert!(blobs.stat(&kept).await.expect("stat").is_some());
+
+    teardown(&maintenance, &name, &root).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
+async fn recording_retention_sweep_removes_only_over_age_unpinned_recordings() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = raw_store(&maintenance, "recordingretention", 8).await;
+    let (root, blobs) = blob_store(&store, "recordingretention").await;
+
+    let current = put(&blobs, b"current recording", "application/vnd.gridwork.pty").await;
+    let expired = put(&blobs, b"expired recording", "application/vnd.gridwork.pty").await;
+    let pinned = put(&blobs, b"pinned recording", "application/vnd.gridwork.pty").await;
+    let durable_evidence = put(&blobs, b"ordinary evidence", "application/octet-stream").await;
+
+    insert_evidence_ref(&store, "ev-current", "pty_recording", &current, 29).await;
+    insert_evidence_ref(&store, "ev-expired", "pty_recording", &expired, 31).await;
+    insert_evidence_ref(&store, "ev-pinned", "pty_recording", &pinned, 36_500).await;
+    insert_evidence_ref(&store, "ev-durable", "diff", &durable_evidence, 36_500).await;
+    blobs
+        .pin(&pinned, &EvidenceId::new("ev-pinned"))
+        .await
+        .expect("pin recording as evidence");
+
+    let swept = blobs.sweep().await.expect("retention sweep");
+    assert_eq!(
+        swept,
+        vec![expired.clone()],
+        "a sweep must not keep an over-age unpinned recording or remove a current/pinned one"
+    );
+    assert!(blobs.stat(&current).await.expect("stat current").is_some());
+    assert!(blobs.stat(&pinned).await.expect("stat pinned").is_some());
+    assert!(
+        blobs
+            .stat(&durable_evidence)
+            .await
+            .expect("stat durable evidence")
+            .is_some(),
+        "the recording age cap must not expire other evidence kinds"
+    );
+    assert!(blobs.stat(&expired).await.expect("stat expired").is_none());
+    let metadata_survived: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM gwk.evidence WHERE id = 'ev-expired')")
+            .fetch_one(store.pool())
+            .await
+            .expect("read expired evidence metadata");
+    assert!(
+        metadata_survived,
+        "retention removes recording bytes, not the evidence ledger row"
+    );
+
+    blobs
+        .unpin(&pinned, &EvidenceId::new("ev-pinned"))
+        .await
+        .expect("release recording pin");
+    assert_eq!(
+        blobs.sweep().await.expect("sweep after unpin"),
+        vec![pinned.clone()],
+        "age never defeats a pin, but an old recording becomes eligible once unpinned"
+    );
 
     teardown(&maintenance, &name, &root).await;
 }

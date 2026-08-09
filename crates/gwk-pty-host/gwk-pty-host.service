@@ -71,10 +71,12 @@ RestartSec=2s
 #   * The home becomes writable (ReadWritePaths under ProtectSystem=strict)
 #     — every engine keeps its own state under it. Point it at the
 #     deployment user's real home.
-#   * PrivateDevices is gone — putting a child on a pseudo-terminal
-#     allocates from the real pty subsystem, and the private /dev this
-#     flag substitutes refuses that allocation (the spawn fails with
-#     ENOENT before any session exists).
+# Derivation: CAP-005 — on the reference deployment, a transient unit with
+# PrivateDevices=yes exposed all three PTY device paths while both
+# posix_openpt(3) and open("/dev/ptmx") failed ENOENT; the control unit was
+# clean.
+#   * PrivateDevices is gone — engine children need the PTY allocation path
+#     the captured unit refused before any session could exist.
 #
 # The engines' TUIs also consult TERM, which a service manager does not
 # set; the value here is a deployment choice for what the sessions report,
