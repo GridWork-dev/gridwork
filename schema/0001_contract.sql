@@ -675,6 +675,84 @@ CREATE TRIGGER dispatch_node_no_delete
 ALTER TABLE gwk.dispatch_node ENABLE ALWAYS TRIGGER dispatch_node_cas;
 ALTER TABLE gwk.dispatch_node ENABLE ALWAYS TRIGGER dispatch_node_no_delete;
 
+-- The durable workspace tree: workspaces, tabs, panes, and each pane's session
+-- binding. Structure ONLY — split sizes, focus, and z-order are the host's
+-- transient geometry and never reach a row here; proportions resetting on a
+-- host restart is the accepted consequence of that split, not a gap. The whole
+-- live tree returns in one query, which is the point of the table.
+--
+-- Close is a real DELETE, unlike every state-carrying sibling: the wire entity
+-- has no closed state, so a closed node simply leaves the tree. The log keeps
+-- the history and a replay rebuilds the same live tree, which is why this
+-- table carries no forbid-delete trigger. The parent FK's default NO ACTION is
+-- the backstop that a node with live children cannot leave first.
+--
+-- Cold-path note (recorded with the migration): this table is ADDITIVE — no
+-- existing projection changes shape. The contract fingerprint still moves, so
+-- a live database follows by the cold path: initialize a fresh database with
+-- the new contract and replay the event log into it (`gw admin
+-- rebuild-projections --scratch-database <name>` is the same replay, with the
+-- hash verdict as proof); nothing rewrites live rows in place.
+CREATE TABLE gwk.workspace_node (
+  id         text PRIMARY KEY,
+  version    bigint NOT NULL DEFAULT 1 CHECK (version BETWEEN 1 AND 4294967295),
+  kind       text NOT NULL CHECK (kind IN ('workspace', 'tab', 'pane')),
+  parent_id  text REFERENCES gwk.workspace_node(id),
+  session_id text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT workspace_node_session_only_on_pane
+    CHECK (kind = 'pane' OR session_id IS NULL)
+);
+
+-- Legal parentage, enforced where a single-row CHECK cannot reach: the rule
+-- reads the PARENT row's kind, so it lives in a trigger. The kernel refuses
+-- illegal parentage before the append; this guard is the backstop that keeps
+-- a foreign writer from bending the tree, not the error path.
+--
+--   workspace: a root — no parent, ever.
+--   tab:       under a workspace.
+--   pane:      under a tab, or under a pane (a split); never the other way
+--              around — a pane cannot parent a tab.
+CREATE FUNCTION gwk.assert_workspace_parentage() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+  parent_kind text;
+BEGIN
+  IF NEW.parent_id IS NULL THEN
+    IF NEW.kind <> 'workspace' THEN
+      RAISE EXCEPTION 'workspace_node %: a % must sit under a parent', NEW.id, NEW.kind;
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF NEW.kind = 'workspace' THEN
+    RAISE EXCEPTION 'workspace_node %: a workspace is a root and cannot have a parent', NEW.id;
+  END IF;
+  IF NEW.parent_id = NEW.id THEN
+    RAISE EXCEPTION 'workspace_node %: a node cannot parent itself', NEW.id;
+  END IF;
+  SELECT kind INTO parent_kind FROM gwk.workspace_node WHERE id = NEW.parent_id;
+  IF NEW.kind = 'tab' AND parent_kind <> 'workspace' THEN
+    RAISE EXCEPTION 'workspace_node %: a tab must sit under a workspace, not a %',
+      NEW.id, parent_kind;
+  END IF;
+  IF NEW.kind = 'pane' AND parent_kind NOT IN ('tab', 'pane') THEN
+    RAISE EXCEPTION 'workspace_node %: a pane must sit under a tab or a pane, not a %',
+      NEW.id, parent_kind;
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE TRIGGER workspace_node_cas
+  BEFORE UPDATE ON gwk.workspace_node
+  FOR EACH ROW EXECUTE FUNCTION gwk.assert_version_cas('workspace_node');
+CREATE TRIGGER workspace_node_parentage
+  BEFORE INSERT OR UPDATE ON gwk.workspace_node
+  FOR EACH ROW EXECUTE FUNCTION gwk.assert_workspace_parentage();
+
+ALTER TABLE gwk.workspace_node ENABLE ALWAYS TRIGGER workspace_node_cas;
+ALTER TABLE gwk.workspace_node ENABLE ALWAYS TRIGGER workspace_node_parentage;
+
 -- The orchestrator's crash-recovery snapshot, latest-per-orchestrator.
 --
 -- Distinct from `gwk-domain::checkpoint::Checkpoint`, which is the kernel's own

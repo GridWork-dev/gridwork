@@ -182,12 +182,11 @@ async fn init_applies_the_contract_is_idempotent_and_refuses_a_stranger() {
         .fetch_all(&mut conn)
         .await
         .expect("query the grant matrix");
-        assert_eq!(rows.len(), 18, "the contract schema changed shape");
+        assert_eq!(rows.len(), 19, "the contract schema changed shape");
         for row in &rows {
             let table: String = row.try_get("relname").expect("relname");
             let get = |col| -> bool { row.try_get(col).expect("bool") };
             assert!(get("sel"), "{table}: the kernel must be able to read it");
-            assert!(!get("del"), "{table}: DELETE is granted nowhere");
             assert!(!get("trunc"), "{table}: TRUNCATE is granted nowhere");
             match table.as_str() {
                 // Append-only history: writable forward, never rewritable.
@@ -197,11 +196,20 @@ async fn init_applies_the_contract_is_idempotent_and_refuses_a_stranger() {
                 "event" | "receipt" | "ingested_record" | "cost_entry" => {
                     assert!(get("ins"), "{table}: history must be appendable");
                     assert!(!get("upd"), "{table}: history must not be rewritable");
+                    assert!(!get("del"), "{table}: DELETE is granted nowhere else");
                 }
                 // The contract ships this seed; the kernel only reads it.
                 "transition" => {
                     assert!(!get("ins"), "{table}: the FSM seed must not be writable");
                     assert!(!get("upd"), "{table}: the FSM seed must not be writable");
+                    assert!(!get("del"), "{table}: DELETE is granted nowhere else");
+                }
+                // The one contract table where DELETE is real: a close removes
+                // the row because the entity has no closed state — the log is
+                // the history and a replay reproduces the same deletion.
+                "workspace_node" => {
+                    assert!(get("ins") && get("upd"), "{table}: the tree is rebuilt");
+                    assert!(get("del"), "{table}: close is a real DELETE");
                 }
                 other => {
                     assert!(
@@ -209,6 +217,7 @@ async fn init_applies_the_contract_is_idempotent_and_refuses_a_stranger() {
                         "{other}: a new table appeared with no declared grant class"
                     );
                     assert!(get("ins") && get("upd"), "{other}: projections are rebuilt");
+                    assert!(!get("del"), "{other}: DELETE is granted nowhere else");
                 }
             }
         }

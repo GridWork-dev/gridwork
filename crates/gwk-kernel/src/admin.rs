@@ -265,6 +265,12 @@ pub async fn runtime_privileges<'e>(
 /// released, and uploads expire. None of that is history — the events that
 /// REFERENCE a blob stay in the log after its bytes are gone, which is what
 /// makes a swept or shredded blob auditable at all.
+///
+/// `workspace_node` is the one CONTRACT table that joins them: a close is a
+/// real DELETE because the entity has no closed state — the row is a cache of
+/// the live tree, the `workspace_node_closed` event is the history, and a
+/// replay reproduces the same deletion. The parentage trigger and the parent
+/// FK stay ENABLE ALWAYS, so the grant widens nothing about tree legality.
 pub fn backend_script(role: &str, contract_sha256: &str) -> String {
     let migrations = BACKEND_MIGRATIONS.join("\n");
     format!(
@@ -277,6 +283,7 @@ pub fn backend_script(role: &str, contract_sha256: &str) -> String {
          REVOKE UPDATE ON gwk.event, gwk.receipt, gwk.ingested_record, \
            gwk.cost_entry FROM {role};\n\
          REVOKE INSERT, UPDATE ON gwk.transition FROM {role};\n\
+         GRANT DELETE ON gwk.workspace_node TO {role};\n\
          GRANT SELECT ON gwk_internal.schema_fingerprint TO {role};\n\
          GRANT SELECT, UPDATE ON gwk_internal.writer TO {role};\n\
          GRANT SELECT, INSERT, UPDATE, DELETE ON \
@@ -429,18 +436,33 @@ mod tests {
         assert!(script.contains("REVOKE INSERT, UPDATE ON gwk.transition"));
         assert!(!script.contains("TRUNCATE"), "{script}");
 
-        // Deletion is granted on the blob tables and NOWHERE else. The check is
-        // spelled as "every granted object is one of these three" rather than
-        // "the blob grant is present", because the second passes just as
-        // happily while a fourth line hands out DELETE on the log.
+        // Deletion is granted on the blob tables and on gwk.workspace_node —
+        // NOWHERE else. The check is spelled as "every DELETE-granting line is
+        // one of the two known lines" rather than "the known grants are
+        // present", because the second passes just as happily while a third
+        // line hands out DELETE on the log. workspace_node earns its place:
+        // close is a real DELETE of a live-tree cache row whose history is the
+        // event log (see `backend_script`'s doc).
         let granted: Vec<&str> = script
             .lines()
             .filter(|line| line.starts_with("GRANT") && line.contains("DELETE"))
             .collect();
-        assert_eq!(granted.len(), 1, "{script}");
+        assert_eq!(granted.len(), 2, "{script}");
+        let workspace = granted
+            .iter()
+            .find(|line| line.contains("gwk.workspace_node"))
+            .expect("the workspace_node DELETE grant");
+        assert!(
+            workspace.starts_with("GRANT DELETE ON gwk.workspace_node TO "),
+            "{workspace}"
+        );
+        let blob = granted
+            .iter()
+            .find(|line| line.contains("gwk_internal.blob"))
+            .expect("the blob DELETE grant");
         for object in ["gwk_internal.blob", "gwk_internal.blob_pin"] {
-            assert!(granted[0].contains(object), "{}", granted[0]);
+            assert!(blob.contains(object), "{blob}");
         }
-        assert!(!granted[0].contains(" gwk."), "{}", granted[0]);
+        assert!(!blob.contains(" gwk."), "{blob}");
     }
 }
