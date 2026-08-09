@@ -31,9 +31,12 @@
 //!
 //! The multiplexer work — panes, layout, detach/reattach routing — lands under
 //! `src/workspace`, which is under the clean-room gate (`CLEANROOM.md` rule 2,
-//! `.github/cleanroom-paths.txt`). Nothing in that module exists yet. The rest
-//! of this crate is lens code and is deliberately outside the gate: the gate
-//! follows the risk, not the directory tree.
+//! `.github/cleanroom-paths.txt`). Its structural floor is in place: the
+//! workspace/tab/split-pane model with create/navigate/resize/close, its
+//! geometry solver, and the furniture painting that consumes [`chrome`]. The
+//! wire half — session content in panes, detach/reattach routing — is not
+//! built yet. The rest of this crate is lens code and is deliberately outside
+//! the gate: the gate follows the risk, not the directory tree.
 //!
 //! [`chrome`] is the demonstration of that sentence. It themes the workspace's
 //! own furniture and is named for it, and it still sits **outside** the gated
@@ -56,3 +59,4 @@ pub mod replay;
 pub mod runtime;
 pub mod seven_act;
 pub mod theme;
+pub mod workspace;
