@@ -195,6 +195,9 @@ pub struct District {
     pub id: DistrictId,
     pub label: String,
     pub stations: Vec<Station>,
+    /// Terminal-state agents older than the caller's aging boundary, collapsed
+    /// out of the agent slots into one heading count.
+    pub aged_done: usize,
     pub changed_seq: Seq,
 }
 
@@ -290,6 +293,12 @@ pub struct MotionFrame<'a> {
     pub inputs: &'a [MotionInput],
 }
 
+/// Motion inputs plus caller-owned page cursors for one rendered frame.
+pub struct PagedMotionFrame<'a> {
+    pub pages: &'a PagingState,
+    pub motion: MotionFrame<'a>,
+}
+
 /// The literal density rung selected for the frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DensityRung {
@@ -297,6 +306,7 @@ pub enum DensityRung {
     Baseline,
     GutterShrink,
     DistrictCollapse,
+    PairShrink,
     Paging,
 }
 
@@ -308,11 +318,45 @@ pub struct DensityPlan {
     pub paging: usize,
 }
 
+/// Caller-owned page cursors. Each district cycles its agents independently.
+/// The district cursor rotates every visible district so even an urgent set
+/// taller than the viewport remains reachable; page zero stays attention-first.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PagingState {
+    district_page: usize,
+    agent_pages: BTreeMap<DistrictId, usize>,
+}
+
+impl PagingState {
+    pub fn next(&mut self, district: &DistrictId) {
+        let page = self.agent_pages.entry(district.clone()).or_default();
+        *page = page.saturating_add(1);
+    }
+
+    pub fn previous(&mut self, district: &DistrictId) {
+        let page = self.agent_pages.entry(district.clone()).or_default();
+        *page = page.saturating_sub(1);
+    }
+
+    pub fn next_district(&mut self) {
+        self.district_page = self.district_page.saturating_add(1);
+    }
+
+    pub fn previous_district(&mut self) {
+        self.district_page = self.district_page.saturating_sub(1);
+    }
+
+    fn agent_page(&self, district: &DistrictId) -> usize {
+        self.agent_pages.get(district).copied().unwrap_or_default()
+    }
+}
+
 fn active(district: &District) -> bool {
-    district
-        .stations
-        .iter()
-        .any(|station| !station.agents.is_empty())
+    district.aged_done > 0
+        || district
+            .stations
+            .iter()
+            .any(|station| !station.agents.is_empty())
 }
 
 fn unresolved_districts(input: &FrameInput) -> BTreeSet<&str> {
@@ -430,17 +474,20 @@ fn safe_width(text: &str, budget: u16) -> u16 {
     u16::try_from(UnicodeWidthStr::width(safe.as_ref())).unwrap_or(u16::MAX)
 }
 
-fn agent_slot_width(agent: &Agent, budget: u16) -> u16 {
+fn agent_slot_width(agent: &Agent, budget: u16, pair_width: u16) -> u16 {
+    if pair_width == 1 {
+        return 1;
+    }
     agent.duration.as_deref().map_or(2, |duration| {
         3u16.saturating_add(safe_width(duration, budget.saturating_sub(3)))
     })
 }
 
-fn agent_row_width(station: &Station, gutter: u16, budget: u16) -> u16 {
+fn agent_row_width(station: &Station, gutter: u16, pair_width: u16, budget: u16) -> u16 {
     let agents = ordered_agents(station);
     let slots = agents
         .iter()
-        .map(|agent| agent_slot_width(agent, budget))
+        .map(|agent| agent_slot_width(agent, budget, pair_width))
         .fold(0u16, u16::saturating_add);
     slots.saturating_add(
         u16::try_from(agents.len().saturating_sub(1))
@@ -449,8 +496,8 @@ fn agent_row_width(station: &Station, gutter: u16, budget: u16) -> u16 {
     )
 }
 
-fn station_width(station: &Station, gutter: u16, budget: u16) -> u16 {
-    safe_width(&station.label, budget).max(agent_row_width(station, gutter, budget))
+fn station_width(station: &Station, gutter: u16, pair_width: u16, budget: u16) -> u16 {
+    safe_width(&station.label, budget).max(agent_row_width(station, gutter, pair_width, budget))
 }
 
 fn collapsed_text(district: &District, budget: u16) -> String {
@@ -467,7 +514,20 @@ fn collapsed_text(district: &District, budget: u16) -> String {
 
 fn district_heading(district: &District, input: &FrameInput, budget: u16) -> String {
     let attention = unresolved_attention_count(input, &district.id);
-    attention_text(&district.label, attention, budget)
+    if district.aged_done == 0 {
+        return attention_text(&district.label, attention, budget);
+    }
+    let suffix = format!(" +{} done", district.aged_done);
+    let suffix_width = safe_width(&suffix, budget);
+    if suffix_width >= budget {
+        return attention_text(&district.label, attention, budget);
+    }
+    let head = attention_text(
+        &district.label,
+        attention,
+        budget.saturating_sub(suffix_width),
+    );
+    format!("{head}{suffix}")
 }
 
 fn attention_text(label: &str, attention: usize, budget: u16) -> String {
@@ -491,6 +551,7 @@ fn district_width(
     district: &District,
     input: &FrameInput,
     gutter: u16,
+    pair_width: u16,
     collapsed: bool,
     budget: u16,
 ) -> u16 {
@@ -500,7 +561,7 @@ fn district_width(
     let stations = ordered_stations(district);
     let station_widths = stations
         .iter()
-        .map(|station| station_width(station, gutter, budget))
+        .map(|station| station_width(station, gutter, pair_width, budget))
         .fold(0u16, u16::saturating_add);
     let heading_budget = if unresolved_attention_count(input, &district.id) == 0 {
         budget
@@ -525,6 +586,7 @@ fn fits(
     input: &FrameInput,
     districts: &[&District],
     gutter: u16,
+    pair_width: u16,
     collapsed: &BTreeSet<String>,
 ) -> bool {
     if area.width == 0 || area.height == 0 {
@@ -544,6 +606,7 @@ fn fits(
                 district,
                 input,
                 gutter,
+                pair_width,
                 collapsed.contains(district.id.as_str()),
                 measure_budget,
             ) <= area.width
@@ -555,6 +618,7 @@ fn paging_count(
     input: &FrameInput,
     districts: &[&District],
     gutter: u16,
+    pair_width: u16,
     collapsed: &BTreeSet<String>,
 ) -> usize {
     let mut used_height = 0u16;
@@ -567,8 +631,14 @@ fn paging_count(
         } else {
             EXPANDED_DISTRICT_HEIGHT
         };
-        let fits_width =
-            district_width(district, input, gutter, is_collapsed, measure_budget) <= area.width;
+        let fits_width = district_width(
+            district,
+            input,
+            gutter,
+            pair_width,
+            is_collapsed,
+            measure_budget,
+        ) <= area.width;
         let fits_height = used_height.saturating_add(height) <= area.height;
         if !fits_width || !fits_height {
             break;
@@ -579,7 +649,8 @@ fn paging_count(
     districts.len().saturating_sub(visible).max(1)
 }
 
-/// Walk the fixed density ladder: baseline, gutter shrink, then collapses.
+/// Walk the fixed density ladder: baseline, gutter shrink, collapses, one-cell
+/// expression glyphs, then paging.
 pub fn solve_density(area: Rect, input: &FrameInput) -> DensityPlan {
     let districts = ordered_visible_districts(input);
     if districts.is_empty() {
@@ -591,14 +662,14 @@ pub fn solve_density(area: Rect, input: &FrameInput) -> DensityPlan {
     }
 
     let mut collapsed = BTreeSet::new();
-    if fits(area, input, &districts, 1, &collapsed) {
+    if fits(area, input, &districts, 1, 2, &collapsed) {
         return DensityPlan {
             rung: DensityRung::Baseline,
             collapsed: Vec::new(),
             paging: 0,
         };
     }
-    if fits(area, input, &districts, 0, &collapsed) {
+    if fits(area, input, &districts, 0, 2, &collapsed) {
         return DensityPlan {
             rung: DensityRung::GutterShrink,
             collapsed: Vec::new(),
@@ -609,7 +680,7 @@ pub fn solve_density(area: Rect, input: &FrameInput) -> DensityPlan {
     let candidates = collapse_order(input);
     for candidate in &candidates {
         collapsed.insert(candidate.as_str().to_owned());
-        if fits(area, input, &districts, 0, &collapsed) {
+        if fits(area, input, &districts, 0, 2, &collapsed) {
             return DensityPlan {
                 rung: DensityRung::DistrictCollapse,
                 collapsed: candidates
@@ -623,10 +694,18 @@ pub fn solve_density(area: Rect, input: &FrameInput) -> DensityPlan {
         }
     }
 
+    if fits(area, input, &districts, 0, 1, &collapsed) {
+        return DensityPlan {
+            rung: DensityRung::PairShrink,
+            collapsed: candidates,
+            paging: 0,
+        };
+    }
+
     DensityPlan {
         rung: DensityRung::Paging,
         collapsed: candidates,
-        paging: paging_count(area, input, &districts, 0, &collapsed),
+        paging: paging_count(area, input, &districts, 0, 1, &collapsed),
     }
 }
 
@@ -895,12 +974,19 @@ fn agent_expression_area(
     hits: &HitMap<HallTarget>,
 ) -> Option<Rect> {
     let pair = *regions.get(id)?;
-    if pair.width != 2 || pair.height != 1 {
+    if !matches!(pair.width, 1 | 2) || pair.height != 1 {
         return None;
     }
     let owns_pair = (pair.x..pair.right())
         .all(|x| matches!(hits.hit(x, pair.y), Some(HallTarget::Agent(owner)) if owner == id));
-    owns_pair.then(|| Rect::new(pair.x.saturating_add(1), pair.y, 1, 1))
+    owns_pair.then(|| {
+        Rect::new(
+            pair.x.saturating_add(pair.width.saturating_sub(1)),
+            pair.y,
+            1,
+            1,
+        )
+    })
 }
 
 fn tick_mark(frame: &FrameInput, id: &AgentId) -> &'static Mark {
@@ -921,6 +1007,14 @@ struct CanvasText {
     text: String,
     style: Style,
     agent_pair: bool,
+}
+
+#[derive(Clone, Copy)]
+struct PaintContext<'a> {
+    tier: ColorTier,
+    glyphs: GlyphSet,
+    pages: &'a PagingState,
+    transforms: &'a [PulseTransform],
 }
 
 fn intersect_rect(left: Rect, right: Rect) -> Option<Rect> {
@@ -1063,6 +1157,225 @@ fn bounded(text: &str, budget: u16) -> String {
     theme::safe_text(text, usize::from(budget)).into_owned()
 }
 
+fn attention_rank(state: AgentState) -> u8 {
+    match state {
+        AgentState::NeedsAttention => 0,
+        AgentState::Blocked => 1,
+        AgentState::Failed => 2,
+        AgentState::Running | AgentState::Canceling => 3,
+        AgentState::Queued | AgentState::Starting => 4,
+        AgentState::Idle | AgentState::Unknown => 5,
+        AgentState::Done | AgentState::Canceled => 6,
+    }
+}
+
+struct AgentPage<'a> {
+    agents: Vec<&'a Agent>,
+    hidden: usize,
+    current: usize,
+    count: usize,
+}
+
+fn agent_page<'a>(district: &'a District, width: u16, requested: usize) -> AgentPage<'a> {
+    let mut agents: Vec<&Agent> = district
+        .stations
+        .iter()
+        .flat_map(|station| &station.agents)
+        .collect();
+    agents.sort_by(|left, right| {
+        attention_rank(left.state)
+            .cmp(&attention_rank(right.state))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let total = agents.len();
+    if total <= usize::from(width) {
+        return AgentPage {
+            agents,
+            hidden: 0,
+            current: 0,
+            count: 1,
+        };
+    }
+
+    let pinned = agents
+        .iter()
+        .take_while(|agent| agent.state == AgentState::NeedsAttention)
+        .copied()
+        .collect::<Vec<_>>();
+    let width = usize::from(width);
+    let suffix_width = format!(" +{total}").len().min(width);
+    let capacity = width.saturating_sub(suffix_width).max(1);
+    if pinned.len() >= capacity {
+        let count = total.div_ceil(capacity).max(1);
+        let current = requested % count;
+        let start = current.saturating_mul(capacity);
+        let visible = agents
+            .iter()
+            .skip(start)
+            .take(capacity)
+            .copied()
+            .collect::<Vec<_>>();
+        return AgentPage {
+            hidden: total.saturating_sub(visible.len()),
+            agents: visible,
+            current,
+            count,
+        };
+    }
+
+    let rest = agents[pinned.len()..].to_vec();
+    let rest_capacity = capacity.saturating_sub(pinned.len()).max(1);
+    let count = rest.len().div_ceil(rest_capacity).max(1);
+    let current = requested % count;
+    let start = current.saturating_mul(rest_capacity);
+    let mut visible = pinned;
+    visible.extend(rest.iter().skip(start).take(rest_capacity).copied());
+    AgentPage {
+        hidden: total.saturating_sub(visible.len()),
+        agents: visible,
+        current,
+        count,
+    }
+}
+
+fn paged_districts<'a>(input: &'a FrameInput, pages: &PagingState) -> Vec<&'a District> {
+    let mut districts = ordered_visible_districts(input);
+    if !districts.is_empty() {
+        let offset = pages.district_page % districts.len();
+        districts.rotate_left(offset);
+    }
+    districts
+}
+
+/// The district rectangle used by non-paged motion. Dense paging has no stable
+/// off-page geometry, so callers suppress movement there rather than guess.
+pub fn district_region(area: Rect, input: &FrameInput, district_id: &DistrictId) -> Option<Rect> {
+    let plan = solve_density(area, input);
+    if matches!(plan.rung, DensityRung::Empty | DensityRung::Paging) {
+        return None;
+    }
+    let collapsed: BTreeSet<&str> = plan.collapsed.iter().map(DistrictId::as_str).collect();
+    let mut y = 0u16;
+    for district in ordered_visible_districts(input) {
+        let height = if collapsed.contains(district.id.as_str()) {
+            1
+        } else {
+            EXPANDED_DISTRICT_HEIGHT
+        };
+        if district.id == *district_id {
+            return (y.saturating_add(height) <= area.height)
+                .then(|| Rect::new(area.x, area.y.saturating_add(y), area.width, height));
+        }
+        y = y.saturating_add(height);
+    }
+    None
+}
+
+fn render_paging_frame(
+    area: Rect,
+    buf: &mut Buffer,
+    input: &FrameInput,
+    hits: &mut HitMap<HallTarget>,
+    plan: &DensityPlan,
+    context: PaintContext<'_>,
+) -> BTreeMap<AgentId, Rect> {
+    let muted = theme::state_style(theme::binding("idle"), context.tier);
+    let collapsed: BTreeSet<&str> = plan.collapsed.iter().map(DistrictId::as_str).collect();
+    let mut text = Vec::new();
+    let mut regions = Vec::new();
+    let mut y = 0u16;
+    let mut hidden_districts = 0usize;
+    let districts = paged_districts(input, context.pages);
+    for (index, district) in districts.iter().copied().enumerate() {
+        let is_collapsed = collapsed.contains(district.id.as_str());
+        let height = if is_collapsed {
+            1
+        } else {
+            EXPANDED_DISTRICT_HEIGHT
+        };
+        if y.saturating_add(height) > area.height {
+            hidden_districts = districts.len().saturating_sub(index);
+            break;
+        }
+        if is_collapsed {
+            text.push(CanvasText {
+                x: 0,
+                y,
+                text: collapsed_text(district, area.width),
+                style: muted,
+                agent_pair: false,
+            });
+            y = y.saturating_add(1);
+            continue;
+        }
+
+        text.push(CanvasText {
+            x: 0,
+            y,
+            text: district_heading(district, input, area.width),
+            style: Style::default().add_modifier(Modifier::BOLD),
+            agent_pair: false,
+        });
+        let page = agent_page(district, area.width, context.pages.agent_page(&district.id));
+        text.push(CanvasText {
+            x: 0,
+            y: y + 1,
+            text: bounded(
+                &format!("page {}/{}", page.current.saturating_add(1), page.count),
+                area.width,
+            ),
+            style: muted,
+            agent_pair: false,
+        });
+        let mut x = 0u16;
+        for agent in page.agents {
+            let binding = theme::binding(agent.state.binding_name());
+            text.push(CanvasText {
+                x,
+                y: y + 2,
+                text: theme::glyph(expression_mark(agent.state), 0, context.glyphs).to_string(),
+                style: theme::state_style(binding, context.tier),
+                agent_pair: false,
+            });
+            regions.push((
+                Rect::new(area.x + x, area.y + y + 2, 1, 1),
+                HallTarget::Agent(agent.id.clone()),
+            ));
+            x = x.saturating_add(1);
+        }
+        if page.hidden > 0 && x < area.width {
+            text.push(CanvasText {
+                x,
+                y: y + 2,
+                text: bounded(&format!(" +{}", page.hidden), area.width.saturating_sub(x)),
+                style: muted,
+                agent_pair: false,
+            });
+        }
+        y = y.saturating_add(EXPANDED_DISTRICT_HEIGHT);
+    }
+
+    if hidden_districts > 0 {
+        let first = districts
+            .first()
+            .map(|district| district_heading(district, input, area.width))
+            .unwrap_or_default();
+        text.push(CanvasText {
+            x: 0,
+            // Headings and collapsed summaries own no hit targets. Replacing
+            // the first one names overflow without covering an agent cell.
+            y: 0,
+            text: bounded(
+                &format!("{first} +{hidden_districts} districts paging"),
+                area.width,
+            ),
+            style: theme::state_style(theme::binding("needs_attention"), context.tier),
+            agent_pair: false,
+        });
+    }
+    paint_frame(area, buf, hits, &text, &regions, context.transforms)
+}
+
 fn identity_glyph(role: Option<&str>, glyphs: GlyphSet) -> char {
     let role_mark = role.and_then(gwk_theme::marks::mark);
     if let Some(mark) = role_mark {
@@ -1092,7 +1405,43 @@ pub fn render(
     glyphs: GlyphSet,
     hits: &mut HitMap<HallTarget>,
 ) {
-    render_frame(area, buf, input, tier, glyphs, hits, &[]);
+    let pages = PagingState::default();
+    render_frame(
+        area,
+        buf,
+        input,
+        hits,
+        PaintContext {
+            tier,
+            glyphs,
+            pages: &pages,
+            transforms: &[],
+        },
+    );
+}
+
+/// Paint one frame with caller-owned page cursors and no motion.
+pub fn render_with_pages(
+    area: Rect,
+    buf: &mut Buffer,
+    input: &FrameInput,
+    tier: ColorTier,
+    glyphs: GlyphSet,
+    hits: &mut HitMap<HallTarget>,
+    pages: &PagingState,
+) {
+    render_frame(
+        area,
+        buf,
+        input,
+        hits,
+        PaintContext {
+            tier,
+            glyphs,
+            pages,
+            transforms: &[],
+        },
+    );
 }
 
 /// Paint one frame with caller-timed tachyonfx motion.
@@ -1105,10 +1454,47 @@ pub fn render_with_motion(
     hits: &mut HitMap<HallTarget>,
     motion: MotionFrame<'_>,
 ) {
+    let pages = PagingState::default();
+    render_with_motion_and_pages(
+        area,
+        buf,
+        input,
+        tier,
+        glyphs,
+        hits,
+        PagedMotionFrame {
+            pages: &pages,
+            motion,
+        },
+    );
+}
+
+/// Paint one caller-paged frame with caller-timed tachyonfx motion.
+pub fn render_with_motion_and_pages(
+    area: Rect,
+    buf: &mut Buffer,
+    input: &FrameInput,
+    tier: ColorTier,
+    glyphs: GlyphSet,
+    hits: &mut HitMap<HallTarget>,
+    paged: PagedMotionFrame<'_>,
+) {
+    let PagedMotionFrame { pages, motion } = paged;
     let active = motion.driver.active_inputs(motion.inputs);
     motion.driver.begin_frame(&active);
     let transforms = motion.driver.prepare_pulses(&active, buf, area);
-    let agent_regions = render_frame(area, buf, input, tier, glyphs, hits, &transforms);
+    let agent_regions = render_frame(
+        area,
+        buf,
+        input,
+        hits,
+        PaintContext {
+            tier,
+            glyphs,
+            pages,
+            transforms: &transforms,
+        },
+    );
     motion.driver.apply_characters(
         &active,
         input,
@@ -1126,10 +1512,8 @@ fn render_frame(
     area: Rect,
     buf: &mut Buffer,
     input: &FrameInput,
-    tier: ColorTier,
-    glyphs: GlyphSet,
     hits: &mut HitMap<HallTarget>,
-    transforms: &[PulseTransform],
+    context: PaintContext<'_>,
 ) -> BTreeMap<AgentId, Rect> {
     hits.clear();
     if area.width == 0 || area.height == 0 {
@@ -1137,7 +1521,7 @@ fn render_frame(
     }
 
     let plan = solve_density(area, input);
-    let muted = theme::state_style(theme::binding("idle"), tier);
+    let muted = theme::state_style(theme::binding("idle"), context.tier);
     let mut text = Vec::new();
     let mut regions = Vec::new();
     if plan.rung == DensityRung::Empty {
@@ -1162,30 +1546,15 @@ fn render_frame(
                 agent_pair: false,
             });
         }
-        return paint_frame(area, buf, hits, &text, &regions, transforms);
+        return paint_frame(area, buf, hits, &text, &regions, context.transforms);
     }
 
     if plan.rung == DensityRung::Paging {
-        let attention = input
-            .attention
-            .iter()
-            .filter(|attention| attention.unresolved)
-            .count();
-        text.push(CanvasText {
-            x: 0,
-            y: 0,
-            text: attention_text(
-                &format!("+{} districts need paging", plan.paging),
-                attention,
-                area.width,
-            ),
-            style: theme::state_style(theme::binding("needs_attention"), tier),
-            agent_pair: false,
-        });
-        return paint_frame(area, buf, hits, &text, &regions, transforms);
+        return render_paging_frame(area, buf, input, hits, &plan, context);
     }
 
     let gutter = u16::from(plan.rung == DensityRung::Baseline);
+    let pair_width = u16::from(plan.rung != DensityRung::PairShrink) + 1;
     let collapsed: BTreeSet<&str> = plan.collapsed.iter().map(DistrictId::as_str).collect();
     let mut y = 0u16;
     for district in ordered_visible_districts(input) {
@@ -1210,7 +1579,7 @@ fn render_frame(
         });
         let mut station_x = 0u16;
         for station in ordered_stations(district) {
-            let width = station_width(station, gutter, area.width);
+            let width = station_width(station, gutter, pair_width, area.width);
             text.push(CanvasText {
                 x: station_x,
                 y: y + 1,
@@ -1222,25 +1591,32 @@ fn render_frame(
             for agent in ordered_agents(station) {
                 let x = agent_x;
                 let binding = theme::binding(agent.state.binding_name());
-                let style = theme::state_style(binding, tier);
-                let pair = String::from_iter([
-                    identity_glyph(agent.role.as_deref(), glyphs),
-                    theme::glyph(expression_mark(agent.state), 0, glyphs),
-                ]);
+                let style = theme::state_style(binding, context.tier);
+                let pair = if pair_width == 1 {
+                    theme::glyph(expression_mark(agent.state), 0, context.glyphs).to_string()
+                } else {
+                    String::from_iter([
+                        identity_glyph(agent.role.as_deref(), context.glyphs),
+                        theme::glyph(expression_mark(agent.state), 0, context.glyphs),
+                    ])
+                };
                 text.push(CanvasText {
                     x,
                     y: y + 2,
                     text: pair,
                     style,
-                    agent_pair: true,
+                    agent_pair: pair_width == 2,
                 });
                 regions.push((
-                    Rect::new(area.x + x, area.y + y + 2, 2, 1),
+                    Rect::new(area.x + x, area.y + y + 2, pair_width, 1),
                     HallTarget::Agent(agent.id.clone()),
                 ));
-                if let Some(duration) = &agent.duration {
+                if pair_width == 2
+                    && let Some(duration) = &agent.duration
+                {
                     let duration_x = x.saturating_add(3);
-                    let duration_budget = agent_slot_width(agent, area.width).saturating_sub(3);
+                    let duration_budget =
+                        agent_slot_width(agent, area.width, pair_width).saturating_sub(3);
                     text.push(CanvasText {
                         x: duration_x,
                         y: y + 2,
@@ -1250,7 +1626,7 @@ fn render_frame(
                     });
                 }
                 agent_x = agent_x
-                    .saturating_add(agent_slot_width(agent, area.width))
+                    .saturating_add(agent_slot_width(agent, area.width, pair_width))
                     .saturating_add(gutter);
             }
             station_x = station_x
@@ -1259,5 +1635,5 @@ fn render_frame(
         }
         y = y.saturating_add(EXPANDED_DISTRICT_HEIGHT);
     }
-    paint_frame(area, buf, hits, &text, &regions, transforms)
+    paint_frame(area, buf, hits, &text, &regions, context.transforms)
 }

@@ -62,7 +62,7 @@ use ratatui::layout::{Position, Rect};
 /// The ruled default frame cadence: 33ms, not 16.
 ///
 /// Measured-good over SSH where 16ms is not, and the base rung of the adaptive
-/// ladder (16 → 33 → 66 → 125 → off) that a later task wires to `--motion`.
+/// ladder (16 → 33 → 66 → 125 → off) the production loop wires to `--motion`.
 /// Lenses take this constant rather than re-deciding the number.
 pub const TICK: Duration = Duration::from_millis(33);
 

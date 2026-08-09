@@ -4,9 +4,9 @@ use gwk_theme::tier::ColorTier;
 use gwk_tui::hall::{
     Agent, AgentId, AgentState, Attention, AttentionId, DECAY_DURATION, DensityRung, District,
     DistrictId, Focus, FrameInput, HallTarget, MotionDriver, MotionEntity, MotionFrame,
-    MotionInput, MotionKey, MotionMode, MotionVerb, PULSE_DURATION, Station, StationId, TICK_CYCLE,
-    agent_order, collapse_order, district_stack_order, render, render_with_motion, solve_density,
-    station_order, target_order,
+    MotionInput, MotionKey, MotionMode, MotionVerb, PULSE_DURATION, PagingState, Station,
+    StationId, TICK_CYCLE, agent_order, collapse_order, district_stack_order, render,
+    render_with_motion, render_with_pages, solve_density, station_order, target_order,
 };
 use gwk_tui::input::HitMap;
 use ratatui::Terminal;
@@ -56,6 +56,7 @@ fn district(id: &str, label: &str, stations: Vec<Station>, seq: u64) -> District
         id: district_id(id),
         label: label.to_owned(),
         stations,
+        aged_done: 0,
         changed_seq: Seq::new(seq),
     }
 }
@@ -189,6 +190,40 @@ fn dump_motion(
                     driver,
                     inputs: motions,
                 },
+            );
+        })
+        .expect("draw");
+    let buffer = terminal.backend().buffer().clone();
+    let mut rendered = String::new();
+    for y in 0..buffer.area.height {
+        let mut line = String::new();
+        for x in 0..buffer.area.width {
+            line.push_str(buffer[(x, y)].symbol());
+        }
+        rendered.push_str(line.trim_end());
+        rendered.push('\n');
+    }
+    (rendered, hits, buffer)
+}
+
+fn dump_pages(
+    width: u16,
+    height: u16,
+    input: &FrameInput,
+    pages: &PagingState,
+) -> (String, HitMap<HallTarget>, Buffer) {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+    let mut hits = HitMap::new();
+    terminal
+        .draw(|frame| {
+            render_with_pages(
+                frame.area(),
+                frame.buffer_mut(),
+                input,
+                ColorTier::Mono,
+                GlyphSet::Unicode,
+                &mut hits,
+                pages,
             );
         })
         .expect("draw");
@@ -478,6 +513,255 @@ fn hall_density_walk_shrinks_gutter_before_collapse() {
         solve_density(Rect::new(0, 0, 20, 1), &input).rung,
         DensityRung::DistrictCollapse
     );
+}
+
+#[test]
+fn hall_density_tail_collapses_before_pair_shrink() {
+    let input = FrameInput {
+        districts: vec![
+            district(
+                "district-a",
+                "A",
+                vec![station(
+                    "station-a",
+                    1,
+                    "s",
+                    vec![
+                        agent("agent-a", None, AgentState::Idle, 4),
+                        agent("agent-b", None, AgentState::Idle, 4),
+                        agent("agent-c", None, AgentState::Idle, 4),
+                        agent("agent-d", None, AgentState::Idle, 4),
+                    ],
+                    4,
+                )],
+                4,
+            ),
+            district(
+                "district-b",
+                "B",
+                vec![station(
+                    "station-b",
+                    1,
+                    "s",
+                    vec![agent("agent-e", None, AgentState::Idle, 1)],
+                    1,
+                )],
+                1,
+            ),
+        ],
+        focus: Some(Focus {
+            district: district_id("district-a"),
+            changed_seq: Seq::new(5),
+        }),
+        ..empty_input()
+    };
+
+    let plan = solve_density(Rect::new(0, 0, 7, 4), &input);
+    assert_eq!(plan.rung, DensityRung::PairShrink);
+    assert_eq!(plan.collapsed, vec![district_id("district-b")]);
+}
+
+#[test]
+fn hall_pair_shrink_keeps_expression_cells_as_one_cell_targets() {
+    let input = FrameInput {
+        districts: vec![district(
+            "district-a",
+            "A",
+            vec![station(
+                "station-a",
+                1,
+                "s",
+                vec![
+                    agent("agent-a", None, AgentState::Idle, 1),
+                    agent("agent-b", None, AgentState::Running, 1),
+                    agent("agent-c", None, AgentState::Failed, 1),
+                ],
+                1,
+            )],
+            1,
+        )],
+        focus: Some(Focus {
+            district: district_id("district-a"),
+            changed_seq: Seq::new(1),
+        }),
+        ..empty_input()
+    };
+
+    let (rendered, hits, _) = dump_pages(3, 3, &input, &PagingState::default());
+    assert_eq!(
+        solve_density(Rect::new(0, 0, 3, 3), &input).rung,
+        DensityRung::PairShrink
+    );
+    for (x, id) in [(0, "agent-a"), (1, "agent-b"), (2, "agent-c")] {
+        assert_eq!(
+            hits.hit(x, 2),
+            Some(&HallTarget::Agent(agent_id(id))),
+            "{rendered}"
+        );
+    }
+    assert_eq!(hits.targets().count(), 3, "{rendered}");
+}
+
+#[test]
+fn hall_per_district_paging_prioritizes_and_retains_attention() {
+    let mut agents = vec![
+        agent("agent-idle", None, AgentState::Idle, 1),
+        agent("agent-running", None, AgentState::Running, 2),
+        agent("agent-failed", None, AgentState::Failed, 3),
+        agent("agent-blocked", None, AgentState::Blocked, 4),
+        agent("agent-attention", None, AgentState::NeedsAttention, 5),
+        agent("agent-queued", None, AgentState::Queued, 6),
+        agent("agent-done", None, AgentState::Done, 7),
+        agent("agent-other", None, AgentState::Idle, 8),
+    ];
+    agents.reverse();
+    let input = FrameInput {
+        districts: vec![district(
+            "district-a",
+            "A",
+            vec![station("station-a", 1, "s", agents, 8)],
+            8,
+        )],
+        focus: Some(Focus {
+            district: district_id("district-a"),
+            changed_seq: Seq::new(8),
+        }),
+        ..empty_input()
+    };
+    assert_eq!(
+        solve_density(Rect::new(0, 0, 6, 3), &input).rung,
+        DensityRung::Paging
+    );
+
+    let mut pages = PagingState::default();
+    let (first, first_hits, _) = dump_pages(6, 3, &input, &pages);
+    let attention = HallTarget::Agent(agent_id("agent-attention"));
+    assert!(
+        first_hits.targets().any(|target| target == &attention),
+        "attention was paged out:\n{first}"
+    );
+    assert!(first.contains('+'), "paging count absent:\n{first}");
+    let first_targets: Vec<_> = first_hits.targets().cloned().collect();
+
+    pages.next(&district_id("district-a"));
+    let (second, second_hits, _) = dump_pages(6, 3, &input, &pages);
+    assert!(
+        second_hits.targets().any(|target| target == &attention),
+        "attention was paged out after cycling:\n{second}"
+    );
+    assert_ne!(
+        first_targets,
+        second_hits.targets().cloned().collect::<Vec<_>>(),
+        "the per-district page key did not change the page"
+    );
+}
+
+#[test]
+fn hall_attention_agent_overflow_remains_reachable() {
+    let agents = (0..5)
+        .map(|index| {
+            agent(
+                &format!("agent-attention-{index}"),
+                None,
+                AgentState::NeedsAttention,
+                index + 1,
+            )
+        })
+        .collect();
+    let input = FrameInput {
+        districts: vec![district(
+            "district-a",
+            "A",
+            vec![station("station-a", 1, "s", agents, 5)],
+            5,
+        )],
+        focus: Some(Focus {
+            district: district_id("district-a"),
+            changed_seq: Seq::new(5),
+        }),
+        ..empty_input()
+    };
+    let mut pages = PagingState::default();
+    let mut reached = Vec::new();
+    for _ in 0..5 {
+        let (_, hits, _) = dump_pages(3, 3, &input, &pages);
+        for target in hits.targets() {
+            if !reached.contains(target) {
+                reached.push(target.clone());
+            }
+        }
+        pages.next(&district_id("district-a"));
+    }
+    assert_eq!(reached.len(), 5, "an urgent agent was trapped off-page");
+}
+
+#[test]
+fn hall_attention_district_overflow_rotates_every_district() {
+    let mut input = FrameInput {
+        districts: (0..3)
+            .map(|index| {
+                district(
+                    &format!("district-{index}"),
+                    &format!("Project {index}"),
+                    vec![station(
+                        &format!("station-{index}"),
+                        1,
+                        "s",
+                        vec![agent(
+                            &format!("agent-{index}"),
+                            None,
+                            AgentState::NeedsAttention,
+                            index + 1,
+                        )],
+                        index + 1,
+                    )],
+                    index + 1,
+                )
+            })
+            .collect(),
+        ..empty_input()
+    };
+    input.attention = (0..3)
+        .map(|index| Attention {
+            id: attention_id(&format!("attention-{index}")),
+            district: district_id(&format!("district-{index}")),
+            unresolved: true,
+            changed_seq: Seq::new(index + 1),
+        })
+        .collect();
+
+    let mut pages = PagingState::default();
+    let mut reached = Vec::new();
+    for _ in 0..3 {
+        let (rendered, hits, _) = dump_pages(40, 3, &input, &pages);
+        assert!(rendered.contains("districts paging"), "{rendered}");
+        for target in hits.targets() {
+            if !reached.contains(target) {
+                reached.push(target.clone());
+            }
+        }
+        pages.next_district();
+    }
+    assert_eq!(reached.len(), 3, "an urgent district was trapped off-page");
+}
+
+#[test]
+fn hall_paging_summary_never_covers_an_active_hit() {
+    let mut input = representative_input();
+    input.focus = Some(Focus {
+        district: district_id("district-build"),
+        changed_seq: Seq::new(9),
+    });
+    let (rendered, hits, buffer) = dump_pages(28, 3, &input, &PagingState::default());
+    assert!(rendered.contains("paging"), "{rendered}");
+    for y in 0..3 {
+        for x in 0..28 {
+            if hits.hit(x, y).is_some() {
+                assert_ne!(buffer[(x, y)].symbol(), " ", "invisible hit at {x},{y}");
+                assert_ne!(y, 0, "summary row retained a hit at {x},{y}");
+            }
+        }
+    }
 }
 
 #[test]
@@ -1254,4 +1538,37 @@ fn hall_same_entity_and_sequence_replaces_the_one_shot() {
         "⠋",
         "the replaced completed decay must never touch the frame"
     );
+}
+
+#[test]
+fn aged_done_rides_the_district_heading_as_a_count() {
+    let mut input = representative_input();
+    input.districts[1].aged_done = 58;
+    let (frame, _, _) = dump_frame(60, 14, &input);
+    assert!(
+        frame.contains("Research +58 done"),
+        "heading carries the aged count:\n{frame}"
+    );
+    assert!(!frame.contains("Build +"), "{frame}");
+}
+
+#[test]
+fn a_district_of_only_aged_agents_stays_visible_with_its_count() {
+    let input = FrameInput {
+        districts: vec![District {
+            aged_done: 3,
+            ..district(
+                "district-quiet",
+                "Quiet",
+                vec![station("station-code", 1, "code", Vec::new(), 4)],
+                4,
+            )
+        }],
+        focus: None,
+        attention: Vec::new(),
+        watermark: Some(Seq::new(9)),
+    };
+    let (frame, _, _) = dump_frame(40, 8, &input);
+    assert!(frame.contains("Quiet +3 done"), "{frame}");
+    assert!(!frame.contains("No active work yet"), "{frame}");
 }
