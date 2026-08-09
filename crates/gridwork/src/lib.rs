@@ -438,6 +438,7 @@ async fn load_board_state_once(
     let mut state = BoardState {
         view,
         tasks: Vec::new(),
+        runs: Vec::new(),
         attempts: Vec::new(),
         nodes: Vec::new(),
         messages: Vec::new(),
