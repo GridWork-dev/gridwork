@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! for k in task attempt dispatch_node message engine_session worktree \
-//!          lease cost_entry ingested_record; do
+//!          lease cost_entry ingested_record receipt; do
 //!   gw projection list $k --limit 256
 //! done | jq -s . | cargo run -p gwk-tui --example board-live
 //! ```
@@ -33,7 +33,7 @@ use ratatui::layout::Rect;
 
 const MAX_INPUT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_DIAGNOSTIC_CELLS: usize = 512;
-const MAX_RECORDS: usize = 9 * 256;
+const MAX_RECORDS: usize = 10 * 256;
 
 fn diagnostic(why: &str) -> String {
     safe_text(why, MAX_DIAGNOSTIC_CELLS).into_owned()
@@ -66,6 +66,7 @@ fn empty_state() -> BoardState {
         leases: Vec::new(),
         costs: Vec::new(),
         ingested: Vec::new(),
+        receipts: Vec::new(),
         // A bounded smoke run over whatever the caller piped in is a prefix
         // by construction. Claiming otherwise would turn the cost panel's
         // floors into totals it has no standing to assert.
@@ -99,6 +100,7 @@ fn add_record(
         ProjectionRecord::IngestedRecord { ingested_record } => {
             state.ingested.push(ingested_record);
         }
+        ProjectionRecord::Receipt { receipt } => state.receipts.push(receipt),
         _ => {}
     }
     Ok(())
@@ -251,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    fn projection_records_are_bounded_to_the_documented_nine_pages() {
+    fn projection_records_are_bounded_to_the_documented_ten_pages() {
         let records = vec![task_record("t-1"); MAX_RECORDS + 1];
         let error = load_state(serde_json::Value::Array(records)).expect_err("too many records");
         assert!(error.contains("record smoke-run limit"));

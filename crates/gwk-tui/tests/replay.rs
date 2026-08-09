@@ -48,6 +48,7 @@ fn replay_state(timeline: ReplayTimeline) -> BoardState {
         leases: Vec::new(),
         costs: Vec::new(),
         ingested: Vec::new(),
+        receipts: Vec::new(),
         complete: true,
         watermark: None,
     }
@@ -228,8 +229,9 @@ fn replay_board_navigation_cycles_views_and_walks_frames_in_recorded_order() {
     assert_eq!(BoardView::Flow.next(), BoardView::Replay);
     assert_eq!(BoardView::Replay.next(), BoardView::Fleet);
     assert_eq!(BoardView::Fleet.next(), BoardView::CostHealth);
-    assert_eq!(BoardView::CostHealth.next(), BoardView::Dag);
-    assert_eq!(BoardView::Dag.previous(), BoardView::CostHealth);
+    assert_eq!(BoardView::CostHealth.next(), BoardView::Audit);
+    assert_eq!(BoardView::Audit.next(), BoardView::Dag);
+    assert_eq!(BoardView::Dag.previous(), BoardView::Audit);
 
     let bytes = recording([
         (40, 0, Frame::Output(b"one".to_vec())),

@@ -169,6 +169,32 @@ async fn execute(verb: Verb, pretty: bool) -> Result<(), Failure> {
             Ok(())
         }
 
+        // The three quieting acts. Each is idempotent last-write-wins in the
+        // kernel and carries no expected version, so the key is the act and
+        // its subject: a retried ack is the SAME ack, which is what a retry
+        // should mean here.
+        Verb::AttentionAck { id } => {
+            let command = KernelCommand::AckAttention {
+                attention_item_id: AttentionItemId::new(id.clone()),
+            };
+            submit(&command, &format!("ack_attention:{id}"), pretty).await
+        }
+        Verb::AttentionMute { id, until } => {
+            let command = KernelCommand::MuteAttention {
+                attention_item_id: AttentionItemId::new(id.clone()),
+                muted_until: Timestamp::new(until.clone()),
+            };
+            // The deadline is part of the act: re-muting the same item to a
+            // NEW instant is a second, legitimate mute, and keying on the id
+            // alone would make the kernel treat it as the first one replayed.
+            submit(&command, &format!("mute_attention:{id}:{until}"), pretty).await
+        }
+        Verb::AttentionUnmute { id } => {
+            let command = KernelCommand::UnmuteAttention {
+                attention_item_id: AttentionItemId::new(id.clone()),
+            };
+            submit(&command, &format!("unmute_attention:{id}"), pretty).await
+        }
         Verb::AttentionResolve { id, resolution } => {
             let command = KernelCommand::ResolveAttention {
                 attention_item_id: AttentionItemId::new(id.clone()),
