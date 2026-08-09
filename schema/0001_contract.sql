@@ -783,9 +783,16 @@ CREATE TRIGGER workflow_run_cas
 CREATE TRIGGER workflow_run_no_delete
   BEFORE DELETE ON gwk.workflow_run
   FOR EACH ROW EXECUTE FUNCTION gwk.forbid_state_row_delete('workflow_run');
+-- Statement-level TRUNCATE partner, as on gwk.task: row triggers never fire
+-- on TRUNCATE, and a truncated ledger is the walk-around the delete guard
+-- exists to stop.
+CREATE TRIGGER workflow_run_no_truncate
+  BEFORE TRUNCATE ON gwk.workflow_run
+  FOR EACH STATEMENT EXECUTE FUNCTION gwk.forbid_state_row_delete('workflow_run');
 
 ALTER TABLE gwk.workflow_run ENABLE ALWAYS TRIGGER workflow_run_cas;
 ALTER TABLE gwk.workflow_run ENABLE ALWAYS TRIGGER workflow_run_no_delete;
+ALTER TABLE gwk.workflow_run ENABLE ALWAYS TRIGGER workflow_run_no_truncate;
 
 -- The orchestrator's crash-recovery snapshot, latest-per-orchestrator.
 --
