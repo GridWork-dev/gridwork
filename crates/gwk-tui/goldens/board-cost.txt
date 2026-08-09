@@ -1,0 +1,24 @@
+ unknown -- 2 facts not in the log
+   currency: tokens only on 1 of 2 entries -- the ledger never converts
+   health: no records -- ingestion is operator-driven, no producer
+ cost  2 entries  1.240000 USD total over 1 of 2 priced  1 estimated
+ by engine
+   claude  sonnet  1 entry                                  1.240000 USD
+   codex  model unreported  1 entry                     no cost reported
+ tokens
+   input 1800 total over 2 of 2 entries
+   output 240 total over 2 of 2 entries
+   cached input not reported
+   cache write not reported
+   reasoning not reported
+ entries
+   09:52  codex  no cost reported                                  ce-02
+   09:41  claude  1.240000 USD estimated                           ce-01
+ ingestion
+   health 0 records
+   session 1 record  newest 2026-08-06T09:51:00Z
+     2026-08-06T09:51:00Z  seq 88                ingest:system:session-1
+
+
+
+BOARD  dag flow replay fleet [cost]  0 running  as-of 407

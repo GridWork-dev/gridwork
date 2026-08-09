@@ -1,7 +1,8 @@
-//! Render both Board views from real kernel pages — the task's smoke run.
+//! Render every Board view from real kernel pages — the task's smoke run.
 //!
 //! ```text
-//! for k in task attempt dispatch_node message; do
+//! for k in task attempt dispatch_node message engine_session worktree \
+//!          lease cost_entry ingested_record; do
 //!   gw projection list $k --limit 256
 //! done | jq -s . | cargo run -p gwk-tui --example board-live
 //! ```
@@ -10,6 +11,11 @@
 //! `{"records": [...], ...}`); a bare array of tagged records also works.
 //! Every record decodes through the contract's `ProjectionRecord` — this is
 //! wire data walking the same door the console will use, not a fixture.
+//!
+//! The smoke run reads a bounded prefix and says so: it never claims the
+//! read reached the end of a projection, so `BoardState::complete` stays
+//! `false` and every folded figure the cost panel prints is a floor. A
+//! caller that genuinely paged to exhaustion is the one entitled to set it.
 
 use std::io::Read;
 use std::process::ExitCode;
@@ -27,7 +33,7 @@ use ratatui::layout::Rect;
 
 const MAX_INPUT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_DIAGNOSTIC_CELLS: usize = 512;
-const MAX_RECORDS: usize = 4 * 256;
+const MAX_RECORDS: usize = 9 * 256;
 
 fn diagnostic(why: &str) -> String {
     safe_text(why, MAX_DIAGNOSTIC_CELLS).into_owned()
@@ -55,6 +61,15 @@ fn empty_state() -> BoardState {
         nodes: Vec::new(),
         messages: Vec::new(),
         replay: ReplayTimeline::empty(),
+        sessions: Vec::new(),
+        worktrees: Vec::new(),
+        leases: Vec::new(),
+        costs: Vec::new(),
+        ingested: Vec::new(),
+        // A bounded smoke run over whatever the caller piped in is a prefix
+        // by construction. Claiming otherwise would turn the cost panel's
+        // floors into totals it has no standing to assert.
+        complete: false,
         watermark: None,
     }
 }
@@ -77,6 +92,13 @@ fn add_record(
         ProjectionRecord::Attempt { attempt } => state.attempts.push(attempt),
         ProjectionRecord::DispatchNode { dispatch_node } => state.nodes.push(dispatch_node),
         ProjectionRecord::Message { message } => state.messages.push(message),
+        ProjectionRecord::EngineSession { engine_session } => state.sessions.push(engine_session),
+        ProjectionRecord::Worktree { worktree } => state.worktrees.push(worktree),
+        ProjectionRecord::Lease { lease } => state.leases.push(lease),
+        ProjectionRecord::CostEntry { cost_entry } => state.costs.push(cost_entry),
+        ProjectionRecord::IngestedRecord { ingested_record } => {
+            state.ingested.push(ingested_record);
+        }
         _ => {}
     }
     Ok(())
@@ -136,7 +158,7 @@ fn main() -> ExitCode {
     };
 
     let area = Rect::new(0, 0, 100, 30);
-    for view in [BoardView::Dag, BoardView::Flow, BoardView::Replay] {
+    for view in BoardView::ALL {
         state.view = view;
         let mut buf = Buffer::empty(area);
         let mut hits: HitMap<gwk_tui::board::BoardTarget> = HitMap::new();
@@ -229,7 +251,7 @@ mod tests {
     }
 
     #[test]
-    fn projection_records_are_bounded_to_the_documented_four_pages() {
+    fn projection_records_are_bounded_to_the_documented_nine_pages() {
         let records = vec![task_record("t-1"); MAX_RECORDS + 1];
         let error = load_state(serde_json::Value::Array(records)).expect_err("too many records");
         assert!(error.contains("record smoke-run limit"));
