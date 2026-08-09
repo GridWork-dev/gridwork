@@ -1,8 +1,8 @@
 //! Render every Board view from real kernel pages — the task's smoke run.
 //!
 //! ```text
-//! for k in task attempt dispatch_node message engine_session worktree \
-//!          lease cost_entry ingested_record receipt; do
+//! for k in task attempt attention_item dispatch_node message engine_session \
+//!          worktree lease cost_entry ingested_record receipt; do
 //!   gw projection list $k --limit 256
 //! done | jq -s . | cargo run -p gwk-tui --example board-live
 //! ```
@@ -33,7 +33,7 @@ use ratatui::layout::Rect;
 
 const MAX_INPUT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_DIAGNOSTIC_CELLS: usize = 512;
-const MAX_RECORDS: usize = 10 * 256;
+const MAX_RECORDS: usize = 11 * 256;
 
 fn diagnostic(why: &str) -> String {
     safe_text(why, MAX_DIAGNOSTIC_CELLS).into_owned()
@@ -60,6 +60,7 @@ fn empty_state() -> BoardState {
         attempts: Vec::new(),
         nodes: Vec::new(),
         messages: Vec::new(),
+        attention: Vec::new(),
         replay: ReplayTimeline::empty(),
         sessions: Vec::new(),
         worktrees: Vec::new(),
@@ -93,6 +94,7 @@ fn add_record(
         ProjectionRecord::Attempt { attempt } => state.attempts.push(attempt),
         ProjectionRecord::DispatchNode { dispatch_node } => state.nodes.push(dispatch_node),
         ProjectionRecord::Message { message } => state.messages.push(message),
+        ProjectionRecord::AttentionItem { attention_item } => state.attention.push(attention_item),
         ProjectionRecord::EngineSession { engine_session } => state.sessions.push(engine_session),
         ProjectionRecord::Worktree { worktree } => state.worktrees.push(worktree),
         ProjectionRecord::Lease { lease } => state.leases.push(lease),
@@ -253,7 +255,7 @@ mod tests {
     }
 
     #[test]
-    fn projection_records_are_bounded_to_the_documented_ten_pages() {
+    fn projection_records_are_bounded_to_the_documented_eleven_pages() {
         let records = vec![task_record("t-1"); MAX_RECORDS + 1];
         let error = load_state(serde_json::Value::Array(records)).expect_err("too many records");
         assert!(error.contains("record smoke-run limit"));

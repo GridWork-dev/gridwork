@@ -126,6 +126,11 @@ pub enum Verb {
         cursor: Option<Seq>,
     },
 
+    /// A coherent fold over the projections that describe current work.
+    EstateOverview,
+    /// The newest projection facts and the work those same pages leave owed.
+    ActivityBrief,
+
     Tui {
         motion: MotionMode,
     },
@@ -208,6 +213,8 @@ gw — the GridWork kernel's command line
   gw projection list <type> [--cursor <key>] [--limit <n>]
   gw event read [--cursor <seq>] [--limit <n>]
   gw event follow [--cursor <seq>]
+  gw estate overview
+  gw activity brief
   gw tui [--motion=off|reduced|full]
   gw theme
   gw attention list [--cursor <key>] [--limit <n>]
@@ -293,6 +300,14 @@ fn verb(rest: &mut Rest) -> Result<Verb, Failure> {
         },
         "projection" => projection(rest),
         "event" => event(rest),
+        "estate" => match rest.word("estate")?.as_str() {
+            "overview" => Ok(Verb::EstateOverview),
+            other => Err(unknown("estate", other)),
+        },
+        "activity" => match rest.word("activity")?.as_str() {
+            "brief" => Ok(Verb::ActivityBrief),
+            other => Err(unknown("activity", other)),
+        },
         "tui" => Ok(Verb::Tui {
             motion: rest
                 .flag("--motion")
@@ -704,6 +719,14 @@ mod tests {
     #[test]
     fn the_documented_tree_parses() {
         assert_eq!(parsed("build-info").expect("parse").verb, Verb::BuildInfo);
+        assert_eq!(
+            parsed("estate overview").expect("parse").verb,
+            Verb::EstateOverview
+        );
+        assert_eq!(
+            parsed("activity brief").expect("parse").verb,
+            Verb::ActivityBrief
+        );
         assert_eq!(
             parsed("tui --motion=reduced").expect("parse").verb,
             Verb::Tui {

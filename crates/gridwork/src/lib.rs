@@ -28,6 +28,7 @@ pub mod exit;
 pub mod pr;
 pub mod tui;
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use args::{Invocation, Sink, Source, Verb};
@@ -42,8 +43,11 @@ use gwk_domain::ids::{
     Timestamp,
 };
 use gwk_domain::protocol::{
-    CONTRACT_VERSION, KernelErrorCode, KernelRequest, KernelResult, ServerControl,
+    CONTRACT_VERSION, KernelErrorCode, KernelRequest, KernelResult, ProjectionKind,
+    ProjectionRecord, ServerControl,
 };
+use gwk_tui::board::{BoardState, BoardView, activity_brief, estate_overview};
+use gwk_tui::replay::ReplayTimeline;
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 
@@ -163,6 +167,14 @@ async fn execute(verb: Verb, pretty: bool) -> Result<(), Failure> {
             ask(KernelRequest::ReadEvents { cursor, limit }, pretty).await
         }
         Verb::EventFollow { cursor } => follow(cursor, pretty).await,
+        Verb::EstateOverview => {
+            let state = load_summary_state(false).await?;
+            emit_serialized(&estate_overview(&state), pretty)
+        }
+        Verb::ActivityBrief => {
+            let state = load_summary_state(true).await?;
+            emit_serialized(&activity_brief(&state), pretty)
+        }
         Verb::Tui { motion } => tui::run(motion).await,
         Verb::Theme => {
             emit(&chrome_theme()?, pretty);
@@ -274,6 +286,166 @@ async fn execute(verb: Verb, pretty: bool) -> Result<(), Failure> {
 
         Verb::Pr { what, dry_run } => pr::run(&what, dry_run, pretty),
     }
+}
+
+const SUMMARY_PAGE_LIMIT: u32 = 256;
+const SUMMARY_SNAPSHOT_ATTEMPTS: usize = 3;
+
+/// Read every projection consumed by the summary twins at one projector
+/// watermark. Projection pages are not snapshots, so a write between kinds
+/// makes the whole fold retry rather than silently joining different moments.
+async fn load_summary_state(include_cost: bool) -> Result<BoardState, Failure> {
+    let mut last_watermarks = Vec::new();
+    for _ in 0..SUMMARY_SNAPSHOT_ATTEMPTS {
+        let mut client = connect().await?;
+        let (state, watermarks) = load_summary_state_once(&mut client, include_cost).await?;
+        let coherent = watermarks
+            .first()
+            .is_none_or(|first| watermarks.iter().all(|watermark| watermark == first));
+        if coherent {
+            return Ok(state);
+        }
+        last_watermarks = watermarks;
+    }
+    Err(Failure::new(
+        KernelErrorCode::StaleVersion,
+        format!(
+            "summary projections did not share one watermark after {SUMMARY_SNAPSHOT_ATTEMPTS} reads: {last_watermarks:?}"
+        ),
+    ))
+}
+
+async fn load_summary_state_once(
+    client: &mut Client,
+    include_cost: bool,
+) -> Result<(BoardState, Vec<Option<Seq>>), Failure> {
+    let mut state = BoardState {
+        view: if include_cost {
+            BoardView::Activity
+        } else {
+            BoardView::Estate
+        },
+        tasks: Vec::new(),
+        attempts: Vec::new(),
+        nodes: Vec::new(),
+        messages: Vec::new(),
+        attention: Vec::new(),
+        replay: ReplayTimeline::empty(),
+        sessions: Vec::new(),
+        worktrees: Vec::new(),
+        leases: Vec::new(),
+        costs: Vec::new(),
+        ingested: Vec::new(),
+        receipts: Vec::new(),
+        complete: true,
+        watermark: None,
+    };
+    let mut kinds = vec![
+        ProjectionKind::Task,
+        ProjectionKind::Attempt,
+        ProjectionKind::AttentionItem,
+        ProjectionKind::Worktree,
+        ProjectionKind::Lease,
+    ];
+    if include_cost {
+        kinds.push(ProjectionKind::CostEntry);
+    }
+
+    let mut watermarks = Vec::new();
+    for kind in kinds {
+        let mut cursor = None;
+        let mut seen = BTreeSet::new();
+        loop {
+            let result = client
+                .ask(KernelRequest::ListProjection {
+                    projection: kind,
+                    cursor: cursor.clone(),
+                    limit: Some(SUMMARY_PAGE_LIMIT),
+                })
+                .await?;
+            let (records, next_cursor, watermark) = match result {
+                KernelResult::ProjectionPage {
+                    records,
+                    next_cursor,
+                    watermark,
+                } => (records, next_cursor, watermark),
+                KernelResult::Error { code, message, .. } => {
+                    return Err(Failure::new(code, message));
+                }
+                other => {
+                    return Err(Failure::internal(format!(
+                        "read summary projections: kernel answered with {other:?}"
+                    )));
+                }
+            };
+            if !records.is_empty() && watermark.is_none() {
+                return Err(Failure::new(
+                    KernelErrorCode::Schema,
+                    format!(
+                        "{} projection rows arrived without a page watermark",
+                        kind.as_str()
+                    ),
+                ));
+            }
+            watermarks.push(watermark);
+            for record in records {
+                push_summary_record(&mut state, kind, record)?;
+            }
+            let Some(next) = next_cursor else {
+                break;
+            };
+            if !seen.insert(next.clone()) {
+                return Err(Failure::internal(format!(
+                    "{} projection cursor repeated {next:?}",
+                    kind.as_str()
+                )));
+            }
+            cursor = Some(next);
+        }
+    }
+    state.watermark = watermarks.first().copied().flatten();
+    Ok((state, watermarks))
+}
+
+fn push_summary_record(
+    state: &mut BoardState,
+    wanted: ProjectionKind,
+    record: ProjectionRecord,
+) -> Result<(), Failure> {
+    match (wanted, record) {
+        (ProjectionKind::Task, ProjectionRecord::Task { task }) => state.tasks.push(task),
+        (ProjectionKind::Attempt, ProjectionRecord::Attempt { attempt }) => {
+            state.attempts.push(attempt);
+        }
+        (ProjectionKind::AttentionItem, ProjectionRecord::AttentionItem { attention_item }) => {
+            state.attention.push(attention_item);
+        }
+        (ProjectionKind::Worktree, ProjectionRecord::Worktree { worktree }) => {
+            state.worktrees.push(worktree);
+        }
+        (ProjectionKind::Lease, ProjectionRecord::Lease { lease }) => state.leases.push(lease),
+        (ProjectionKind::CostEntry, ProjectionRecord::CostEntry { cost_entry }) => {
+            state.costs.push(cost_entry);
+        }
+        (_, record) => {
+            return Err(Failure::new(
+                KernelErrorCode::Schema,
+                format!(
+                    "{} projection page carried a {} row",
+                    wanted.as_str(),
+                    record.kind().as_str()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn emit_serialized(value: &impl serde::Serialize, pretty: bool) -> Result<(), Failure> {
+    let value = serde_json::to_value(value)
+        .map_err(|why| Failure::internal(format!("render a summary: {why}")))?;
+    emit(&value, pretty);
+    Ok(())
 }
 
 /// The resolved workspace chrome theme.

@@ -71,6 +71,8 @@ fn the_command_tree_is_printed_as_prose_and_everything_else_as_json() {
     // why this case exists: to pin the exception rather than let it spread.
     assert!(text.starts_with("gw —"), "{text}");
     assert!(text.contains("gw kernel health"), "{text}");
+    assert!(text.contains("gw estate overview"), "{text}");
+    assert!(text.contains("gw activity brief"), "{text}");
 
     let info = gw(&socket, "build-info");
     assert_eq!(code(&info), 0);
@@ -399,6 +401,8 @@ async fn the_binary_talks_to_a_real_daemon() {
         let status = gw(socket, "kernel status");
         let events = gw(socket, "event read --limit 1");
         let tasks = gw(socket, "projection list task");
+        let estate = gw(socket, "estate overview");
+        let activity = gw(socket, "activity brief");
         let missing = gw(socket, "projection get task t-nope");
 
         // A blob, all the way there and back through the built binary.
@@ -415,12 +419,13 @@ async fn the_binary_talks_to_a_real_daemon() {
             ),
         );
         (
-            health, status, events, tasks, missing, put, plaintext, payload,
+            health, status, events, tasks, estate, activity, missing, put, plaintext, payload,
         )
     })
     .await
     .expect("join");
-    let (health, status, events, tasks, missing, put, plaintext, payload) = answers;
+    let (health, status, events, tasks, estate, activity, missing, put, plaintext, payload) =
+        answers;
 
     assert_eq!(
         code(&health),
@@ -453,6 +458,18 @@ async fn the_binary_talks_to_a_real_daemon() {
     assert_eq!(code(&tasks), 0);
     // An empty page is an answer, and a cursor that says the walk is over.
     assert_eq!(json(&tasks)["records"], serde_json::json!([]));
+
+    assert_eq!(code(&estate), 0);
+    let estate = json(&estate);
+    assert_eq!(estate["type"], "estate_overview");
+    assert_eq!(estate["counts"]["tasks"], 0);
+    assert_eq!(estate["counts"]["unresolved_attention"], 0);
+
+    assert_eq!(code(&activity), 0);
+    let activity = json(&activity);
+    assert_eq!(activity["type"], "activity_brief");
+    assert_eq!(activity["owed_total"], 0);
+    assert_eq!(activity["cost"]["entries"], 0);
 
     // Absent exits 4, distinctly from a refusal and from unavailability.
     assert_eq!(code(&missing), 4);

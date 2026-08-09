@@ -1,13 +1,10 @@
-//! The Board lens — work structure, message flow, terminal replay, the
-//! running fleet, and cost/health.
+//! The Board lens — estate and activity summaries, work structure, message
+//! flow, terminal replay, the running fleet, cost/health, and audit receipts.
 //!
-//! The task/attempt DAG, A2A message flow, persisted PTY replay, the fleet,
-//! and cost/health: the two Board panels still absent — evidence and brain —
-//! are out by ruling, not omission, and both wait on domains the kernel does
-//! not own yet. All five are row surfaces. Work rows print state as a word
-//! and use the mark cell for the graph tier; replay rows carry elapsed time,
-//! event kind, and sequence from the typed recording reader without
-//! inventing a fifth graph-tier mark.
+//! All eight views are row surfaces over kernel facts. Work rows print state
+//! as a word and use the mark cell for the graph tier; replay rows carry
+//! elapsed time, event kind, and sequence from the typed recording reader
+//! without inventing another graph-tier mark.
 //!
 //! # The fleet and cost/health panels read the log and nothing else
 //!
@@ -71,13 +68,13 @@
 //! never followed: absence is a fact, and facts get words.
 
 use gwk_domain::entity::{
-    Attempt, CostEntry, DispatchNode, EngineSession, IngestedRecord, Lease, Message, Receipt, Task,
-    Worktree,
+    Attempt, AttentionItem, CostEntry, DispatchNode, EngineSession, IngestedRecord, Lease, Message,
+    Receipt, Task, Worktree,
 };
 use gwk_domain::fsm::{AttemptState, LeaseState, MessageState, TaskState};
 use gwk_domain::ids::{
-    AttemptId, CostEntryId, DispatchNodeId, EngineSessionId, IngestedRecordId, LeaseId, MessageId,
-    ReceiptId, Seq, TaskId, Timestamp, WorktreeId,
+    AttemptId, AttentionItemId, CostEntryId, DispatchNodeId, EngineSessionId, IngestedRecordId,
+    LeaseId, MessageId, ReceiptId, Seq, TaskId, Timestamp, WorktreeId,
 };
 use gwk_domain::ingestion::IngestionKind;
 use gwk_theme::marks::{GlyphSet, Mark, StateBinding};
@@ -91,12 +88,14 @@ use crate::input::HitMap;
 use crate::replay::{ReplayFrame, ReplayTimeline};
 use crate::theme;
 
-/// Which Board panel the frame shows. One lens, five views, one visible at
+/// Which Board panel the frame shows. One lens, eight views, one visible at
 /// a time — the others are a keystroke away, never extra panes fighting for
 /// the same columns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BoardView {
     #[default]
+    Estate,
+    Activity,
     Dag,
     Flow,
     Replay,
@@ -108,7 +107,9 @@ pub enum BoardView {
 impl BoardView {
     /// Every panel in the Board's stable navigation order — the order
     /// [`Self::next`] walks, and the order the status bar's tab strip prints.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 8] = [
+        Self::Estate,
+        Self::Activity,
         Self::Dag,
         Self::Flow,
         Self::Replay,
@@ -120,6 +121,8 @@ impl BoardView {
     /// The tab strip's name for this panel.
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Estate => "estate",
+            Self::Activity => "brief",
             Self::Dag => "dag",
             Self::Flow => "flow",
             Self::Replay => "replay",
@@ -132,19 +135,23 @@ impl BoardView {
     /// The next panel in the Board's stable navigation order.
     pub const fn next(self) -> Self {
         match self {
+            Self::Estate => Self::Activity,
+            Self::Activity => Self::Dag,
             Self::Dag => Self::Flow,
             Self::Flow => Self::Replay,
             Self::Replay => Self::Fleet,
             Self::Fleet => Self::CostHealth,
             Self::CostHealth => Self::Audit,
-            Self::Audit => Self::Dag,
+            Self::Audit => Self::Estate,
         }
     }
 
     /// The previous panel in the Board's stable navigation order.
     pub const fn previous(self) -> Self {
         match self {
-            Self::Dag => Self::Audit,
+            Self::Estate => Self::Audit,
+            Self::Activity => Self::Estate,
+            Self::Dag => Self::Activity,
             Self::Flow => Self::Dag,
             Self::Replay => Self::Flow,
             Self::Fleet => Self::Replay,
@@ -163,6 +170,8 @@ pub struct BoardState {
     pub attempts: Vec<Attempt>,
     pub nodes: Vec<DispatchNode>,
     pub messages: Vec<Message>,
+    /// Current attention facts used by the estate head and activity debt.
+    pub attention: Vec<AttentionItem>,
     /// The persisted recording selected for the replay panel.
     pub replay: ReplayTimeline,
     /// Provider-level sessions under attempts — the fleet panel's live rows.
@@ -200,6 +209,7 @@ pub enum BoardTarget {
     Attempt(AttemptId),
     Node(DispatchNodeId),
     Message(MessageId),
+    Attention(AttentionItemId),
     ReplayFrame(u64),
     Session(EngineSessionId),
     Worktree(WorktreeId),
@@ -207,6 +217,89 @@ pub enum BoardTarget {
     Cost(CostEntryId),
     Ingested(IngestedRecordId),
     Receipt(ReceiptId),
+}
+
+/// Counts in the one-screen estate view. Against a partial page these are
+/// floors; [`EstateOverview::complete`] carries that distinction to both twins.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct EstateCounts {
+    pub tasks: usize,
+    pub active_tasks: usize,
+    pub attempts: usize,
+    pub running_attempts: usize,
+    pub unresolved_attention: usize,
+    pub held_worktrees: usize,
+    pub held_leases: usize,
+}
+
+/// The first unresolved attention item in the contract's P0-first order.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AttentionHead {
+    pub id: AttentionItemId,
+    pub summary: String,
+    pub priority: Option<i32>,
+    pub subject_ref: Option<String>,
+    pub raised_at: Timestamp,
+    pub acked_at: Option<Timestamp>,
+    pub muted_until: Option<Timestamp>,
+}
+
+/// One recorded change shown by both summary verbs.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ActivityFact {
+    pub at: Timestamp,
+    pub kind: String,
+    pub id: String,
+    pub summary: String,
+}
+
+/// One current fact the activity brief says remains owed.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct OwedFact {
+    pub kind: String,
+    pub id: String,
+    pub reason: String,
+}
+
+/// The priced subset of the cost ledger. `cost_micros` is decimal text because
+/// a fold may exceed JSON's exact integer range; absent means no row named cost.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CostHeadline {
+    pub entries: usize,
+    pub priced_entries: usize,
+    pub unpriced_entries: usize,
+    pub estimated_entries: usize,
+    pub cost_micros: Option<String>,
+}
+
+/// State now: counts, the attention head, and the newest facts on the pages.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct EstateOverview {
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    pub complete: bool,
+    pub watermark: Option<Seq>,
+    pub counts: EstateCounts,
+    pub attention_head: Option<AttentionHead>,
+    pub recent_activity: Vec<ActivityFact>,
+    pub findings: Vec<String>,
+    pub unknowns: Vec<String>,
+}
+
+/// Delta intent over projection facts: what changed most recently and what
+/// remains open. It names no time window the contract did not provide.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ActivityBrief {
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    pub complete: bool,
+    pub watermark: Option<Seq>,
+    pub happened: Vec<ActivityFact>,
+    pub owed_total: usize,
+    pub owed: Vec<OwedFact>,
+    pub cost: CostHeadline,
+    pub findings: Vec<String>,
+    pub unknowns: Vec<String>,
 }
 
 /// A spawn chain deeper than this stops indenting further: the tree is
@@ -918,6 +1011,454 @@ const fn fold_word(complete: bool) -> &'static str {
     if complete { "total" } else { "at least" }
 }
 
+const SUMMARY_ROWS: usize = 5;
+
+fn summary_findings(state: &BoardState, include_cost: bool) -> Vec<String> {
+    let (_, duplicate_tasks) = unique_by_id(&state.tasks, |item| item.id.as_str());
+    let (_, duplicate_attempts) = unique_by_id(&state.attempts, |item| item.id.as_str());
+    let (_, duplicate_attention) = unique_by_id(&state.attention, |item| item.id.as_str());
+    let (_, duplicate_worktrees) = unique_by_id(&state.worktrees, |item| item.id.as_str());
+    let (_, duplicate_leases) = unique_by_id(&state.leases, |item| item.id.as_str());
+    let (_, duplicate_costs) = unique_by_id(&state.costs, |item| item.id.as_str());
+    [
+        duplicate_finding(duplicate_tasks, "task"),
+        duplicate_finding(duplicate_attempts, "attempt"),
+        duplicate_finding(duplicate_attention, "attention item"),
+        duplicate_finding(duplicate_worktrees, "worktree"),
+        duplicate_finding(duplicate_leases, "lease"),
+        include_cost
+            .then(|| duplicate_finding(duplicate_costs, "cost entry"))
+            .flatten(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+fn ranked_attention(items: &[AttentionItem]) -> Vec<&AttentionItem> {
+    let (mut open, _) = unique_by_id(items, |item| item.id.as_str());
+    open.retain(|item| item.resolved_at.is_none());
+    open.sort_by(|left, right| {
+        match (left.priority, right.priority) {
+            (Some(a), Some(b)) => a.cmp(&b),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        }
+        .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+    });
+    open
+}
+
+fn recent_activity(state: &BoardState) -> Vec<ActivityFact> {
+    let (tasks, _) = unique_by_id(&state.tasks, |item| item.id.as_str());
+    let (attempts, _) = unique_by_id(&state.attempts, |item| item.id.as_str());
+    let (attention, _) = unique_by_id(&state.attention, |item| item.id.as_str());
+    let (worktrees, _) = unique_by_id(&state.worktrees, |item| item.id.as_str());
+    let (leases, _) = unique_by_id(&state.leases, |item| item.id.as_str());
+    let mut facts = Vec::new();
+    facts.extend(tasks.into_iter().map(|task| ActivityFact {
+        at: task.updated_at.clone(),
+        kind: "task".to_owned(),
+        id: task.id.as_str().to_owned(),
+        summary: format!(
+            "{}  {}",
+            task.title.as_deref().unwrap_or("untitled"),
+            task_face(task.state).0
+        ),
+    }));
+    facts.extend(attempts.into_iter().map(|attempt| ActivityFact {
+        at: attempt.updated_at.clone(),
+        kind: "attempt".to_owned(),
+        id: attempt.id.as_str().to_owned(),
+        summary: format!(
+            "{}  {}",
+            attempt.engine.as_str(),
+            attempt_face(attempt.state).0
+        ),
+    }));
+    facts.extend(attention.into_iter().map(|item| ActivityFact {
+        at: item.resolved_at.as_ref().unwrap_or(&item.raised_at).clone(),
+        kind: "attention_item".to_owned(),
+        id: item.id.as_str().to_owned(),
+        summary: format!(
+            "{}  {}",
+            if item.resolved_at.is_some() {
+                "resolved"
+            } else {
+                "raised"
+            },
+            item.summary
+        ),
+    }));
+    facts.extend(worktrees.into_iter().map(|worktree| {
+        ActivityFact {
+            at: worktree
+                .released_at
+                .as_ref()
+                .unwrap_or(&worktree.created_at)
+                .clone(),
+            kind: "worktree".to_owned(),
+            id: worktree.id.as_str().to_owned(),
+            summary: format!(
+                "{}  {}  {}",
+                worktree.repo,
+                worktree.branch,
+                worktree_face(worktree).0
+            ),
+        }
+    }));
+    facts.extend(leases.into_iter().map(|lease| ActivityFact {
+        at: lease.updated_at.clone(),
+        kind: "lease".to_owned(),
+        id: lease.id.as_str().to_owned(),
+        summary: format!(
+            "{}  {}",
+            lease.scope.as_deref().unwrap_or("unnamed scope"),
+            lease_face(lease.state).0
+        ),
+    }));
+    facts.sort_by(|left, right| {
+        right
+            .at
+            .as_str()
+            .cmp(left.at.as_str())
+            .then_with(|| left.kind.cmp(&right.kind))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    facts.truncate(SUMMARY_ROWS);
+    facts
+}
+
+fn cost_headline(costs: &[CostEntry]) -> CostHeadline {
+    let (costs, _) = unique_by_id(costs, |item| item.id.as_str());
+    let mut micros = 0u128;
+    let mut priced = 0usize;
+    let mut estimated = 0usize;
+    for cost in &costs {
+        if let Some(value) = cost.cost_micros {
+            micros = micros.saturating_add(u128::from(value.value()));
+            priced += 1;
+        }
+        estimated += usize::from(cost.cost_is_estimate == Some(true));
+    }
+    CostHeadline {
+        entries: costs.len(),
+        priced_entries: priced,
+        unpriced_entries: costs.len().saturating_sub(priced),
+        estimated_entries: estimated,
+        cost_micros: (priced > 0).then(|| micros.to_string()),
+    }
+}
+
+/// Build the shared estate summary consumed by the Board and `gw estate overview`.
+pub fn estate_overview(state: &BoardState) -> EstateOverview {
+    let (tasks, _) = unique_by_id(&state.tasks, |item| item.id.as_str());
+    let (attempts, _) = unique_by_id(&state.attempts, |item| item.id.as_str());
+    let attention = ranked_attention(&state.attention);
+    let (worktrees, _) = unique_by_id(&state.worktrees, |item| item.id.as_str());
+    let (leases, _) = unique_by_id(&state.leases, |item| item.id.as_str());
+    EstateOverview {
+        kind: "estate_overview",
+        complete: state.complete,
+        watermark: state.watermark,
+        counts: EstateCounts {
+            tasks: tasks.len(),
+            active_tasks: tasks
+                .iter()
+                .filter(|task| {
+                    matches!(
+                        task.state,
+                        TaskState::Submitted | TaskState::Working | TaskState::InputRequired
+                    )
+                })
+                .count(),
+            attempts: attempts.len(),
+            running_attempts: attempts
+                .iter()
+                .filter(|attempt| attempt.state == AttemptState::Running)
+                .count(),
+            unresolved_attention: attention.len(),
+            held_worktrees: worktrees
+                .iter()
+                .filter(|worktree| worktree.released_at.is_none())
+                .count(),
+            held_leases: leases
+                .iter()
+                .filter(|lease| lease.state == LeaseState::Held)
+                .count(),
+        },
+        attention_head: attention.first().map(|item| AttentionHead {
+            id: item.id.clone(),
+            summary: item.summary.clone(),
+            priority: item.priority,
+            subject_ref: item.subject_ref.clone(),
+            raised_at: item.raised_at.clone(),
+            acked_at: item.acked_at.clone(),
+            muted_until: item.muted_until.clone(),
+        }),
+        recent_activity: recent_activity(state),
+        findings: summary_findings(state, false),
+        unknowns: (!state.complete)
+            .then(|| "read short of the last projection page -- counts are floors".to_owned())
+            .into_iter()
+            .collect(),
+    }
+}
+
+/// Build the shared activity digest consumed by the Board and `gw activity brief`.
+pub fn activity_brief(state: &BoardState) -> ActivityBrief {
+    let mut owed = Vec::new();
+    owed.extend(
+        ranked_attention(&state.attention)
+            .into_iter()
+            .map(|item| OwedFact {
+                kind: "attention_item".to_owned(),
+                id: item.id.as_str().to_owned(),
+                reason: item.summary.clone(),
+            }),
+    );
+    let (tasks, _) = unique_by_id(&state.tasks, |item| item.id.as_str());
+    owed.extend(
+        tasks
+            .into_iter()
+            .filter(|task| task.state == TaskState::InputRequired)
+            .map(|task| OwedFact {
+                kind: "task".to_owned(),
+                id: task.id.as_str().to_owned(),
+                reason: "input required".to_owned(),
+            }),
+    );
+    let (attempts, _) = unique_by_id(&state.attempts, |item| item.id.as_str());
+    owed.extend(
+        attempts
+            .into_iter()
+            .filter(|attempt| attempt.state == AttemptState::Blocked)
+            .map(|attempt| OwedFact {
+                kind: "attempt".to_owned(),
+                id: attempt.id.as_str().to_owned(),
+                reason: "blocked".to_owned(),
+            }),
+    );
+    let (worktrees, _) = unique_by_id(&state.worktrees, |item| item.id.as_str());
+    owed.extend(
+        worktrees
+            .into_iter()
+            .filter(|worktree| {
+                worktree.released_at.is_none() && (worktree.dirty || worktree.unpushed)
+            })
+            .map(|worktree| OwedFact {
+                kind: "worktree".to_owned(),
+                id: worktree.id.as_str().to_owned(),
+                reason: match (worktree.dirty, worktree.unpushed) {
+                    (true, true) => "held, dirty, and unpushed",
+                    (true, false) => "held and dirty",
+                    (false, true) => "held and unpushed",
+                    (false, false) => "held",
+                }
+                .to_owned(),
+            }),
+    );
+    owed.sort_by(|left, right| {
+        left.kind
+            .cmp(&right.kind)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let owed_total = owed.len();
+    owed.truncate(SUMMARY_ROWS);
+    ActivityBrief {
+        kind: "activity_brief",
+        complete: state.complete,
+        watermark: state.watermark,
+        happened: recent_activity(state),
+        owed_total,
+        owed,
+        cost: cost_headline(&state.costs),
+        findings: summary_findings(state, true),
+        unknowns: (!state.complete)
+            .then(|| {
+                "read short of the last projection page -- activity and debt are page-scoped"
+                    .to_owned()
+            })
+            .into_iter()
+            .collect(),
+    }
+}
+
+fn fact_target(fact: &ActivityFact) -> Option<BoardTarget> {
+    match fact.kind.as_str() {
+        "task" => Some(BoardTarget::Task(TaskId::new(&fact.id))),
+        "attempt" => Some(BoardTarget::Attempt(AttemptId::new(&fact.id))),
+        "attention_item" => Some(BoardTarget::Attention(AttentionItemId::new(&fact.id))),
+        "worktree" => Some(BoardTarget::Worktree(WorktreeId::new(&fact.id))),
+        "lease" => Some(BoardTarget::Lease(LeaseId::new(&fact.id))),
+        _ => None,
+    }
+}
+
+fn owed_target(fact: &OwedFact) -> Option<BoardTarget> {
+    match fact.kind.as_str() {
+        "task" => Some(BoardTarget::Task(TaskId::new(&fact.id))),
+        "attempt" => Some(BoardTarget::Attempt(AttemptId::new(&fact.id))),
+        "attention_item" => Some(BoardTarget::Attention(AttentionItemId::new(&fact.id))),
+        "worktree" => Some(BoardTarget::Worktree(WorktreeId::new(&fact.id))),
+        _ => None,
+    }
+}
+
+fn estate_rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
+    let muted = theme::state_style(theme::binding("idle"), tier);
+    let summary = estate_overview(state);
+    let unknowns = summary
+        .unknowns
+        .iter()
+        .map(|why| UnknownNote {
+            subject: "snapshot",
+            why: why.clone(),
+        })
+        .collect();
+    let mut out = pinned_block(summary.findings.clone(), unknowns, muted);
+    out.push(Row::plain(
+        format!(
+            "{}  {} active  {}  {} running",
+            plural(summary.counts.tasks, "task", "tasks"),
+            summary.counts.active_tasks,
+            plural(summary.counts.attempts, "attempt", "attempts"),
+            summary.counts.running_attempts,
+        ),
+        muted,
+    ));
+    out.push(Row::plain(
+        format!(
+            "{}  {} held  {} held",
+            plural(
+                summary.counts.unresolved_attention,
+                "unresolved attention item",
+                "unresolved attention items"
+            ),
+            plural(summary.counts.held_worktrees, "worktree", "worktrees"),
+            plural(summary.counts.held_leases, "lease", "leases"),
+        ),
+        muted,
+    ));
+    out.push(Row::plain("attention head".to_owned(), muted));
+    if let Some(head) = summary.attention_head {
+        out.push(Row {
+            indent: INDENT_STEP,
+            mark: None,
+            text: head.summary,
+            right: Some(head.id.as_str().to_owned()),
+            style: theme::state_style(theme::binding("needs_attention"), tier),
+            target: Some(BoardTarget::Attention(head.id)),
+            diagnostic: false,
+        });
+    } else {
+        out.push(Row::plain(
+            "  none unresolved on this page".to_owned(),
+            muted,
+        ));
+    }
+    out.push(Row::plain("recent activity".to_owned(), muted));
+    if summary.recent_activity.is_empty() {
+        out.push(Row::plain(
+            "  no projection activity on this page".to_owned(),
+            muted,
+        ));
+    } else {
+        out.extend(summary.recent_activity.into_iter().map(|fact| {
+            let target = fact_target(&fact);
+            Row {
+                indent: INDENT_STEP,
+                mark: None,
+                text: format!("{}  {}", fact.kind, fact.summary),
+                right: Some(hhmm(&fact.at).to_owned()),
+                style: Style::default(),
+                target,
+                diagnostic: false,
+            }
+        }));
+    }
+    out
+}
+
+fn activity_rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
+    let muted = theme::state_style(theme::binding("idle"), tier);
+    let summary = activity_brief(state);
+    let unknowns = summary
+        .unknowns
+        .iter()
+        .map(|why| UnknownNote {
+            subject: "snapshot",
+            why: why.clone(),
+        })
+        .collect();
+    let mut out = pinned_block(summary.findings.clone(), unknowns, muted);
+    out.push(Row::plain("what happened".to_owned(), muted));
+    if summary.happened.is_empty() {
+        out.push(Row::plain(
+            "  no recorded changes on this page".to_owned(),
+            muted,
+        ));
+    } else {
+        out.extend(summary.happened.into_iter().map(|fact| {
+            let target = fact_target(&fact);
+            Row {
+                indent: INDENT_STEP,
+                mark: None,
+                text: format!("{}  {}", fact.kind, fact.summary),
+                right: Some(hhmm(&fact.at).to_owned()),
+                style: Style::default(),
+                target,
+                diagnostic: false,
+            }
+        }));
+    }
+    out.push(Row::plain(
+        format!(
+            "what is owed  {}",
+            plural(summary.owed_total, "fact", "facts")
+        ),
+        muted,
+    ));
+    if summary.owed.is_empty() {
+        out.push(Row::plain(
+            "  nothing owed by these projections".to_owned(),
+            muted,
+        ));
+    } else {
+        out.extend(summary.owed.into_iter().map(|fact| {
+            let target = owed_target(&fact);
+            Row {
+                indent: INDENT_STEP,
+                mark: None,
+                text: format!("{} {}  {}", fact.kind, fact.id, fact.reason),
+                right: None,
+                style: theme::state_style(theme::binding("needs_attention"), tier),
+                target,
+                diagnostic: false,
+            }
+        }));
+    }
+    out.push(Row::plain(
+        if summary.cost.entries == 0 {
+            "cost  no entries -- no spend recorded on this page".to_owned()
+        } else {
+            format!(
+                "cost  {}  {} priced  {} unpriced  {}",
+                plural(summary.cost.entries, "entry", "entries"),
+                summary.cost.priced_entries,
+                summary.cost.unpriced_entries,
+                summary.cost.cost_micros.map_or_else(
+                    || "no cost reported".to_owned(),
+                    |value| format!("{value} micros")
+                ),
+            )
+        },
+        muted,
+    ));
+    out
+}
+
 fn session_face(session: &EngineSession) -> (&'static str, &'static StateBinding) {
     match session.ended_at {
         Some(_) => ("ended", theme::binding("done")),
@@ -1505,6 +2046,8 @@ fn audit_rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
 
 fn rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
     match state.view {
+        BoardView::Estate => estate_rows(state, tier),
+        BoardView::Activity => activity_rows(state, tier),
         BoardView::Dag => dag_rows(state, tier),
         BoardView::Flow => flow_rows(state, tier),
         BoardView::Replay => replay_rows(state, tier),
@@ -1665,6 +2208,37 @@ fn detail_lines(state: &BoardState, target: &BoardTarget) -> Option<Vec<String>>
                     "created {}  updated {}",
                     message.created_at.as_str(),
                     message.updated_at.as_str()
+                ),
+            ])
+        }
+        BoardTarget::Attention(id) => {
+            let item = state
+                .attention
+                .iter()
+                .find(|item| item.id.as_str() == id.as_str())?;
+            Some(vec![
+                format!("attention {}  {}", item.id.as_str(), item.kind),
+                item.summary.clone(),
+                format!(
+                    "state {}{}{}",
+                    if item.resolved_at.is_some() {
+                        "resolved"
+                    } else {
+                        "unresolved"
+                    },
+                    opt("subject", item.subject_ref.as_deref()),
+                    item.priority
+                        .map(|priority| format!("  priority {priority}"))
+                        .unwrap_or_default(),
+                ),
+                format!(
+                    "raised {}{}{}",
+                    item.raised_at.as_str(),
+                    opt("acked", item.acked_at.as_ref().map(|at| at.as_str())),
+                    opt(
+                        "muted-until",
+                        item.muted_until.as_ref().map(|at| at.as_str())
+                    ),
                 ),
             ])
         }
@@ -2118,10 +2692,7 @@ pub fn render(
         .watermark
         .as_ref()
         .map_or_else(|| "-".to_string(), |w| w.to_string());
-    let status = format!(
-        "BOARD  {tabs}  {} running  as-of {as_of}",
-        running_count(state)
-    );
+    let status = format!("BOARD {tabs}  {} run  as-of {as_of}", running_count(state));
     let safe_status = theme::safe_text(&status, area.width as usize);
     buf.set_stringn(
         area.x,
@@ -2236,6 +2807,28 @@ mod tests {
         }
     }
 
+    fn attention_item(
+        id: &str,
+        summary: &str,
+        priority: Option<i32>,
+        raised: &str,
+        resolved: Option<&str>,
+    ) -> AttentionItem {
+        AttentionItem {
+            id: AttentionItemId::new(id),
+            kind: "operator".into(),
+            summary: summary.into(),
+            subject_ref: Some(format!("attempt:{id}")),
+            raised_by: None,
+            priority,
+            raised_at: ts(raised),
+            acked_at: None,
+            muted_until: None,
+            resolved_at: resolved.map(ts),
+            resolution: resolved.map(|_| "handled".into()),
+        }
+    }
+
     fn empty_state() -> BoardState {
         BoardState {
             view: BoardView::Dag,
@@ -2243,6 +2836,7 @@ mod tests {
             attempts: Vec::new(),
             nodes: Vec::new(),
             messages: Vec::new(),
+            attention: Vec::new(),
             replay: ReplayTimeline::empty(),
             sessions: Vec::new(),
             worktrees: Vec::new(),
@@ -2434,6 +3028,43 @@ mod tests {
         state
     }
 
+    fn summary_state() -> BoardState {
+        let mut state = workday_state();
+        state.view = BoardView::Estate;
+        state.tasks[1].state = TaskState::InputRequired;
+        state.attempts[1].state = AttemptState::Blocked;
+        state.attention = vec![
+            attention_item(
+                "ai-low",
+                "review the late result",
+                Some(3),
+                "2026-08-06T10:20:00Z",
+                None,
+            ),
+            attention_item(
+                "ai-p0",
+                "operator decision required",
+                Some(0),
+                "2026-08-06T10:19:00Z",
+                None,
+            ),
+        ];
+        state.worktrees = vec![worktree("wt-01", "feat/auth", None, true)];
+        state.leases = vec![lease("ls-01", LeaseState::Held, "gw-implementer")];
+        state.costs = vec![
+            cost(
+                "ce-01",
+                "claude",
+                Some("sonnet"),
+                Some(125_000),
+                Some(true),
+                "2026-08-06T10:16:00Z",
+            ),
+            cost("ce-02", "codex", None, None, None, "2026-08-06T10:17:00Z"),
+        ];
+        state
+    }
+
     fn workday_state() -> BoardState {
         let mut lead = attempt(
             "at-01",
@@ -2537,6 +3168,7 @@ mod tests {
                 node("d-2", Some("at-01"), Some("d-1"), "lint", "registered"),
             ],
             messages: vec![brief, findings, dead, pending],
+            attention: Vec::new(),
             replay: ReplayTimeline::empty(),
             sessions: Vec::new(),
             worktrees: Vec::new(),
@@ -2647,6 +3279,90 @@ mod tests {
         assert!(
             dump.contains("no message flows -- nothing sent"),
             "the flow view's absence has its own words:\n{dump}"
+        );
+    }
+
+    #[test]
+    fn estate_overview_ranks_attention_without_relabeling_recency() {
+        let summary = estate_overview(&summary_state());
+        assert_eq!(summary.kind, "estate_overview");
+        assert_eq!(summary.watermark, Some(Seq::new(407)));
+        assert_eq!(summary.counts.tasks, 3);
+        assert_eq!(summary.counts.active_tasks, 2);
+        assert_eq!(summary.counts.attempts, 4);
+        assert_eq!(summary.counts.running_attempts, 2);
+        assert_eq!(summary.counts.unresolved_attention, 2);
+        assert_eq!(summary.counts.held_worktrees, 1);
+        assert_eq!(summary.counts.held_leases, 1);
+        assert_eq!(
+            summary.attention_head.expect("attention head").id,
+            AttentionItemId::new("ai-p0"),
+            "the head is priority-ranked"
+        );
+        assert_eq!(
+            summary.recent_activity[0].id, "ai-low",
+            "recent activity remains time-ordered"
+        );
+        assert!(summary.findings.is_empty());
+        assert!(summary.unknowns.is_empty());
+    }
+
+    #[test]
+    fn activity_brief_names_owed_facts_and_cost_coverage() {
+        let summary = activity_brief(&summary_state());
+        assert_eq!(summary.kind, "activity_brief");
+        assert_eq!(summary.owed_total, 5);
+        assert_eq!(summary.owed.len(), 5);
+        assert!(
+            summary
+                .owed
+                .iter()
+                .any(|fact| fact.kind == "task" && fact.reason == "input required")
+        );
+        assert!(
+            summary
+                .owed
+                .iter()
+                .any(|fact| fact.kind == "attempt" && fact.reason == "blocked")
+        );
+        assert_eq!(summary.cost.entries, 2);
+        assert_eq!(summary.cost.priced_entries, 1);
+        assert_eq!(summary.cost.unpriced_entries, 1);
+        assert_eq!(summary.cost.estimated_entries, 1);
+        assert_eq!(summary.cost.cost_micros.as_deref(), Some("125000"));
+    }
+
+    #[test]
+    fn summaries_say_when_projection_pages_are_incomplete() {
+        let mut state = summary_state();
+        state.complete = false;
+        let estate = estate_overview(&state);
+        let activity = activity_brief(&state);
+        assert!(!estate.complete && !activity.complete);
+        assert!(estate.unknowns[0].contains("counts are floors"));
+        assert!(activity.unknowns[0].contains("page-scoped"));
+    }
+
+    #[test]
+    fn board_summary_views_render_the_shared_values_and_targets() {
+        let state = summary_state();
+        let (estate, hits, _) = dump_frame(96, 22, &state, None);
+        assert!(estate.contains("operator decision required"), "{estate}");
+        assert!(estate.contains("recent activity"), "{estate}");
+        assert!(
+            hits.targets()
+                .any(|target| *target == BoardTarget::Attention(AttentionItemId::new("ai-p0"))),
+            "the attention head opens its detail pane:\n{estate}"
+        );
+
+        let mut state = state;
+        state.view = BoardView::Activity;
+        let (activity, _, _) = dump_frame(96, 22, &state, None);
+        assert!(activity.contains("what happened"), "{activity}");
+        assert!(activity.contains("what is owed  5 facts"), "{activity}");
+        assert!(
+            activity.contains("2 entries  1 priced  1 unpriced  125000 micros"),
+            "{activity}"
         );
     }
 
@@ -2926,6 +3642,20 @@ mod tests {
     fn board_a_cost_frame_matches_its_golden() {
         let (dump, _, _) = dump_frame(72, 24, &cost_state(), None);
         assert_matches_golden("board-cost", &dump);
+    }
+
+    #[test]
+    fn board_an_estate_frame_matches_its_golden() {
+        let (dump, _, _) = dump_frame(96, 18, &summary_state(), None);
+        assert_matches_golden("board-estate", &dump);
+    }
+
+    #[test]
+    fn board_an_activity_frame_matches_its_golden() {
+        let mut state = summary_state();
+        state.view = BoardView::Activity;
+        let (dump, _, _) = dump_frame(96, 18, &state, None);
+        assert_matches_golden("board-activity", &dump);
     }
 
     #[test]
@@ -3701,7 +4431,7 @@ mod tests {
         let (dump, _, _) = dump_frame(72, 18, &state, None);
         assert_eq!(
             dump.lines().nth(17),
-            Some("BOARD  [dag] flow replay fleet cost audit  2 running  as-of 407"),
+            Some("BOARD estate brief [dag] flow replay fleet cost audit  2 run  as-of 407"),
             "the bar names the view, the pulse, and the page:\n{dump}"
         );
         assert!(
@@ -3714,7 +4444,7 @@ mod tests {
         let (dump, _, _) = dump_frame(72, 18, &flow, None);
         assert_eq!(
             dump.lines().nth(17),
-            Some("BOARD  dag [flow] replay fleet cost audit  2 running  as-of 407"),
+            Some("BOARD estate brief dag [flow] replay fleet cost audit  2 run  as-of 407"),
             "the flow view keeps the ambient pulse:\n{dump}"
         );
     }
