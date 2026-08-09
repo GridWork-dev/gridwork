@@ -17,11 +17,17 @@ Locked decisions change only by a recorded amendment, not by drift.
 > **In flight (in the tree, incomplete, unpublished):** the PTY engine
 > (`gwk-pty` — server-side VT, render deltas, styled cells, attach, record) and
 > the three agent adapters, with `gwk-pty-host` carrying the session runtime
-> (supervision, wire-frame conversion, command origination) but not yet the
-> kernel-side hookup that serves its frames to a consumer.
+> (supervision, wire-frame conversion, command origination) and the kernel-side
+> hookup that serves its frames to a consumer — the publish/retire wire family
+> plus `PtyAttach`/`PtySnapshot` answering from the kernel's PTY hub, so the
+> resident host's sessions reach the drill-down lens across the kernel socket.
+> Spawn-over-socket, via the adapters' control halves, remains deferred.
 >
-> **Not built:** the TUI — the whole human surface. Anything this file says
-> about lenses, the console, or the workspace is specification.
+> **Built (partial):** the TUI's Queue, Board, Hall, session drill-down, and
+> Config lenses (`crates/gwk-tui`), with `gw tui` driving the Hall lens live
+> from the kernel's projections and events (`crates/gridwork/src/tui.rs`).
+> **Not built:** the workspace — the real multiplexer (`ROADMAP.md` stage 5);
+> anything this file says about that surface is specification.
 >
 > `docs/security/THREAT_MODEL.md` labels each security stance **in force** /
 > **partial** / **designed, not yet built**; when this file and that one disagree

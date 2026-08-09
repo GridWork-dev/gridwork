@@ -78,8 +78,11 @@ escape-stripped. Control never rides synthetic keystrokes, so output cannot
 
 **Status: partial.** In force: `gwk-pty` keeps raw child-process bytes `[u8]` end
 to end and feeds them to a server-side virtual-terminal model — the grid, not the
-byte stream, is what every consumer renders from. Still designed: the TUI that
-does that rendering, and the escape-stripped echo path, do not exist yet.
+byte stream, is what every consumer renders from — and the TUI's session
+drill-down lens renders from those typed snapshot/delta cells, escape-stripping
+every echoed glyph through the shared safe-text path before it reaches the
+operator's terminal. Still designed: the same treatment for the workspace
+stage's live-attached full session surface.
 
 ### 3. Hostile or buggy socket clients
 
@@ -223,8 +226,12 @@ refused rather than downgraded, and the refusal is a frame the client can read �
 a peer that guessed the version wrong must be able to tell that from a socket
 nobody was listening on. Capabilities are explicit in the hello and the
 unknown-`schema_version` refusal in the contract types is unchanged. Permission
-relay stays designed: adapter code is in the tree — `gwk-adapter-claude` already
-models the engine's permission prompts — but the kernel Gate relay is not yet wired.
+relay is wired: each adapter turns the engine's own prompt channel into a kernel
+`OpenGate`, and `DecideGate` returns the decision through the same channel that
+raised it — certified in both directions per engine by `docs/PARITY.md` Axis 4.
+Deciding a gate from the TUI is not yet wired — the Queue lens surfaces open
+gates and refuses to render a decided gate as answerable, and decisions reach
+the kernel from other clients.
 
 ### 10. Self-asserted actor identity
 
