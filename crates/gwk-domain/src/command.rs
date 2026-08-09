@@ -20,7 +20,8 @@ use crate::fsm::{
 use crate::ids::{
     AttemptId, AttentionItemId, AuthorityGrantId, ByteCount, CommandId, CorrelationId, CostEntryId,
     CostMicros, DispatchNodeId, EngineId, EngineSessionId, EvidenceId, GateId, LeaseId, MessageId,
-    PtySessionId, ReceiptId, TaskId, Timestamp, TokenCount, WorkspaceNodeId, WorktreeId,
+    PtySessionId, ReceiptId, TaskId, Timestamp, TokenCount, WorkflowRunId, WorkspaceNodeId,
+    WorktreeId,
 };
 use crate::ingestion::IngestionKind;
 use crate::inherited::{FindingAction, OrchestratorCheckpoint, RoundFindingSummary};
@@ -496,6 +497,36 @@ pub enum KernelCommand {
         expected_version: u32,
     },
 
+    // ---- workflow runs ----
+    //
+    // The RUN, not the template (S3): `template_ref` is opaque client-side
+    // data and `step` is an open string — the act taxonomy is template data
+    // (decision 17), so the kernel asserts nothing about step names.
+    OpenWorkflowRun {
+        workflow_run_id: WorkflowRunId,
+        template_ref: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[specta(optional)]
+        template_sha256: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[specta(optional)]
+        task_id: Option<TaskId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[specta(optional)]
+        title: Option<String>,
+    },
+    AdvanceWorkflowRun {
+        workflow_run_id: WorkflowRunId,
+        step: String,
+        expected_version: u32,
+    },
+    CloseWorkflowRun {
+        workflow_run_id: WorkflowRunId,
+        /// `completed`, `failed`, or `canceled` — the run's terminal state.
+        outcome: String,
+        expected_version: u32,
+    },
+
     // ---- dispatch tree ----
     RegisterDispatchNode {
         dispatch_node_id: DispatchNodeId,
@@ -618,6 +649,9 @@ impl KernelCommand {
             Self::MoveWorkspaceNode { .. } => "move_workspace_node",
             Self::RebindWorkspacePane { .. } => "rebind_workspace_pane",
             Self::CloseWorkspaceNode { .. } => "close_workspace_node",
+            Self::OpenWorkflowRun { .. } => "open_workflow_run",
+            Self::AdvanceWorkflowRun { .. } => "advance_workflow_run",
+            Self::CloseWorkflowRun { .. } => "close_workflow_run",
             Self::RegisterDispatchNode { .. } => "register_dispatch_node",
             Self::TransitionDispatchNode { .. } => "transition_dispatch_node",
             Self::WriteOrchestratorCheckpoint { .. } => "write_orchestrator_checkpoint",
@@ -692,7 +726,7 @@ mod tests {
         // slip in `command_type()` would silently route the wrong handler. Walk
         // the serialized tag of a value from EVERY variant instead.
         let all = all_variants();
-        assert_eq!(all.len(), 43, "the v1 command set is 43 variants");
+        assert_eq!(all.len(), 46, "the v1 command set is 46 variants");
         for command in &all {
             let json = serde_json::to_value(command).expect("serialize");
             let tag = json["type"].as_str().expect("tagged with a string type");
@@ -1077,6 +1111,23 @@ mod tests {
             KernelCommand::CloseWorkspaceNode {
                 workspace_node_id: WorkspaceNodeId::new("pane-1"),
                 expected_version: 3,
+            },
+            KernelCommand::OpenWorkflowRun {
+                workflow_run_id: WorkflowRunId::new("run-1"),
+                template_ref: "phase-lifecycle".into(),
+                template_sha256: Some("a".repeat(64)),
+                task_id: Some(TaskId::new("task-1")),
+                title: Some("ship the workspace".into()),
+            },
+            KernelCommand::AdvanceWorkflowRun {
+                workflow_run_id: WorkflowRunId::new("run-1"),
+                step: "verify".into(),
+                expected_version: 1,
+            },
+            KernelCommand::CloseWorkflowRun {
+                workflow_run_id: WorkflowRunId::new("run-1"),
+                outcome: "completed".into(),
+                expected_version: 2,
             },
             KernelCommand::RegisterDispatchNode {
                 dispatch_node_id: DispatchNodeId::new("node-1"),
