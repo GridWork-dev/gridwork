@@ -24,14 +24,15 @@
 //!
 //! # What is deliberately absent
 //!
-//! **No bindings.** The input vocabulary — which keys drive these operations
-//! — is its own element with its own lineage obligations; this module owns
-//! the structure, not the verbs. **No wire and no content.** Nothing here
-//! talks to the kernel or hosts a session; panes are structural leaves until
-//! the elements that bind sessions to them land. **No persistence.** The
-//! durable arrangement authority is server-side design work; this model is
-//! the client's in-memory floor.
+//! **No bindings here.** The input vocabulary — which keys and command names
+//! drive these operations, and the lineage every default owes — lives in
+//! [`input`]; this file owns the structure, not the verbs. **No wire and no
+//! content.** Nothing here talks to the kernel or hosts a session; panes are
+//! structural leaves until the elements that bind sessions to them land.
+//! **No persistence.** The durable arrangement authority is server-side
+//! design work; this model is the client's in-memory floor.
 
+pub mod input;
 pub mod render;
 
 use std::cmp::Reverse;
