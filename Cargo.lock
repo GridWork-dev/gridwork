@@ -1279,6 +1279,11 @@ dependencies = [
 [[package]]
 name = "gwk-text"
 version = "0.0.1"
+dependencies = [
+ "unicode-properties",
+ "unicode-segmentation",
+ "unicode-width",
+]
 
 [[package]]
 name = "gwk-theme"
