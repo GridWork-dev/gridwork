@@ -685,12 +685,23 @@ mod tests {
         // produce is on it too. Counting between ACKs also defeats
         // coalescing: a wrongly-delivered re-set signal cannot hide inside
         // the next real one's delivery, because an ACK separates them.
+        //
+        // The read is retried on failure because the trapped signal lands
+        // while the shell is sitting in `read`, and what a failed
+        // interrupted read does to a `while read` loop turned out to be the
+        // shell's choice: one shell resumes reading after running the trap,
+        // another lets the loop end — the first version of this loop passed
+        // on the development machine and exited BYE before the first ACK
+        // under CI's /bin/sh. The retry bound keeps a genuine end-of-file
+        // from spinning the loop instead.
         let mut session = Session::spawn(
             pty_process::Command::new("/bin/sh").arg("-c").arg(
-                "trap 'echo GOT-WINCH' WINCH; echo READY; \
-                 while read -r line; do \
-                   echo \"ACK:$line\"; \
-                   if [ \"$line\" = done ]; then break; fi; \
+                "trap 'echo GOT-WINCH' WINCH; echo READY; fails=0; \
+                 while [ \"$fails\" -lt 10 ]; do \
+                   if read -r line; then \
+                     echo \"ACK:$line\"; \
+                     if [ \"$line\" = done ]; then break; fi; \
+                   else fails=$((fails+1)); fi; \
                  done; echo BYE",
             ),
             80,
