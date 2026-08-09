@@ -79,6 +79,7 @@
     "request": {
       "type": "pty_attach",
       "session_id": "pty-1",
+      "generation": "pty-life-1",
       "cursor": "42"
     }
   },

@@ -30,8 +30,8 @@ use crate::entity::{
 use crate::envelope::{CommandEnvelope, EventEnvelope, JsonValue};
 use crate::frame::{PtyDelta, PtyFrame};
 use crate::ids::{
-    BlobUploadId, ByteCount, CommandId, EventCount, EventId, PtyFrameSeq, PtySessionId, RequestId,
-    Seq, WriterEpoch,
+    BlobUploadId, ByteCount, CommandId, EventCount, EventId, PtyFrameSeq, PtySessionGeneration,
+    PtySessionId, RequestId, Seq, WriterEpoch,
 };
 use crate::inherited::OrchestratorCheckpoint;
 
@@ -692,12 +692,17 @@ pub enum KernelRequest {
         address: BlobAddress,
     },
     /// Attach to a hosted PTY session's live output. Durable-cursor delivery,
-    /// mirroring [`Self::SubscribeEvents`]: an absent `cursor` is a fresh
-    /// attach, a present one is a reattach that resumes deltas after that
-    /// [`PtyFrameSeq`] without a gap. Deltas for this request follow as
+    /// mirroring [`Self::SubscribeEvents`]: an absent generation/cursor pair
+    /// is a fresh attach; a pair matching the current session life resumes
+    /// deltas after that [`PtyFrameSeq`] without a gap. A cursor without the
+    /// matching generation cannot claim continuity and reseeds at the live
+    /// head. Deltas for this request follow as
     /// [`ServerControl::PtyDeltaBatch`], tagged with the same `request_id`.
     PtyAttach {
         session_id: PtySessionId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[specta(optional)]
+        generation: Option<PtySessionGeneration>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[specta(optional)]
         cursor: Option<PtyFrameSeq>,
@@ -868,10 +873,12 @@ pub enum KernelResult {
     BlobStat {
         descriptor: BlobDescriptor,
     },
-    /// The attach succeeded. `cursor` is the frame revision deltas resume
-    /// from — absent only for a session that has not produced a frame yet.
+    /// The attach succeeded. `generation` names this lifetime of the session
+    /// id; `cursor` is the frame revision deltas resume from — absent only for
+    /// a session that has not produced a frame yet.
     PtyAttached {
         session_id: PtySessionId,
+        generation: PtySessionGeneration,
         rows: u16,
         cols: u16,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -880,6 +887,7 @@ pub enum KernelResult {
     },
     PtySnapshot {
         session_id: PtySessionId,
+        generation: PtySessionGeneration,
         seq: PtyFrameSeq,
         frame: PtyFrame,
     },
@@ -973,21 +981,24 @@ pub enum ServerControl {
         #[specta(optional)]
         last_cursor: Option<Seq>,
     },
-    /// One batch of PTY deltas on a live attach. `seq` is the last delivered
-    /// frame revision — what a reattach resumes from, mirroring
-    /// [`Self::EventBatch`].
+    /// One batch of PTY deltas on a live attach. `generation` qualifies the
+    /// session life and `seq` is its last delivered frame revision — the pair
+    /// a reattach resumes from, mirroring [`Self::EventBatch`].
     PtyDeltaBatch {
         request_id: RequestId,
         session_id: PtySessionId,
+        generation: PtySessionGeneration,
         deltas: Vec<PtyDelta>,
         seq: PtyFrameSeq,
     },
-    /// A PTY attach ended. `last_seq` is the last delta revision the consumer
-    /// actually received — the PTY analogue of [`Self::StreamClosed`], kept
-    /// as its own variant rather than reusing that one because the two carry
-    /// different sequence axes ([`Seq`] there, [`PtyFrameSeq`] here).
+    /// A PTY attach ended. `generation` qualifies `last_seq`, the last delta
+    /// revision the consumer actually received — the PTY analogue of
+    /// [`Self::StreamClosed`], kept as its own variant rather than reusing that
+    /// one because the two carry different sequence axes ([`Seq`] there,
+    /// [`PtyFrameSeq`] here).
     PtyStreamClosed {
         request_id: RequestId,
+        generation: PtySessionGeneration,
         code: KernelErrorCode,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[specta(optional)]

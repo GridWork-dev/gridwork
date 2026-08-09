@@ -92,6 +92,7 @@
     "result": {
       "type": "pty_attached",
       "session_id": "pty-1",
+      "generation": "pty-life-1",
       "rows": 24,
       "cols": 80,
       "cursor": "42"
@@ -103,6 +104,7 @@
     "result": {
       "type": "pty_snapshot",
       "session_id": "pty-1",
+      "generation": "pty-life-1",
       "seq": "43",
       "frame": {
         "cells": [
@@ -191,6 +193,7 @@
     "type": "pty_delta_batch",
     "request_id": "req-6",
     "session_id": "pty-1",
+    "generation": "pty-life-1",
     "deltas": [
       {
         "type": "cells_changed",
@@ -242,6 +245,7 @@
   {
     "type": "pty_stream_closed",
     "request_id": "req-6",
+    "generation": "pty-life-1",
     "code": "slow_consumer",
     "last_seq": "44"
   },
