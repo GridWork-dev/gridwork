@@ -194,7 +194,7 @@ jobs:
           --health-retries 10
     env:
       GWK_TEST_ADMIN_DATABASE_URL: postgresql://postgres:ci@localhost:5432/postgres
-      GWK_PERF_RECEIPT: gwk-perf-receipt.json
+      GWK_PERF_RECEIPT: ${{ github.workspace }}/gwk-perf-receipt.json
       GWK_PERF_REVISION: ${{ github.sha }}
       GWK_PERF_SLACK: "3"
     steps:
@@ -216,6 +216,7 @@ jobs:
         with:
           name: perf-receipt
           path: gwk-perf-receipt.json
+          if-no-files-found: error
       - id: verdict
         if: always()
         env:
@@ -243,7 +244,7 @@ jobs:
           --health-retries 10
     env:
       GWK_TEST_ADMIN_DATABASE_URL: postgresql://postgres:ci@localhost:5432/postgres
-      GWK_PERF_RECEIPT: gwk-perf-receipt-retry.json
+      GWK_PERF_RECEIPT: ${{ github.workspace }}/gwk-perf-receipt-retry.json
       GWK_PERF_REVISION: ${{ github.sha }}
       GWK_PERF_SLACK: "3"
     steps:
@@ -263,6 +264,7 @@ jobs:
         with:
           name: perf-receipt-retry
           path: gwk-perf-receipt-retry.json
+          if-no-files-found: error
       - id: verdict
         if: always()
         env:
