@@ -32,17 +32,20 @@
 //! [libghostty-vt]: https://crates.io/crates/libghostty-vt
 
 use libghostty_vt::fmt::{Format, Formatter, FormatterOptions};
-use libghostty_vt::terminal::{Options, Terminal};
+use libghostty_vt::selection::Selection;
+use libghostty_vt::terminal::{Options, Point, PointCoordinate, Terminal};
 
 pub mod attach;
 pub mod record;
 pub mod render;
+pub mod scroll;
 pub mod session;
 pub mod style;
 
 pub use attach::{Attach, CaughtUp};
 pub use record::{Entry, Event, Recording};
 pub use render::{Frame, Renderer};
+pub use scroll::HistoryView;
 pub use session::{Session, SpawnError};
 pub use style::{CellStyle, Color, Underline};
 
@@ -87,6 +90,56 @@ impl Grid {
         self.term.scrollback_rows().ok()
     }
 
+    /// Total rows in the screen: retained scrollback plus the live viewport.
+    pub fn total_rows(&self) -> Option<usize> {
+        self.term.total_rows().ok()
+    }
+
+    /// A run of rows from the full screen — scrollback plus live viewport —
+    /// as plain text, one line per row.
+    ///
+    /// `start` is an absolute screen row, zero being the oldest row still
+    /// retained. Eviction moves what row zero names, so a caller holding a
+    /// position across writes re-derives it from
+    /// [`scrollback_rows`](Self::scrollback_rows) — that is [`HistoryView`]'s
+    /// whole job. Returns `None` for an empty range or one reaching past the
+    /// end.
+    ///
+    /// Reading history mutates nothing: the live screen, cursor, and
+    /// viewport are exactly as before the call.
+    ///
+    /// Formatting matches [`text`](Self::text): no trimming, no unwrapping
+    /// of soft-wrapped lines — a row of spaces and an empty row stay
+    /// distinguishable, and one screen row stays one output line.
+    pub fn screen_rows_text(&self, start: usize, count: usize) -> Option<String> {
+        let (cols, _) = self.size()?;
+        let last = start.checked_add(count.checked_sub(1)?)?;
+        if last >= self.total_rows()? {
+            return None;
+        }
+        let head = self
+            .term
+            .grid_ref(Point::Screen(PointCoordinate {
+                x: 0,
+                y: u32::try_from(start).ok()?,
+            }))
+            .ok()?;
+        let tail = self
+            .term
+            .grid_ref(Point::Screen(PointCoordinate {
+                x: cols - 1,
+                y: u32::try_from(last).ok()?,
+            }))
+            .ok()?;
+        let selection = Selection::new(head, tail, false);
+        let bytes = self.run_formatter(
+            FormatterOptions::new()
+                .with_format(Format::Plain)
+                .with_selection(&selection),
+        )?;
+        String::from_utf8(bytes).ok()
+    }
+
     /// Feed child-process output to the parser.
     ///
     /// Takes an arbitrary byte slice, not a `str`: a child emits whatever it
@@ -123,7 +176,13 @@ impl Grid {
         self.term.resize(cols, rows, 0, 0).ok()
     }
 
-    /// The active screen as plain text, one line per row.
+    /// The screen as plain text, one line per row — every retained row,
+    /// scrollback included, not just the live viewport.
+    ///
+    /// An earlier version of this comment said "the active screen", which is
+    /// a property this method never had: the formatter renders the whole
+    /// screen, and the first grid to accumulate history showed it. The
+    /// viewport-sized read is [`screen_rows_text`](Self::screen_rows_text).
     ///
     /// This is the crate's canonical rendering: it is what golden frames are
     /// captured as, and what two grids are compared through when a reattached
@@ -160,8 +219,13 @@ impl Grid {
     /// the twenty-four conformance vectors land there, and every one of them
     /// made `text()` return `None`, as though the screen were unreadable.
     fn format(&self, format: Format) -> Option<Vec<u8>> {
-        let mut formatter =
-            Formatter::new(&self.term, FormatterOptions::new().with_format(format)).ok()?;
+        self.run_formatter(FormatterOptions::new().with_format(format))
+    }
+
+    /// Size, fill, and drain one formatter — the quirk handling above lives
+    /// here so the whole-screen and selection-restricted paths share it.
+    fn run_formatter(&self, options: FormatterOptions<'_, '_>) -> Option<Vec<u8>> {
+        let mut formatter = Formatter::new(&self.term, options).ok()?;
         let len = match formatter.format_len() {
             Ok(len) => len,
             Err(libghostty_vt::error::Error::InvalidValue) => 0,
@@ -236,5 +300,58 @@ mod tests {
         // computed against the wrong geometry.
         assert!(Grid::new(0, 24).is_none());
         assert!(Grid::new(80, 0).is_none());
+    }
+
+    #[test]
+    fn screen_rows_text_reads_an_exact_absolute_window() {
+        let mut grid = Grid::with_scrollback(20, 5, 100).expect("a valid grid");
+        for i in 0..12 {
+            grid.write(format!("line-{i}\r\n").as_bytes());
+        }
+
+        // 12 lines through a 5-row viewport leaves 8 rows of history; screen
+        // row 0 is line-0, and the live viewport starts at screen row 8.
+        let window = grid.screen_rows_text(2, 3).expect("an in-range window");
+        let rows: Vec<&str> = window.lines().collect();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].trim_end(), "line-2");
+        assert_eq!(rows[2].trim_end(), "line-4");
+
+        // The window ending at the last screen row reads the live tail.
+        let total = grid.total_rows().expect("a row count");
+        assert_eq!(total, 13, "8 history + 5 viewport");
+        let tail = grid.screen_rows_text(total - 1, 1).expect("the last row");
+        assert_eq!(tail.trim_end(), "", "the shell-style blank prompt row");
+    }
+
+    #[test]
+    fn screen_rows_text_refuses_empty_and_out_of_range_windows() {
+        let mut grid = Grid::new(20, 5).expect("a valid grid");
+        grid.write(b"hello");
+
+        assert!(grid.screen_rows_text(0, 0).is_none(), "an empty window");
+        let total = grid.total_rows().expect("a row count");
+        assert!(
+            grid.screen_rows_text(total, 1).is_none(),
+            "starting past the end"
+        );
+        assert!(
+            grid.screen_rows_text(total - 1, 2).is_none(),
+            "reaching past the end"
+        );
+    }
+
+    #[test]
+    fn screen_rows_text_keeps_blank_and_space_rows_distinct() {
+        // The same property text() documents, held on the selection path: a
+        // row of spaces and an empty row are different screen states.
+        let mut grid = Grid::with_scrollback(10, 3, 100).expect("a valid grid");
+        grid.write(b"          \r\n\r\nx\r\n\r\n\r\n");
+
+        let spaces = grid.screen_rows_text(0, 1).expect("the space row");
+        let blank = grid.screen_rows_text(1, 1).expect("the blank row");
+        assert_eq!(spaces, " ".repeat(10));
+        assert_eq!(blank, "");
+        assert_ne!(spaces, blank);
     }
 }
