@@ -164,6 +164,12 @@ string_id!(
     /// or none at all).
     PtySessionId
 );
+string_id!(
+    /// One lifetime of a hosted PTY session id. A reclaimed [`PtySessionId`]
+    /// gets a new opaque generation so frame revisions from separate lives
+    /// are never mistaken for one continuous cursor axis.
+    PtySessionGeneration
+);
 
 u64_decimal_string!(
     /// A position in the global event log. Assigned by the kernel append actor
