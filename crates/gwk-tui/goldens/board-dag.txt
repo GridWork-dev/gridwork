@@ -9,10 +9,10 @@
    ⊚ codex  succeeded                                              08:39
  off-page -- parents beyond this page
    ⊚ codex  running                                                10:00
-
 ------------------------------------------------------------------------
  attempt at-01  task t-auth
  engine codex  role implementer
  state running
+ budget not recorded -- every axis is uncapped
  created 2026-08-06T09:40:00Z  updated 2026-08-06T10:12:00Z
 BOARD estate brief [dag] flow events replay fleet cost audit  2 run @407

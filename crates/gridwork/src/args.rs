@@ -16,7 +16,8 @@
 use std::path::PathBuf;
 
 use gwk_domain::blob::BlobAddress;
-use gwk_domain::ids::Seq;
+use gwk_domain::entity::Budget;
+use gwk_domain::ids::{CostMicros, Seq};
 use gwk_domain::ingestion::IngestionKind;
 use gwk_domain::protocol::ProjectionKind;
 use gwk_tui::hall::MotionMode;
@@ -34,12 +35,17 @@ const VALUE_FLAGS: &[&str] = &[
     "--cursor",
     "--cutover-id",
     "--event-type",
+    "--expected-version",
     "--file",
     "--head",
     "--key",
     "--kind",
     "--limit",
     "--media-type",
+    "--max-cost-micros",
+    "--max-tokens",
+    "--max-tool-calls",
+    "--max-wall-ms",
     "--motion",
     "--output",
     "--project",
@@ -137,7 +143,19 @@ pub enum Verb {
     EstateOverview,
     /// The newest projection facts and the work those same pages leave owed.
     ActivityBrief,
+    CostRollup,
     AgentFleet,
+    AttemptStop {
+        id: String,
+    },
+    AttemptBudget {
+        id: String,
+    },
+    AttemptBudgetUpdate {
+        id: String,
+        expected_version: u32,
+        budget: Budget,
+    },
     SessionSnapshot {
         id: String,
     },
@@ -230,7 +248,13 @@ gw — the GridWork kernel's command line
   gw event tail [--cursor <seq>] [--aggregate-type <type>] [--event-type <type>]
   gw estate overview
   gw activity brief
+  gw cost rollup
   gw agent fleet
+  gw attempt stop <attempt-id>
+  gw attempt budget <attempt-id>
+  gw attempt budget set <attempt-id> --expected-version <n>
+      [--max-tokens <n>] [--max-tool-calls <n>] [--max-wall-ms <n>] [--max-cost-micros <n>]
+  gw attempt budget clear <attempt-id> --expected-version <n>
   gw session list [--cursor <key>] [--limit <n>]
   gw session inspect <engine-session-id>
   gw session snapshot <pty-session-id>
@@ -335,10 +359,15 @@ fn verb(rest: &mut Rest) -> Result<Verb, Failure> {
             "brief" => Ok(Verb::ActivityBrief),
             other => Err(unknown("activity", other)),
         },
+        "cost" => match rest.word("cost")?.as_str() {
+            "rollup" => Ok(Verb::CostRollup),
+            other => Err(unknown("cost", other)),
+        },
         "agent" => match rest.word("agent")?.as_str() {
             "fleet" => Ok(Verb::AgentFleet),
             other => Err(unknown("agent", other)),
         },
+        "attempt" => attempt(rest),
         "session" => match rest.word("session")?.as_str() {
             "list" => rest.page(ProjectionKind::EngineSession),
             "inspect" => Ok(Verb::ProjectionGet {
@@ -500,6 +529,57 @@ fn event(rest: &mut Rest) -> Result<Verb, Failure> {
     }
 }
 
+fn attempt(rest: &mut Rest) -> Result<Verb, Failure> {
+    match rest.word("attempt")?.as_str() {
+        "stop" => Ok(Verb::AttemptStop {
+            id: rest.word("attempt stop")?,
+        }),
+        "budget" => {
+            let sub_or_id = rest.word("attempt budget")?;
+            match sub_or_id.as_str() {
+                "set" => {
+                    let id = rest.word("attempt budget set")?;
+                    let budget = Budget {
+                        max_tokens: optional_u32(rest, "--max-tokens")?,
+                        max_tool_calls: optional_u32(rest, "--max-tool-calls")?,
+                        max_wall_ms: optional_u32(rest, "--max-wall-ms")?,
+                        max_cost_micros: rest
+                            .flag("--max-cost-micros")
+                            .map(|value| unsigned(&value, "--max-cost-micros").map(CostMicros::new))
+                            .transpose()?,
+                    };
+                    if budget.max_tokens.is_none()
+                        && budget.max_tool_calls.is_none()
+                        && budget.max_wall_ms.is_none()
+                        && budget.max_cost_micros.is_none()
+                    {
+                        return Err(Failure::usage(
+                            "attempt budget set needs at least one cap; use attempt budget clear to uncap every axis",
+                        ));
+                    }
+                    Ok(Verb::AttemptBudgetUpdate {
+                        id,
+                        expected_version: required_u32(rest, "--expected-version")?,
+                        budget,
+                    })
+                }
+                "clear" => Ok(Verb::AttemptBudgetUpdate {
+                    id: rest.word("attempt budget clear")?,
+                    expected_version: required_u32(rest, "--expected-version")?,
+                    budget: Budget {
+                        max_tokens: None,
+                        max_tool_calls: None,
+                        max_wall_ms: None,
+                        max_cost_micros: None,
+                    },
+                }),
+                id => Ok(Verb::AttemptBudget { id: id.to_owned() }),
+            }
+        }
+        other => Err(unknown("attempt", other)),
+    }
+}
+
 fn blob(rest: &mut Rest) -> Result<Verb, Failure> {
     match rest.word("blob")?.as_str() {
         "put" => Ok(Verb::BlobPut {
@@ -576,6 +656,29 @@ fn count(value: &str) -> Result<u32, Failure> {
     value
         .parse()
         .map_err(|_| Failure::usage(format!("a limit is a count, not {value:?}")))
+}
+
+fn unsigned(value: &str, name: &str) -> Result<u64, Failure> {
+    value
+        .parse()
+        .map_err(|_| Failure::usage(format!("{name} is an unsigned integer, not {value:?}")))
+}
+
+fn optional_u32(rest: &mut Rest, name: &str) -> Result<Option<u32>, Failure> {
+    rest.flag(name)
+        .map(|value| {
+            value
+                .parse()
+                .map_err(|_| Failure::usage(format!("{name} is a u32, not {value:?}")))
+        })
+        .transpose()
+}
+
+fn required_u32(rest: &mut Rest, name: &str) -> Result<u32, Failure> {
+    let value = rest.required(name)?;
+    value
+        .parse()
+        .map_err(|_| Failure::usage(format!("{name} is a u32, not {value:?}")))
 }
 
 /// A cursor as a caller writes it: decimal, because that is what the wire
@@ -777,6 +880,47 @@ mod tests {
             parsed("activity brief").expect("parse").verb,
             Verb::ActivityBrief
         );
+        assert_eq!(parsed("cost rollup").expect("parse").verb, Verb::CostRollup);
+        assert_eq!(
+            parsed("attempt stop at-1").expect("parse").verb,
+            Verb::AttemptStop { id: "at-1".into() }
+        );
+        assert_eq!(
+            parsed("attempt budget at-1").expect("parse").verb,
+            Verb::AttemptBudget { id: "at-1".into() }
+        );
+        assert_eq!(
+            parsed(
+                "attempt budget set at-1 --expected-version 3 --max-tokens 100 --max-cost-micros 999"
+            )
+            .expect("parse")
+            .verb,
+            Verb::AttemptBudgetUpdate {
+                id: "at-1".into(),
+                expected_version: 3,
+                budget: Budget {
+                    max_tokens: Some(100),
+                    max_tool_calls: None,
+                    max_wall_ms: None,
+                    max_cost_micros: Some(CostMicros::new(999)),
+                },
+            }
+        );
+        assert_eq!(
+            parsed("attempt budget clear at-1 --expected-version 3")
+                .expect("parse")
+                .verb,
+            Verb::AttemptBudgetUpdate {
+                id: "at-1".into(),
+                expected_version: 3,
+                budget: Budget {
+                    max_tokens: None,
+                    max_tool_calls: None,
+                    max_wall_ms: None,
+                    max_cost_micros: None,
+                },
+            }
+        );
         assert_eq!(parsed("agent fleet").expect("parse").verb, Verb::AgentFleet);
         assert_eq!(
             parsed("session list").expect("parse").verb,
@@ -950,6 +1094,12 @@ mod tests {
             "tui --pretty",
             "event tail --pretty",
             "session attach pty-1 --pretty",
+            "attempt budget set at-1 --expected-version 1",
+            "attempt budget set at-1 --max-tokens 1",
+            "attempt budget clear at-1",
+            "attempt budget at-1 --max-tokens 1",
+            "attempt budget set at-1 --expected-version nope --max-tokens 1",
+            "attempt budget set at-1 --expected-version 1 --max-cost-micros nope",
             "blob stat not-an-address",
             "pr open",
             "pr open --title t",

@@ -40,14 +40,17 @@ use gwk_domain::blob::{BLOB_CHUNK_BYTES, BlobAddress};
 use gwk_domain::command::KernelCommand;
 use gwk_domain::envelope::{Actor, CommandEnvelope, ENVELOPE_SCHEMA_VERSION, Origin};
 use gwk_domain::ids::{
-    AttentionItemId, AuthorityGrantId, ByteCount, CommandId, IdempotencyKey, ProjectId,
+    AttemptId, AttentionItemId, AuthorityGrantId, ByteCount, CommandId, IdempotencyKey, ProjectId,
     PtySessionId, Seq, Timestamp,
 };
 use gwk_domain::protocol::{
     CONTRACT_VERSION, KernelErrorCode, KernelRequest, KernelResult, ProjectionKind,
     ProjectionRecord, ServerControl,
 };
-use gwk_tui::board::{BoardState, BoardView, activity_brief, agent_fleet, estate_overview};
+use gwk_tui::board::{
+    BoardState, BoardTarget, BoardView, activity_brief, agent_fleet, attempt_budget, cost_rollup,
+    estate_overview, replace_attempt_budget, stop_attempt,
+};
 use gwk_tui::replay::ReplayTimeline;
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
@@ -181,9 +184,36 @@ async fn execute(verb: Verb, pretty: bool) -> Result<(), Failure> {
             let state = load_summary_state(true).await?;
             emit_serialized(&activity_brief(&state), pretty)
         }
+        Verb::CostRollup => {
+            let state = load_cost_state().await?;
+            emit_serialized(&cost_rollup(&state), pretty)
+        }
         Verb::AgentFleet => {
             let state = load_fleet_state().await?;
             emit_serialized(&agent_fleet(&state), pretty)
+        }
+        Verb::AttemptStop { id } => {
+            let target = BoardTarget::Attempt(AttemptId::new(id.clone()));
+            let command = stop_attempt(&target).expect("an attempt target supports stop_attempt");
+            submit(&command, &format!("stop_attempt:{id}"), pretty).await
+        }
+        Verb::AttemptBudget { id } => {
+            let attempt = load_attempt(&id).await?;
+            emit_serialized(&attempt_budget(&attempt), pretty)
+        }
+        Verb::AttemptBudgetUpdate {
+            id,
+            expected_version,
+            budget,
+        } => {
+            let command =
+                replace_attempt_budget(AttemptId::new(id.clone()), expected_version, budget);
+            submit(
+                &command,
+                &format!("update_budget:{id}:{expected_version}"),
+                pretty,
+            )
+            .await
         }
         Verb::SessionSnapshot { id } => {
             ask(
@@ -332,6 +362,7 @@ const FLEET_PROJECTIONS: &[ProjectionKind] = &[
     ProjectionKind::Worktree,
     ProjectionKind::Lease,
 ];
+const COST_PROJECTIONS: &[ProjectionKind] = &[ProjectionKind::CostEntry];
 
 /// Read every projection consumed by the summary twins at one projector
 /// watermark. Projection pages are not snapshots, so a write between kinds
@@ -346,6 +377,33 @@ async fn load_summary_state(include_cost: bool) -> Result<BoardState, Failure> {
 
 async fn load_fleet_state() -> Result<BoardState, Failure> {
     load_board_state(FLEET_PROJECTIONS, BoardView::Fleet).await
+}
+
+async fn load_cost_state() -> Result<BoardState, Failure> {
+    load_board_state(COST_PROJECTIONS, BoardView::CostHealth).await
+}
+
+async fn load_attempt(id: &str) -> Result<gwk_domain::entity::Attempt, Failure> {
+    let result = connect()
+        .await?
+        .ask(KernelRequest::GetProjection {
+            projection: ProjectionKind::Attempt,
+            id: id.to_owned(),
+        })
+        .await?;
+    match result {
+        KernelResult::Projection {
+            record: ProjectionRecord::Attempt { attempt },
+        } => Ok(attempt),
+        KernelResult::Error {
+            code,
+            message,
+            detail,
+        } => Err(kernel_failure(code, message, detail)),
+        other => Err(Failure::internal(format!(
+            "read attempt budget: kernel answered with {other:?}"
+        ))),
+    }
 }
 
 async fn load_board_state(
@@ -566,18 +624,22 @@ fn answer(result: KernelResult, pretty: bool) -> Result<(), Failure> {
         detail,
     } = result
     {
-        let mut failure = Failure::new(code, message);
-        if let Some(detail) = detail {
-            // Kept, because the contract puts machine-readable specifics there —
-            // the version behind a stale_version, the field behind a validation.
-            failure.message = format!("{}: {detail}", failure.message);
-        }
-        return Err(failure);
+        return Err(kernel_failure(code, message, detail));
     }
     let value = serde_json::to_value(&result)
         .map_err(|e| Failure::internal(format!("render an answer: {e}")))?;
     emit(&value, pretty);
     Ok(())
+}
+
+fn kernel_failure(code: KernelErrorCode, message: String, detail: Option<Value>) -> Failure {
+    let mut failure = Failure::new(code, message);
+    if let Some(detail) = detail {
+        // Kept, because the contract puts machine-readable specifics there —
+        // the version behind a stale_version, the field behind a validation.
+        failure.message = format!("{}: {detail}", failure.message);
+    }
+    failure
 }
 
 /// Submit a command this program minted, in the kernel's own project.
