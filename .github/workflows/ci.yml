@@ -35,10 +35,15 @@ jobs:
             echo 'perf-job-guard accepted two misses — the retry guard is broken' >&2
             exit 1
           fi
+          if ./tools/perf-job-guard.sh final success skipped; then
+            echo 'perf-job-guard accepted a skipped parallel run - the retry guard is broken' >&2
+            exit 1
+          fi
           [ "$(./tools/perf-job-guard.sh attempt success success)" = 'outcome=success' ]
           [ "$(./tools/perf-job-guard.sh attempt success failure)" = 'outcome=failure' ]
+          ./tools/perf-job-guard.sh final success success
+          ./tools/perf-job-guard.sh final success failure
           ./tools/perf-job-guard.sh final failure success
-          ./tools/perf-job-guard.sh final success skipped
       # DEFAULT members, not `--workspace`. `--workspace` overrides
       # `default-members` and would pull in gwk-pty, which needs Zig and a 71 MB
       # ghostty tree — and whose build script CLONES ghostty when
@@ -163,10 +168,11 @@ jobs:
 
   # The accepted performance bounds, in release, against the pinned PostgreSQL
   # major. Sample-level slack stays fixed at 3; it cannot model contention from
-  # unrelated work sharing an entire hosted runner. A miss gets one retry in a
-  # separate job — therefore on a fresh runner — and the `perf` aggregator below
-  # remains the stable required check. Two misses are a regression; one miss
-  # followed by a clean fresh run is runner noise, not a reason to widen slack.
+  # unrelated work sharing an entire hosted runner. Every run gets two parallel
+  # measurements in separate jobs and therefore on independent fresh runners;
+  # the `perf` aggregator below remains the stable required check. Two misses are
+  # a regression; one miss beside a clean fresh run is runner noise, not a reason
+  # to widen slack.
   perf-attempt:
     continue-on-error: true
     outputs:
@@ -215,8 +221,6 @@ jobs:
         run: ./tools/perf-job-guard.sh attempt "$ENVELOPE_OUTCOME" "$RECEIPT_OUTCOME" >> "$GITHUB_OUTPUT"
 
   perf-retry:
-    needs: perf-attempt
-    if: ${{ always() && needs.perf-attempt.outputs.outcome != 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     services:
