@@ -6,10 +6,11 @@ an issue first.
 
 ## What's actually useful right now
 
-The kernel has landed and the engines are in flight (stage 3 of the
-[roadmap](ROADMAP.md)): the PTY engine and adapter crates are in the tree but incomplete
-and unpublished, so there is a running daemon to break but no human surface to build on
-yet. What is most useful:
+The kernel and the engines have landed and the console is in flight (stage 4 of 6
+on the [roadmap](ROADMAP.md)): the PTY engine and adapter crates are certified but
+still in-tree and unpublished, and `gwk-tui` now puts an early `gw tui` surface over
+the daemon — so there is a running daemon to break and a young console to build on.
+What is most useful:
 
 - **Read the contract and argue with it.** `crates/gwk-domain/src/fsm.rs` and
   `transition.rs` hold the entire state-machine contract — four enums, four edge

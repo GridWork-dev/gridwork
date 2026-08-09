@@ -60,14 +60,18 @@ threat_stage=$(grep -oE 'stage [0-9] of 6' docs/security/THREAT_MODEL.md | grep 
 quickstart_stage=$(grep -oE 'stage [0-9] of 6' site/content/docs/quickstart.mdx | grep -oE '^stage [0-9]' | grep -oE '[0-9]' | head -1 || true)
 site_security_stage=$(grep -oE 'stage [0-9] of 6' site/content/docs/security/index.mdx | grep -oE '^stage [0-9]' | grep -oE '[0-9]' | head -1 || true)
 site_prose_stage=$(grep -oE 'stage [0-9] of 6' "$landing" | grep -oE '^stage [0-9]' | grep -oE '[0-9]' | head -1 || true)
+# CONTRIBUTING.md joined at the 6' close: it sat a full stage behind for five
+# days precisely because nothing compared it.
+contributing_stage=$(grep -oE 'stage [0-9] of 6' CONTRIBUTING.md | grep -oE '^stage [0-9]' | grep -oE '[0-9]' | head -1 || true)
 if [ -z "$readme_stage" ] \
   || [ "$readme_stage" != "$site_stage" ] \
   || [ "$readme_stage" != "$roadmap_stage" ] \
   || [ "$readme_stage" != "$threat_stage" ] \
   || [ "$readme_stage" != "$quickstart_stage" ] \
   || [ "$readme_stage" != "$site_security_stage" ] \
-  || [ "$readme_stage" != "$site_prose_stage" ]; then
-  echo "check-claims: current-stage disagreement — README='$readme_stage' site-chip='$site_stage' ROADMAP='$roadmap_stage' THREAT_MODEL='$threat_stage' quickstart='$quickstart_stage' site-security='$site_security_stage' site-prose='$site_prose_stage'" >&2
+  || [ "$readme_stage" != "$site_prose_stage" ] \
+  || [ "$readme_stage" != "$contributing_stage" ]; then
+  echo "check-claims: current-stage disagreement — README='$readme_stage' site-chip='$site_stage' ROADMAP='$roadmap_stage' THREAT_MODEL='$threat_stage' quickstart='$quickstart_stage' site-security='$site_security_stage' site-prose='$site_prose_stage' CONTRIBUTING='$contributing_stage'" >&2
   fail=1
 fi
 
@@ -84,6 +88,12 @@ need README.md "Don.t run .main." "main is not for use"
 # it goes red — which dropping it from C4 alone would not catch.
 need docs/contract/NAMING.md 'Frozen at the Contract stage \(stage 1 of 5\)' "contract-freeze stage"
 need site/content/docs/contract/index.mdx 'Frozen at the Contract stage \(stage 1 of 5\)' "site contract-freeze stage"
+# The parity promise is the same shape: "stage 3" there records WHEN the roadmap
+# promised the matrix, not where the ladder stands. It was the one public stage
+# string neither compared by C4 nor pinned here (2026-08-04 review triage) — a
+# renumbering sweep could move it silently. Pin canonical + mirror to the constant.
+need docs/PARITY.md 'for stage 3, defined before any adapter exists' "parity-promise stage"
+need site/content/docs/parity.mdx 'for stage 3, defined before any adapter exists' "site parity-promise stage"
 
 # C8 — the crates table names the same crate SET on both surfaces (README table,
 # landing-page array). Name-set only: wording and status drift are readable on
