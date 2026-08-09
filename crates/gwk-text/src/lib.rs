@@ -34,6 +34,31 @@ use unicode_width::UnicodeWidthStr;
 const TEXT_PRESENTATION_SELECTOR: char = '\u{fe0e}';
 const EMOJI_PRESENTATION_SELECTOR: char = '\u{fe0f}';
 
+/// The Unicode release shared by every table that determines GridWork cells.
+pub const UNICODE_VERSION: (u64, u64, u64) = (17, 0, 0);
+
+const _: () = assert!(unicode_tables_match(
+    unicode_width::UNICODE_VERSION,
+    unicode_segmentation::UNICODE_VERSION,
+    unicode_properties::UNICODE_VERSION,
+));
+
+const fn unicode_tables_match(
+    width: (u8, u8, u8),
+    segmentation: (u64, u64, u64),
+    properties: (u64, u64, u64),
+) -> bool {
+    width.0 as u64 == UNICODE_VERSION.0
+        && width.1 as u64 == UNICODE_VERSION.1
+        && width.2 as u64 == UNICODE_VERSION.2
+        && segmentation.0 == UNICODE_VERSION.0
+        && segmentation.1 == UNICODE_VERSION.1
+        && segmentation.2 == UNICODE_VERSION.2
+        && properties.0 == UNICODE_VERSION.0
+        && properties.1 == UNICODE_VERSION.1
+        && properties.2 == UNICODE_VERSION.2
+}
+
 /// How characters with `East_Asian_Width=Ambiguous` are resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AmbiguousWidth {
@@ -170,4 +195,18 @@ fn has_emoji_presentation(character: char) -> bool {
 
 fn is_regional_indicator(character: char) -> bool {
     unicode_properties::emoji::is_regional_indicator(character)
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+
+    #[test]
+    fn seeded_unicode_table_mismatch_is_rejected() {
+        assert!(!unicode_tables_match(
+            (16, 0, 0),
+            unicode_segmentation::UNICODE_VERSION,
+            unicode_properties::UNICODE_VERSION,
+        ));
+    }
 }
