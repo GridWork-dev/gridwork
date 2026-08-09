@@ -25,6 +25,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 
+use super::input::{DEFAULTS, InputState, Mode, PaletteView};
 use super::{PaneId, WorkspaceState};
 use crate::chrome::{ChromeRole, ChromeTheme};
 use crate::input::HitMap;
@@ -201,6 +202,116 @@ fn status(
         area.width as usize,
         chrome.style(ChromeRole::StatusBar, tier),
     );
+}
+
+/// Paint the input grammar's own furniture over a rendered surface: the
+/// mode word at the status row's right edge, and the palette overlay.
+///
+/// A separate layer rather than more [`render`] parameters, because the
+/// grammar is optional chrome over the structure: a caller that has not
+/// wired input yet paints a complete surface without it.
+pub fn render_input(
+    area: Rect,
+    buf: &mut Buffer,
+    input: &InputState,
+    tier: ColorTier,
+    glyphs: GlyphSet,
+    chrome: &ChromeTheme,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let mode_word = match input.mode() {
+        Mode::Passthrough => None,
+        Mode::Command => Some("command"),
+        Mode::Palette => Some("palette"),
+    };
+    if let Some(word) = mode_word
+        && area.height >= 2
+        && area.width > word.len() as u16
+    {
+        buf.set_string(
+            area.x + area.width - word.len() as u16,
+            area.y + area.height - 1,
+            word,
+            chrome.style(ChromeRole::StatusBar, tier),
+        );
+    }
+
+    if input.mode() != Mode::Palette {
+        return;
+    }
+    let Some(view) = input.palette().view() else {
+        return;
+    };
+
+    let width = area.width.saturating_sub(4).min(56);
+    let border = match glyphs {
+        GlyphSet::Unicode => &UNICODE_BORDER,
+        GlyphSet::Ascii => &ASCII_BORDER,
+    };
+    let rows: Vec<String> = match view {
+        PaletteView::Input => {
+            let line = format!("> {}", input.palette().input());
+            let mut rows = vec![line];
+            if let Some(notice) = input.palette().notice() {
+                rows.push(notice.to_owned());
+            }
+            rows.extend(input.palette().candidates().map(|name| format!("  {name}")));
+            rows
+        }
+        PaletteView::Keys => DEFAULTS
+            .iter()
+            .map(|row| {
+                format!(
+                    "{:<12} {:<28} {}  -- {}",
+                    row.mode, row.keys, row.does, row.lineage
+                )
+            })
+            .collect(),
+    };
+
+    // Interior rows the area can afford; the border adds two.
+    let interior = rows.len().min(area.height.saturating_sub(4) as usize) as u16;
+    if width < 8 || interior == 0 {
+        return;
+    }
+    let overlay = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + 1,
+        width,
+        interior + 2,
+    );
+    // A blank ground first: the overlay covers panes, not blends into them.
+    for y in overlay.y..overlay.y + overlay.height {
+        buf.set_string(
+            overlay.x,
+            y,
+            " ".repeat(overlay.width as usize),
+            chrome.style(ChromeRole::StatusBar, tier),
+        );
+    }
+    draw_border(
+        buf,
+        overlay,
+        chrome.style(ChromeRole::PaneBorderFocused, tier),
+        border,
+    );
+    for (offset, row) in rows.iter().take(interior as usize).enumerate() {
+        let role = match (view, offset) {
+            (PaletteView::Input, 0) => ChromeRole::PaneTitle,
+            (PaletteView::Input, _) => ChromeRole::TabInactive,
+            (PaletteView::Keys, _) => ChromeRole::StatusBar,
+        };
+        buf.set_stringn(
+            overlay.x + 1,
+            overlay.y + 1 + offset as u16,
+            row,
+            (overlay.width - 2) as usize,
+            chrome.style(role, tier),
+        );
+    }
 }
 
 fn draw_border(buf: &mut Buffer, rect: Rect, style: Style, glyphs: &BorderGlyphs) {
@@ -394,6 +505,124 @@ mod tests {
             &mut hits,
         );
         assert_eq!(hits.targets().count(), 0);
+    }
+
+    #[test]
+    fn render_the_mode_word_sits_at_the_status_row_edge() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let state = WorkspaceState::new();
+        let mut input = InputState::new();
+        input.handle(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
+
+        let (mut buf, _) = painted(&state, GlyphSet::Unicode);
+        render_input(
+            AREA,
+            &mut buf,
+            &input,
+            ColorTier::Truecolor,
+            GlyphSet::Unicode,
+            &ChromeTheme::signal(),
+        );
+        assert!(
+            row(&buf, 11).ends_with("command"),
+            "the armed mode is stated where the operator's eye already is"
+        );
+
+        // Pass-through paints no mode word: the resting state is not chrome.
+        let (mut resting, _) = painted(&state, GlyphSet::Unicode);
+        render_input(
+            AREA,
+            &mut resting,
+            &InputState::new(),
+            ColorTier::Truecolor,
+            GlyphSet::Unicode,
+            &ChromeTheme::signal(),
+        );
+        assert!(!row(&resting, 11).contains("command"));
+    }
+
+    #[test]
+    fn render_the_palette_overlay_paints_the_line_and_its_candidates() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let state = WorkspaceState::new();
+        let mut input = InputState::new();
+        input.handle(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        input.handle(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE));
+        for c in "sp".chars() {
+            input.handle(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+
+        let (mut buf, _) = painted(&state, GlyphSet::Unicode);
+        render_input(
+            AREA,
+            &mut buf,
+            &input,
+            ColorTier::Truecolor,
+            GlyphSet::Unicode,
+            &ChromeTheme::signal(),
+        );
+        let screen: Vec<String> = (0..AREA.height).map(|y| row(&buf, y)).collect();
+        assert!(
+            screen.iter().any(|line| line.contains("> sp")),
+            "the typed line is visible: {screen:?}"
+        );
+        assert!(
+            screen.iter().any(|line| line.contains("split-pane")),
+            "the matching candidates are listed"
+        );
+    }
+
+    #[test]
+    fn render_the_keys_view_paints_the_lineage_table_ascii_safe() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let state = WorkspaceState::new();
+        let mut input = InputState::new();
+        input.handle(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        input.handle(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE));
+        for c in "list-keys".chars() {
+            input.handle(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        input.handle(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        // Ascii glyphs end to end: the overlay's border AND the table's own
+        // text must survive a terminal with no wide glyph inventory.
+        let mut buf = Buffer::empty(AREA);
+        let mut hits = HitMap::new();
+        render(
+            AREA,
+            &mut buf,
+            &state,
+            ColorTier::Truecolor,
+            GlyphSet::Ascii,
+            &ChromeTheme::signal(),
+            &mut hits,
+        );
+        render_input(
+            AREA,
+            &mut buf,
+            &input,
+            ColorTier::Truecolor,
+            GlyphSet::Ascii,
+            &ChromeTheme::signal(),
+        );
+        let mut joined = String::new();
+        for y in 0..AREA.height {
+            for x in 0..AREA.width {
+                let symbol = buf[(x, y)].symbol();
+                assert!(
+                    symbol.is_ascii(),
+                    "({x},{y}) paints {symbol:?} under the ascii glyph set"
+                );
+                joined.push_str(symbol);
+            }
+        }
+        assert!(
+            joined.contains("Ctrl-g"),
+            "the table's first default is on screen"
+        );
     }
 
     #[test]
