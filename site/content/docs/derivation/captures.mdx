@@ -3,7 +3,7 @@ title: Captured observations
 description: The registered observation IDs, hashes, and review guarantees used when no public specification is sufficient.
 ---
 
-{/* curated-from: docs/derivation/CAPTURES.md sha256=2634ac3df81abaefbc8397c4bfa74e6c718403d9b07dfda0135d5cc88d047256 */}
+{/* curated-from: docs/derivation/CAPTURES.md sha256=4e8fcda2eab5ff71d69cbb6167b26e1069db741782f16b5cad5673f4bb49bea5 */}
 
 Observed-behavior captures cited by clean-room derivation notes (CLEANROOM.md rule 3).
 Each capture has a stable ID and the SHA-256 of the raw capture. Scrubbed captures may
@@ -61,6 +61,7 @@ a different observation. `cleanroom-gate` resolves every cited ID against this t
 | `CAP-002` | `9cf4c0478be69f618838964da0d483fbb02dc45394c9ca9968e041c958c9adf4` | On Linux, a `read` of a pseudoterminal master after the last descriptor for its slave has closed fails with `EIO` rather than reporting end-of-file. A terminal treating that errno as an error reports every clean child exit as a failure. |
 | `CAP-003` | `f387911b368f608bbdbc332981ef7a70db99fffebb42affaa00174c33288b2c7` | The pinned Claude Code CLI (2.1.220), invoked in print mode with `--input-format stream-json --output-format stream-json` and no `--verbose`, refuses at flag validation before either format flag takes effect: stderr `Error: When using --print, --output-format=stream-json requires --verbose`, exit status 1. |
 | `CAP-004` | `bfe0f1ac5235cdb4f477cfb19f224129b27333b1ec09be1e8efbb1d31e2bcaf3` | A ZWJ emoji sequence — one UAX-29 extended grapheme cluster — occupies TWO cells in the pinned engine with grapheme-cluster mode reset (the default), yielding two style entries that both carry the SGR set before it, and ONE cell with that mode set, yielding one. So a consumer segmenting the delta's `text` by UAX-29 reads styles index-aligned only under the set mode. |
+| `CAP-005` | `953f5e70c2eab37ec803fb7576ac6a05c20cc5f7f5389ce9595b5a794572b258` | In a transient systemd user unit with `PrivateDevices=yes`, `/dev/ptmx`, `/dev/pts`, and `/dev/pts/ptmx` all exist, but both `posix_openpt(3)` and `open("/dev/ptmx")` fail with `ENOENT`. The same probe in a control unit without `PrivateDevices` succeeds on both calls. |
 
 `CAP-001` takes the public-source clause: `crates/gwk-pty/fixtures/PROVENANCE.md` names
 its repository, revision, license and path. What that clause requires is that the tree is
@@ -105,3 +106,9 @@ pins, so the claim is falsifiable by re-running the probe rather than by reading
 a document that refuses to state one. `TERM-UNICODE-CORE` keeps the citations it earns:
 what the mode requires when set, and that the reset state is undefined — which argues for
 pinning both sides better than the invented rule did.
+
+`CAP-005` takes the own-observation clause. The capture carries the exact probe and both
+transient-unit invocations, and its output was regenerated when the row was registered.
+It records the deployment behavior narrowly: device nodes being present did not make PTY
+allocation usable under `PrivateDevices=yes`, while the otherwise-identical control was
+clean. The row does not generalize that result to every systemd or kernel version.

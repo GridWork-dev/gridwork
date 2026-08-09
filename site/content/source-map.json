@@ -87,7 +87,7 @@
     },
     {
       "destination": "content/docs/derivation/captures.mdx",
-      "sha256": "9ae70048d65a7dc03f90ae2da464b857ed719ac820267c8e415c2fe6d7dfe73e",
+      "sha256": "6540733463550d8c7dfc9e09a6ee4fca4746196d3a2f88bd36d2660bc7214989",
       "sources": [
         {
           "path": "docs/derivation/CAPTURES.md"
@@ -96,7 +96,7 @@
     },
     {
       "destination": "content/docs/derivation/reviews.mdx",
-      "sha256": "e0621389b183b2db599abb7e4ff590ec5faf3af096f2d1e36fc0e91b1234f03a",
+      "sha256": "b6e0700bad1ff16d82a6a161bff58f4ff2017e7316196b3848b235770f69b797",
       "sources": [
         {
           "path": "docs/derivation/reviews"
