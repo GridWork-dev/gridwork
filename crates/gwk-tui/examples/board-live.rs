@@ -3,7 +3,7 @@
 //! ```text
 //! { gw event read --limit 256; \
 //!   for k in task attempt attention_item dispatch_node message engine_session \
-//!            worktree lease cost_entry ingested_record receipt; do \
+//!            worktree lease cost_entry ingested_record receipt workflow_run; do \
 //!     gw projection list $k --limit 256; \
 //!   done; } | jq -s . | cargo run -p gwk-tui --example board-live
 //! ```
@@ -35,7 +35,7 @@ use ratatui::layout::Rect;
 
 const MAX_INPUT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_DIAGNOSTIC_CELLS: usize = 512;
-const MAX_RECORDS: usize = 12 * 256;
+const MAX_RECORDS: usize = 13 * 256;
 
 fn diagnostic(why: &str) -> String {
     safe_text(why, MAX_DIAGNOSTIC_CELLS).into_owned()
@@ -59,6 +59,7 @@ fn empty_state() -> BoardState {
     BoardState {
         view: BoardView::Dag,
         tasks: Vec::new(),
+        runs: Vec::new(),
         attempts: Vec::new(),
         nodes: Vec::new(),
         messages: Vec::new(),
@@ -95,6 +96,7 @@ fn add_record(
         .map_err(|why| format!("a record failed the contract: {why}"))?
     {
         ProjectionRecord::Task { task } => state.tasks.push(task),
+        ProjectionRecord::WorkflowRun { workflow_run } => state.runs.push(workflow_run),
         ProjectionRecord::Attempt { attempt } => state.attempts.push(attempt),
         ProjectionRecord::DispatchNode { dispatch_node } => state.nodes.push(dispatch_node),
         ProjectionRecord::Message { message } => state.messages.push(message),
@@ -218,10 +220,10 @@ fn main() -> ExitCode {
 mod tests {
     use std::io::Cursor;
 
-    use gwk_domain::entity::Task;
+    use gwk_domain::entity::{Task, WorkflowRun};
     use gwk_domain::envelope::{Actor, Origin};
     use gwk_domain::fsm::TaskState;
-    use gwk_domain::ids::{AggregateId, EventId, ProjectId, TaskId, Timestamp};
+    use gwk_domain::ids::{AggregateId, EventId, ProjectId, TaskId, Timestamp, WorkflowRunId};
 
     use super::*;
 
@@ -239,6 +241,25 @@ mod tests {
                 tracker_ref: None,
                 created_at: Timestamp::new("2026-08-06T10:00:00Z"),
                 updated_at: Timestamp::new("2026-08-06T10:00:00Z"),
+            },
+        })
+        .expect("record serializes")
+    }
+
+    fn workflow_run_record(id: &str) -> serde_json::Value {
+        serde_json::to_value(ProjectionRecord::WorkflowRun {
+            workflow_run: WorkflowRun {
+                id: WorkflowRunId::new(id),
+                version: 1,
+                state: "completed".to_owned(),
+                step: Some("release-candidate".to_owned()),
+                template_ref: "delivery@v3".to_owned(),
+                template_sha256: None,
+                task_id: Some(TaskId::new("t-1")),
+                title: Some("smoke workflow".to_owned()),
+                opened_at: Timestamp::new("2026-08-09T10:00:00Z"),
+                updated_at: Timestamp::new("2026-08-09T10:30:00Z"),
+                closed_at: Some(Timestamp::new("2026-08-09T10:30:00Z")),
             },
         })
         .expect("record serializes")
@@ -278,6 +299,14 @@ mod tests {
         let state = load_state(serde_json::json!([task_record("t-1")])).expect("bare records");
         assert_eq!(state.tasks.len(), 1);
         assert_eq!(state.tasks[0].id.as_str(), "t-1");
+    }
+
+    #[test]
+    fn workflow_run_records_walk_the_contract_into_the_board() {
+        let state = load_state(serde_json::json!([workflow_run_record("wfr-1")]))
+            .expect("workflow run record");
+        assert_eq!(state.runs.len(), 1);
+        assert_eq!(state.runs[0].id.as_str(), "wfr-1");
     }
 
     #[test]
@@ -326,7 +355,7 @@ mod tests {
     }
 
     #[test]
-    fn projection_records_are_bounded_to_the_documented_twelve_pages() {
+    fn projection_records_are_bounded_to_the_documented_thirteen_pages() {
         let records = vec![task_record("t-1"); MAX_RECORDS + 1];
         let error = load_state(serde_json::Value::Array(records)).expect_err("too many records");
         assert!(error.contains("record smoke-run limit"));
