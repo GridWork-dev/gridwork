@@ -181,7 +181,8 @@ jobs:
             echo 'gwk-text compiled with a Unicode table version mismatch' >&2
             exit 1
           fi
-          grep -q 'evaluation of constant value failed' /tmp/unicode-version-seed.log
+          grep -Fq 'error[E0080]' /tmp/unicode-version-seed.log
+          grep -Fq 'assertion failed: unicode_tables_match' /tmp/unicode-version-seed.log
 
           cp /tmp/gwk-text-lib.rs "$source"
           cargo check -p gwk-text --locked
