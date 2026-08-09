@@ -24,7 +24,7 @@ use gwk_domain::fsm::{AttemptState, CommandState, MessageState, Outcome, TaskSta
 use gwk_domain::ids::{
     AggregateId, AttemptId, BlobUploadId, ByteCount, CommandId, CorrelationId, CostMicros,
     EngineId, EventCount, EventId, IdempotencyKey, LeaseId, MessageId, ProjectId, PtyFrameSeq,
-    PtySessionId, RequestId, Seq, TaskId, Timestamp,
+    PtySessionGeneration, PtySessionId, RequestId, Seq, TaskId, Timestamp,
 };
 use gwk_domain::inherited::{BudgetCursor, OrchestratorCheckpoint, PendingApproval};
 use gwk_domain::protocol::{
@@ -373,6 +373,10 @@ fn pty_session_id() -> PtySessionId {
     PtySessionId::new("pty-1")
 }
 
+fn pty_generation() -> PtySessionGeneration {
+    PtySessionGeneration::new("pty-life-1")
+}
+
 /// The SGR-0 rendition: no colors, no underline, every flag off.
 fn plain_style() -> CellStyle {
     CellStyle {
@@ -524,6 +528,7 @@ fn golden_client_control() -> Vec<ClientControl> {
             request_id: RequestId::new("req-6"),
             request: KernelRequest::PtyAttach {
                 session_id: pty_session_id(),
+                generation: Some(pty_generation()),
                 cursor: Some(PtyFrameSeq::new(42)),
             },
         },
@@ -623,6 +628,7 @@ fn golden_server_control() -> Vec<ServerControl> {
             request_id: RequestId::new("req-6"),
             result: KernelResult::PtyAttached {
                 session_id: pty_session_id(),
+                generation: pty_generation(),
                 rows: 24,
                 cols: 80,
                 cursor: Some(PtyFrameSeq::new(42)),
@@ -632,6 +638,7 @@ fn golden_server_control() -> Vec<ServerControl> {
             request_id: RequestId::new("req-7"),
             result: KernelResult::PtySnapshot {
                 session_id: pty_session_id(),
+                generation: pty_generation(),
                 seq: PtyFrameSeq::new(43),
                 frame: golden_pty_frame(),
             },
@@ -642,11 +649,13 @@ fn golden_server_control() -> Vec<ServerControl> {
         ServerControl::PtyDeltaBatch {
             request_id: RequestId::new("req-6"),
             session_id: pty_session_id(),
+            generation: pty_generation(),
             deltas: golden_pty_deltas(),
             seq: PtyFrameSeq::new(44),
         },
         ServerControl::PtyStreamClosed {
             request_id: RequestId::new("req-6"),
+            generation: pty_generation(),
             code: KernelErrorCode::SlowConsumer,
             last_seq: Some(PtyFrameSeq::new(44)),
         },

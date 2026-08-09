@@ -278,6 +278,7 @@ test("client control: tagged frames, number major, decimal-string cursor", async
   const attachRequest = ptyAttach["request"];
   if (!isRecord(attachRequest)) throw new Error("pty attach request missing");
   expect(attachRequest["type"]).toBe("pty_attach");
+  expect(attachRequest["generation"]).toBe("pty-life-1");
   expect(attachRequest["cursor"]).toMatch(DECIMAL);
 
   // A fresh, un-attached snapshot request carries no cursor at all.
@@ -369,11 +370,13 @@ test("server control: refusals are values, cursors survive a disconnect", async 
         break;
       }
       case "pty_delta_batch": {
+        expect(frame.generation).toBe("pty-life-1");
         expect(frame.seq).toMatch(DECIMAL);
         expect(frame.deltas.length).toBeGreaterThan(0);
         break;
       }
       case "pty_stream_closed": {
+        expect(frame.generation).toBe("pty-life-1");
         expect(frame.code).toBe("slow_consumer");
         // The PTY analogue of `stream_closed.last_cursor`, on its own
         // sequence axis — a reattach resumes from here, not from `Seq`.
@@ -421,6 +424,7 @@ test("server control: refusals are values, cursors survive a disconnect", async 
   const attachedResult = attached["result"];
   if (!isRecord(attachedResult)) throw new Error("pty attached result missing");
   expect(attachedResult["type"]).toBe("pty_attached");
+  expect(attachedResult["generation"]).toBe("pty-life-1");
   expect(attachedResult["cursor"]).toMatch(DECIMAL);
 
   // The full styled frame: every color tier appears somewhere in the grid.
@@ -429,6 +433,7 @@ test("server control: refusals are values, cursors survive a disconnect", async 
   const snapshotResult = snapshot["result"];
   if (!isRecord(snapshotResult)) throw new Error("pty snapshot result missing");
   expect(snapshotResult["type"]).toBe("pty_snapshot");
+  expect(snapshotResult["generation"]).toBe("pty-life-1");
   expect(snapshotResult["seq"]).toMatch(DECIMAL);
   const frame = snapshotResult["frame"];
   if (!isRecord(frame)) throw new Error("pty frame missing");

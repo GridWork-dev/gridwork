@@ -1351,7 +1351,7 @@ async fn a_published_pty_session_is_served_end_to_end_and_a_foreign_writer_is_re
     }
 
     // A snapshot serves the published screen back, byte for byte.
-    match viewer
+    let snapshot_generation = match viewer
         .ask(
             "v-snap",
             r#"{"type":"pty_snapshot","session_id":"pty-console"}"#,
@@ -1360,6 +1360,7 @@ async fn a_published_pty_session_is_served_end_to_end_and_a_foreign_writer_is_re
     {
         KernelResult::PtySnapshot {
             session_id,
+            generation,
             seq,
             frame,
         } => {
@@ -1367,13 +1368,14 @@ async fn a_published_pty_session_is_served_end_to_end_and_a_foreign_writer_is_re
             assert_eq!(seq, gwk_domain::ids::PtyFrameSeq::new(0));
             assert_eq!(frame.cells.len(), 2);
             assert!(frame.cells.iter().all(|row| row.len() == 4));
+            generation
         }
         other => panic!("{other:?}"),
-    }
+    };
 
     // A fresh attach answers the dimensions and the revision deltas resume
     // from, before any batch.
-    match viewer
+    let first_generation = match viewer
         .ask(
             "v-attach",
             r#"{"type":"pty_attach","session_id":"pty-console"}"#,
@@ -1382,16 +1384,19 @@ async fn a_published_pty_session_is_served_end_to_end_and_a_foreign_writer_is_re
     {
         KernelResult::PtyAttached {
             session_id,
+            generation,
             rows,
             cols,
             cursor,
         } => {
             assert_eq!(session_id.as_str(), "pty-console");
+            assert_eq!(generation, snapshot_generation);
             assert_eq!((rows, cols), (2, 4));
             assert_eq!(cursor, Some(gwk_domain::ids::PtyFrameSeq::new(0)));
+            generation
         }
         other => panic!("{other:?}"),
-    }
+    };
 
     // The host moves the screen; the viewer's live stream carries the batch,
     // tagged with the attach's own request id.
@@ -1423,11 +1428,13 @@ async fn a_published_pty_session_is_served_end_to_end_and_a_foreign_writer_is_re
         ServerControl::PtyDeltaBatch {
             request_id,
             session_id,
+            generation,
             deltas,
             seq,
         } => {
             assert_eq!(request_id.as_str(), "v-attach");
             assert_eq!(session_id.as_str(), "pty-console");
+            assert_eq!(generation, first_generation);
             assert_eq!(seq, gwk_domain::ids::PtyFrameSeq::new(1));
             // The batch's CONTENT survives the trip, not just its count.
             match &deltas[..] {
@@ -1497,10 +1504,12 @@ async fn a_published_pty_session_is_served_end_to_end_and_a_foreign_writer_is_re
     match closed {
         ServerControl::PtyStreamClosed {
             request_id,
+            generation,
             code,
             last_seq,
         } => {
             assert_eq!(request_id.as_str(), "v-attach");
+            assert_eq!(generation, first_generation);
             assert_eq!(code, KernelErrorCode::NotFound);
             assert_eq!(last_seq, Some(gwk_domain::ids::PtyFrameSeq::new(1)));
         }
@@ -1538,22 +1547,30 @@ async fn a_published_pty_session_is_served_end_to_end_and_a_foreign_writer_is_re
 
     // A viewer still holding the OLD life's cursor is reseeded at the head:
     // answering the cursor back would claim gap-free continuity over a hole.
-    match viewer
+    let second_generation = match viewer
         .ask(
             "v-re",
-            r#"{"type":"pty_attach","session_id":"pty-console","cursor":"1"}"#,
+            &format!(
+                r#"{{"type":"pty_attach","session_id":"pty-console","generation":"{first_generation}","cursor":"1"}}"#
+            ),
         )
         .await
     {
-        KernelResult::PtyAttached { cursor, .. } => {
+        KernelResult::PtyAttached {
+            generation,
+            cursor,
+            ..
+        } => {
+            assert_ne!(generation, first_generation);
             assert_eq!(
                 cursor,
                 Some(gwk_domain::ids::PtyFrameSeq::new(5)),
                 "a stale cursor must be answered at the reclaim head — reseed"
             );
+            generation
         }
         other => panic!("{other:?}"),
-    }
+    };
 
     // The next batch reaches the reattached viewer live…
     match host2
@@ -1574,9 +1591,13 @@ async fn a_published_pty_session_is_served_end_to_end_and_a_foreign_writer_is_re
         .expect("open")
     {
         ServerControl::PtyDeltaBatch {
-            request_id, seq, ..
+            request_id,
+            generation,
+            seq,
+            ..
         } => {
             assert_eq!(request_id.as_str(), "v-re");
+            assert_eq!(generation, second_generation);
             assert_eq!(seq, gwk_domain::ids::PtyFrameSeq::new(6));
         }
         other => panic!("{other:?}"),
@@ -1588,11 +1609,18 @@ async fn a_published_pty_session_is_served_end_to_end_and_a_foreign_writer_is_re
     match viewer2
         .ask(
             "v2-attach",
-            r#"{"type":"pty_attach","session_id":"pty-console","cursor":"5"}"#,
+            &format!(
+                r#"{{"type":"pty_attach","session_id":"pty-console","generation":"{second_generation}","cursor":"5"}}"#
+            ),
         )
         .await
     {
-        KernelResult::PtyAttached { cursor, .. } => {
+        KernelResult::PtyAttached {
+            generation,
+            cursor,
+            ..
+        } => {
+            assert_eq!(generation, second_generation);
             assert_eq!(cursor, Some(gwk_domain::ids::PtyFrameSeq::new(5)));
         }
         other => panic!("{other:?}"),
@@ -1622,10 +1650,12 @@ async fn a_published_pty_session_is_served_end_to_end_and_a_foreign_writer_is_re
         {
             ServerControl::PtyStreamClosed {
                 request_id: closed,
+                generation,
                 code,
                 last_seq,
             } => {
                 assert_eq!(closed.as_str(), request_id);
+                assert_eq!(generation, second_generation);
                 assert_eq!(code, KernelErrorCode::NotFound);
                 assert_eq!(last_seq, Some(gwk_domain::ids::PtyFrameSeq::new(6)));
             }

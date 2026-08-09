@@ -41,7 +41,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use gwk_domain::frame::{CellStyle, PtyDelta, PtyFrame, StyledCell};
-use gwk_domain::ids::{PtyFrameSeq, PtySessionId, RequestId};
+use gwk_domain::ids::{PtyFrameSeq, PtySessionGeneration, PtySessionId, RequestId, WriterEpoch};
 use gwk_domain::protocol::{
     FRAME_BODY_MAX_BYTES, KernelErrorCode, KernelResult, SLOW_CONSUMER_TIMEOUT_SECS, ServerControl,
 };
@@ -132,6 +132,8 @@ impl PtyRefusal {
 /// catch-up to send first, and the live subscription that follows it.
 #[derive(Debug)]
 pub struct Attached {
+    /// The session id's current life. A consumer must pair this with `cursor`.
+    pub generation: PtySessionGeneration,
     pub rows: u16,
     pub cols: u16,
     /// The revision deltas resume from — the `PtyAttached` answer. `None`
@@ -147,6 +149,7 @@ pub struct Attached {
 /// One hosted session's state, exactly what the host published.
 struct Session {
     owner: ConnectionId,
+    generation: PtySessionGeneration,
     /// Head revision; `None` until the first sequenced publish.
     seq: Option<u64>,
     /// The mirror snapshots are answered from. Rectangular by construction:
@@ -190,13 +193,33 @@ impl Session {
 }
 
 /// Every hosted session, by id. One per daemon, shared by every connection.
-#[derive(Default)]
 pub struct PtyHub {
     sessions: Mutex<HashMap<PtySessionId, Session>>,
     connections: AtomicU64,
+    writer_epoch: WriterEpoch,
+    generations: AtomicU64,
+}
+
+#[cfg(test)]
+impl Default for PtyHub {
+    fn default() -> Self {
+        Self::new(WriterEpoch::new(0))
+    }
 }
 
 impl PtyHub {
+    /// Start an empty registry in this daemon's durable writer epoch.
+    /// Generation tokens combine that epoch with a process-local counter, so
+    /// neither a reclaimed id nor a restarted daemon can reuse a session life.
+    pub fn new(writer_epoch: WriterEpoch) -> Self {
+        Self {
+            sessions: Mutex::new(HashMap::new()),
+            connections: AtomicU64::new(0),
+            writer_epoch,
+            generations: AtomicU64::new(0),
+        }
+    }
+
     /// Mint one connection's identity. Starts at 1 so no live connection can
     /// ever equal a zero-initialized field by accident.
     pub fn connection(&self) -> ConnectionId {
@@ -224,11 +247,13 @@ impl PtyHub {
                         format!("the hub already holds {MAX_SESSIONS} pty sessions"),
                     ));
                 }
+                let generation = self.next_generation()?;
                 let (live, _) = broadcast::channel(BROADCAST_CAPACITY);
                 sessions.insert(
                     id.clone(),
                     Session {
                         owner: conn,
+                        generation,
                         seq,
                         cells: frame.cells,
                         retained: VecDeque::new(),
@@ -433,25 +458,30 @@ impl PtyHub {
     /// Attach a consumer. The subscription and the replay are taken under
     /// one lock, so every batch after the catch-up point is in exactly one
     /// of them.
-    pub fn attach(&self, id: &PtySessionId, cursor: Option<u64>) -> Result<Attached, PtyRefusal> {
+    pub fn attach(
+        &self,
+        id: &PtySessionId,
+        generation: Option<&PtySessionGeneration>,
+        cursor: Option<u64>,
+    ) -> Result<Attached, PtyRefusal> {
         let sessions = self.lock();
         let session = sessions.get(id).ok_or_else(|| unknown_session(id))?;
         let (cols, rows) = session.size();
         let live = session.live.subscribe();
 
-        let serviceable = match cursor {
-            None => None,
-            // A revision this session's life never produced, or one whose
-            // gap was evicted: answered at the live head with no replay,
-            // which the client reads as "your cursor was not honored —
-            // reseed". The same two fallbacks the host's own catch-up takes.
-            Some(cursor) => {
+        let serviceable = match (generation, cursor) {
+            (Some(generation), Some(cursor)) if generation == &session.generation => {
+                // A revision this session's life never produced, or one whose
+                // gap was evicted: answered at the live head with no replay,
+                // which the client reads as "your cursor was not honored —
+                // reseed". The same two fallbacks the host's own catch-up takes.
                 let past_head = session.seq.is_none_or(|head| cursor > head);
                 let evicted = session
                     .evicted_through
                     .is_some_and(|evicted| cursor < evicted);
                 (!past_head && !evicted).then_some(cursor)
             }
+            _ => None,
         };
         let (cursor_answer, replay) = match serviceable {
             Some(cursor) => (
@@ -466,6 +496,7 @@ impl PtyHub {
             None => (session.seq, Vec::new()),
         };
         Ok(Attached {
+            generation: session.generation.clone(),
             rows,
             cols,
             cursor: cursor_answer,
@@ -483,7 +514,10 @@ impl PtyHub {
     /// here turns what would be a fatal framing error at the write (tearing
     /// down the whole connection over a well-formed request) into a value
     /// the client can branch on.
-    pub fn snapshot(&self, id: &PtySessionId) -> Result<(u64, PtyFrame), PtyRefusal> {
+    pub fn snapshot(
+        &self,
+        id: &PtySessionId,
+    ) -> Result<(PtySessionGeneration, u64, PtyFrame), PtyRefusal> {
         let sessions = self.lock();
         let session = sessions.get(id).ok_or_else(|| unknown_session(id))?;
         let seq = session.seq.ok_or_else(|| {
@@ -510,7 +544,26 @@ impl PtyHub {
                 ),
             ));
         }
-        Ok((seq, frame))
+        Ok((session.generation.clone(), seq, frame))
+    }
+
+    fn next_generation(&self) -> Result<PtySessionGeneration, PtyRefusal> {
+        let counter = self
+            .generations
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                value.checked_add(1)
+            })
+            .map_err(|_| {
+                PtyRefusal::new(
+                    KernelErrorCode::Overloaded,
+                    "the PTY session generation space is exhausted",
+                )
+            })?
+            + 1;
+        Ok(PtySessionGeneration::new(format!(
+            "{}:{counter}",
+            self.writer_epoch
+        )))
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<PtySessionId, Session>> {
@@ -541,7 +594,10 @@ pub(crate) async fn run_attach(
     delivered: Arc<AtomicU64>,
 ) {
     let Attached {
-        replay, mut live, ..
+        generation,
+        replay,
+        mut live,
+        ..
     } = attached;
 
     enum Ended {
@@ -554,7 +610,16 @@ pub(crate) async fn run_attach(
 
     let mut ended = None;
     for batch in replay {
-        match send(&batches, &request_id, &session_id, batch, &delivered).await {
+        match send(
+            &batches,
+            &request_id,
+            &session_id,
+            &generation,
+            batch,
+            &delivered,
+        )
+        .await
+        {
             Ok(()) => {}
             Err(gone) => {
                 ended = Some(if gone {
@@ -568,7 +633,16 @@ pub(crate) async fn run_attach(
     }
     while ended.is_none() {
         match live.recv().await {
-            Ok(batch) => match send(&batches, &request_id, &session_id, batch, &delivered).await {
+            Ok(batch) => match send(
+                &batches,
+                &request_id,
+                &session_id,
+                &generation,
+                batch,
+                &delivered,
+            )
+            .await
+            {
                 Ok(()) => {}
                 Err(gone) => {
                     ended = Some(if gone {
@@ -604,6 +678,7 @@ pub(crate) async fn run_attach(
     let _ = responses
         .send(ServerControl::PtyStreamClosed {
             request_id,
+            generation,
             code,
             last_seq,
         })
@@ -616,6 +691,7 @@ async fn send(
     batches: &mpsc::Sender<Outgoing>,
     request_id: &RequestId,
     session_id: &PtySessionId,
+    generation: &PtySessionGeneration,
     batch: PtyBatch,
     delivered: &Arc<AtomicU64>,
 ) -> Result<(), bool> {
@@ -623,6 +699,7 @@ async fn send(
         control: ServerControl::PtyDeltaBatch {
             request_id: request_id.clone(),
             session_id: session_id.clone(),
+            generation: generation.clone(),
             deltas: batch.deltas.as_ref().clone(),
             seq: PtyFrameSeq::new(batch.seq),
         },
@@ -811,7 +888,7 @@ mod tests {
         let host = hub.connection();
         hub.publish_snapshot(host, &id("s"), Some(5), frame(2, 4))
             .expect("seed");
-        let mut live = hub.attach(&id("s"), None).expect("attach").live;
+        let mut live = hub.attach(&id("s"), None, None).expect("attach").live;
 
         // Equal is a legal reseed — and a SILENT one: nothing advanced, so
         // nothing is broadcast. Behind is not legal; unsequenced is not.
@@ -854,7 +931,7 @@ mod tests {
             .publish_snapshot(host, &id("s"), Some(5), frame(3, 5))
             .expect_err("a non-advancing reseed must keep its dimensions");
         assert_eq!(refused.code, KernelErrorCode::Validation);
-        let attached = hub.attach(&id("s"), None).expect("attach");
+        let attached = hub.attach(&id("s"), None, None).expect("attach");
         assert_eq!((attached.rows, attached.cols), (2, 4), "nothing changed");
 
         // An ADVANCING reseed resizes fine — that is the jump path, and the
@@ -872,7 +949,7 @@ mod tests {
         hub.publish_deltas(host, &id("s"), 1, cells_changed(vec![update(0, 0, "x")]))
             .expect("apply");
 
-        let (seq, snapshot) = hub.snapshot(&id("s")).expect("snapshot");
+        let (_, seq, snapshot) = hub.snapshot(&id("s")).expect("snapshot");
         assert_eq!(seq, 1);
         assert_eq!(snapshot.cells[0][0].glyph, "x");
         assert_eq!(snapshot.cells[0][1].glyph, " ");
@@ -895,7 +972,7 @@ mod tests {
             )
             .expect_err("out of bounds");
         assert_eq!(refused.code, KernelErrorCode::Validation);
-        let (seq, snapshot) = hub.snapshot(&id("s")).expect("snapshot");
+        let (_, seq, snapshot) = hub.snapshot(&id("s")).expect("snapshot");
         assert_eq!(seq, 0, "a refused batch must not advance the head");
         assert_eq!(snapshot.cells[0][0].glyph, " ", "nothing may have landed");
 
@@ -912,7 +989,7 @@ mod tests {
             ],
         )
         .expect("in bounds after the resize");
-        let (_, snapshot) = hub.snapshot(&id("s")).expect("snapshot");
+        let (_, _, snapshot) = hub.snapshot(&id("s")).expect("snapshot");
         assert_eq!(snapshot.cells[9][9].glyph, "z");
     }
 
@@ -955,8 +1032,15 @@ mod tests {
             .expect("apply");
         }
 
+        let generation = hub
+            .attach(&id("s"), None, None)
+            .expect("learn the current generation")
+            .generation;
+
         // Inside the window: exactly the batches after the cursor, in order.
-        let attached = hub.attach(&id("s"), Some(2)).expect("attach");
+        let attached = hub
+            .attach(&id("s"), Some(&generation), Some(2))
+            .expect("attach");
         assert_eq!(attached.cursor, Some(2));
         assert_eq!(
             attached.replay.iter().map(|b| b.seq).collect::<Vec<_>>(),
@@ -965,18 +1049,22 @@ mod tests {
         assert_eq!((attached.rows, attached.cols), (2, 4));
 
         // Fresh: no replay, resume from the head.
-        let attached = hub.attach(&id("s"), None).expect("attach");
+        let attached = hub.attach(&id("s"), None, None).expect("attach");
         assert_eq!(attached.cursor, Some(4));
         assert!(attached.replay.is_empty());
 
         // Past the head: a revision this life never produced. No replay, and
         // the head answer is what tells the client its cursor was not honored.
-        let attached = hub.attach(&id("s"), Some(99)).expect("attach");
+        let attached = hub
+            .attach(&id("s"), Some(&generation), Some(99))
+            .expect("attach");
         assert_eq!(attached.cursor, Some(4));
         assert!(attached.replay.is_empty());
 
         assert_eq!(
-            hub.attach(&id("ghost"), None).expect_err("unknown").code,
+            hub.attach(&id("ghost"), None, None)
+                .expect_err("unknown")
+                .code,
             KernelErrorCode::NotFound
         );
     }
@@ -992,7 +1080,13 @@ mod tests {
             hub.publish_deltas(host, &id("s"), seq, cells_changed(vec![update(0, 0, "x")]))
                 .expect("apply");
         }
-        let attached = hub.attach(&id("s"), Some(1)).expect("attach");
+        let generation = hub
+            .attach(&id("s"), None, None)
+            .expect("learn the current generation")
+            .generation;
+        let attached = hub
+            .attach(&id("s"), Some(&generation), Some(1))
+            .expect("attach");
         assert_eq!(
             attached.cursor,
             Some(RETAINED_BATCHES as u64 + 8),
@@ -1007,7 +1101,7 @@ mod tests {
         let host = hub.connection();
         hub.publish_snapshot(host, &id("s"), Some(0), frame(2, 4))
             .expect("seed");
-        let attached = hub.attach(&id("s"), None).expect("attach");
+        let attached = hub.attach(&id("s"), None, None).expect("attach");
         let mut live = attached.live;
 
         // The host reseeds past the head with no deltas in between — the
@@ -1031,7 +1125,7 @@ mod tests {
             .expect("seed a");
         hub.publish_snapshot(host, &id("b"), Some(0), frame(2, 4))
             .expect("seed b");
-        let mut live_a = hub.attach(&id("a"), None).expect("attach").live;
+        let mut live_a = hub.attach(&id("a"), None, None).expect("attach").live;
 
         hub.retire(host, &id("a")).expect("retire");
         assert!(matches!(
@@ -1066,7 +1160,7 @@ mod tests {
             hub.snapshot(&id("s")).expect_err("no frame yet").code,
             KernelErrorCode::NotFound
         );
-        let attached = hub.attach(&id("s"), None).expect("attach");
+        let attached = hub.attach(&id("s"), None, None).expect("attach");
         assert_eq!(attached.cursor, None, "no frame yet: no resume revision");
         assert_eq!((attached.rows, attached.cols), (2, 4));
     }
@@ -1103,6 +1197,10 @@ mod tests {
             hub.publish_deltas(host, &id("s"), seq, cells_changed(vec![update(0, 0, "x")]))
                 .expect("apply");
         }
+        let old_generation = hub
+            .attach(&id("s"), None, None)
+            .expect("learn the first generation")
+            .generation;
 
         // The host's connection dies mid-flight; its successor reclaims the
         // same id at the head its engine meanwhile reached. The reclaim's
@@ -1115,13 +1213,93 @@ mod tests {
         // A consumer that saw revision 4 of the old life: honoring its
         // cursor would claim gap-free continuity over five silently missing
         // revisions. The head answer is the reseed signal.
-        let attached = hub.attach(&id("s"), Some(4)).expect("attach");
+        let attached = hub
+            .attach(&id("s"), Some(&old_generation), Some(4))
+            .expect("attach");
         assert_eq!(attached.cursor, Some(9), "a stale cursor must reseed");
         assert!(attached.replay.is_empty());
 
-        // At the head itself there is no gap to hide, so it is honored.
-        let attached = hub.attach(&id("s"), Some(9)).expect("attach");
+        // Once the client holds the new generation, the head is resumable.
+        let generation = attached.generation;
+        let attached = hub
+            .attach(&id("s"), Some(&generation), Some(9))
+            .expect("attach");
         assert_eq!(attached.cursor, Some(9));
+    }
+
+    #[test]
+    fn a_reclaimed_id_changes_generation_when_frame_sequences_overlap() {
+        let hub = PtyHub::default();
+        let host = hub.connection();
+        hub.publish_snapshot(host, &id("s"), Some(4), frame(2, 4))
+            .expect("seed the first life");
+        let first = hub.attach(&id("s"), None, None).expect("first attach");
+
+        hub.disconnect(host);
+        let successor = hub.connection();
+        hub.publish_snapshot(successor, &id("s"), Some(4), frame(2, 4))
+            .expect("reclaim at the same sequence");
+        let reclaimed = hub
+            .attach(&id("s"), Some(&first.generation), Some(4))
+            .expect("attach to reclaimed life");
+
+        assert_ne!(reclaimed.generation, first.generation);
+        assert_eq!(reclaimed.cursor, Some(4));
+        assert!(reclaimed.replay.is_empty());
+    }
+
+    #[test]
+    fn generations_do_not_repeat_across_writer_epochs() {
+        let first = PtyHub::new(WriterEpoch::new(7));
+        let first_host = first.connection();
+        first
+            .publish_snapshot(first_host, &id("s"), Some(4), frame(1, 1))
+            .expect("first daemon");
+
+        let restarted = PtyHub::new(WriterEpoch::new(8));
+        let restarted_host = restarted.connection();
+        restarted
+            .publish_snapshot(restarted_host, &id("s"), Some(4), frame(1, 1))
+            .expect("restarted daemon");
+
+        assert_ne!(
+            first
+                .attach(&id("s"), None, None)
+                .expect("first generation")
+                .generation,
+            restarted
+                .attach(&id("s"), None, None)
+                .expect("restarted generation")
+                .generation
+        );
+    }
+
+    #[test]
+    fn generation_exhaustion_refuses_without_inserting_a_session() {
+        let hub = PtyHub::default();
+        hub.generations.store(u64::MAX - 1, Ordering::Relaxed);
+        let host = hub.connection();
+
+        hub.publish_snapshot(host, &id("last"), Some(0), frame(1, 1))
+            .expect("the final unique generation");
+        assert_eq!(
+            hub.attach(&id("last"), None, None)
+                .expect("last session")
+                .generation
+                .as_str(),
+            format!("{}:{}", hub.writer_epoch, u64::MAX)
+        );
+
+        let refused = hub
+            .publish_snapshot(host, &id("overflow"), Some(0), frame(1, 1))
+            .expect_err("generation reuse must be refused");
+        assert_eq!(refused.code, KernelErrorCode::Overloaded);
+        assert_eq!(
+            hub.attach(&id("overflow"), None, None)
+                .expect_err("a refused claim must insert nothing")
+                .code,
+            KernelErrorCode::NotFound
+        );
     }
 
     #[test]
@@ -1146,7 +1324,7 @@ mod tests {
             )
             .expect_err("a tiny frame must not demand an enormous mirror");
         assert_eq!(refused.code, KernelErrorCode::Validation);
-        let (seq, snapshot) = hub.snapshot(&id("s")).expect("snapshot");
+        let (_, seq, snapshot) = hub.snapshot(&id("s")).expect("snapshot");
         assert_eq!(seq, 0, "the refusal must not advance the head");
         assert_eq!(snapshot.cells.len(), 2, "the refusal must touch nothing");
     }
@@ -1203,7 +1381,8 @@ mod tests {
             .expect_err("a mirror past one frame must refuse typed, not kill the connection");
         assert_eq!(refused.code, KernelErrorCode::Overloaded);
         // The recovery the refusal names still works.
-        hub.attach(&id("s"), None).expect("attach still serves");
+        hub.attach(&id("s"), None, None)
+            .expect("attach still serves");
     }
 
     #[test]
@@ -1226,7 +1405,7 @@ mod tests {
         let host = hub.connection();
         hub.publish_snapshot(host, &id("s"), Some(7), frame(1, 1))
             .expect("seed");
-        let attached = hub.attach(&id("s"), None).expect("attach");
+        let attached = hub.attach(&id("s"), None, None).expect("attach");
         assert_eq!(attached.cursor, Some(7));
 
         let (batches, _batches_rx) = mpsc::channel(8);
@@ -1265,7 +1444,7 @@ mod tests {
         let host = hub.connection();
         hub.publish_snapshot(host, &id("s"), Some(0), frame(1, 1))
             .expect("seed");
-        let attached = hub.attach(&id("s"), None).expect("attach");
+        let attached = hub.attach(&id("s"), None, None).expect("attach");
         // Flood the broadcast past its capacity before the pump reads a byte.
         for seq in 1..=(BROADCAST_CAPACITY as u64 + 8) {
             hub.publish_deltas(host, &id("s"), seq, cells_changed(vec![update(0, 0, "x")]))
@@ -1332,7 +1511,13 @@ mod tests {
             hub.publish_deltas(host, &id("s"), seq, cells_changed(updates))
                 .expect("apply");
         }
-        let attached = hub.attach(&id("s"), Some(1)).expect("attach");
+        let generation = hub
+            .attach(&id("s"), None, None)
+            .expect("learn the current generation")
+            .generation;
+        let attached = hub
+            .attach(&id("s"), Some(&generation), Some(1))
+            .expect("attach");
         assert!(
             attached.replay.is_empty(),
             "a cursor behind the byte-evicted horizon must reseed"
