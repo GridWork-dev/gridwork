@@ -1135,10 +1135,11 @@ impl TokenFold {
             return format!("{label} not reported");
         }
         format!(
-            "{label} {} {} over {} of {entries} entries",
+            "{label} {} {} over {} of {}",
             self.sum,
             fold_word(complete),
             self.rows,
+            plural(entries, "entry", "entries"),
         )
     }
 }
@@ -1235,7 +1236,7 @@ fn cost_health_rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
     let mut out = pinned_block(findings, unknowns, muted);
     out.push(Row::plain(
         if costs.is_empty() {
-            "cost  no entries -- nothing recorded spend on this page".to_owned()
+            "cost  no entries -- no spend recorded on this page".to_owned()
         } else {
             format!(
                 "cost  {}  {} {} over {priced} of {} priced  {estimated} estimated",
@@ -1402,7 +1403,7 @@ fn audit_rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
         unknowns.push(UnknownNote {
             subject: "basis",
             why: format!(
-                "{basisless} of {} name no observed basis",
+                "no observed basis on {basisless} of {}",
                 plural(receipts.len(), "receipt", "receipts"),
             ),
         });
@@ -2783,7 +2784,7 @@ mod tests {
             "a state flip prints its edge, which is its whole content:\n{dump}"
         );
         assert!(
-            dump.contains("basis: 1 of 2 receipts name no observed basis"),
+            dump.contains("basis: no observed basis on 1 of 2 receipts"),
             "a missing basis is counted in the pinned block:\n{dump}"
         );
         assert!(

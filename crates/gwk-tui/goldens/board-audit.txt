@@ -1,5 +1,5 @@
  unknown -- 1 facts not in the log
-   basis: 1 of 2 receipts name no observed basis
+   basis: no observed basis on 1 of 2 receipts
  2 receipts  total across 2 actions
  09:52  auto_answer  gate g-1                                  orchestrator:gw
  09:41  state_flip  attempt at-01  queued -> running           orchestrator:gw
