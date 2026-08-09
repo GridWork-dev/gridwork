@@ -214,6 +214,7 @@ fn event_board(
     BoardState {
         view: BoardView::Events,
         tasks: Vec::new(),
+        runs: Vec::new(),
         attempts: Vec::new(),
         nodes: Vec::new(),
         messages: Vec::new(),
