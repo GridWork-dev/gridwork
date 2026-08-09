@@ -10,8 +10,9 @@
 //! Three rules hold everywhere:
 //!
 //! * **Command answers are JSON on standard output.** `--pretty` changes the
-//!   formatting and never the value. `--help` is prose and `tui` owns the
-//!   interactive terminal; neither is a command answer.
+//!   formatting and never the value. `--help` is prose; `tui`, `event tail`,
+//!   and `session attach` own the interactive terminal. None is a command
+//!   answer.
 //! * **The exit says what to do about it** ([`exit`]). One table, derived from
 //!   the refusal's own code, so the exit and the JSON can never disagree.
 //! * **No database, no key material.** Every verb here goes through the socket.
@@ -39,14 +40,14 @@ use gwk_domain::blob::{BLOB_CHUNK_BYTES, BlobAddress};
 use gwk_domain::command::KernelCommand;
 use gwk_domain::envelope::{Actor, CommandEnvelope, ENVELOPE_SCHEMA_VERSION, Origin};
 use gwk_domain::ids::{
-    AttentionItemId, AuthorityGrantId, ByteCount, CommandId, IdempotencyKey, ProjectId, Seq,
-    Timestamp,
+    AttentionItemId, AuthorityGrantId, ByteCount, CommandId, IdempotencyKey, ProjectId,
+    PtySessionId, Seq, Timestamp,
 };
 use gwk_domain::protocol::{
     CONTRACT_VERSION, KernelErrorCode, KernelRequest, KernelResult, ProjectionKind,
     ProjectionRecord, ServerControl,
 };
-use gwk_tui::board::{BoardState, BoardView, activity_brief, estate_overview};
+use gwk_tui::board::{BoardState, BoardView, activity_brief, agent_fleet, estate_overview};
 use gwk_tui::replay::ReplayTimeline;
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
@@ -167,6 +168,11 @@ async fn execute(verb: Verb, pretty: bool) -> Result<(), Failure> {
             ask(KernelRequest::ReadEvents { cursor, limit }, pretty).await
         }
         Verb::EventFollow { cursor } => follow(cursor, pretty).await,
+        Verb::EventTail {
+            cursor,
+            aggregate_type,
+            event_type,
+        } => tui::event_tail(cursor, aggregate_type, event_type).await,
         Verb::EstateOverview => {
             let state = load_summary_state(false).await?;
             emit_serialized(&estate_overview(&state), pretty)
@@ -175,6 +181,20 @@ async fn execute(verb: Verb, pretty: bool) -> Result<(), Failure> {
             let state = load_summary_state(true).await?;
             emit_serialized(&activity_brief(&state), pretty)
         }
+        Verb::AgentFleet => {
+            let state = load_fleet_state().await?;
+            emit_serialized(&agent_fleet(&state), pretty)
+        }
+        Verb::SessionSnapshot { id } => {
+            ask(
+                KernelRequest::PtySnapshot {
+                    session_id: PtySessionId::new(id),
+                },
+                pretty,
+            )
+            .await
+        }
+        Verb::SessionAttach { id } => tui::session_attach(PtySessionId::new(id)).await,
         Verb::Tui { motion } => tui::run(motion).await,
         Verb::Theme => {
             emit(&chrome_theme()?, pretty);
@@ -290,15 +310,52 @@ async fn execute(verb: Verb, pretty: bool) -> Result<(), Failure> {
 
 const SUMMARY_PAGE_LIMIT: u32 = 256;
 const SUMMARY_SNAPSHOT_ATTEMPTS: usize = 3;
+const ESTATE_PROJECTIONS: &[ProjectionKind] = &[
+    ProjectionKind::Task,
+    ProjectionKind::Attempt,
+    ProjectionKind::AttentionItem,
+    ProjectionKind::Worktree,
+    ProjectionKind::Lease,
+];
+const ACTIVITY_PROJECTIONS: &[ProjectionKind] = &[
+    ProjectionKind::Task,
+    ProjectionKind::Attempt,
+    ProjectionKind::AttentionItem,
+    ProjectionKind::Worktree,
+    ProjectionKind::Lease,
+    ProjectionKind::CostEntry,
+];
+const FLEET_PROJECTIONS: &[ProjectionKind] = &[
+    ProjectionKind::EngineSession,
+    ProjectionKind::DispatchNode,
+    ProjectionKind::Attempt,
+    ProjectionKind::Worktree,
+    ProjectionKind::Lease,
+];
 
 /// Read every projection consumed by the summary twins at one projector
 /// watermark. Projection pages are not snapshots, so a write between kinds
 /// makes the whole fold retry rather than silently joining different moments.
 async fn load_summary_state(include_cost: bool) -> Result<BoardState, Failure> {
+    if include_cost {
+        load_board_state(ACTIVITY_PROJECTIONS, BoardView::Activity).await
+    } else {
+        load_board_state(ESTATE_PROJECTIONS, BoardView::Estate).await
+    }
+}
+
+async fn load_fleet_state() -> Result<BoardState, Failure> {
+    load_board_state(FLEET_PROJECTIONS, BoardView::Fleet).await
+}
+
+async fn load_board_state(
+    kinds: &[ProjectionKind],
+    view: BoardView,
+) -> Result<BoardState, Failure> {
     let mut last_watermarks = Vec::new();
     for _ in 0..SUMMARY_SNAPSHOT_ATTEMPTS {
         let mut client = connect().await?;
-        let (state, watermarks) = load_summary_state_once(&mut client, include_cost).await?;
+        let (state, watermarks) = load_board_state_once(&mut client, kinds, view).await?;
         let coherent = watermarks
             .first()
             .is_none_or(|first| watermarks.iter().all(|watermark| watermark == first));
@@ -315,20 +372,19 @@ async fn load_summary_state(include_cost: bool) -> Result<BoardState, Failure> {
     ))
 }
 
-async fn load_summary_state_once(
+async fn load_board_state_once(
     client: &mut Client,
-    include_cost: bool,
+    kinds: &[ProjectionKind],
+    view: BoardView,
 ) -> Result<(BoardState, Vec<Option<Seq>>), Failure> {
     let mut state = BoardState {
-        view: if include_cost {
-            BoardView::Activity
-        } else {
-            BoardView::Estate
-        },
+        view,
         tasks: Vec::new(),
         attempts: Vec::new(),
         nodes: Vec::new(),
         messages: Vec::new(),
+        events: Vec::new(),
+        event_tail: gwk_tui::board::EventTail::default(),
         attention: Vec::new(),
         replay: ReplayTimeline::empty(),
         sessions: Vec::new(),
@@ -340,19 +396,8 @@ async fn load_summary_state_once(
         complete: true,
         watermark: None,
     };
-    let mut kinds = vec![
-        ProjectionKind::Task,
-        ProjectionKind::Attempt,
-        ProjectionKind::AttentionItem,
-        ProjectionKind::Worktree,
-        ProjectionKind::Lease,
-    ];
-    if include_cost {
-        kinds.push(ProjectionKind::CostEntry);
-    }
-
     let mut watermarks = Vec::new();
-    for kind in kinds {
+    for &kind in kinds {
         let mut cursor = None;
         let mut seen = BTreeSet::new();
         loop {
@@ -389,7 +434,7 @@ async fn load_summary_state_once(
             }
             watermarks.push(watermark);
             for record in records {
-                push_summary_record(&mut state, kind, record)?;
+                push_board_record(&mut state, kind, record)?;
             }
             let Some(next) = next_cursor else {
                 break;
@@ -407,7 +452,7 @@ async fn load_summary_state_once(
     Ok((state, watermarks))
 }
 
-fn push_summary_record(
+fn push_board_record(
     state: &mut BoardState,
     wanted: ProjectionKind,
     record: ProjectionRecord,
@@ -416,6 +461,12 @@ fn push_summary_record(
         (ProjectionKind::Task, ProjectionRecord::Task { task }) => state.tasks.push(task),
         (ProjectionKind::Attempt, ProjectionRecord::Attempt { attempt }) => {
             state.attempts.push(attempt);
+        }
+        (ProjectionKind::EngineSession, ProjectionRecord::EngineSession { engine_session }) => {
+            state.sessions.push(engine_session);
+        }
+        (ProjectionKind::DispatchNode, ProjectionRecord::DispatchNode { dispatch_node }) => {
+            state.nodes.push(dispatch_node);
         }
         (ProjectionKind::AttentionItem, ProjectionRecord::AttentionItem { attention_item }) => {
             state.attention.push(attention_item);

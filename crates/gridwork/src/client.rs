@@ -12,7 +12,7 @@
 
 use std::path::Path;
 
-use gwk_domain::ids::{RequestId, Seq};
+use gwk_domain::ids::{PtyFrameSeq, PtySessionGeneration, PtySessionId, RequestId, Seq};
 use gwk_domain::protocol::{
     CONNECTION_EGRESS_BYTES_PER_WINDOW, CONNECTION_INGRESS_BYTES_PER_WINDOW, ClientControl,
     FRAME_BODY_MAX_BYTES, FrameKind, KernelErrorCode, KernelRequest, KernelResult, ProtocolVersion,
@@ -129,6 +129,43 @@ impl Client {
             },
             other => Err(Failure::unreachable(format!(
                 "subscribe answered with {other:?}"
+            ))),
+        }
+    }
+
+    /// Open one hosted-session attach and return its typed acknowledgement.
+    /// The caller retains the request id because every later delta carries it.
+    pub async fn attach_pty(
+        &mut self,
+        session_id: PtySessionId,
+        generation: Option<PtySessionGeneration>,
+        cursor: Option<PtyFrameSeq>,
+    ) -> Result<(RequestId, ServerControl), Failure> {
+        let request_id = self.next_id();
+        self.send(&ClientControl::Request {
+            request_id: request_id.clone(),
+            request: KernelRequest::PtyAttach {
+                session_id,
+                generation,
+                cursor,
+            },
+        })
+        .await?;
+        let response = self
+            .receive()
+            .await?
+            .ok_or_else(|| Failure::unreachable("the daemon closed without acknowledging"))?;
+        match &response {
+            ServerControl::Response {
+                request_id: answered,
+                result: KernelResult::PtyAttached { .. },
+            } if answered == &request_id => Ok((request_id, response)),
+            ServerControl::Response {
+                request_id: answered,
+                result: KernelResult::Error { code, message, .. },
+            } if answered == &request_id => Err(Failure::new(*code, message.clone())),
+            other => Err(Failure::unreachable(format!(
+                "attach answered {request_id} with {other:?}"
             ))),
         }
     }

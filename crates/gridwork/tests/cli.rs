@@ -73,6 +73,12 @@ fn the_command_tree_is_printed_as_prose_and_everything_else_as_json() {
     assert!(text.contains("gw kernel health"), "{text}");
     assert!(text.contains("gw estate overview"), "{text}");
     assert!(text.contains("gw activity brief"), "{text}");
+    assert!(text.contains("gw event tail"), "{text}");
+    assert!(text.contains("gw agent fleet"), "{text}");
+    assert!(text.contains("gw session list"), "{text}");
+    assert!(text.contains("gw session inspect"), "{text}");
+    assert!(text.contains("gw session snapshot"), "{text}");
+    assert!(text.contains("gw session attach"), "{text}");
 
     let info = gw(&socket, "build-info");
     assert_eq!(code(&info), 0);
@@ -403,6 +409,11 @@ async fn the_binary_talks_to_a_real_daemon() {
         let tasks = gw(socket, "projection list task");
         let estate = gw(socket, "estate overview");
         let activity = gw(socket, "activity brief");
+        let agent_fleet = gw(socket, "agent fleet");
+        let sessions = gw(socket, "session list");
+        let session_missing = gw(socket, "session inspect es-nope");
+        let pty_missing = gw(socket, "session snapshot pty-nope");
+        let pty_attach_missing = gw(socket, "session attach pty-nope");
         let missing = gw(socket, "projection get task t-nope");
 
         // A blob, all the way there and back through the built binary.
@@ -419,13 +430,40 @@ async fn the_binary_talks_to_a_real_daemon() {
             ),
         );
         (
-            health, status, events, tasks, estate, activity, missing, put, plaintext, payload,
+            health,
+            status,
+            events,
+            tasks,
+            estate,
+            activity,
+            missing,
+            put,
+            plaintext,
+            payload,
+            (
+                agent_fleet,
+                sessions,
+                session_missing,
+                pty_missing,
+                pty_attach_missing,
+            ),
         )
     })
     .await
     .expect("join");
-    let (health, status, events, tasks, estate, activity, missing, put, plaintext, payload) =
-        answers;
+    let (
+        health,
+        status,
+        events,
+        tasks,
+        estate,
+        activity,
+        missing,
+        put,
+        plaintext,
+        payload,
+        (agent_fleet, sessions, session_missing, pty_missing, pty_attach_missing),
+    ) = answers;
 
     assert_eq!(
         code(&health),
@@ -470,6 +508,21 @@ async fn the_binary_talks_to_a_real_daemon() {
     assert_eq!(activity["type"], "activity_brief");
     assert_eq!(activity["owed_total"], 0);
     assert_eq!(activity["cost"]["entries"], 0);
+
+    assert_eq!(code(&agent_fleet), 0);
+    let agent_fleet = json(&agent_fleet);
+    assert_eq!(agent_fleet["type"], "agent_fleet");
+    assert_eq!(agent_fleet["counts"]["sessions"], 0);
+    assert_eq!(agent_fleet["dispatch_nodes"], serde_json::json!([]));
+
+    assert_eq!(code(&sessions), 0);
+    assert_eq!(json(&sessions)["records"], serde_json::json!([]));
+    assert_eq!(code(&session_missing), 4);
+    assert_eq!(json(&session_missing)["code"], "not_found");
+    assert_eq!(code(&pty_missing), 4);
+    assert_eq!(json(&pty_missing)["code"], "not_found");
+    assert_eq!(code(&pty_attach_missing), 4);
+    assert_eq!(json(&pty_attach_missing)["code"], "not_found");
 
     // Absent exits 4, distinctly from a refusal and from unavailability.
     assert_eq!(code(&missing), 4);
