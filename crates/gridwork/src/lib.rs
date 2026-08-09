@@ -164,6 +164,10 @@ async fn execute(verb: Verb, pretty: bool) -> Result<(), Failure> {
         }
         Verb::EventFollow { cursor } => follow(cursor, pretty).await,
         Verb::Tui { motion } => tui::run(motion).await,
+        Verb::Theme => {
+            emit(&chrome_theme()?, pretty);
+            Ok(())
+        }
 
         Verb::AttentionResolve { id, resolution } => {
             let command = KernelCommand::ResolveAttention {
@@ -217,6 +221,33 @@ async fn execute(verb: Verb, pretty: bool) -> Result<(), Failure> {
 
         Verb::Pr { what, dry_run } => pr::run(&what, dry_run, pretty),
     }
+}
+
+/// The resolved workspace chrome theme.
+///
+/// The twin of what the workspace paints: same resolver, same closed role
+/// set, same refusals — so `gw theme` cannot report a binding the workspace
+/// would not use. It answers `signal: true` when nothing was remapped, which
+/// is the difference between "my file did nothing" and "my file was never
+/// found" — two states an operator otherwise cannot tell apart.
+fn chrome_theme() -> Result<Value, Failure> {
+    let theme = gwk_tui::chrome::ChromeTheme::from_env()
+        .map_err(|why| Failure::new(KernelErrorCode::Schema, why.to_string()))?;
+    Ok(serde_json::json!({
+        "type": "chrome_theme",
+        "source_env": gwk_tui::chrome::CHROME_THEME_ENV,
+        "signal": theme.is_signal(),
+        "roles": theme
+            .bindings()
+            .map(|(role, token)| serde_json::json!({
+                "role": role.as_str(),
+                "token": token.name,
+                "value": token.value,
+                "index256": token.index256,
+                "default": role.default_token(),
+            }))
+            .collect::<Vec<_>>(),
+    }))
 }
 
 /// What this build is, without asking anything.
