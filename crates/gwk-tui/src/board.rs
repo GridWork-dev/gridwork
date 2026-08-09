@@ -1,7 +1,8 @@
-//! The Board lens — estate and activity summaries, work structure, message
-//! flow, terminal replay, the running fleet, cost/health, and audit receipts.
+//! The Board lens — estate and activity summaries, workflow runs, work
+//! structure, message flow, terminal replay, the running fleet, cost/health,
+//! and audit receipts.
 //!
-//! All nine views are row surfaces over kernel facts. Work rows print state
+//! All ten views are row surfaces over kernel facts. Work rows print state
 //! as a word and use the mark cell for the graph tier; replay rows carry
 //! elapsed time, event kind, and sequence from the typed recording reader
 //! without inventing another graph-tier mark.
@@ -70,13 +71,14 @@
 use gwk_domain::command::KernelCommand;
 use gwk_domain::entity::{
     Attempt, AttentionItem, Budget, CostEntry, DispatchNode, EngineSession, IngestedRecord, Lease,
-    Message, Receipt, Task, Worktree,
+    Message, Receipt, Task, WorkflowRun, Worktree,
 };
 use gwk_domain::envelope::EventEnvelope;
 use gwk_domain::fsm::{AttemptState, LeaseState, MessageState, TaskState};
 use gwk_domain::ids::{
     AttemptId, AttentionItemId, CommandId, CostEntryId, DispatchNodeId, EngineSessionId, EventId,
-    IngestedRecordId, LeaseId, MessageId, ReceiptId, Seq, TaskId, Timestamp, WorktreeId,
+    IngestedRecordId, LeaseId, MessageId, ReceiptId, Seq, TaskId, Timestamp, WorkflowRunId,
+    WorktreeId,
 };
 use gwk_domain::ingestion::IngestionKind;
 use gwk_theme::marks::{GlyphSet, Mark, StateBinding};
@@ -90,7 +92,7 @@ use crate::input::HitMap;
 use crate::replay::{ReplayFrame, ReplayTimeline};
 use crate::theme;
 
-/// Which Board panel the frame shows. One lens, nine views, one visible at
+/// Which Board panel the frame shows. One lens, ten views, one visible at
 /// a time — the others are a keystroke away, never extra panes fighting for
 /// the same columns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -98,6 +100,7 @@ pub enum BoardView {
     #[default]
     Estate,
     Activity,
+    Runs,
     Dag,
     Flow,
     Events,
@@ -110,9 +113,10 @@ pub enum BoardView {
 impl BoardView {
     /// Every panel in the Board's stable navigation order — the order
     /// [`Self::next`] walks, and the order the status bar's tab strip prints.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Estate,
         Self::Activity,
+        Self::Runs,
         Self::Dag,
         Self::Flow,
         Self::Events,
@@ -127,6 +131,7 @@ impl BoardView {
         match self {
             Self::Estate => "estate",
             Self::Activity => "brief",
+            Self::Runs => "run",
             Self::Dag => "dag",
             Self::Flow => "flow",
             Self::Events => "events",
@@ -141,7 +146,8 @@ impl BoardView {
     pub const fn next(self) -> Self {
         match self {
             Self::Estate => Self::Activity,
-            Self::Activity => Self::Dag,
+            Self::Activity => Self::Runs,
+            Self::Runs => Self::Dag,
             Self::Dag => Self::Flow,
             Self::Flow => Self::Events,
             Self::Events => Self::Replay,
@@ -157,7 +163,8 @@ impl BoardView {
         match self {
             Self::Estate => Self::Audit,
             Self::Activity => Self::Estate,
-            Self::Dag => Self::Activity,
+            Self::Runs => Self::Activity,
+            Self::Dag => Self::Runs,
             Self::Flow => Self::Dag,
             Self::Events => Self::Flow,
             Self::Replay => Self::Events,
@@ -187,6 +194,9 @@ pub struct EventTail {
 pub struct BoardState {
     pub view: BoardView,
     pub tasks: Vec<Task>,
+    /// Workflow choreography as a durable run ledger. Closed rows remain
+    /// history; `step` is printed as opaque template data.
+    pub runs: Vec<WorkflowRun>,
     pub attempts: Vec<Attempt>,
     pub nodes: Vec<DispatchNode>,
     pub messages: Vec<Message>,
@@ -230,6 +240,7 @@ pub struct BoardState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BoardTarget {
     Task(TaskId),
+    WorkflowRun(WorkflowRunId),
     Attempt(AttemptId),
     Node(DispatchNodeId),
     Message(MessageId),
@@ -887,6 +898,98 @@ fn dag_rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
         );
     }
 
+    out
+}
+
+fn workflow_run_row(run: &WorkflowRun, tier: ColorTier) -> Row {
+    let live = run.closed_at.is_none();
+    let binding = if live {
+        theme::binding("running")
+    } else {
+        match run.state.as_str() {
+            "completed" => theme::binding("done"),
+            "failed" => theme::binding("failed"),
+            "canceled" => theme::binding("canceled"),
+            _ => theme::binding("unknown"),
+        }
+    };
+    let label = run.title.as_deref().unwrap_or_else(|| run.id.as_str());
+    // The step is template data. Print the wire value without assigning it an
+    // icon, order, or vocabulary; a missing value is equally explicit.
+    let step = run
+        .step
+        .as_deref()
+        .map_or_else(|| "step absent".to_owned(), |step| format!("step {step}"));
+    let text = if live {
+        format!("{label}  {}  {step}", run.state)
+    } else {
+        format!("{label}  outcome {}  {step}", run.state)
+    };
+    let right = run.closed_at.as_ref().map_or_else(
+        || format!("updated {}", hhmm(&run.updated_at)),
+        |closed| format!("closed {}", hhmm(closed)),
+    );
+    Row {
+        indent: INDENT_STEP,
+        mark: None,
+        text,
+        right: Some(right),
+        style: theme::state_style(binding, tier),
+        target: Some(BoardTarget::WorkflowRun(run.id.clone())),
+        diagnostic: false,
+    }
+}
+
+/// The workflow ledger, split into the runs still moving and immutable close
+/// history. The split is derived from `closed_at`; the step remains opaque.
+fn workflow_run_rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
+    let muted = theme::state_style(theme::binding("idle"), tier);
+    let (mut runs, duplicate_runs) = unique_by_id(&state.runs, |run| run.id.as_str());
+    runs.sort_by(|left, right| {
+        right
+            .updated_at
+            .as_str()
+            .cmp(left.updated_at.as_str())
+            .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+    });
+
+    let findings = duplicate_finding(duplicate_runs, "workflow run")
+        .into_iter()
+        .collect();
+    let unknowns = (!state.complete)
+        .then(|| UnknownNote {
+            subject: "run ledger",
+            why: "read short of the last page -- rows are a prefix".to_owned(),
+        })
+        .into_iter()
+        .collect();
+    let mut out = pinned_block(findings, unknowns, muted);
+    if runs.is_empty() {
+        out.push(Row::plain(
+            "no workflow runs -- no run history on this page".to_owned(),
+            muted,
+        ));
+        return out;
+    }
+
+    out.push(Row::plain(
+        format!(
+            "{}  {}",
+            plural(runs.len(), "workflow run", "workflow runs"),
+            fold_word(state.complete),
+        ),
+        muted,
+    ));
+    let (live, closed): (Vec<_>, Vec<_>) =
+        runs.into_iter().partition(|run| run.closed_at.is_none());
+    if !live.is_empty() {
+        out.push(Row::plain("live".to_owned(), muted));
+        out.extend(live.into_iter().map(|run| workflow_run_row(run, tier)));
+    }
+    if !closed.is_empty() {
+        out.push(Row::plain("history".to_owned(), muted));
+        out.extend(closed.into_iter().map(|run| workflow_run_row(run, tier)));
+    }
     out
 }
 
@@ -2426,6 +2529,7 @@ fn rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
     match state.view {
         BoardView::Estate => estate_rows(state, tier),
         BoardView::Activity => activity_rows(state, tier),
+        BoardView::Runs => workflow_run_rows(state, tier),
         BoardView::Dag => dag_rows(state, tier),
         BoardView::Flow => flow_rows(state, tier),
         BoardView::Events => event_rows(state, tier),
@@ -2489,6 +2593,41 @@ fn detail_lines(state: &BoardState, target: &BoardTarget) -> Option<Vec<String>>
                     "created {}  updated {}",
                     task.created_at.as_str(),
                     task.updated_at.as_str()
+                ),
+            ])
+        }
+        BoardTarget::WorkflowRun(id) => {
+            let run = state
+                .runs
+                .iter()
+                .find(|run| run.id.as_str() == id.as_str())?;
+            Some(vec![
+                format!("workflow run {}  version {}", run.id.as_str(), run.version),
+                format!(
+                    "title {}  state {}",
+                    run.title.as_deref().unwrap_or("absent"),
+                    run.state,
+                ),
+                run.step.as_deref().map_or_else(
+                    || "step absent -- run has not advanced".to_owned(),
+                    |step| format!("step {step}"),
+                ),
+                run.template_sha256.as_deref().map_or_else(
+                    || format!("template {}  sha256 absent", run.template_ref),
+                    |digest| format!("template {}  sha256 {digest}", run.template_ref),
+                ),
+                run.task_id.as_ref().map_or_else(
+                    || "task absent".to_owned(),
+                    |task_id| format!("task {}", task_id.as_str()),
+                ),
+                format!(
+                    "opened {}  updated {}",
+                    run.opened_at.as_str(),
+                    run.updated_at.as_str(),
+                ),
+                run.closed_at.as_ref().map_or_else(
+                    || "closed absent -- run is live".to_owned(),
+                    |closed| format!("closed {}", closed.as_str()),
                 ),
             ])
         }
@@ -3132,7 +3271,9 @@ pub fn render(
         .watermark
         .as_ref()
         .map_or_else(|| "-".to_string(), |w| w.to_string());
-    let status = format!("BOARD {tabs}  {} run @{as_of}", running_count(state));
+    // `rN@seq` keeps the running-attempt pulse and projector watermark visible
+    // after the run-ledger tab joined the 72-cell baseline frame.
+    let status = format!("BOARD {tabs}  r{}@{as_of}", running_count(state));
     let safe_status = theme::safe_text(&status, area.width as usize);
     buf.set_stringn(
         area.x,
@@ -3145,9 +3286,10 @@ pub fn render(
 
 #[cfg(test)]
 mod tests {
-    use gwk_domain::entity::Budget;
+    use gwk_domain::entity::{Budget, WorkflowRun};
     use gwk_domain::ids::{
         AggregateId, CorrelationId, CostMicros, EngineId, IdempotencyKey, ProjectId, TokenCount,
+        WorkflowRunId,
     };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -3300,10 +3442,33 @@ mod tests {
         }
     }
 
+    fn workflow_run(
+        id: &str,
+        state: &str,
+        step: Option<&str>,
+        title: Option<&str>,
+        closed_at: Option<&str>,
+    ) -> WorkflowRun {
+        WorkflowRun {
+            id: WorkflowRunId::new(id),
+            version: 3,
+            state: state.to_owned(),
+            step: step.map(str::to_owned),
+            template_ref: "delivery@v3".to_owned(),
+            template_sha256: None,
+            task_id: Some(TaskId::new("task-board")),
+            title: title.map(str::to_owned),
+            opened_at: ts("2026-08-09T09:00:00Z"),
+            updated_at: ts("2026-08-09T09:30:00Z"),
+            closed_at: closed_at.map(ts),
+        }
+    }
+
     fn empty_state() -> BoardState {
         BoardState {
             view: BoardView::Dag,
             tasks: Vec::new(),
+            runs: Vec::new(),
             attempts: Vec::new(),
             nodes: Vec::new(),
             messages: Vec::new(),
@@ -3672,6 +3837,7 @@ mod tests {
                     "2026-08-06T08:40:00Z",
                 ),
             ],
+            runs: Vec::new(),
             attempts: vec![lead, second, shipped, orphan],
             nodes: vec![
                 node("d-1", Some("at-01"), None, "recon", "completed"),
@@ -3792,6 +3958,73 @@ mod tests {
             dump.contains("no message flows -- nothing sent"),
             "the flow view's absence has its own words:\n{dump}"
         );
+    }
+
+    #[test]
+    fn board_a_live_workflow_run_renders_its_open_step_verbatim() {
+        let mut state = empty_state();
+        state.view = BoardView::Runs;
+        state.runs.push(workflow_run(
+            "wfr-live",
+            "running",
+            Some("peer-signoff"),
+            Some("ship the Board"),
+            None,
+        ));
+        let target = BoardTarget::WorkflowRun(WorkflowRunId::new("wfr-live"));
+
+        let (dump, hits, _) = dump_frame(88, 16, &state, Some(&target));
+        assert!(
+            dump.contains("ship the Board  running  step peer-signoff"),
+            "the open step must pass through as template data:\n{dump}"
+        );
+        assert!(dump.contains("closed absent -- run is live"), "{dump}");
+        assert!(
+            hits.targets().any(|candidate| *candidate == target),
+            "the live run must open its detail pane:\n{dump}"
+        );
+
+        state.runs[0].step = None;
+        let (dump, _, _) = dump_frame(88, 10, &state, None);
+        assert!(
+            dump.contains("step absent"),
+            "a run that has not advanced must say the step is absent:\n{dump}"
+        );
+    }
+
+    #[test]
+    fn board_a_closed_workflow_run_renders_its_outcome_and_close_stamp() {
+        let mut state = empty_state();
+        state.view = BoardView::Runs;
+        state.runs.push(workflow_run(
+            "wfr-closed",
+            "failed",
+            Some("unconventional-finalizer"),
+            None,
+            Some("2026-08-09T09:45:00Z"),
+        ));
+        let target = BoardTarget::WorkflowRun(WorkflowRunId::new("wfr-closed"));
+
+        let (dump, _, _) = dump_frame(88, 14, &state, Some(&target));
+        assert!(dump.contains("wfr-closed  outcome failed"), "{dump}");
+        assert!(dump.contains("closed 2026-08-09T09:45:00Z"), "{dump}");
+        assert!(
+            dump.contains("step unconventional-finalizer"),
+            "a closed row must preserve the step the ledger holds:\n{dump}"
+        );
+    }
+
+    #[test]
+    fn board_an_empty_workflow_run_projection_says_so_in_words() {
+        let mut state = empty_state();
+        state.view = BoardView::Runs;
+
+        let (dump, hits, _) = dump_frame(88, 8, &state, None);
+        assert!(
+            dump.contains("no workflow runs -- no run history on this page"),
+            "absence must be explicit:\n{dump}"
+        );
+        assert_eq!(hits.targets().count(), 0, "an empty ledger has no targets");
     }
 
     #[test]
@@ -5151,7 +5384,7 @@ mod tests {
         let (dump, _, _) = dump_frame(72, 18, &state, None);
         assert_eq!(
             dump.lines().nth(17),
-            Some("BOARD estate brief [dag] flow events replay fleet cost audit  2 run @407"),
+            Some("BOARD estate brief run [dag] flow events replay fleet cost audit  r2@407"),
             "the bar names the view, the pulse, and the page:\n{dump}"
         );
         assert!(
@@ -5164,7 +5397,7 @@ mod tests {
         let (dump, _, _) = dump_frame(72, 18, &flow, None);
         assert_eq!(
             dump.lines().nth(17),
-            Some("BOARD estate brief dag [flow] events replay fleet cost audit  2 run @407"),
+            Some("BOARD estate brief run dag [flow] events replay fleet cost audit  r2@407"),
             "the flow view keeps the ambient pulse:\n{dump}"
         );
     }
