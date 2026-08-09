@@ -157,6 +157,20 @@ test("command terminal: outcome present exactly at verification_complete", async
   await reemit("command-verification-complete.json", command);
 });
 
+test("workspace node: durable tree structure and pane binding", async () => {
+  const raw = await golden("workspace-node.json");
+  if (!isRecord(raw)) throw new Error("golden is not an object");
+  const node = raw as B.WorkspaceNode_Serialize;
+  const kind: B.WorkspaceNodeKind = node.kind;
+  expect(kind).toBe("pane");
+  expect(node.parent_id).toBe("tab-0001");
+  expect(node.session_id).toBe("pty-1");
+  for (const transient of ["split_size", "focus", "z_order"]) {
+    expect(transient in raw).toBe(false);
+  }
+  await reemit("workspace-node.json", node);
+});
+
 test("transition results: tagged snake_case kinds, exhaustive", async () => {
   const raw = await golden("transition-results.json");
   if (!Array.isArray(raw)) throw new Error("golden is not an array");

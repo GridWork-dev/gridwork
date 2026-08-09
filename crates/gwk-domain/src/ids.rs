@@ -123,6 +123,7 @@ string_id!(AttentionItemId);
 string_id!(AuthorityGrantId);
 string_id!(EvidenceId);
 string_id!(CostEntryId);
+string_id!(WorkspaceNodeId);
 string_id!(
     /// One ingested record. Kernel-derived rather than caller-named: the
     /// command carries no id, so the identity is minted from the

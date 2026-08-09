@@ -17,7 +17,7 @@ use crate::ids::{
     AttemptId, AttentionItemId, AuthorityGrantId, ByteCount, CommandId, CorrelationId, CostEntryId,
     CostMicros, DispatchNodeId, EngineId, EngineSessionId, EvidenceId, FenceToken, GateId,
     IdempotencyKey, IngestedRecordId, LeaseId, MessageId, ReceiptId, Seq, TaskId, Timestamp,
-    TokenCount, WorktreeId,
+    TokenCount, WorkspaceNodeId, WorktreeId,
 };
 use crate::ingestion::IngestionKind;
 
@@ -484,6 +484,48 @@ pub struct Worktree {
     #[specta(optional)]
     pub disposition: Option<String>,
     pub created_at: Timestamp,
+}
+
+/// The closed structural levels in a durable workspace tree.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    specta::Type,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceNodeKind {
+    Workspace,
+    Tab,
+    Pane,
+}
+
+/// One durable node in the workspace arrangement.
+///
+/// Only structure belongs here: the host owns split sizes, focus, and z-order.
+/// `session_id` is present only for panes; parentage and binding rules are
+/// enforced by the kernel and projection schema.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceNode {
+    pub id: WorkspaceNodeId,
+    pub version: u32,
+    pub kind: WorkspaceNodeKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub parent_id: Option<WorkspaceNodeId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub session_id: Option<crate::ids::PtySessionId>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 /// An advisory lease over a scope (worktree, file set, singleton role).

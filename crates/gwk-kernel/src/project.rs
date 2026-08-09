@@ -1060,6 +1060,18 @@ pub(crate) async fn apply_event(
             require_one(done, "attention_item", attention_item_id.as_str())?;
         }
 
+        // The wire contract is intentionally one task ahead of its additive
+        // projection. No live submit can append these yet; refusing here keeps
+        // a foreign or corrupt event from becoming a silent replay no-op.
+        KernelCommand::CreateWorkspaceNode { .. }
+        | KernelCommand::MoveWorkspaceNode { .. }
+        | KernelCommand::RebindWorkspacePane { .. }
+        | KernelCommand::CloseWorkspaceNode { .. } => {
+            return Err(Refusal::storage(
+                "workspace layout event has no workspace_node projection handler".to_owned(),
+            ));
+        }
+
         // The epoch boundary is the log itself — there is no row behind it.
         KernelCommand::ActivateKernel { .. } => {}
 

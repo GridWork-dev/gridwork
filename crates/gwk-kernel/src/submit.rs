@@ -80,6 +80,14 @@ struct Route {
     event_type: &'static str,
 }
 
+fn workspace_layout_unavailable() -> Refusal {
+    Refusal::new(
+        KernelErrorCode::Capability,
+        "workspace_layout is not available until the workspace_node projection is installed",
+    )
+    .with_detail(serde_json::json!({ "capability": "workspace_layout" }))
+}
+
 /// What the log already holds under this command's idempotency key.
 enum Prior {
     /// Nothing: this key has never been used in this project.
@@ -384,6 +392,16 @@ fn route_of(envelope: &CommandEnvelope, command: &KernelCommand) -> Result<Route
             worktree_id.as_str().to_owned(),
             "worktree_released",
         ),
+
+        // The contract lands before its additive projection DDL by design.
+        // Keep the interim revision explicit: these verbs exist on the wire,
+        // but no event may be appended until the projector can replay it.
+        C::CreateWorkspaceNode { .. }
+        | C::MoveWorkspaceNode { .. }
+        | C::RebindWorkspacePane { .. }
+        | C::CloseWorkspaceNode { .. } => {
+            return Err(workspace_layout_unavailable());
+        }
 
         C::RegisterDispatchNode {
             dispatch_node_id, ..
@@ -890,6 +908,13 @@ async fn decide(
         // at the instant of the append, not merely when the epoch was read.
         C::ActivateKernel { .. } => 1,
 
+        C::CreateWorkspaceNode { .. }
+        | C::MoveWorkspaceNode { .. }
+        | C::RebindWorkspacePane { .. }
+        | C::CloseWorkspaceNode { .. } => {
+            return Err(workspace_layout_unavailable());
+        }
+
         // Version 0 is the assertion "this aggregate has no events" — so the
         // CAS in the append is what refuses a duplicate create, and no separate
         // existence check can drift from it.
@@ -1357,6 +1382,43 @@ mod tests {
             (route.aggregate_type, route.event_type),
             ("evidence", "evidence_recorded")
         );
+    }
+
+    #[test]
+    fn workspace_commands_refuse_until_the_projection_handler_lands() {
+        use gwk_domain::{PtySessionId, WorkspaceNodeId, WorkspaceNodeKind};
+
+        let commands = [
+            KernelCommand::CreateWorkspaceNode {
+                workspace_node_id: WorkspaceNodeId::new("pane-1"),
+                kind: WorkspaceNodeKind::Pane,
+                parent_id: Some(WorkspaceNodeId::new("tab-1")),
+                session_id: Some(PtySessionId::new("pty-1")),
+            },
+            KernelCommand::MoveWorkspaceNode {
+                workspace_node_id: WorkspaceNodeId::new("pane-1"),
+                parent_id: WorkspaceNodeId::new("tab-2"),
+                expected_version: 1,
+            },
+            KernelCommand::RebindWorkspacePane {
+                workspace_node_id: WorkspaceNodeId::new("pane-1"),
+                session_id: PtySessionId::new("pty-2"),
+                expected_version: 2,
+            },
+            KernelCommand::CloseWorkspaceNode {
+                workspace_node_id: WorkspaceNodeId::new("pane-1"),
+                expected_version: 3,
+            },
+        ];
+
+        for command in commands {
+            let refusal = route_of(&envelope(&command), &command).expect_err("not backed yet");
+            assert_eq!(refusal.code, KernelErrorCode::Capability);
+            assert_eq!(
+                refusal.detail,
+                Some(serde_json::json!({ "capability": "workspace_layout" }))
+            );
+        }
     }
 
     #[test]
