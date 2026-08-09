@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  merge_group:
 
 permissions:
   contents: read
@@ -35,10 +36,29 @@ jobs:
             echo 'perf-job-guard accepted two misses — the retry guard is broken' >&2
             exit 1
           fi
+          if ./tools/perf-job-guard.sh final success skipped; then
+            echo 'perf-job-guard accepted a skipped parallel run - the retry guard is broken' >&2
+            exit 1
+          fi
+          if ./tools/perf-job-guard.sh final skipped success; then
+            echo 'perf-job-guard accepted a skipped parallel run - the retry guard is broken' >&2
+            exit 1
+          fi
+          if ./tools/perf-job-guard.sh final invalid success; then
+            echo 'perf-job-guard accepted invalid first-run evidence' >&2
+            exit 1
+          fi
+          if ./tools/perf-job-guard.sh final success invalid; then
+            echo 'perf-job-guard accepted invalid second-run evidence' >&2
+            exit 1
+          fi
           [ "$(./tools/perf-job-guard.sh attempt success success)" = 'outcome=success' ]
-          [ "$(./tools/perf-job-guard.sh attempt success failure)" = 'outcome=failure' ]
+          [ "$(./tools/perf-job-guard.sh attempt failure success)" = 'outcome=failure' ]
+          [ "$(./tools/perf-job-guard.sh attempt success failure)" = 'outcome=invalid' ]
+          [ "$(./tools/perf-job-guard.sh attempt skipped success)" = 'outcome=invalid' ]
+          ./tools/perf-job-guard.sh final success success
+          ./tools/perf-job-guard.sh final success failure
           ./tools/perf-job-guard.sh final failure success
-          ./tools/perf-job-guard.sh final success skipped
       # DEFAULT members, not `--workspace`. `--workspace` overrides
       # `default-members` and would pull in gwk-pty, which needs Zig and a 71 MB
       # ghostty tree — and whose build script CLONES ghostty when
@@ -186,10 +206,11 @@ jobs:
 
   # The accepted performance bounds, in release, against the pinned PostgreSQL
   # major. Sample-level slack stays fixed at 3; it cannot model contention from
-  # unrelated work sharing an entire hosted runner. A miss gets one retry in a
-  # separate job — therefore on a fresh runner — and the `perf` aggregator below
-  # remains the stable required check. Two misses are a regression; one miss
-  # followed by a clean fresh run is runner noise, not a reason to widen slack.
+  # unrelated work sharing an entire hosted runner. Every run gets two parallel
+  # measurements in separate jobs and therefore on independent fresh runners;
+  # the `perf` aggregator below remains the stable required check. Two misses are
+  # a regression; one miss beside a clean fresh run is runner noise, not a reason
+  # to widen slack.
   perf-attempt:
     continue-on-error: true
     outputs:
@@ -210,7 +231,7 @@ jobs:
           --health-retries 10
     env:
       GWK_TEST_ADMIN_DATABASE_URL: postgresql://postgres:ci@localhost:5432/postgres
-      GWK_PERF_RECEIPT: gwk-perf-receipt.json
+      GWK_PERF_RECEIPT: ${{ github.workspace }}/gwk-perf-receipt.json
       GWK_PERF_REVISION: ${{ github.sha }}
       GWK_PERF_SLACK: "3"
     steps:
@@ -219,6 +240,8 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: perf-release
       - id: envelope
         continue-on-error: true
         run: cargo test --release -p gwk-kernel --test perf -- --ignored --nocapture
@@ -230,6 +253,7 @@ jobs:
         with:
           name: perf-receipt
           path: gwk-perf-receipt.json
+          if-no-files-found: error
       - id: verdict
         if: always()
         env:
@@ -238,8 +262,9 @@ jobs:
         run: ./tools/perf-job-guard.sh attempt "$ENVELOPE_OUTCOME" "$RECEIPT_OUTCOME" >> "$GITHUB_OUTPUT"
 
   perf-retry:
-    needs: perf-attempt
-    if: ${{ always() && needs.perf-attempt.outputs.outcome != 'success' }}
+    continue-on-error: true
+    outputs:
+      outcome: ${{ steps.verdict.outputs.outcome }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     services:
@@ -256,7 +281,7 @@ jobs:
           --health-retries 10
     env:
       GWK_TEST_ADMIN_DATABASE_URL: postgresql://postgres:ci@localhost:5432/postgres
-      GWK_PERF_RECEIPT: gwk-perf-receipt-retry.json
+      GWK_PERF_RECEIPT: ${{ github.workspace }}/gwk-perf-receipt-retry.json
       GWK_PERF_REVISION: ${{ github.sha }}
       GWK_PERF_SLACK: "3"
     steps:
@@ -265,12 +290,24 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - run: cargo test --release -p gwk-kernel --test perf -- --ignored --nocapture
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          shared-key: perf-release
+      - id: envelope
+        continue-on-error: true
+        run: cargo test --release -p gwk-kernel --test perf -- --ignored --nocapture
+      - id: receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: perf-receipt-retry
           path: gwk-perf-receipt-retry.json
+          if-no-files-found: error
+      - id: verdict
+        if: always()
+        env:
+          ENVELOPE_OUTCOME: ${{ steps.envelope.outcome }}
+          RECEIPT_OUTCOME: ${{ steps.receipt.outcome }}
+        run: ./tools/perf-job-guard.sh attempt "$ENVELOPE_OUTCOME" "$RECEIPT_OUTCOME" >> "$GITHUB_OUTPUT"
 
   perf:
     needs: [perf-attempt, perf-retry]
@@ -281,11 +318,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: resolve the first attempt and fresh-runner retry
+      - name: resolve the two fresh-runner measurements
         run: >-
           ./tools/perf-job-guard.sh final
           "${{ needs.perf-attempt.outputs.outcome }}"
-          "${{ needs.perf-retry.result }}"
+          "${{ needs.perf-retry.outputs.outcome }}"
 
   # The second platform the kernel claims. Socket behaviour is not portable by
   # assumption — `sun_path` is 104 bytes here and 108 on Linux, a parent
@@ -336,7 +373,12 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: ${{ env.ZIG_VERSION }}
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: pty
       # The zig-built engine library is tuned to the CPU that built it — with
       # no -Dtarget, `zig build` resolves the NATIVE cpu model, vector
       # extensions and all — and GitHub's runner fleet mixes
@@ -551,6 +593,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: pty
       # Same reason as the `pty` job: the zig-built engine lib is native-CPU
       # tuned and must not cross runners inside the rust cache.
       - name: never reuse a machine-tuned engine lib from cache
@@ -998,9 +1042,18 @@ jobs:
           # The gate diffs against the merge base, which a shallow clone does not have.
           fetch-depth: 0
       - name: engine-adjacent changes carry their second-reader record
+        env:
+          MERGE_GROUP_BASE: ${{ github.event.merge_group.base_sha }}
+          MERGE_GROUP_HEAD: ${{ github.event.merge_group.head_sha }}
         run: |
           set -euo pipefail
-          if [ -n "${GITHUB_BASE_REF:-}" ]; then
+          target=HEAD
+          if [ "$GITHUB_EVENT_NAME" = merge_group ]; then
+            base="$MERGE_GROUP_BASE"
+            target="$MERGE_GROUP_HEAD"
+            git cat-file -e "${base}^{commit}"
+            git cat-file -e "${target}^{commit}"
+          elif [ -n "${GITHUB_BASE_REF:-}" ]; then
             # FETCH_HEAD, not origin/<ref>: the checkout action fetches the PR merge
             # ref, so a remote-tracking branch for the base may not exist locally.
             git fetch --no-tags origin "$GITHUB_BASE_REF"
@@ -1014,7 +1067,7 @@ jobs:
           # put no registry path in this list at all — the reviewer of the
           # row binding defeated the first version exactly that way. With
           # renames off, the canonical path always appears as a deletion.
-          git diff --no-renames --name-only "$base" HEAD > /tmp/changed-paths
+          git diff --no-renames --name-only "$base" "$target" > /tmp/changed-paths
           # Fail CLOSED. An empty set from a diff that failed would otherwise read
           # as "nothing engine-adjacent was touched" — the gate passing because it
           # could not look, which is the failure mode this whole job exists for.
@@ -1575,7 +1628,9 @@ jobs:
   # Commit messages and every line added or deleted inside the PR range publish
   # too — the final tracked tree is not the whole exposure. Same seeded proof.
   # Direct pushes to main (including the very first publication push, which
-  # carries the entire history) get their pushed range scanned as well.
+  # carries the entire history) get their pushed range scanned as well. Merge
+  # groups use the payload's explicit parent/head range rather than guessing
+  # from a temporary queue ref.
   commit-messages:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -1636,6 +1691,18 @@ jobs:
             git log --format=%B "${BEFORE}..${AFTER}" | ./tools/leak-scan.sh --stdin
             ./tools/leak-scan.sh --history "${BEFORE}..${AFTER}"
           fi
+      - name: scan merge-group commit messages and content
+        if: github.event_name == 'merge_group'
+        shell: bash
+        env:
+          BASE: ${{ github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+        run: |
+          set -euo pipefail
+          git cat-file -e "${BASE}^{commit}"
+          git cat-file -e "${HEAD_SHA}^{commit}"
+          git log --format=%B "${BASE}..${HEAD_SHA}" | ./tools/leak-scan.sh --stdin
+          ./tools/leak-scan.sh --history "${BASE}..${HEAD_SHA}"
       - name: prove the gate can fail (seeded violation)
         run: |
           seed=$(printf 'see claude.ai/code/ses%s_EXAMPLE' 'sion')
