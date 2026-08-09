@@ -235,11 +235,14 @@ fn the_committed_fixture_certifies_clean() {
     assert_eq!(check_stream(&events), vec![]);
 }
 
-/// Regenerate the committed fixture:
-/// `cargo test -p gwk-cert regen_fixture -- --ignored`
+/// Regenerate the committed fixture explicitly:
+/// `GWK_CERT_REGENERATE_VALID_STREAM=1 cargo test -p gwk-cert regenerate_committed_valid_stream -- --ignored`
 #[test]
-#[ignore = "writes the committed fixture; run explicitly to regenerate"]
-fn regen_fixture() {
+#[ignore = "writes the committed fixture; set GWK_CERT_REGENERATE_VALID_STREAM=1"]
+fn regenerate_committed_valid_stream() {
+    if std::env::var("GWK_CERT_REGENERATE_VALID_STREAM").as_deref() != Ok("1") {
+        return;
+    }
     let json = serde_json::to_string_pretty(&valid_stream()).expect("serialize");
     std::fs::write(
         concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/valid-stream.json"),
