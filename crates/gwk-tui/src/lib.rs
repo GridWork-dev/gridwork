@@ -34,8 +34,17 @@
 //! `.github/cleanroom-paths.txt`). Nothing in that module exists yet. The rest
 //! of this crate is lens code and is deliberately outside the gate: the gate
 //! follows the risk, not the directory tree.
+//!
+//! [`chrome`] is the demonstration of that sentence. It themes the workspace's
+//! own furniture and is named for it, and it still sits **outside** the gated
+//! prefix — because rule 2 is a category test, not a directory test, and a
+//! table mapping a chrome role to a ratified colour token supervises no
+//! process and emits no terminal byte. Filing it under `src/workspace/`
+//! would have gated it by path regardless of its category, which is exactly
+//! the directory-tree reading rule 2 rejects.
 
 pub mod board;
+pub mod chrome;
 pub mod config;
 pub mod drilldown;
 pub mod estate;

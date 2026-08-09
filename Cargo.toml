@@ -19,6 +19,7 @@ default-members = [
   "crates/gwk-cert",
   "crates/gwk-domain",
   "crates/gwk-kernel",
+  "crates/gwk-text",
   "crates/gwk-theme",
   "crates/gwk-tui",
   "xtask",
@@ -68,6 +69,7 @@ gwk-kernel = { path = "crates/gwk-kernel", version = "0.0.3" }
 # Path-only, no version: unpublished (`publish = false`), like the adapter
 # crates that depend on it.
 gwk-pty = { path = "crates/gwk-pty" }
+gwk-text = { path = "crates/gwk-text" }
 gwk-theme = { path = "crates/gwk-theme", version = "0.0.3" }
 # The installed `gw` binary carries the production terminal loop.
 gwk-tui = { path = "crates/gwk-tui", version = "0.0.2" }
@@ -130,17 +132,13 @@ toml = "0.9"
 # `tracing-subscriber`, which is NOT already resolved and would be a real new
 # dependency for what a bounded event-formatting sink does not need).
 tracing = "0.1.44"
-# Two dev-only unicode tables, and they add NO crate to the graph: both are
-# already resolved in the lockfile (ratatui pulls `unicode-width`, sqlx's
-# `stringprep` pulls `unicode-properties`), so this is a new edge to a crate
-# cargo-deny already cleared, not a new dependency. They exist for the mark
-# inventory's admission gate, which has no waiver path and therefore cannot be
-# a hand-written table of claims about UCD — it has to read UCD. `width` and
-# `width_cjk` together express the East-Asian-Width clause as the rendered
-# consequence; `unicode-properties` carries the emoji clause, which width
-# cannot see (U+26A0 is Neutral and still unusable).
+# These Unicode tables add no crate to the graph: all were already resolved
+# transitively before gwk-text named them. The exact width and segmentation
+# pins prevent peer resolution drift; gwk-text's compile-time version gate also
+# checks the properties table against the same declared Unicode release.
 unicode-properties = "0.1.4"
-unicode-width = "0.2.2"
+unicode-segmentation = "=1.13.3"
+unicode-width = "=0.2.2"
 zeroize = "1.9.0"
 
 [workspace.lints.rust]

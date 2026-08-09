@@ -1,0 +1,19 @@
+[package]
+name = "gwk-text"
+version = "0.0.1"
+description = "Pure column arithmetic and extended grapheme-boundary utilities"
+homepage = "https://gridwork.dev"
+readme = "README.md"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+unicode-properties.workspace = true
+unicode-segmentation.workspace = true
+unicode-width.workspace = true
+
+[lints]
+workspace = true

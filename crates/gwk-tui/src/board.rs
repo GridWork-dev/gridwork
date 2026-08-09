@@ -1,11 +1,42 @@
-//! The Board lens — work structure, message flow, and terminal replay.
+//! The Board lens — work structure, message flow, terminal replay, the
+//! running fleet, and cost/health.
 //!
-//! The task/attempt DAG, A2A message flow, and persisted PTY replay, and
-//! nothing else: the other Board panels — fleet, cost/health, evidence,
-//! brain — are out of this phase by ruling, not omission. All three are row
-//! surfaces. Work rows print state as a word and use the mark cell for the
-//! graph tier; replay rows carry elapsed time, event kind, and sequence from
-//! the typed recording reader without inventing a fifth graph-tier mark.
+//! The task/attempt DAG, A2A message flow, persisted PTY replay, the fleet,
+//! and cost/health: the two Board panels still absent — evidence and brain —
+//! are out by ruling, not omission, and both wait on domains the kernel does
+//! not own yet. All five are row surfaces. Work rows print state as a word
+//! and use the mark cell for the graph tier; replay rows carry elapsed time,
+//! event kind, and sequence from the typed recording reader without
+//! inventing a fifth graph-tier mark.
+//!
+//! # The fleet and cost/health panels read the log and nothing else
+//!
+//! Both new panels render kernel projections only — engine sessions,
+//! worktrees, leases, and the attempt/dispatch counts for the fleet;
+//! `CostEntry` and the `health`/`session` ingestion kinds for cost/health.
+//! No estate telemetry producer is re-pointed at the log to feed them, so
+//! both are thinner than a dashboard reading a purpose-built metrics store,
+//! and that is priced rather than hidden.
+//!
+//! What makes them honest instead of merely thin is [`UnknownNote`]: **what
+//! is not in the log is not on the panel, and the panel says so** rather
+//! than painting a blank or a zero. Three absences recur and each has words:
+//! an engine session with no end stamp is *unended*, which is not the same
+//! claim as alive; a `CostEntry` may carry token counts with no currency at
+//! all, because the ledger never converts on an engine's behalf; and an
+//! ingestion kind with no rows may have no producer rather than no activity.
+//! A blank cell cannot tell those apart from a value of zero, so none of
+//! them is ever drawn blank.
+//!
+//! # A fold over a partial read is a floor, not a total
+//!
+//! The kernel offers no server-side aggregation, no time ordering, and no
+//! filter by ingestion kind: every figure here is a client-side fold over
+//! id-ordered projection pages. So a caller that stopped short of the last
+//! page hands this lens a prefix of the ledger, and a sum over a prefix is
+//! not a sum. [`BoardState::complete`] carries that fact, and every folded
+//! figure changes its own word — `total` against a complete read, `at least`
+//! against a partial one. The lens never guesses which it got.
 //!
 //! # The DAG is layered, and the layers are indentation
 //!
@@ -39,9 +70,16 @@
 //! rather than vanishing, and a parent cycle in the wire data is counted,
 //! never followed: absence is a fact, and facts get words.
 
-use gwk_domain::entity::{Attempt, DispatchNode, Message, Task};
-use gwk_domain::fsm::{AttemptState, MessageState, TaskState};
-use gwk_domain::ids::{AttemptId, DispatchNodeId, MessageId, Seq, TaskId, Timestamp};
+use gwk_domain::entity::{
+    Attempt, CostEntry, DispatchNode, EngineSession, IngestedRecord, Lease, Message, Receipt, Task,
+    Worktree,
+};
+use gwk_domain::fsm::{AttemptState, LeaseState, MessageState, TaskState};
+use gwk_domain::ids::{
+    AttemptId, CostEntryId, DispatchNodeId, EngineSessionId, IngestedRecordId, LeaseId, MessageId,
+    ReceiptId, Seq, TaskId, Timestamp, WorktreeId,
+};
+use gwk_domain::ingestion::IngestionKind;
 use gwk_theme::marks::{GlyphSet, Mark, StateBinding};
 use gwk_theme::tier::ColorTier;
 use ratatui::buffer::Buffer;
@@ -53,7 +91,7 @@ use crate::input::HitMap;
 use crate::replay::{ReplayFrame, ReplayTimeline};
 use crate::theme;
 
-/// Which Board panel the frame shows. One lens, three views, one visible at
+/// Which Board panel the frame shows. One lens, five views, one visible at
 /// a time — the others are a keystroke away, never extra panes fighting for
 /// the same columns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -62,24 +100,56 @@ pub enum BoardView {
     Dag,
     Flow,
     Replay,
+    Fleet,
+    CostHealth,
+    Audit,
 }
 
 impl BoardView {
+    /// Every panel in the Board's stable navigation order — the order
+    /// [`Self::next`] walks, and the order the status bar's tab strip prints.
+    pub const ALL: [Self; 6] = [
+        Self::Dag,
+        Self::Flow,
+        Self::Replay,
+        Self::Fleet,
+        Self::CostHealth,
+        Self::Audit,
+    ];
+
+    /// The tab strip's name for this panel.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Dag => "dag",
+            Self::Flow => "flow",
+            Self::Replay => "replay",
+            Self::Fleet => "fleet",
+            Self::CostHealth => "cost",
+            Self::Audit => "audit",
+        }
+    }
+
     /// The next panel in the Board's stable navigation order.
     pub const fn next(self) -> Self {
         match self {
             Self::Dag => Self::Flow,
             Self::Flow => Self::Replay,
-            Self::Replay => Self::Dag,
+            Self::Replay => Self::Fleet,
+            Self::Fleet => Self::CostHealth,
+            Self::CostHealth => Self::Audit,
+            Self::Audit => Self::Dag,
         }
     }
 
     /// The previous panel in the Board's stable navigation order.
     pub const fn previous(self) -> Self {
         match self {
-            Self::Dag => Self::Replay,
+            Self::Dag => Self::Audit,
             Self::Flow => Self::Dag,
             Self::Replay => Self::Flow,
+            Self::Fleet => Self::Replay,
+            Self::CostHealth => Self::Fleet,
+            Self::Audit => Self::CostHealth,
         }
     }
 }
@@ -95,6 +165,29 @@ pub struct BoardState {
     pub messages: Vec<Message>,
     /// The persisted recording selected for the replay panel.
     pub replay: ReplayTimeline,
+    /// Provider-level sessions under attempts — the fleet panel's live rows.
+    pub sessions: Vec<EngineSession>,
+    /// Isolated working copies, held or handed back.
+    pub worktrees: Vec<Worktree>,
+    /// Advisory leases over worktrees, file sets, and singleton roles.
+    pub leases: Vec<Lease>,
+    /// Usage rows for the cost panel. Append-only spend facts, never an
+    /// accumulator: the total is this fold and nothing else.
+    pub costs: Vec<CostEntry>,
+    /// The attestation ledger the audit panel reads. One row per action an
+    /// actor performed, minted by the kernel in the same transaction as the
+    /// action itself.
+    pub receipts: Vec<Receipt>,
+    /// Ingested records for the health and session halves. One projection
+    /// carries all twelve kinds and the wire offers no filter, so the panel
+    /// selects by [`IngestedRecord::kind`] here rather than at the socket.
+    pub ingested: Vec<IngestedRecord>,
+    /// Whether the caller paged every projection this frame folds to
+    /// exhaustion. `false` makes every folded figure a FLOOR — the panels
+    /// print `at least` instead of `total`, because a sum over a prefix of
+    /// an id-ordered ledger is not a sum, and the lens cannot tell from the
+    /// rows alone which one it was handed.
+    pub complete: bool,
     /// The projector's as-of stamp from the page this state was read at.
     pub watermark: Option<Seq>,
 }
@@ -108,6 +201,12 @@ pub enum BoardTarget {
     Node(DispatchNodeId),
     Message(MessageId),
     ReplayFrame(u64),
+    Session(EngineSessionId),
+    Worktree(WorktreeId),
+    Lease(LeaseId),
+    Cost(CostEntryId),
+    Ingested(IngestedRecordId),
+    Receipt(ReceiptId),
 }
 
 /// A spawn chain deeper than this stops indenting further: the tree is
@@ -748,11 +847,657 @@ fn replay_rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
     out
 }
 
+/// One fact the log does not carry, and why it does not.
+///
+/// The fleet and cost/health panels end their pinned block with these
+/// instead of leaving a value blank. A blank cell and a zero look identical
+/// on a terminal and at most one of them is ever true, so neither is drawn
+/// where the honest answer is "the log does not say".
+struct UnknownNote {
+    subject: &'static str,
+    why: String,
+}
+
+/// The pinned block both new panels open with: the page's integrity findings
+/// first, then what the log does not carry. Pinned rather than appended,
+/// because a panel whose unknowns scrolled off the bottom would read as a
+/// panel with none.
+fn pinned_block(findings: Vec<String>, unknowns: Vec<UnknownNote>, muted: Style) -> Vec<Row> {
+    let mut out = Vec::new();
+    if !findings.is_empty() {
+        out.push(Row::diagnostic(
+            format!("invalid page -- {} findings", findings.len()),
+            muted,
+        ));
+        out.extend(
+            findings
+                .into_iter()
+                .map(|finding| Row::diagnostic(finding, muted)),
+        );
+    }
+    if !unknowns.is_empty() {
+        out.push(Row::diagnostic(
+            format!("unknown -- {} facts not in the log", unknowns.len()),
+            muted,
+        ));
+        out.extend(
+            unknowns
+                .into_iter()
+                .map(|note| Row::diagnostic(format!("  {}: {}", note.subject, note.why), muted)),
+        );
+    }
+    out
+}
+
+/// `1 entry` / `2 entries`. These panels count small sets constantly — a
+/// single cost row and a single held lease are the common case, not the
+/// edge — so a bare `1 entries` would be the most frequent thing on the
+/// frame rather than a rare wart.
+fn plural(count: usize, one: &str, many: &str) -> String {
+    format!("{count} {}", if count == 1 { one } else { many })
+}
+
+/// The duplicate-id finding line every panel words the same way.
+fn duplicate_finding(count: usize, what: &str) -> Option<String> {
+    (count > 0).then(|| {
+        let noun = if count == 1 { "id" } else { "ids" };
+        format!("+{count} duplicate {what} {noun} -- invalid page")
+    })
+}
+
+/// `total` against a read that reached the end of every projection, `at
+/// least` against one that stopped short. The lens cannot tell the two apart
+/// from the rows, so the caller says which and this picks the word.
+const fn fold_word(complete: bool) -> &'static str {
+    if complete { "total" } else { "at least" }
+}
+
+fn session_face(session: &EngineSession) -> (&'static str, &'static StateBinding) {
+    match session.ended_at {
+        Some(_) => ("ended", theme::binding("done")),
+        // The log holds no end stamp. That is not the claim that the session
+        // is alive: nothing here heartbeats, probes, or watches a process,
+        // so `unended` is the whole of what can honestly be said.
+        None => ("no end recorded", theme::binding("unknown")),
+    }
+}
+
+fn worktree_face(worktree: &Worktree) -> (&'static str, &'static StateBinding) {
+    match worktree.released_at {
+        Some(_) => ("released", theme::binding("done")),
+        None => ("held", theme::binding("running")),
+    }
+}
+
+fn lease_face(state: LeaseState) -> (&'static str, &'static StateBinding) {
+    match state {
+        LeaseState::Held => ("held", theme::binding("running")),
+        LeaseState::Released => ("released", theme::binding("done")),
+        // A lapse, not a failure — the warn token says "look", not "it broke".
+        LeaseState::Expired => ("expired", theme::binding("unknown")),
+    }
+}
+
+/// The running estate: engine sessions, the worktrees and leases they hold,
+/// and the attempt/spawn counts the DAG panel details.
+fn fleet_rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
+    let muted = theme::state_style(theme::binding("idle"), tier);
+
+    let (sessions, duplicate_sessions) =
+        unique_by_id(&state.sessions, |session| session.id.as_str());
+    let (worktrees, duplicate_worktrees) =
+        unique_by_id(&state.worktrees, |worktree| worktree.id.as_str());
+    let (leases, duplicate_leases) = unique_by_id(&state.leases, |lease| lease.id.as_str());
+    let (attempts, _) = unique_by_id(&state.attempts, |attempt| attempt.id.as_str());
+    let (nodes, _) = unique_by_id(&state.nodes, |node| node.id.as_str());
+
+    let findings: Vec<String> = [
+        duplicate_finding(duplicate_sessions, "session"),
+        duplicate_finding(duplicate_worktrees, "worktree"),
+        duplicate_finding(duplicate_leases, "lease"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    let unended = sessions
+        .iter()
+        .filter(|session| session.ended_at.is_none())
+        .count();
+    let held_worktrees = worktrees
+        .iter()
+        .filter(|worktree| worktree.released_at.is_none())
+        .count();
+    let held_leases = leases
+        .iter()
+        .filter(|lease| lease.state == LeaseState::Held)
+        .count();
+    let attempts_without_session = {
+        let bound: std::collections::BTreeSet<&str> = sessions
+            .iter()
+            .map(|session| session.attempt_id.as_str())
+            .collect();
+        attempts
+            .iter()
+            .filter(|attempt| attempt.state == AttemptState::Running)
+            .filter(|attempt| !bound.contains(attempt.id.as_str()))
+            .count()
+    };
+
+    let mut unknowns = Vec::new();
+    if unended > 0 {
+        unknowns.push(UnknownNote {
+            subject: "liveness",
+            why: format!(
+                "no end stamp on {unended} of {} -- unended is not alive",
+                plural(sessions.len(), "session", "sessions"),
+            ),
+        });
+    }
+    if attempts_without_session > 0 {
+        unknowns.push(UnknownNote {
+            subject: "engine binding",
+            why: format!(
+                "none on this page for {}",
+                plural(
+                    attempts_without_session,
+                    "running attempt",
+                    "running attempts"
+                ),
+            ),
+        });
+    }
+    if !state.complete {
+        unknowns.push(UnknownNote {
+            subject: "fleet size",
+            why: "read short of the last page -- counts are floors".to_owned(),
+        });
+    }
+
+    let mut out = pinned_block(findings, unknowns, muted);
+    out.push(Row::plain(
+        format!(
+            "{}  {} running  {} held  {} held  {}",
+            plural(sessions.len(), "session", "sessions"),
+            plural(running_count(state), "attempt", "attempts"),
+            plural(held_worktrees, "worktree", "worktrees"),
+            plural(held_leases, "lease", "leases"),
+            plural(nodes.len(), "spawn", "spawns"),
+        ),
+        muted,
+    ));
+
+    if sessions.is_empty() && worktrees.is_empty() && leases.is_empty() {
+        out.push(Row::plain(
+            "no fleet -- no sessions, worktrees, or leases on this page".to_owned(),
+            muted,
+        ));
+        return out;
+    }
+
+    if !sessions.is_empty() {
+        out.push(Row::plain("engine sessions".to_owned(), muted));
+        out.extend(sessions.iter().map(|session| {
+            let (word, bind) = session_face(session);
+            Row {
+                indent: INDENT_STEP,
+                mark: None,
+                text: format!(
+                    "{}  {word}  started {}  attempt {}",
+                    session.engine.as_str(),
+                    hhmm(&session.started_at),
+                    session.attempt_id.as_str(),
+                ),
+                right: Some(session.id.as_str().to_owned()),
+                style: theme::state_style(bind, tier),
+                target: Some(BoardTarget::Session(session.id.clone())),
+                diagnostic: false,
+            }
+        }));
+    }
+
+    if !worktrees.is_empty() {
+        out.push(Row::plain("worktrees".to_owned(), muted));
+        out.extend(worktrees.iter().map(|worktree| {
+            let (word, bind) = worktree_face(worktree);
+            let mut text = format!("{}  {}  {word}", worktree.repo, worktree.branch);
+            if worktree.dirty {
+                text.push_str("  dirty");
+            }
+            if worktree.unpushed {
+                text.push_str("  unpushed");
+            }
+            Row {
+                indent: INDENT_STEP,
+                mark: None,
+                text,
+                right: Some(worktree.id.as_str().to_owned()),
+                style: theme::state_style(bind, tier),
+                target: Some(BoardTarget::Worktree(worktree.id.clone())),
+                diagnostic: false,
+            }
+        }));
+    }
+
+    if !leases.is_empty() {
+        out.push(Row::plain("leases".to_owned(), muted));
+        out.extend(leases.iter().map(|lease| {
+            let (word, bind) = lease_face(lease.state);
+            Row {
+                indent: INDENT_STEP,
+                mark: None,
+                text: format!(
+                    "{}  {word}  holder {}  scope {}",
+                    match lease.mode {
+                        gwk_domain::fsm::LeaseMode::Exclusive => "exclusive",
+                        gwk_domain::fsm::LeaseMode::Shared => "shared",
+                    },
+                    lease.holder.as_deref().unwrap_or("unnamed"),
+                    lease.scope.as_deref().unwrap_or("unnamed"),
+                ),
+                right: Some(lease.id.as_str().to_owned()),
+                style: theme::state_style(bind, tier),
+                target: Some(BoardTarget::Lease(lease.id.clone())),
+                diagnostic: false,
+            }
+        }));
+    }
+
+    out
+}
+
+/// Micro-USD at the ledger's own resolution. Six decimals and no rounding:
+/// most token rows are sub-cent, and two decimals would print them as zero —
+/// which is the one value the ledger is careful never to invent.
+fn usd(micros: u128) -> String {
+    format!("{}.{:06} USD", micros / 1_000_000, micros % 1_000_000)
+}
+
+/// One token column's fold: the sum, and how many rows reported it at all.
+/// A column no row reports is `not reported` and never `0`, because zero is
+/// the claim that an engine used none of it.
+#[derive(Debug, Default, Clone, Copy)]
+struct TokenFold {
+    sum: u128,
+    rows: usize,
+}
+
+impl TokenFold {
+    fn add(&mut self, value: Option<gwk_domain::ids::TokenCount>) {
+        if let Some(count) = value {
+            self.sum = self.sum.saturating_add(u128::from(count.value()));
+            self.rows += 1;
+        }
+    }
+
+    fn line(self, label: &str, entries: usize, complete: bool) -> String {
+        if self.rows == 0 {
+            return format!("{label} not reported");
+        }
+        format!(
+            "{label} {} {} over {} of {}",
+            self.sum,
+            fold_word(complete),
+            self.rows,
+            plural(entries, "entry", "entries"),
+        )
+    }
+}
+
+/// Burn and liveness: the `cost_entry` ledger folded client-side, and the
+/// `health`/`session` ingestion kinds counted.
+fn cost_health_rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
+    let muted = theme::state_style(theme::binding("idle"), tier);
+
+    let (costs, duplicate_costs) = unique_by_id(&state.costs, |cost| cost.id.as_str());
+    let (ingested, duplicate_ingested) = unique_by_id(&state.ingested, |record| record.id.as_str());
+
+    let findings: Vec<String> = [
+        duplicate_finding(duplicate_costs, "cost entry"),
+        duplicate_finding(duplicate_ingested, "ingested record"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    let mut micros: u128 = 0;
+    let mut priced = 0usize;
+    let mut estimated = 0usize;
+    let mut input = TokenFold::default();
+    let mut cached = TokenFold::default();
+    let mut cache_write = TokenFold::default();
+    let mut output = TokenFold::default();
+    let mut reasoning = TokenFold::default();
+    // Engine, then model: a per-model row under one engine is the split an
+    // operator asks for, and the ledger's `model` is an OPEN string, so an
+    // absent one gets a word rather than a bucket of its own.
+    let mut by_engine: std::collections::BTreeMap<(&str, &str), (usize, u128, usize)> =
+        std::collections::BTreeMap::new();
+    for cost in &costs {
+        if let Some(value) = cost.cost_micros {
+            micros = micros.saturating_add(u128::from(value.value()));
+            priced += 1;
+        }
+        if cost.cost_is_estimate == Some(true) {
+            estimated += 1;
+        }
+        input.add(cost.input_tokens);
+        cached.add(cost.cached_input_tokens);
+        cache_write.add(cost.cache_write_tokens);
+        output.add(cost.output_tokens);
+        reasoning.add(cost.reasoning_tokens);
+
+        let bucket = by_engine
+            .entry((
+                cost.engine.as_str(),
+                cost.model.as_deref().unwrap_or("model unreported"),
+            ))
+            .or_default();
+        bucket.0 += 1;
+        if let Some(value) = cost.cost_micros {
+            bucket.1 = bucket.1.saturating_add(u128::from(value.value()));
+            bucket.2 += 1;
+        }
+    }
+    let unpriced = costs.len() - priced;
+
+    let health = ingested
+        .iter()
+        .filter(|record| record.kind == IngestionKind::Health)
+        .count();
+    let session_records: Vec<&&IngestedRecord> = ingested
+        .iter()
+        .filter(|record| record.kind == IngestionKind::Session)
+        .collect();
+
+    let mut unknowns = Vec::new();
+    if unpriced > 0 {
+        unknowns.push(UnknownNote {
+            subject: "currency",
+            why: format!(
+                "tokens only on {unpriced} of {} -- the ledger never converts",
+                plural(costs.len(), "entry", "entries"),
+            ),
+        });
+    }
+    if health == 0 {
+        unknowns.push(UnknownNote {
+            subject: "health",
+            why: "no records -- ingestion is operator-driven, no producer".to_owned(),
+        });
+    }
+    if !state.complete {
+        unknowns.push(UnknownNote {
+            subject: "the ledger",
+            why: "read short of the last page -- figures are floors".to_owned(),
+        });
+    }
+
+    let mut out = pinned_block(findings, unknowns, muted);
+    out.push(Row::plain(
+        if costs.is_empty() {
+            "cost  no entries -- no spend recorded on this page".to_owned()
+        } else {
+            format!(
+                "cost  {}  {} {} over {priced} of {} priced  {estimated} estimated",
+                plural(costs.len(), "entry", "entries"),
+                usd(micros),
+                fold_word(state.complete),
+                costs.len(),
+            )
+        },
+        muted,
+    ));
+
+    if !costs.is_empty() {
+        out.push(Row::plain("by engine".to_owned(), muted));
+        out.extend(by_engine.iter().map(
+            |((engine, model), (entries, engine_micros, engine_priced))| Row {
+                indent: INDENT_STEP,
+                mark: None,
+                text: format!(
+                    "{engine}  {model}  {}",
+                    plural(*entries, "entry", "entries")
+                ),
+                right: Some(if *engine_priced == 0 {
+                    "no cost reported".to_owned()
+                } else {
+                    usd(*engine_micros)
+                }),
+                style: Style::default(),
+                target: None,
+                diagnostic: false,
+            },
+        ));
+
+        out.push(Row::plain("tokens".to_owned(), muted));
+        for line in [
+            input.line("input", costs.len(), state.complete),
+            output.line("output", costs.len(), state.complete),
+            cached.line("cached input", costs.len(), state.complete),
+            cache_write.line("cache write", costs.len(), state.complete),
+            reasoning.line("reasoning", costs.len(), state.complete),
+        ] {
+            out.push(Row {
+                indent: INDENT_STEP,
+                mark: None,
+                text: line,
+                right: None,
+                style: Style::default(),
+                target: None,
+                diagnostic: false,
+            });
+        }
+
+        // Newest first, among the rows the caller actually read. The wire
+        // pages by id in byte order and offers no time ordering at all, so
+        // this recency is over the page and the pinned block says when that
+        // page was a prefix.
+        let mut recent: Vec<&&CostEntry> = costs.iter().collect();
+        recent.sort_by(|left, right| {
+            right
+                .recorded_at
+                .as_str()
+                .cmp(left.recorded_at.as_str())
+                .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+        });
+        out.push(Row::plain("entries".to_owned(), muted));
+        out.extend(recent.into_iter().map(|cost| Row {
+            indent: INDENT_STEP,
+            mark: None,
+            text: format!(
+                "{}  {}  {}",
+                hhmm(&cost.recorded_at),
+                cost.engine.as_str(),
+                match (cost.cost_micros, cost.cost_is_estimate) {
+                    (Some(value), Some(true)) =>
+                        format!("{} estimated", usd(u128::from(value.value()))),
+                    (Some(value), _) => usd(u128::from(value.value())),
+                    (None, _) => "no cost reported".to_owned(),
+                },
+            ),
+            right: Some(cost.id.as_str().to_owned()),
+            style: Style::default(),
+            target: Some(BoardTarget::Cost(cost.id.clone())),
+            diagnostic: false,
+        }));
+    }
+
+    out.push(Row::plain("ingestion".to_owned(), muted));
+    out.push(Row {
+        indent: INDENT_STEP,
+        mark: None,
+        text: format!("health {}", plural(health, "record", "records")),
+        right: None,
+        style: if health == 0 {
+            theme::state_style(theme::binding("unknown"), tier)
+        } else {
+            Style::default()
+        },
+        target: None,
+        diagnostic: false,
+    });
+    out.push(Row {
+        indent: INDENT_STEP,
+        mark: None,
+        text: format!(
+            "session {}{}",
+            plural(session_records.len(), "record", "records"),
+            session_records
+                .iter()
+                .map(|record| record.ingested_at.as_str())
+                .max()
+                .map(|newest| format!("  newest {newest}"))
+                .unwrap_or_default(),
+        ),
+        right: None,
+        style: if session_records.is_empty() {
+            theme::state_style(theme::binding("unknown"), tier)
+        } else {
+            Style::default()
+        },
+        target: None,
+        diagnostic: false,
+    });
+    out.extend(session_records.into_iter().map(|record| Row {
+        indent: INDENT_STEP * 2,
+        mark: None,
+        text: format!("{}  seq {}", record.ingested_at.as_str(), record.event_seq),
+        right: Some(record.id.as_str().to_owned()),
+        style: Style::default(),
+        target: Some(BoardTarget::Ingested(record.id.clone())),
+        diagnostic: false,
+    }));
+
+    out
+}
+
+/// `kind:id` for an actor, or the word for an actor that named no id.
+fn actor_face(actor: &gwk_domain::envelope::Actor) -> String {
+    match &actor.id {
+        Some(id) => format!("{}:{id}", actor.kind),
+        None => actor.kind.clone(),
+    }
+}
+
+/// The attestation ledger: who did what to which subject, and on what basis.
+///
+/// The kernel mints a receipt in the same transaction as the action it
+/// attests, so this is not a log a writer could forget to append to — which
+/// is the property that makes it an audit ledger rather than a diary.
+fn audit_rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
+    let muted = theme::state_style(theme::binding("idle"), tier);
+    let (receipts, duplicate_receipts) =
+        unique_by_id(&state.receipts, |receipt| receipt.id.as_str());
+
+    let findings: Vec<String> = duplicate_finding(duplicate_receipts, "receipt")
+        .into_iter()
+        .collect();
+
+    let basisless = receipts
+        .iter()
+        .filter(|receipt| receipt.observed_basis.is_none())
+        .count();
+    let mut unknowns = Vec::new();
+    if basisless > 0 {
+        unknowns.push(UnknownNote {
+            subject: "basis",
+            why: format!(
+                "no observed basis on {basisless} of {}",
+                plural(receipts.len(), "receipt", "receipts"),
+            ),
+        });
+    }
+    if !state.complete {
+        unknowns.push(UnknownNote {
+            subject: "the ledger",
+            why: "read short of the last page -- counts are floors".to_owned(),
+        });
+    }
+
+    let mut out = pinned_block(findings, unknowns, muted);
+    if receipts.is_empty() {
+        out.push(Row::plain(
+            "no receipts -- nothing attested on this page".to_owned(),
+            muted,
+        ));
+        return out;
+    }
+
+    let mut by_action: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for receipt in &receipts {
+        *by_action.entry(receipt.action.as_str()).or_default() += 1;
+    }
+    out.push(Row::plain(
+        format!(
+            "{}  {} across {}",
+            plural(receipts.len(), "receipt", "receipts"),
+            fold_word(state.complete),
+            plural(by_action.len(), "action", "actions"),
+        ),
+        muted,
+    ));
+
+    // Newest first among the rows read. The wire pages by id in byte order
+    // and offers no time ordering, so this recency is over the page — the
+    // pinned block says so when the page was a prefix.
+    let mut recent: Vec<&&Receipt> = receipts.iter().collect();
+    recent.sort_by(|left, right| {
+        right
+            .ts
+            .as_str()
+            .cmp(left.ts.as_str())
+            .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+    });
+    out.extend(recent.into_iter().map(|receipt| {
+        // The edge when the receipt records one, because "queued -> running"
+        // is the whole content of a state-flip attestation and printing the
+        // action alone would drop it.
+        let edge = match (&receipt.from, &receipt.to) {
+            (Some(from), Some(to)) => format!("  {from} -> {to}"),
+            (None, Some(to)) => format!("  -> {to}"),
+            (Some(from), None) => format!("  {from} ->"),
+            (None, None) => String::new(),
+        };
+        Row {
+            indent: 0,
+            mark: None,
+            text: format!(
+                "{}  {}  {} {}{edge}",
+                hhmm(&receipt.ts),
+                receipt.action,
+                receipt.subject_type,
+                receipt.subject_id,
+            ),
+            right: Some(actor_face(&receipt.actor)),
+            style: Style::default(),
+            target: Some(BoardTarget::Receipt(receipt.id.clone())),
+            diagnostic: false,
+        }
+    }));
+
+    out.push(Row::plain("by action".to_owned(), muted));
+    out.extend(by_action.into_iter().map(|(action, count)| Row {
+        indent: INDENT_STEP,
+        mark: None,
+        text: action.to_owned(),
+        right: Some(plural(count, "receipt", "receipts")),
+        style: Style::default(),
+        target: None,
+        diagnostic: false,
+    }));
+
+    out
+}
+
 fn rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
     match state.view {
         BoardView::Dag => dag_rows(state, tier),
         BoardView::Flow => flow_rows(state, tier),
         BoardView::Replay => replay_rows(state, tier),
+        BoardView::Fleet => fleet_rows(state, tier),
+        BoardView::CostHealth => cost_health_rows(state, tier),
+        BoardView::Audit => audit_rows(state, tier),
     }
 }
 
@@ -907,6 +1652,180 @@ fn detail_lines(state: &BoardState, target: &BoardTarget) -> Option<Vec<String>>
                     "created {}  updated {}",
                     message.created_at.as_str(),
                     message.updated_at.as_str()
+                ),
+            ])
+        }
+        BoardTarget::Session(id) => {
+            let session = state
+                .sessions
+                .iter()
+                .find(|session| session.id.as_str() == id.as_str())?;
+            let (word, _) = session_face(session);
+            Some(vec![
+                format!(
+                    "engine session {}  attempt {}",
+                    session.id.as_str(),
+                    session.attempt_id.as_str()
+                ),
+                format!(
+                    "engine {}{}",
+                    session.engine.as_str(),
+                    opt("provider ref", session.provider_session_ref.as_deref()),
+                ),
+                format!("state {word}  started {}", session.started_at.as_str()),
+                session.ended_at.as_ref().map_or_else(
+                    || "ended -- the log carries no end stamp".to_owned(),
+                    |ended| format!("ended {}", ended.as_str()),
+                ),
+            ])
+        }
+        BoardTarget::Worktree(id) => {
+            let worktree = state
+                .worktrees
+                .iter()
+                .find(|worktree| worktree.id.as_str() == id.as_str())?;
+            let (word, _) = worktree_face(worktree);
+            Some(vec![
+                format!("worktree {}", worktree.id.as_str()),
+                format!("{}  {}  {}", worktree.repo, worktree.branch, worktree.path),
+                format!(
+                    "state {word}  dirty {}  unpushed {}{}{}",
+                    worktree.dirty,
+                    worktree.unpushed,
+                    opt("lease", worktree.lease_id.as_ref().map(|id| id.as_str())),
+                    opt("disposition", worktree.disposition.as_deref()),
+                ),
+                format!(
+                    "created {}{}",
+                    worktree.created_at.as_str(),
+                    worktree
+                        .released_at
+                        .as_ref()
+                        .map(|at| format!("  released {}", at.as_str()))
+                        .unwrap_or_default(),
+                ),
+            ])
+        }
+        BoardTarget::Lease(id) => {
+            let lease = state
+                .leases
+                .iter()
+                .find(|lease| lease.id.as_str() == id.as_str())?;
+            let (word, _) = lease_face(lease.state);
+            Some(vec![
+                format!("lease {}", lease.id.as_str()),
+                format!(
+                    "state {word}{}{}",
+                    opt("holder", lease.holder.as_deref()),
+                    opt("scope", lease.scope.as_deref()),
+                ),
+                format!(
+                    "dirty {}  unpushed {}{}{}",
+                    lease.dirty,
+                    lease.unpushed,
+                    opt("fence", lease.fence_token.map(|t| t.to_string()).as_deref()),
+                    opt("expires", lease.expires_at.as_ref().map(|at| at.as_str())),
+                ),
+                format!(
+                    "created {}  updated {}",
+                    lease.created_at.as_str(),
+                    lease.updated_at.as_str()
+                ),
+            ])
+        }
+        BoardTarget::Cost(id) => {
+            let cost = state
+                .costs
+                .iter()
+                .find(|cost| cost.id.as_str() == id.as_str())?;
+            let tokens = |label: &str, value: Option<gwk_domain::ids::TokenCount>| {
+                value
+                    .map(|count| format!("  {label} {}", count.value()))
+                    .unwrap_or_default()
+            };
+            Some(vec![
+                format!("cost entry {}  {}", cost.id.as_str(), cost.engine.as_str()),
+                format!(
+                    "recorded {}{}",
+                    cost.recorded_at.as_str(),
+                    opt("model", cost.model.as_deref()),
+                ),
+                // Absent currency is a sentence, not an empty field: an engine
+                // that reports no dollar figure leaves both columns null and
+                // the ledger declines to convert for it.
+                match (cost.cost_micros, cost.cost_is_estimate) {
+                    (Some(value), Some(true)) => {
+                        format!(
+                            "cost {} (engine-reported estimate)",
+                            usd(u128::from(value.value()))
+                        )
+                    }
+                    (Some(value), _) => format!("cost {}", usd(u128::from(value.value()))),
+                    (None, _) => "cost not reported -- tokens are the only fact here".to_owned(),
+                },
+                format!(
+                    "tokens{}{}{}{}{}",
+                    tokens("input", cost.input_tokens),
+                    tokens("cached", cost.cached_input_tokens),
+                    tokens("cache-write", cost.cache_write_tokens),
+                    tokens("output", cost.output_tokens),
+                    tokens("reasoning", cost.reasoning_tokens),
+                ),
+                format!(
+                    "subject{}{}{}",
+                    opt("attempt", cost.attempt_id.as_ref().map(|id| id.as_str())),
+                    opt(
+                        "session",
+                        cost.engine_session_id.as_ref().map(|id| id.as_str())
+                    ),
+                    opt(
+                        "spawn",
+                        cost.dispatch_node_id.as_ref().map(|id| id.as_str())
+                    ),
+                ),
+            ])
+        }
+        BoardTarget::Ingested(id) => {
+            let record = state
+                .ingested
+                .iter()
+                .find(|record| record.id.as_str() == id.as_str())?;
+            Some(vec![
+                format!("ingested record {}", record.id.as_str()),
+                format!(
+                    "kind {}  ingested {}  event seq {}",
+                    record.kind,
+                    record.ingested_at.as_str(),
+                    record.event_seq
+                ),
+                // The payload has no per-kind schema anywhere in the contract:
+                // it is free-form JSON by construction. The pane prints it as
+                // the opaque value it is rather than naming fields nothing
+                // guarantees.
+                format!("payload {}", record.payload),
+            ])
+        }
+        BoardTarget::Receipt(id) => {
+            let receipt = state
+                .receipts
+                .iter()
+                .find(|receipt| receipt.id.as_str() == id.as_str())?;
+            Some(vec![
+                format!("receipt {}  {}", receipt.id.as_str(), receipt.ts.as_str()),
+                format!("{} by {}", receipt.action, actor_face(&receipt.actor)),
+                format!("subject {} {}", receipt.subject_type, receipt.subject_id),
+                match (&receipt.from, &receipt.to) {
+                    (Some(from), Some(to)) => format!("edge {from} -> {to}"),
+                    (None, Some(to)) => format!("edge -> {to}"),
+                    (Some(from), None) => format!("edge {from} ->"),
+                    (None, None) => "edge none -- this action moved no state".to_owned(),
+                },
+                // Absent basis is a sentence: the field is where a flip
+                // records what it observed, and a blank line would read as a
+                // basis of nothing rather than as a receipt that named none.
+                receipt.observed_basis.as_deref().map_or_else(
+                    || "observed basis not recorded".to_owned(),
+                    |basis| format!("observed basis {basis}"),
                 ),
             ])
         }
@@ -1140,13 +2059,20 @@ pub fn render(
     }
 
     // The status bar: which view this is, the board's pulse, and the page's
-    // as-of stamp. The inactive view's name stays visible — the other half
-    // of the demo cut is one keystroke away, and the bar says so.
-    let tabs = match state.view {
-        BoardView::Dag => "[dag] flow replay",
-        BoardView::Flow => "dag [flow] replay",
-        BoardView::Replay => "dag flow [replay]",
-    };
+    // as-of stamp. Every inactive view's name stays visible — the other
+    // panels are one keystroke away, and the bar says so rather than hiding
+    // four of five behind a discoverable-by-accident binding.
+    let tabs = BoardView::ALL
+        .iter()
+        .map(|view| {
+            if *view == state.view {
+                format!("[{}]", view.as_str())
+            } else {
+                view.as_str().to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
     let as_of = state
         .watermark
         .as_ref()
@@ -1167,7 +2093,7 @@ pub fn render(
 
 #[cfg(test)]
 mod tests {
-    use gwk_domain::ids::{CorrelationId, EngineId, IdempotencyKey};
+    use gwk_domain::ids::{CorrelationId, CostMicros, EngineId, IdempotencyKey, TokenCount};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -1277,8 +2203,194 @@ mod tests {
             nodes: Vec::new(),
             messages: Vec::new(),
             replay: ReplayTimeline::empty(),
+            sessions: Vec::new(),
+            worktrees: Vec::new(),
+            leases: Vec::new(),
+            costs: Vec::new(),
+            ingested: Vec::new(),
+            receipts: Vec::new(),
+            complete: true,
             watermark: None,
         }
+    }
+
+    fn session(id: &str, attempt: &str, engine: &str, ended: Option<&str>) -> EngineSession {
+        EngineSession {
+            id: EngineSessionId::new(id),
+            attempt_id: AttemptId::new(attempt),
+            engine: EngineId::new(engine),
+            provider_session_ref: None,
+            started_at: ts("2026-08-06T09:40:00Z"),
+            ended_at: ended.map(ts),
+        }
+    }
+
+    fn worktree(id: &str, branch: &str, released: Option<&str>, unpushed: bool) -> Worktree {
+        Worktree {
+            id: WorktreeId::new(id),
+            repo: "gridwork".into(),
+            path: "worktrees/lens".into(),
+            branch: branch.into(),
+            base_sha: None,
+            lease_id: Some(LeaseId::new("ls-01")),
+            dirty: false,
+            unpushed,
+            released_at: released.map(ts),
+            disposition: None,
+            created_at: ts("2026-08-06T09:00:00Z"),
+        }
+    }
+
+    fn lease(id: &str, state: LeaseState, holder: &str) -> Lease {
+        Lease {
+            id: LeaseId::new(id),
+            version: 1,
+            state,
+            mode: gwk_domain::fsm::LeaseMode::Exclusive,
+            holder: Some(holder.into()),
+            scope: Some("worktree:lens".into()),
+            repo: None,
+            path: None,
+            branch: None,
+            base_sha: None,
+            fence_token: None,
+            heartbeat_at: None,
+            expires_at: None,
+            dirty: false,
+            unpushed: false,
+            disposition: None,
+            created_at: ts("2026-08-06T09:00:00Z"),
+            updated_at: ts("2026-08-06T09:30:00Z"),
+        }
+    }
+
+    fn cost(
+        id: &str,
+        engine: &str,
+        model: Option<&str>,
+        micros: Option<u64>,
+        estimate: Option<bool>,
+        recorded: &str,
+    ) -> CostEntry {
+        CostEntry {
+            id: CostEntryId::new(id),
+            attempt_id: Some(AttemptId::new("at-01")),
+            engine_session_id: None,
+            dispatch_node_id: None,
+            engine: EngineId::new(engine),
+            model: model.map(Into::into),
+            input_tokens: Some(TokenCount::new(900)),
+            cached_input_tokens: None,
+            cache_write_tokens: None,
+            output_tokens: Some(TokenCount::new(120)),
+            reasoning_tokens: None,
+            cost_micros: micros.map(CostMicros::new),
+            cost_is_estimate: estimate,
+            recorded_at: ts(recorded),
+        }
+    }
+
+    fn ingested(id: &str, kind: IngestionKind, at: &str, seq: u64) -> IngestedRecord {
+        IngestedRecord {
+            id: IngestedRecordId::new(id),
+            kind,
+            payload: serde_json::json!({"session": "es-01"}),
+            payload_ref: None,
+            ingested_by: None,
+            event_seq: Seq::new(seq),
+            ingested_at: ts(at),
+        }
+    }
+
+    fn receipt(
+        id: &str,
+        action: &str,
+        subject: (&str, &str),
+        edge: (Option<&str>, Option<&str>),
+        basis: Option<&str>,
+        at: &str,
+    ) -> Receipt {
+        Receipt {
+            id: ReceiptId::new(id),
+            actor: gwk_domain::envelope::Actor {
+                kind: "orchestrator".into(),
+                id: Some("gw".into()),
+            },
+            action: action.into(),
+            subject_type: subject.0.into(),
+            subject_id: subject.1.into(),
+            from: edge.0.map(Into::into),
+            to: edge.1.map(Into::into),
+            observed_basis: basis.map(Into::into),
+            ts: ts(at),
+        }
+    }
+
+    fn audit_state() -> BoardState {
+        let mut state = empty_state();
+        state.view = BoardView::Audit;
+        state.watermark = Some(Seq::new(407));
+        state.receipts = vec![
+            receipt(
+                "rc-01",
+                "state_flip",
+                ("attempt", "at-01"),
+                (Some("queued"), Some("running")),
+                Some("engine reported a pid"),
+                "2026-08-06T09:41:00Z",
+            ),
+            receipt(
+                "rc-02",
+                "auto_answer",
+                ("gate", "g-1"),
+                (None, None),
+                None,
+                "2026-08-06T09:52:00Z",
+            ),
+        ];
+        state
+    }
+
+    fn fleet_state() -> BoardState {
+        let mut state = workday_state();
+        state.view = BoardView::Fleet;
+        state.sessions = vec![
+            session("es-01", "at-01", "codex", None),
+            session("es-02", "at-03", "codex", Some("2026-08-06T08:40:00Z")),
+        ];
+        state.worktrees = vec![
+            worktree("wt-01", "feat/auth", None, true),
+            worktree("wt-02", "fix/docs", Some("2026-08-06T09:10:00Z"), false),
+        ];
+        state.leases = vec![
+            lease("ls-01", LeaseState::Held, "gw-implementer"),
+            lease("ls-02", LeaseState::Expired, "gw-reviewer"),
+        ];
+        state
+    }
+
+    fn cost_state() -> BoardState {
+        let mut state = empty_state();
+        state.view = BoardView::CostHealth;
+        state.watermark = Some(Seq::new(407));
+        state.costs = vec![
+            cost(
+                "ce-01",
+                "claude",
+                Some("sonnet"),
+                Some(1_240_000),
+                Some(true),
+                "2026-08-06T09:41:00Z",
+            ),
+            cost("ce-02", "codex", None, None, None, "2026-08-06T09:52:00Z"),
+        ];
+        state.ingested = vec![ingested(
+            "ingest:system:session-1",
+            IngestionKind::Session,
+            "2026-08-06T09:51:00Z",
+            88,
+        )];
+        state
     }
 
     fn workday_state() -> BoardState {
@@ -1385,6 +2497,13 @@ mod tests {
             ],
             messages: vec![brief, findings, dead, pending],
             replay: ReplayTimeline::empty(),
+            sessions: Vec::new(),
+            worktrees: Vec::new(),
+            leases: Vec::new(),
+            costs: Vec::new(),
+            ingested: Vec::new(),
+            receipts: Vec::new(),
+            complete: true,
             watermark: Some(Seq::new(407)),
         }
     }
@@ -1488,6 +2607,250 @@ mod tests {
             dump.contains("no message flows -- nothing sent"),
             "the flow view's absence has its own words:\n{dump}"
         );
+    }
+
+    #[test]
+    fn board_fleet_says_unended_rather_than_alive() {
+        let (dump, hits, _) = dump_frame(72, 24, &fleet_state(), None);
+        assert!(
+            dump.contains("no end recorded"),
+            "a session with no end stamp is unended, never asserted alive:\n{dump}"
+        );
+        assert!(
+            dump.contains("liveness: no end stamp on 1 of 2 sessions -- unended is not alive"),
+            "the pinned block names the unknown and counts it:\n{dump}"
+        );
+        // The row for the unended session may say what the log holds and
+        // nothing more. Every word below would be a claim about a process
+        // this client has never observed.
+        let unended_row = dump
+            .lines()
+            .find(|line| line.contains("es-01"))
+            .unwrap_or_else(|| panic!("the unended session has no row:\n{dump}"));
+        for claim in ["alive", "live", "healthy", "up", "running"] {
+            assert!(
+                !unended_row.contains(claim),
+                "the unended session's row claims {claim:?}:\n{unended_row}"
+            );
+        }
+        assert!(
+            hits.targets()
+                .any(|t| *t == BoardTarget::Session(EngineSessionId::new("es-01"))),
+            "a session row is clickable into the detail pane:\n{dump}"
+        );
+    }
+
+    #[test]
+    fn board_fleet_pins_its_unknowns_above_the_rows_it_can_lose() {
+        // The unknown block is worthless if a long fleet scrolls it away, so
+        // it is pinned like an invalid-page finding. Three body rows is well
+        // under what the fixture needs, which is the point of the check.
+        let (dump, _, _) = dump_frame(72, 6, &fleet_state(), None);
+        assert!(
+            dump.contains("unknown -- 2 facts not in the log"),
+            "the unknown block survives a frame too small for the rows:\n{dump}"
+        );
+    }
+
+    #[test]
+    fn board_an_empty_fleet_says_so_in_words() {
+        let mut state = empty_state();
+        state.view = BoardView::Fleet;
+        let (dump, _, _) = dump_frame(72, 8, &state, None);
+        assert!(
+            dump.contains("no fleet -- no sessions, worktrees, or leases on this page"),
+            "absence in words:\n{dump}"
+        );
+        // Zero sessions raise no liveness question, so the panel invents no
+        // unknown to look thorough.
+        assert!(
+            !dump.contains("not in the log"),
+            "an empty page has nothing unknown about it:\n{dump}"
+        );
+    }
+
+    #[test]
+    fn board_cost_reports_tokens_when_the_engine_reported_no_currency() {
+        let (dump, _, _) = dump_frame(72, 24, &cost_state(), None);
+        assert!(
+            dump.contains("no cost reported"),
+            "an unpriced entry says so rather than printing 0.000000:\n{dump}"
+        );
+        assert!(
+            dump.contains("currency: tokens only on 1 of 2 entries -- the ledger never converts"),
+            "the pinned block counts what carries no currency:\n{dump}"
+        );
+        assert!(
+            dump.contains("reasoning not reported"),
+            "a token column no row reported is not a zero:\n{dump}"
+        );
+        assert!(
+            dump.contains("input 1800 total over 2 of 2 entries"),
+            "a reported column carries its sum and its coverage:\n{dump}"
+        );
+    }
+
+    #[test]
+    fn board_cost_over_a_partial_read_is_a_floor_and_says_which() {
+        let complete = cost_state();
+        let (whole, _, _) = dump_frame(72, 24, &complete, None);
+        assert!(
+            whole.contains("1.240000 USD total over 1 of 2 priced"),
+            "a read to exhaustion is a total:\n{whole}"
+        );
+        assert!(
+            !whole.contains("figures are floors"),
+            "a complete read raises no floor caveat:\n{whole}"
+        );
+
+        // The mutation: the same rows, read short. Nothing about the ledger
+        // changed — only the caller's claim about how much of it it saw.
+        let mut partial = complete;
+        partial.complete = false;
+        let (cut, _, _) = dump_frame(72, 24, &partial, None);
+        assert!(
+            cut.contains("1.240000 USD at least over 1 of 2 priced"),
+            "a partial read is a floor, not a total:\n{cut}"
+        );
+        assert!(
+            cut.contains("the ledger: read short of the last page -- figures are floors"),
+            "and the pinned block says why:\n{cut}"
+        );
+    }
+
+    #[test]
+    fn board_health_with_no_records_is_unknown_and_never_healthy() {
+        let (dump, _, _) = dump_frame(72, 24, &cost_state(), None);
+        assert!(
+            dump.contains("health 0 records"),
+            "the count is stated:\n{dump}"
+        );
+        assert!(
+            dump.contains("health: no records -- ingestion is operator-driven, no producer"),
+            "and the absence is explained rather than left to read as healthy:\n{dump}"
+        );
+        assert!(
+            dump.contains("session 1 record  newest 2026-08-06T09:51:00Z"),
+            "the kind that does have rows carries its newest stamp:\n{dump}"
+        );
+    }
+
+    #[test]
+    fn board_every_new_target_opens_a_detail_pane() {
+        for (state, target, expected) in [
+            (
+                fleet_state(),
+                BoardTarget::Session(EngineSessionId::new("es-01")),
+                "ended -- the log carries no end stamp",
+            ),
+            (
+                fleet_state(),
+                BoardTarget::Worktree(WorktreeId::new("wt-01")),
+                "state held  dirty false  unpushed true",
+            ),
+            (
+                fleet_state(),
+                BoardTarget::Lease(LeaseId::new("ls-02")),
+                "state expired",
+            ),
+            (
+                cost_state(),
+                BoardTarget::Cost(CostEntryId::new("ce-02")),
+                "cost not reported -- tokens are the only fact here",
+            ),
+            (
+                cost_state(),
+                BoardTarget::Ingested(IngestedRecordId::new("ingest:system:session-1")),
+                "kind session",
+            ),
+        ] {
+            let (dump, _, _) = dump_frame(78, 24, &state, Some(&target));
+            assert!(
+                dump.contains(expected),
+                "{target:?} detail pane missing {expected:?}:\n{dump}"
+            );
+        }
+    }
+
+    #[test]
+    fn board_audit_prints_the_edge_and_names_a_missing_basis() {
+        let (dump, hits, _) = dump_frame(78, 22, &audit_state(), None);
+        assert!(
+            dump.contains("2 receipts  total across 2 actions"),
+            "the summary folds the ledger:\n{dump}"
+        );
+        assert!(
+            dump.contains("09:41  state_flip  attempt at-01  queued -> running"),
+            "a state flip prints its edge, which is its whole content:\n{dump}"
+        );
+        assert!(
+            dump.contains("basis: no observed basis on 1 of 2 receipts"),
+            "a missing basis is counted in the pinned block:\n{dump}"
+        );
+        assert!(
+            hits.targets()
+                .any(|t| *t == BoardTarget::Receipt(ReceiptId::new("rc-01"))),
+            "a receipt row opens the detail pane:\n{dump}"
+        );
+
+        let selected = BoardTarget::Receipt(ReceiptId::new("rc-02"));
+        let (dump, _, _) = dump_frame(78, 22, &audit_state(), Some(&selected));
+        for expected in [
+            "auto_answer by orchestrator:gw",
+            "edge none -- this action moved no state",
+            "observed basis not recorded",
+        ] {
+            assert!(dump.contains(expected), "missing {expected:?}:\n{dump}");
+        }
+    }
+
+    #[test]
+    fn board_an_empty_audit_ledger_says_so_in_words() {
+        let mut state = empty_state();
+        state.view = BoardView::Audit;
+        let (dump, _, _) = dump_frame(72, 8, &state, None);
+        assert!(
+            dump.contains("no receipts -- nothing attested on this page"),
+            "absence in words:\n{dump}"
+        );
+    }
+
+    #[test]
+    fn board_an_audit_frame_matches_its_golden() {
+        let (dump, _, _) = dump_frame(78, 16, &audit_state(), None);
+        assert_matches_golden("board-audit", &dump);
+    }
+
+    #[test]
+    fn board_a_fleet_frame_matches_its_golden() {
+        let (dump, _, _) = dump_frame(72, 22, &fleet_state(), None);
+        assert_matches_golden("board-fleet", &dump);
+    }
+
+    #[test]
+    fn board_a_cost_frame_matches_its_golden() {
+        let (dump, _, _) = dump_frame(72, 24, &cost_state(), None);
+        assert_matches_golden("board-cost", &dump);
+    }
+
+    #[test]
+    fn board_the_tab_strip_names_every_panel_and_brackets_the_live_one() {
+        for view in BoardView::ALL {
+            let mut state = empty_state();
+            state.view = view;
+            let (dump, _, _) = dump_frame(72, 6, &state, None);
+            let status = dump.lines().last().unwrap_or_default();
+            for other in BoardView::ALL {
+                assert!(
+                    status.contains(other.as_str()),
+                    "{view:?}'s status bar hides {other:?}:\n{status}"
+                );
+            }
+            assert!(
+                status.contains(&format!("[{}]", view.as_str())),
+                "{view:?} is not the bracketed one:\n{status}"
+            );
+        }
     }
 
     #[test]
@@ -2243,7 +3606,7 @@ mod tests {
         let (dump, _, _) = dump_frame(72, 18, &state, None);
         assert_eq!(
             dump.lines().nth(17),
-            Some("BOARD  [dag] flow replay  2 running  as-of 407"),
+            Some("BOARD  [dag] flow replay fleet cost audit  2 running  as-of 407"),
             "the bar names the view, the pulse, and the page:\n{dump}"
         );
         assert!(
@@ -2256,7 +3619,7 @@ mod tests {
         let (dump, _, _) = dump_frame(72, 18, &flow, None);
         assert_eq!(
             dump.lines().nth(17),
-            Some("BOARD  dag [flow] replay  2 running  as-of 407"),
+            Some("BOARD  dag [flow] replay fleet cost audit  2 running  as-of 407"),
             "the flow view keeps the ambient pulse:\n{dump}"
         );
     }

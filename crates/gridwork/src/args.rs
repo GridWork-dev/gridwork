@@ -47,6 +47,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--scratch-database",
     "--strategy",
     "--title",
+    "--until",
 ];
 
 /// Every flag that is its own answer.
@@ -129,6 +130,25 @@ pub enum Verb {
         motion: MotionMode,
     },
 
+    /// The resolved workspace chrome theme — every role, the Signal token it
+    /// carries, and whether an operator file moved it.
+    Theme,
+
+    /// Stamp the item seen. Quiets the row; leaves the item open, so the
+    /// dedup slot stays held and the same problem cannot raise twice.
+    AttentionAck {
+        id: String,
+    },
+    /// Quiet the item until an instant. Same discipline as ack — quiet is
+    /// presentation, resolve is the only close.
+    AttentionMute {
+        id: String,
+        until: String,
+    },
+    /// Make the item audible again, by stamping a deadline already gone.
+    AttentionUnmute {
+        id: String,
+    },
     AttentionResolve {
         id: String,
         resolution: Option<String>,
@@ -189,7 +209,11 @@ gw — the GridWork kernel's command line
   gw event read [--cursor <seq>] [--limit <n>]
   gw event follow [--cursor <seq>]
   gw tui [--motion=off|reduced|full]
+  gw theme
   gw attention list [--cursor <key>] [--limit <n>]
+  gw attention ack <id>
+  gw attention mute <id> --until <rfc3339>
+  gw attention unmute <id>
   gw attention resolve <id> [--resolution <text>]
   gw authority list [--cursor <key>] [--limit <n>]
   gw authority grant --file <path|->
@@ -214,6 +238,10 @@ Every command answer is JSON on standard output; `tui` is interactive. Exits: 0 
 argument array, never a shell line — and its live answer and standard streams
 are gh's own. A body comes from exactly one of its two body flags, and
 --dry-run prints the argv as JSON instead of running anything.
+
+`theme` resolves the workspace chrome slot from GWK_CHROME_THEME and asks
+nothing of the socket. Orchestration stays SIGNAL: the slot themes the
+workspace's own furniture, never a lens and never a pane's contents.
 
 `daemon` and `admin` read GWK_DATABASE_URL / GWK_ADMIN_DATABASE_URL and the blob
 KEK. Every other verb uses only the socket. `admin blob rotate` also reads
@@ -277,6 +305,19 @@ fn verb(rest: &mut Rest) -> Result<Verb, Failure> {
         // way of asking one question.
         "attention" => match rest.word("attention")?.as_str() {
             "list" => rest.page(ProjectionKind::AttentionItem),
+            "ack" => Ok(Verb::AttentionAck {
+                id: rest.word("attention ack")?,
+            }),
+            "mute" => Ok(Verb::AttentionMute {
+                id: rest.word("attention mute")?,
+                // Required rather than defaulted: the kernel has no clock the
+                // caller can borrow, and a mute whose deadline this program
+                // invented would be quiet for a length nobody asked for.
+                until: rest.required("--until")?,
+            }),
+            "unmute" => Ok(Verb::AttentionUnmute {
+                id: rest.word("attention unmute")?,
+            }),
             "resolve" => Ok(Verb::AttentionResolve {
                 id: rest.word("attention resolve")?,
                 resolution: rest.flag("--resolution"),
@@ -294,6 +335,10 @@ fn verb(rest: &mut Rest) -> Result<Verb, Failure> {
             }),
             other => Err(unknown("authority", other)),
         },
+        // The one verb that asks nothing of the kernel and nothing of the
+        // forge: the workspace chrome slot is a local file resolved against a
+        // ratified palette, so its twin resolves it locally too.
+        "theme" => Ok(Verb::Theme),
         "blob" => blob(rest),
         "pr" => pr(rest),
         "ingest" => match rest.word("ingest")?.as_str() {
@@ -690,6 +735,47 @@ mod tests {
                 .expect("parse")
                 .verb
         );
+        // The attention lifecycle is four kernel commands, and the command
+        // line reaches all four. Two of them had a TUI verb and no twin
+        // until this tree grew them, which is exactly the shape a
+        // decommission drops without noticing.
+        assert_eq!(
+            parsed("attention ack a-1").expect("parse").verb,
+            Verb::AttentionAck {
+                id: "a-1".to_owned()
+            }
+        );
+        assert_eq!(
+            parsed("attention mute a-1 --until 2026-08-09T12:00:00Z")
+                .expect("parse")
+                .verb,
+            Verb::AttentionMute {
+                id: "a-1".to_owned(),
+                until: "2026-08-09T12:00:00Z".to_owned()
+            }
+        );
+        assert_eq!(
+            parsed("attention unmute a-1").expect("parse").verb,
+            Verb::AttentionUnmute {
+                id: "a-1".to_owned()
+            }
+        );
+        assert_eq!(
+            parsed("attention resolve a-1").expect("parse").verb,
+            Verb::AttentionResolve {
+                id: "a-1".to_owned(),
+                resolution: None
+            }
+        );
+        // A mute with no deadline is refused rather than defaulted: this
+        // program has no clock the kernel would agree with, and quiet for a
+        // length nobody asked for is worse than a usage error.
+        assert!(parsed("attention mute a-1").is_err());
+        assert!(
+            parsed("attention snooze a-1").is_err(),
+            "no second spelling"
+        );
+
         assert_eq!(
             parsed("event follow --cursor 42").expect("parse").verb,
             Verb::EventFollow {

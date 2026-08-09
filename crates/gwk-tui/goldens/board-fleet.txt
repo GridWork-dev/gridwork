@@ -1,0 +1,22 @@
+ unknown -- 2 facts not in the log
+   liveness: no end stamp on 1 of 2 sessions -- unended is not alive
+   engine binding: none on this page for 1 running attempt
+ 2 sessions  2 attempts running  1 worktree held  1 lease held  2 spawns
+ engine sessions
+   codex  no end recorded  started 09:40  attempt at-01            es-01
+   codex  ended  started 09:40  attempt at-03                      es-02
+ worktrees
+   gridwork  feat/auth  held  unpushed                             wt-01
+   gridwork  fix/docs  released                                    wt-02
+ leases
+   exclusive  held  holder gw-implementer  scope worktree:lens     ls-01
+   exclusive  expired  holder gw-reviewer  scope worktree:lens     ls-02
+
+
+
+
+
+
+
+
+BOARD  dag flow replay [fleet] cost audit  2 running  as-of 407
