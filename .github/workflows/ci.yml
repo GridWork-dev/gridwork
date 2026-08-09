@@ -64,6 +64,29 @@ jobs:
           cargo tree -p gwk-pty --edges normal --prefix none | grep -q libghostty
           cargo tree -p gridwork --edges normal --prefix none | grep -q gwk-tui
           echo "gridwork carries gwk-tui and remains Zig-free; the greps that prove it are live"
+      # The engine adapters enable serde_json/preserve_order. Cargo feature
+      # unification means building one beside `gw` would then change the key
+      # order in values the kernel hashes, even though the `gw` graph alone is
+      # deterministic. Guard the deployable's resolved graph, not Cargo.toml.
+      - name: the gw feature graph excludes serde_json preserve_order
+        run: |
+          set -euo pipefail
+          features=/tmp/gridwork-serde-json-features.txt
+          seeded=/tmp/seeded-gridwork-serde-json-features.txt
+          forbidden='serde_json feature "preserve_order"'
+          cargo tree -p gridwork -e features,no-dev -i serde_json > "$features"
+          if grep -Fq "$forbidden" "$features"; then
+            echo 'gridwork enables serde_json/preserve_order — kernel hashes now depend on insertion order' >&2
+            grep -F "$forbidden" "$features" >&2
+            exit 1
+          fi
+          cp "$features" "$seeded"
+          printf '%s\n' "$forbidden" >> "$seeded"
+          if ! grep -Fq "$forbidden" "$seeded"; then
+            echo 'the seeded preserve_order feature was not detected — the guard is decoration' >&2
+            exit 1
+          fi
+          echo 'gridwork excludes serde_json/preserve_order; the seeded positive control is detected'
       # P6(a): the console is a THIN CLIENT. PTY sessions and engine adapters
       # live server-side in their own host crate and the console consumes frames
       # as wire data, which is what makes attach-from-anywhere fall out instead
