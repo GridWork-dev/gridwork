@@ -152,7 +152,9 @@ fn hall_live_uses_matching_event_sequences_never_projection_watermarks() {
         attention: vec![Stamped::new(attention(), page_watermark)],
         watermarks: vec![Some(page_watermark)],
     };
-    let estate = events.build(&projections).expect("projection/event join");
+    let estate = events
+        .build(&projections, None)
+        .expect("projection/event join");
 
     assert_eq!(estate.frame.watermark, Some(page_watermark));
     assert_eq!(estate.frame.districts.len(), 1);
@@ -202,7 +204,7 @@ fn hall_live_refuses_a_projection_row_without_event_provenance() {
     };
 
     let error = events
-        .build(&projections)
+        .build(&projections, None)
         .expect_err("the attempt has no matching event");
     assert!(error.to_string().contains("attempt-1"), "{error}");
     assert!(error.to_string().contains("sequence provenance"), "{error}");
@@ -215,7 +217,7 @@ fn hall_live_refuses_projection_pages_that_straddle_an_append() {
         ..ProjectionSnapshot::default()
     };
     let error = EventIndex::default()
-        .build(&projections)
+        .build(&projections, None)
         .expect_err("mixed projection watermarks are not one frame");
     assert!(error.to_string().contains("straddled an append"), "{error}");
     assert!(EventIndex::is_retryable(&error));
@@ -236,7 +238,7 @@ fn hall_live_refuses_attention_state_newer_than_its_page_watermark() {
     };
 
     let error = events
-        .build(&projections)
+        .build(&projections, None)
         .expect_err("resolved row cannot borrow the raise sequence");
     assert!(error.to_string().contains("unresolved=false"), "{error}");
     assert!(EventIndex::is_retryable(&error));
@@ -275,8 +277,10 @@ fn hall_live_digest_normalizes_contract_valid_opaque_ids() {
         ..ProjectionSnapshot::default()
     };
 
-    let first = events.build(&projections).expect("normalized estate");
-    let second = events.build(&projections).expect("deterministic estate");
+    let first = events.build(&projections, None).expect("normalized estate");
+    let second = events
+        .build(&projections, None)
+        .expect("deterministic estate");
     assert_eq!(first.frame, second.frame);
     for id in [
         first.frame.districts[0].id.as_str(),
@@ -323,7 +327,7 @@ fn hall_live_raw_and_hashed_view_ids_cannot_alias() {
         ..ProjectionSnapshot::default()
     };
 
-    let estate = events.build(&projections).expect("disjoint view ids");
+    let estate = events.build(&projections, None).expect("disjoint view ids");
     assert_eq!(estate.frame.districts.len(), 2);
     assert_ne!(estate.frame.districts[0].id, estate.frame.districts[1].id);
 }
@@ -346,9 +350,132 @@ fn hall_live_does_not_label_a_terminal_attempt_live() {
         watermarks: vec![Some(watermark)],
         ..ProjectionSnapshot::default()
     };
-    let estate = events.build(&projections).expect("terminal estate");
+    let estate = events.build(&projections, None).expect("terminal estate");
     assert_eq!(
         estate.frame.districts[0].stations[0].agents[0].duration,
         None
     );
+}
+
+#[test]
+fn live_join_ages_old_terminal_attempts_into_the_district_count() {
+    let mut events = EventIndex::default();
+    events
+        .ingest([
+            event(7, "proj-alpha", "task", "task-execute", 1),
+            event(11, "proj-alpha", "attempt", "attempt-1", 2),
+            event(12, "proj-alpha", "attempt", "attempt-2", 2),
+        ])
+        .expect("ordered event page");
+
+    // Both attempts are older than the boundary; only the terminal one ages.
+    let old_running = Attempt {
+        updated_at: Timestamp::new("2026-08-01T00:00:00Z"),
+        ..attempt()
+    };
+    let old_done = Attempt {
+        id: AttemptId::new("attempt-2"),
+        state: AttemptState::Succeeded,
+        updated_at: Timestamp::new("2026-08-01T00:00:00Z"),
+        ..attempt()
+    };
+    let page_watermark = Seq::new(900);
+    let projections = ProjectionSnapshot {
+        tasks: vec![Stamped::new(task(), page_watermark)],
+        attempts: vec![
+            Stamped::new(old_running, page_watermark),
+            Stamped::new(old_done, page_watermark),
+        ],
+        messages: Vec::new(),
+        attention: Vec::new(),
+        watermarks: vec![Some(page_watermark)],
+    };
+
+    let cutoff = Timestamp::new("2026-08-07T00:00:00Z");
+    let estate = events
+        .build(&projections, Some(&cutoff))
+        .expect("aged projection/event join");
+    let district = &estate.frame.districts[0];
+    assert_eq!(district.aged_done, 1);
+    let states: Vec<AgentState> = district
+        .stations
+        .iter()
+        .flat_map(|station| station.agents.iter())
+        .map(|agent| agent.state)
+        .collect();
+    assert_eq!(states, vec![AgentState::Running]);
+
+    // Without a boundary every attempt keeps its slot.
+    let estate = events.build(&projections, None).expect("unaged join");
+    let district = &estate.frame.districts[0];
+    assert_eq!(district.aged_done, 0);
+    let slots = district
+        .stations
+        .iter()
+        .map(|station| station.agents.len())
+        .sum::<usize>();
+    assert_eq!(slots, 2);
+}
+
+#[test]
+fn live_join_never_ages_an_attention_targeted_attempt() {
+    let mut events = EventIndex::default();
+    events
+        .ingest([
+            event(7, "proj-alpha", "task", "task-execute", 1),
+            event(11, "proj-alpha", "attempt", "attempt-1", 2),
+            event(17, "proj-alpha", "attention_item", "attention-1", 1),
+        ])
+        .expect("ordered event page");
+
+    let old_done = Attempt {
+        state: AttemptState::Succeeded,
+        updated_at: Timestamp::new("2026-08-01T00:00:00Z"),
+        ..attempt()
+    };
+    let page_watermark = Seq::new(900);
+    let projections = ProjectionSnapshot {
+        tasks: vec![Stamped::new(task(), page_watermark)],
+        attempts: vec![Stamped::new(old_done, page_watermark)],
+        messages: Vec::new(),
+        attention: vec![Stamped::new(attention(), page_watermark)],
+        watermarks: vec![Some(page_watermark)],
+    };
+    let cutoff = Timestamp::new("2026-08-07T00:00:00Z");
+    let estate = events
+        .build(&projections, Some(&cutoff))
+        .expect("targeted join");
+    let district = &estate.frame.districts[0];
+    assert_eq!(district.aged_done, 0);
+    let states: Vec<AgentState> = district
+        .stations
+        .iter()
+        .flat_map(|station| station.agents.iter())
+        .map(|agent| agent.state)
+        .collect();
+    assert_eq!(states, vec![AgentState::NeedsAttention]);
+}
+
+#[test]
+fn live_join_labels_a_kind_station_by_its_kind_not_a_member_title() {
+    let mut events = EventIndex::default();
+    events
+        .ingest([event(7, "proj-alpha", "task", "task-execute", 1)])
+        .expect("ordered event page");
+    let dispatch_task = Task {
+        kind: Some("dispatch".to_owned()),
+        title: Some("code_write_rust".to_owned()),
+        ..task()
+    };
+    let page_watermark = Seq::new(900);
+    let projections = ProjectionSnapshot {
+        tasks: vec![Stamped::new(dispatch_task, page_watermark)],
+        attempts: Vec::new(),
+        messages: Vec::new(),
+        attention: Vec::new(),
+        watermarks: vec![Some(page_watermark)],
+    };
+    let estate = events.build(&projections, None).expect("labeled join");
+    let station = &estate.frame.districts[0].stations[0];
+    assert_eq!(station.label, "dispatch");
 }

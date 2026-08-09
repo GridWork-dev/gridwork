@@ -11,7 +11,7 @@ use std::fmt::Write as _;
 use gwk_domain::entity::{Attempt, AttentionItem, Message, Task};
 use gwk_domain::envelope::EventEnvelope;
 use gwk_domain::fsm::{AttemptState, TaskState};
-use gwk_domain::ids::{MessageId, Seq};
+use gwk_domain::ids::{MessageId, Seq, Timestamp};
 use sha2::{Digest as _, Sha256};
 
 use crate::hall::{
@@ -177,7 +177,16 @@ impl EventIndex {
     }
 
     /// Join current projection rows to exact event versions and normalize them.
-    pub fn build(&self, projections: &ProjectionSnapshot) -> Result<EstateSnapshot, EstateError> {
+    ///
+    /// `aged_before` is the caller-resolved aging boundary (the join reads no
+    /// clock): a terminal-state attempt last updated strictly before it is
+    /// collapsed into its district's `aged_done` count instead of occupying an
+    /// agent slot. Attention-targeted attempts never age out.
+    pub fn build(
+        &self,
+        projections: &ProjectionSnapshot,
+        aged_before: Option<&Timestamp>,
+    ) -> Result<EstateSnapshot, EstateError> {
         let frame_watermark = coherent_watermark(&projections.watermarks)?;
         let mut tasks = BTreeMap::new();
         for row in &projections.tasks {
@@ -275,21 +284,30 @@ impl EventIndex {
                     let needs_attention = targeted_attempts.contains(attempt.attempt.id.as_str())
                         || fact.task.state == TaskState::InputRequired;
                     let state = agent_state(attempt.attempt.state, needs_attention);
-                    station.agents.push(Agent {
-                        id: agent_id(attempt.attempt.id.as_str())?,
-                        role: attempt.attempt.role.clone(),
+                    let aged = matches!(
                         state,
-                        duration: (attempt.attempt.runtime_started_at.is_some()
-                            && matches!(
-                                state,
-                                AgentState::Starting
-                                    | AgentState::Running
-                                    | AgentState::Canceling
-                                    | AgentState::NeedsAttention
-                            ))
-                        .then(|| "live".to_owned()),
-                        changed_seq: attempt.sequence,
-                    });
+                        AgentState::Done | AgentState::Failed | AgentState::Canceled
+                    ) && aged_before
+                        .is_some_and(|cutoff| attempt.attempt.updated_at.0 < cutoff.0);
+                    if aged {
+                        district.aged_done += 1;
+                    } else {
+                        station.agents.push(Agent {
+                            id: agent_id(attempt.attempt.id.as_str())?,
+                            role: attempt.attempt.role.clone(),
+                            state,
+                            duration: (attempt.attempt.runtime_started_at.is_some()
+                                && matches!(
+                                    state,
+                                    AgentState::Starting
+                                        | AgentState::Running
+                                        | AgentState::Canceling
+                                        | AgentState::NeedsAttention
+                                ))
+                            .then(|| "live".to_owned()),
+                            changed_seq: attempt.sequence,
+                        });
+                    }
                     station.changed_seq = station.changed_seq.max(attempt.sequence);
                     district.changed_seq = district.changed_seq.max(attempt.sequence);
                 }
@@ -441,6 +459,7 @@ struct AttemptFact {
 struct DistrictBuild {
     label: String,
     changed_seq: Seq,
+    aged_done: usize,
     stations: BTreeMap<String, Station>,
 }
 
@@ -449,6 +468,7 @@ impl DistrictBuild {
         Self {
             label: project.to_owned(),
             changed_seq,
+            aged_done: 0,
             stations: BTreeMap::new(),
         }
     }
@@ -458,6 +478,7 @@ impl DistrictBuild {
             id: district_id(&self.label)?,
             label: self.label,
             stations: self.stations.into_values().collect(),
+            aged_done: self.aged_done,
             changed_seq: self.changed_seq,
         })
     }
@@ -508,11 +529,14 @@ fn station_identity(task: &Task) -> (String, String, u16) {
             u16::try_from(ordinal).unwrap_or(u16::MAX),
         );
     }
+    // The label must describe the station's KEY, not one member: every task
+    // sharing a kind merges into one station, so a first-inserted task title
+    // would name the whole station after an arbitrary member.
     let key = task.kind.as_deref().unwrap_or(task.id.as_str()).to_owned();
     let label = task
-        .title
+        .kind
         .as_deref()
-        .or(task.kind.as_deref())
+        .or(task.title.as_deref())
         .unwrap_or(task.id.as_str())
         .to_owned();
     (key, label, u16::MAX)

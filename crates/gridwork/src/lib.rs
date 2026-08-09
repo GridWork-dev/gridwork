@@ -556,7 +556,7 @@ fn now() -> Timestamp {
     Timestamp::new(rfc3339(secs))
 }
 
-fn rfc3339(secs: u64) -> String {
+pub(crate) fn rfc3339(secs: u64) -> String {
     let days = (secs / 86_400) as i64;
     let rest = secs % 86_400;
     let (year, month, day) = civil_from_days(days);

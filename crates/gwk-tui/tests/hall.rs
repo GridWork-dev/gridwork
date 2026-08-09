@@ -56,6 +56,7 @@ fn district(id: &str, label: &str, stations: Vec<Station>, seq: u64) -> District
         id: district_id(id),
         label: label.to_owned(),
         stations,
+        aged_done: 0,
         changed_seq: Seq::new(seq),
     }
 }
@@ -1537,4 +1538,37 @@ fn hall_same_entity_and_sequence_replaces_the_one_shot() {
         "⠋",
         "the replaced completed decay must never touch the frame"
     );
+}
+
+#[test]
+fn aged_done_rides_the_district_heading_as_a_count() {
+    let mut input = representative_input();
+    input.districts[1].aged_done = 58;
+    let (frame, _, _) = dump_frame(60, 14, &input);
+    assert!(
+        frame.contains("Research +58 done"),
+        "heading carries the aged count:\n{frame}"
+    );
+    assert!(!frame.contains("Build +"), "{frame}");
+}
+
+#[test]
+fn a_district_of_only_aged_agents_stays_visible_with_its_count() {
+    let input = FrameInput {
+        districts: vec![District {
+            aged_done: 3,
+            ..district(
+                "district-quiet",
+                "Quiet",
+                vec![station("station-code", 1, "code", Vec::new(), 4)],
+                4,
+            )
+        }],
+        focus: None,
+        attention: Vec::new(),
+        watermark: Some(Seq::new(9)),
+    };
+    let (frame, _, _) = dump_frame(40, 8, &input);
+    assert!(frame.contains("Quiet +3 done"), "{frame}");
+    assert!(!frame.contains("No active work yet"), "{frame}");
 }

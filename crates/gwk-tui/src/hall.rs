@@ -195,6 +195,9 @@ pub struct District {
     pub id: DistrictId,
     pub label: String,
     pub stations: Vec<Station>,
+    /// Terminal-state agents older than the caller's aging boundary, collapsed
+    /// out of the agent slots into one heading count.
+    pub aged_done: usize,
     pub changed_seq: Seq,
 }
 
@@ -349,10 +352,11 @@ impl PagingState {
 }
 
 fn active(district: &District) -> bool {
-    district
-        .stations
-        .iter()
-        .any(|station| !station.agents.is_empty())
+    district.aged_done > 0
+        || district
+            .stations
+            .iter()
+            .any(|station| !station.agents.is_empty())
 }
 
 fn unresolved_districts(input: &FrameInput) -> BTreeSet<&str> {
@@ -510,7 +514,20 @@ fn collapsed_text(district: &District, budget: u16) -> String {
 
 fn district_heading(district: &District, input: &FrameInput, budget: u16) -> String {
     let attention = unresolved_attention_count(input, &district.id);
-    attention_text(&district.label, attention, budget)
+    if district.aged_done == 0 {
+        return attention_text(&district.label, attention, budget);
+    }
+    let suffix = format!(" +{} done", district.aged_done);
+    let suffix_width = safe_width(&suffix, budget);
+    if suffix_width >= budget {
+        return attention_text(&district.label, attention, budget);
+    }
+    let head = attention_text(
+        &district.label,
+        attention,
+        budget.saturating_sub(suffix_width),
+    );
+    format!("{head}{suffix}")
 }
 
 fn attention_text(label: &str, attention: usize, budget: u16) -> String {

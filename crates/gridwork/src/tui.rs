@@ -9,7 +9,7 @@ use crossterm::QueueableCommand as _;
 use crossterm::cursor::Show;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
-use gwk_domain::ids::{RequestId, Seq};
+use gwk_domain::ids::{RequestId, Seq, Timestamp};
 use gwk_domain::protocol::{
     KernelErrorCode, KernelRequest, KernelResult, ProjectionKind, ProjectionRecord, ServerControl,
 };
@@ -370,22 +370,35 @@ fn draw(
                 },
             );
             if area.height > 0 {
-                let cadence = pacer
-                    .interval()
-                    .map(|duration| format!("{}ms", duration.as_millis()))
-                    .unwrap_or_else(|| "off".to_owned());
-                let p95 = pacer
-                    .last_p95()
-                    .map(|duration| format!(" p95 {}ms", duration.as_millis()))
-                    .unwrap_or_default();
-                let status = Line::from(format!(
-                    " q quit  m motion off  j/k project  [/] page  motion {} {cadence}{p95}  glyph {}  attach {}ms",
-                    motion_name(pacer.motion_mode()),
+                let motion = match pacer.motion_mode() {
+                    MotionMode::Off => "motion off".to_owned(),
+                    mode => {
+                        let cadence = pacer
+                            .interval()
+                            .map(|duration| format!("{}ms", duration.as_millis()))
+                            .unwrap_or_else(|| "off".to_owned());
+                        let p95 = pacer
+                            .last_p95()
+                            .map(|duration| format!(" p95 {}ms", duration.as_millis()))
+                            .unwrap_or_default();
+                        format!("motion {} {cadence}{p95}", motion_name(mode))
+                    }
+                };
+                let state = format!(
+                    "{motion}  glyph {}  attach {}ms",
                     glyph_name(glyphs),
                     attach_elapsed.as_millis(),
-                ));
+                );
+                let full = format!(" q quit  m motion  j/k project  [/] page  {state}");
+                // Hints yield before state: at narrow widths the whole hint
+                // block drops rather than clipping the state text mid-word.
+                let status = if full.chars().count() <= usize::from(area.width) {
+                    full
+                } else {
+                    format!(" {state}")
+                };
                 frame.render_widget(
-                    Paragraph::new(status),
+                    Paragraph::new(Line::from(status)),
                     Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
                 );
             }
@@ -721,6 +734,21 @@ async fn connect() -> Result<Client, Failure> {
     Ok(client)
 }
 
+/// Terminal-state attempts older than this collapse into the district
+/// heading's `+N done` count instead of holding agent slots forever.
+const AGED_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// The caller-resolved aging boundary: the lens reads no clock, so the runtime
+/// stamps it once per refresh, in the kernel's own UTC RFC 3339 shape.
+fn aged_cutoff() -> Timestamp {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default()
+        .saturating_sub(AGED_AFTER.as_secs());
+    Timestamp::new(crate::rfc3339(secs))
+}
+
 async fn refresh_estate(
     client: &mut Client,
     events: &mut EventIndex,
@@ -729,7 +757,7 @@ async fn refresh_estate(
     for _ in 0..SNAPSHOT_ATTEMPTS {
         let projections = load_projection_pages(client).await?;
         load_events_to_head(client, events).await?;
-        match events.build(&projections) {
+        match events.build(&projections, Some(&aged_cutoff())) {
             Ok(estate) => return Ok(estate),
             Err(why) if EventIndex::is_retryable(&why) => last_retry = Some(why),
             Err(why) => return Err(estate_failure(why)),
@@ -907,6 +935,7 @@ mod tests {
                 })
                 .into_iter()
                 .collect(),
+            aged_done: 0,
             changed_seq: Seq::new(1),
         }
     }
