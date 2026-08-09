@@ -1060,16 +1060,79 @@ pub(crate) async fn apply_event(
             require_one(done, "attention_item", attention_item_id.as_str())?;
         }
 
-        // The wire contract is intentionally one task ahead of its additive
-        // projection. No live submit can append these yet; refusing here keeps
-        // a foreign or corrupt event from becoming a silent replay no-op.
-        KernelCommand::CreateWorkspaceNode { .. }
-        | KernelCommand::MoveWorkspaceNode { .. }
-        | KernelCommand::RebindWorkspacePane { .. }
-        | KernelCommand::CloseWorkspaceNode { .. } => {
-            return Err(Refusal::storage(
-                "workspace layout event has no workspace_node projection handler".to_owned(),
-            ));
+        // ---- workspace tree ----
+        KernelCommand::CreateWorkspaceNode {
+            workspace_node_id,
+            kind,
+            parent_id,
+            session_id,
+        } => {
+            sqlx::query(
+                "INSERT INTO gwk.workspace_node \
+                   (id, version, kind, parent_id, session_id, created_at, updated_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6::timestamptz, $6::timestamptz)",
+            )
+            .bind(workspace_node_id.as_str())
+            .bind(version)
+            .bind(kind.as_str())
+            .bind(parent_id.as_ref().map(|p| p.as_str()))
+            .bind(session_id.as_ref().map(|s| s.as_str()))
+            .bind(at)
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| db("create workspace node", e))?;
+        }
+        KernelCommand::MoveWorkspaceNode {
+            workspace_node_id,
+            parent_id,
+            ..
+        } => {
+            let done = sqlx::query(
+                "UPDATE gwk.workspace_node SET parent_id = $2, version = $3, \
+                   updated_at = $4::timestamptz \
+                 WHERE id = $1",
+            )
+            .bind(workspace_node_id.as_str())
+            .bind(parent_id.as_str())
+            .bind(version)
+            .bind(at)
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| db("move workspace node", e))?;
+            require_one(done, "workspace_node", workspace_node_id.as_str())?;
+        }
+        KernelCommand::RebindWorkspacePane {
+            workspace_node_id,
+            session_id,
+            ..
+        } => {
+            let done = sqlx::query(
+                "UPDATE gwk.workspace_node SET session_id = $2, version = $3, \
+                   updated_at = $4::timestamptz \
+                 WHERE id = $1",
+            )
+            .bind(workspace_node_id.as_str())
+            .bind(session_id.as_str())
+            .bind(version)
+            .bind(at)
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| db("rebind workspace pane", e))?;
+            require_one(done, "workspace_node", workspace_node_id.as_str())?;
+        }
+        KernelCommand::CloseWorkspaceNode {
+            workspace_node_id, ..
+        } => {
+            // A real DELETE: the wire entity has no closed state, so a closed
+            // node leaves the tree. The log keeps the history, and a replay of
+            // any legal history deletes children before their parent — submit
+            // refuses a close while children are live.
+            let done = sqlx::query("DELETE FROM gwk.workspace_node WHERE id = $1")
+                .bind(workspace_node_id.as_str())
+                .execute(&mut *conn)
+                .await
+                .map_err(|e| db("close workspace node", e))?;
+            require_one(done, "workspace_node", workspace_node_id.as_str())?;
         }
 
         // The epoch boundary is the log itself — there is no row behind it.

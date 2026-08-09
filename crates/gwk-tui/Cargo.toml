@@ -29,6 +29,9 @@ gwk-theme.workspace = true
 # first consumer so the single-`ratatui-core` lockfile assertion in CI had
 # something to assert before any widget existed.
 ratatui.workspace = true
+# The operator summaries are one typed value shared by the Board frame and
+# its machine-readable CLI twin.
+serde.workspace = true
 # Linux terminal probing waits on stdin readiness through safe poll bindings;
 # silence must degrade instead of blocking raw mode indefinitely.
 rustix = { workspace = true, features = ["event"] }

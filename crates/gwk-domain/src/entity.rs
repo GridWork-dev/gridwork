@@ -507,6 +507,19 @@ pub enum WorkspaceNodeKind {
     Pane,
 }
 
+impl WorkspaceNodeKind {
+    /// The wire spelling — the same string `serde` writes, held as one method
+    /// so the projector's column value and refusal prose can never drift from
+    /// the tag on the wire.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Workspace => "workspace",
+            Self::Tab => "tab",
+            Self::Pane => "pane",
+        }
+    }
+}
+
 /// One durable node in the workspace arrangement.
 ///
 /// Only structure belongs here: the host owns split sizes, focus, and z-order.

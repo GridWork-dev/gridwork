@@ -9,12 +9,15 @@ use crossterm::QueueableCommand as _;
 use crossterm::cursor::Show;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
-use gwk_domain::ids::{RequestId, Seq, Timestamp};
+use gwk_domain::envelope::EventEnvelope;
+use gwk_domain::ids::{PtySessionId, RequestId, Seq, Timestamp};
 use gwk_domain::protocol::{
     KernelErrorCode, KernelRequest, KernelResult, ProjectionKind, ProjectionRecord, ServerControl,
 };
 use gwk_theme::marks::GlyphSet;
 use gwk_theme::tier::{ColorChoice, ColorTier, TerminalEnv};
+use gwk_tui::board::{self, BoardState, BoardTarget, BoardView, EventTail};
+use gwk_tui::drilldown::{self, DrilldownState, DrilldownTarget, IngestDisposition};
 use gwk_tui::estate::{EstateSnapshot, EventIndex, ProjectionSnapshot, Stamped};
 use gwk_tui::hall::{
     Agent, AgentId, AgentState, DECAY_DURATION, DistrictId, Focus, FrameInput, HallTarget,
@@ -23,6 +26,7 @@ use gwk_tui::hall::{
     render_with_motion_and_pages,
 };
 use gwk_tui::input::{self, HitMap};
+use gwk_tui::replay::ReplayTimeline;
 use gwk_tui::runtime::{FramePacer, resolve_motion};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
@@ -38,6 +42,7 @@ const PAGE_LIMIT: u32 = 256;
 const SNAPSHOT_ATTEMPTS: usize = 3;
 const INPUT_POLL: Duration = Duration::from_millis(100);
 const PARKED_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+const EVENT_TAIL_ROWS: usize = 512;
 
 type PanicHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync + 'static>;
 
@@ -146,6 +151,463 @@ pub async fn run(requested_motion: MotionMode) -> Result<(), Failure> {
     drop(terminal);
     drop(restore);
     result
+}
+
+/// Follow the durable event log in a bounded Board tail. Filters are exact
+/// contract strings and never alter the subscription cursor, so reconnecting
+/// from the last visible sequence remains gap-free.
+pub async fn event_tail(
+    cursor: Option<Seq>,
+    aggregate_type: Option<String>,
+    event_type: Option<String>,
+) -> Result<(), Failure> {
+    let terminal_env = TerminalEnv::from_process(ColorChoice::Auto);
+    let tier = ColorTier::resolve(&terminal_env);
+    if !terminal_env.stdout_is_tty {
+        return event_tail_snapshot(cursor, aggregate_type, event_type, tier).await;
+    }
+
+    let mut stream = connect().await?;
+    let stream_id = stream.subscribe(cursor).await?;
+    let mut state = event_board(cursor, aggregate_type, event_type, true);
+    let restore = TerminalRestore::install();
+    enable_raw_mode().map_err(|why| Failure::unreachable(format!("enable raw mode: {why}")))?;
+    let mut stdout = std::io::stdout();
+    input::enter(&mut stdout)
+        .map_err(|why| Failure::unreachable(format!("enter terminal screen: {why}")))?;
+    let glyphs = if terminal_env.term.as_deref() == Some("dumb") {
+        GlyphSet::Ascii
+    } else {
+        gwk_tui::probe::probe_terminal(&mut stdout).glyph_set()
+    };
+    let mut terminal = Terminal::new(CrosstermBackend::new(stdout))
+        .map_err(|why| Failure::unreachable(format!("open terminal: {why}")))?;
+    let stop_input = Arc::new(AtomicBool::new(false));
+    let (input_tx, mut input_rx) = mpsc::channel(32);
+    let input_thread = spawn_input(input_tx, Arc::clone(&stop_input));
+    let result = event_tail_loop(
+        &mut terminal,
+        &mut stream,
+        &stream_id,
+        &mut state,
+        tier,
+        glyphs,
+        &mut input_rx,
+    )
+    .await;
+
+    stop_input.store(true, Ordering::Relaxed);
+    drop(input_rx);
+    let _ = tokio::task::spawn_blocking(move || input_thread.join()).await;
+    let _ = terminal.show_cursor();
+    drop(terminal);
+    drop(restore);
+    result
+}
+
+fn event_board(
+    cursor: Option<Seq>,
+    aggregate_type: Option<String>,
+    event_type: Option<String>,
+    live: bool,
+) -> BoardState {
+    BoardState {
+        view: BoardView::Events,
+        tasks: Vec::new(),
+        attempts: Vec::new(),
+        nodes: Vec::new(),
+        messages: Vec::new(),
+        events: Vec::new(),
+        event_tail: EventTail {
+            cursor,
+            aggregate_type,
+            event_type,
+            live,
+            dropped: 0,
+        },
+        attention: Vec::new(),
+        replay: ReplayTimeline::empty(),
+        sessions: Vec::new(),
+        worktrees: Vec::new(),
+        leases: Vec::new(),
+        costs: Vec::new(),
+        ingested: Vec::new(),
+        receipts: Vec::new(),
+        complete: true,
+        watermark: None,
+    }
+}
+
+fn append_event_batch(state: &mut BoardState, events: Vec<EventEnvelope>, cursor: Option<Seq>) {
+    state.events.extend(events);
+    state.watermark = cursor.or(state.watermark);
+    if state.events.len() > EVENT_TAIL_ROWS {
+        let remove = state.events.len() - EVENT_TAIL_ROWS;
+        state.events.drain(..remove);
+        state.event_tail.dropped = state.event_tail.dropped.saturating_add(remove);
+    }
+}
+
+async fn event_tail_snapshot(
+    cursor: Option<Seq>,
+    aggregate_type: Option<String>,
+    event_type: Option<String>,
+    tier: ColorTier,
+) -> Result<(), Failure> {
+    let mut client = connect().await?;
+    let result = client
+        .ask(KernelRequest::ReadEvents {
+            cursor,
+            limit: EVENT_TAIL_ROWS as u32,
+        })
+        .await?;
+    let KernelResult::Events {
+        events,
+        cursor: delivered,
+        watermark,
+    } = result
+    else {
+        return result_failure(result, "read event tail");
+    };
+    let mut state = event_board(cursor, aggregate_type, event_type, false);
+    append_event_batch(&mut state, events, delivered);
+    state.watermark = watermark;
+    let mut terminal = Terminal::with_options(
+        CrosstermBackend::new(std::io::stdout()),
+        TerminalOptions {
+            viewport: Viewport::Fixed(Rect::new(0, 0, 100, 30)),
+        },
+    )
+    .map_err(|why| Failure::unreachable(format!("open event snapshot terminal: {why}")))?;
+    let mut hits = HitMap::new();
+    terminal
+        .draw(|frame| {
+            board::render(
+                frame.area(),
+                frame.buffer_mut(),
+                &state,
+                None,
+                tier,
+                GlyphSet::Ascii,
+                &mut hits,
+            );
+        })
+        .map(|_| ())
+        .map_err(|why| Failure::unreachable(format!("paint event snapshot: {why}")))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn event_tail_loop(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    stream: &mut Client,
+    stream_id: &RequestId,
+    state: &mut BoardState,
+    tier: ColorTier,
+    glyphs: GlyphSet,
+    input_rx: &mut mpsc::Receiver<InputEvent>,
+) -> Result<(), Failure> {
+    let mut hits = HitMap::new();
+    let mut selected = None;
+    let mut dirty = true;
+    let ctrl_c = tokio::signal::ctrl_c();
+    tokio::pin!(ctrl_c);
+    let mut terminate =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .map_err(|why| Failure::unreachable(format!("listen for SIGTERM: {why}")))?;
+    loop {
+        if dirty {
+            let order = board::target_order(state);
+            if selected
+                .as_ref()
+                .is_some_and(|target| !order.contains(target))
+            {
+                selected = order.first().cloned();
+            }
+            terminal
+                .draw(|frame| {
+                    board::render(
+                        frame.area(),
+                        frame.buffer_mut(),
+                        state,
+                        selected.as_ref(),
+                        tier,
+                        glyphs,
+                        &mut hits,
+                    );
+                })
+                .map_err(|why| Failure::unreachable(format!("paint event tail: {why}")))?;
+            dirty = false;
+        }
+        tokio::select! {
+            result = &mut ctrl_c => {
+                result.map_err(|why| Failure::unreachable(format!("listen for Ctrl-C: {why}")))?;
+                return Ok(());
+            }
+            _ = terminate.recv() => return Ok(()),
+            input = input_rx.recv() => match input {
+                Some(InputEvent::Terminal(event)) => {
+                    if handle_event_tail_input(event, state, &hits, &mut selected) {
+                        return Ok(());
+                    }
+                    dirty = true;
+                }
+                Some(InputEvent::Fault(why)) => {
+                    return Err(Failure::unreachable(format!("read terminal input: {why}")));
+                }
+                None => return Ok(()),
+            },
+            control = stream.receive() => {
+                let Some(control) = control? else {
+                    return Ok(());
+                };
+                match control {
+                    ServerControl::EventBatch { request_id, events, cursor }
+                        if request_id == *stream_id =>
+                    {
+                        append_event_batch(state, events, Some(cursor));
+                        dirty = true;
+                    }
+                    ServerControl::StreamClosed { request_id, code, last_cursor }
+                        if request_id == *stream_id =>
+                    {
+                        let resume = last_cursor
+                            .map(|seq| seq.value().to_string())
+                            .unwrap_or_else(|| "the beginning".to_owned());
+                        return Err(Failure::new(code, format!("event stream closed; resume from {resume}")));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+fn handle_event_tail_input(
+    event: Event,
+    state: &BoardState,
+    hits: &HitMap<BoardTarget>,
+    selected: &mut Option<BoardTarget>,
+) -> bool {
+    match event {
+        Event::Key(key) if key.kind == KeyEventKind::Press => {
+            if quit_key(key) {
+                return true;
+            }
+            let delta = match key.code {
+                KeyCode::Char('j') | KeyCode::Down | KeyCode::Tab => Some(1),
+                KeyCode::Char('k') | KeyCode::Up | KeyCode::BackTab => Some(-1),
+                _ => None,
+            };
+            if let Some(delta) = delta {
+                let order = board::target_order(state);
+                if order.is_empty() {
+                    *selected = None;
+                } else {
+                    let current = selected
+                        .as_ref()
+                        .and_then(|selected| order.iter().position(|target| target == selected))
+                        .unwrap_or_else(|| if delta < 0 { 0 } else { order.len() - 1 });
+                    let next = if delta < 0 {
+                        current.checked_sub(1).unwrap_or(order.len() - 1)
+                    } else {
+                        (current + 1) % order.len()
+                    };
+                    *selected = Some(order[next].clone());
+                }
+            }
+        }
+        Event::Mouse(mouse) => {
+            if let Some(target) = hits.click(&mouse) {
+                *selected = Some(target.clone());
+            }
+        }
+        Event::Resize(_, _) => {}
+        _ => {}
+    }
+    false
+}
+
+/// Attach to one explicitly named hosted PTY session. Engine-session ids are
+/// deliberately not coerced into PTY ids: the contract keeps those namespaces
+/// separate, and callers use `session list/inspect` for the former.
+pub async fn session_attach(session_id: PtySessionId) -> Result<(), Failure> {
+    let terminal_env = TerminalEnv::from_process(ColorChoice::Auto);
+    let tier = ColorTier::resolve(&terminal_env);
+    let mut data = connect().await?;
+    let mut state = DrilldownState::new(session_id.clone());
+    refresh_session_snapshot(&mut data, &mut state).await?;
+    if !terminal_env.stdout_is_tty {
+        return render_session_snapshot(&state, tier);
+    }
+
+    let mut stream = connect().await?;
+    let (request_id, attached) = stream
+        .attach_pty(session_id, state.generation().cloned(), state.frame_seq())
+        .await?;
+    state.begin_attach(request_id);
+    if state.ingest(&attached) == IngestDisposition::Unrelated {
+        return Err(Failure::internal(
+            "PTY attach acknowledgement was unrelated",
+        ));
+    }
+    if state.frame().is_none() {
+        refresh_session_snapshot(&mut data, &mut state).await?;
+    }
+
+    let restore = TerminalRestore::install();
+    enable_raw_mode().map_err(|why| Failure::unreachable(format!("enable raw mode: {why}")))?;
+    let mut stdout = std::io::stdout();
+    input::enter(&mut stdout)
+        .map_err(|why| Failure::unreachable(format!("enter terminal screen: {why}")))?;
+    let mut terminal = Terminal::new(CrosstermBackend::new(stdout))
+        .map_err(|why| Failure::unreachable(format!("open terminal: {why}")))?;
+    let stop_input = Arc::new(AtomicBool::new(false));
+    let (input_tx, mut input_rx) = mpsc::channel(32);
+    let input_thread = spawn_input(input_tx, Arc::clone(&stop_input));
+    let result = session_attach_loop(
+        &mut terminal,
+        &mut data,
+        &mut stream,
+        &mut state,
+        tier,
+        &mut input_rx,
+    )
+    .await;
+
+    stop_input.store(true, Ordering::Relaxed);
+    drop(input_rx);
+    let _ = tokio::task::spawn_blocking(move || input_thread.join()).await;
+    let _ = terminal.show_cursor();
+    drop(terminal);
+    drop(restore);
+    result
+}
+
+async fn refresh_session_snapshot(
+    client: &mut Client,
+    state: &mut DrilldownState,
+) -> Result<(), Failure> {
+    let result = client
+        .ask(KernelRequest::PtySnapshot {
+            session_id: state.session_id().clone(),
+        })
+        .await?;
+    let result = match result {
+        KernelResult::Error { code, message, .. } => return Err(Failure::new(code, message)),
+        result => result,
+    };
+    let response = ServerControl::Response {
+        request_id: RequestId::new("gw-session-snapshot"),
+        result,
+    };
+    if state.ingest(&response) == IngestDisposition::Unrelated {
+        return Err(Failure::internal(
+            "session snapshot answered with an unrelated value",
+        ));
+    }
+    Ok(())
+}
+
+fn render_session_snapshot(state: &DrilldownState, tier: ColorTier) -> Result<(), Failure> {
+    let mut terminal = Terminal::with_options(
+        CrosstermBackend::new(std::io::stdout()),
+        TerminalOptions {
+            viewport: Viewport::Fixed(Rect::new(0, 0, 100, 30)),
+        },
+    )
+    .map_err(|why| Failure::unreachable(format!("open session snapshot terminal: {why}")))?;
+    let mut hits = HitMap::new();
+    terminal
+        .draw(|frame| {
+            drilldown::render(
+                frame.area(),
+                frame.buffer_mut(),
+                state,
+                None,
+                tier,
+                &mut hits,
+            );
+        })
+        .map(|_| ())
+        .map_err(|why| Failure::unreachable(format!("paint session snapshot: {why}")))
+}
+
+async fn session_attach_loop(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    data: &mut Client,
+    stream: &mut Client,
+    state: &mut DrilldownState,
+    tier: ColorTier,
+    input_rx: &mut mpsc::Receiver<InputEvent>,
+) -> Result<(), Failure> {
+    let mut hits = HitMap::new();
+    let selected = DrilldownTarget::Session(state.session_id().clone());
+    let mut viewport_row = 0u16;
+    let mut viewport_col = 0u16;
+    let mut dirty = true;
+    let ctrl_c = tokio::signal::ctrl_c();
+    tokio::pin!(ctrl_c);
+    let mut terminate =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .map_err(|why| Failure::unreachable(format!("listen for SIGTERM: {why}")))?;
+    loop {
+        if dirty {
+            terminal
+                .draw(|frame| {
+                    drilldown::render(
+                        frame.area(),
+                        frame.buffer_mut(),
+                        state,
+                        Some(&selected),
+                        tier,
+                        &mut hits,
+                    );
+                })
+                .map_err(|why| Failure::unreachable(format!("paint session attach: {why}")))?;
+            dirty = false;
+        }
+        tokio::select! {
+            result = &mut ctrl_c => {
+                result.map_err(|why| Failure::unreachable(format!("listen for Ctrl-C: {why}")))?;
+                return Ok(());
+            }
+            _ = terminate.recv() => return Ok(()),
+            input = input_rx.recv() => match input {
+                Some(InputEvent::Terminal(Event::Key(key))) if key.kind == KeyEventKind::Press => {
+                    if quit_key(key) {
+                        return Ok(());
+                    }
+                    match key.code {
+                        KeyCode::Up | KeyCode::Char('k') => viewport_row = viewport_row.saturating_sub(1),
+                        KeyCode::Down | KeyCode::Char('j') => viewport_row = viewport_row.saturating_add(1),
+                        KeyCode::Left | KeyCode::Char('h') => viewport_col = viewport_col.saturating_sub(1),
+                        KeyCode::Right | KeyCode::Char('l') => viewport_col = viewport_col.saturating_add(1),
+                        KeyCode::PageUp => viewport_row = viewport_row.saturating_sub(10),
+                        KeyCode::PageDown => viewport_row = viewport_row.saturating_add(10),
+                        _ => {}
+                    }
+                    state.set_viewport(viewport_row, viewport_col);
+                    dirty = true;
+                }
+                Some(InputEvent::Terminal(Event::Resize(_, _))) => dirty = true,
+                Some(InputEvent::Terminal(_)) => {}
+                Some(InputEvent::Fault(why)) => {
+                    return Err(Failure::unreachable(format!("read terminal input: {why}")));
+                }
+                None => return Ok(()),
+            },
+            control = stream.receive() => {
+                let Some(control) = control? else {
+                    return Ok(());
+                };
+                let disposition = state.ingest(&control);
+                if disposition != IngestDisposition::Unrelated && state.frame().is_none() {
+                    refresh_session_snapshot(data, state).await?;
+                }
+                dirty = disposition != IngestDisposition::Unrelated;
+            }
+        }
+    }
 }
 
 fn spawn_input(
@@ -919,7 +1381,37 @@ fn estate_failure(why: impl std::fmt::Display) -> Failure {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gwk_domain::envelope::{Actor, Origin};
+    use gwk_domain::ids::{AggregateId, EventId, ProjectId};
     use gwk_tui::hall::{Agent, AgentId, Attention, AttentionId, District, Station, StationId};
+
+    fn event(seq: u64) -> EventEnvelope {
+        EventEnvelope {
+            event_id: EventId::new(format!("event-{seq}")),
+            project_id: ProjectId::new("system"),
+            aggregate_type: "attempt".into(),
+            aggregate_id: AggregateId::new("attempt-1"),
+            aggregate_version: u32::try_from(seq).unwrap_or(u32::MAX),
+            event_type: "attempt_changed".into(),
+            schema_version: 1,
+            global_sequence: Seq::new(seq),
+            occurred_at: Timestamp::new("2026-08-09T12:00:00Z"),
+            appended_at: Timestamp::new("2026-08-09T12:00:00Z"),
+            actor: Actor {
+                kind: "kernel".into(),
+                id: None,
+            },
+            origin: Origin {
+                system: "gwk".into(),
+                r#ref: None,
+            },
+            causation_id: None,
+            correlation_id: None,
+            idempotency_key: None,
+            payload: serde_json::Value::Null,
+            payload_ref: None,
+        }
+    }
 
     fn district(id: &str, agents: Vec<Agent>) -> District {
         District {
@@ -1072,5 +1564,20 @@ mod tests {
         };
 
         assert_eq!(subscription_cursor(&estate), Some(Seq::new(7)));
+    }
+
+    #[test]
+    fn event_tail_bounds_memory_and_keeps_the_resume_sequence() {
+        let mut state = event_board(None, None, None, true);
+        let events = (1..=(EVENT_TAIL_ROWS as u64 + 2)).map(event).collect();
+        append_event_batch(
+            &mut state,
+            events,
+            Some(Seq::new(EVENT_TAIL_ROWS as u64 + 2)),
+        );
+        assert_eq!(state.events.len(), EVENT_TAIL_ROWS);
+        assert_eq!(state.event_tail.dropped, 2);
+        assert_eq!(state.events[0].global_sequence, Seq::new(3));
+        assert_eq!(state.watermark, Some(Seq::new(EVENT_TAIL_ROWS as u64 + 2)));
     }
 }

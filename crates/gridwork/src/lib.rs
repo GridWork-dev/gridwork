@@ -10,8 +10,9 @@
 //! Three rules hold everywhere:
 //!
 //! * **Command answers are JSON on standard output.** `--pretty` changes the
-//!   formatting and never the value. `--help` is prose and `tui` owns the
-//!   interactive terminal; neither is a command answer.
+//!   formatting and never the value. `--help` is prose; `tui`, `event tail`,
+//!   and `session attach` own the interactive terminal. None is a command
+//!   answer.
 //! * **The exit says what to do about it** ([`exit`]). One table, derived from
 //!   the refusal's own code, so the exit and the JSON can never disagree.
 //! * **No database, no key material.** Every verb here goes through the socket.
@@ -28,6 +29,7 @@ pub mod exit;
 pub mod pr;
 pub mod tui;
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use args::{Invocation, Sink, Source, Verb};
@@ -38,12 +40,18 @@ use gwk_domain::blob::{BLOB_CHUNK_BYTES, BlobAddress};
 use gwk_domain::command::KernelCommand;
 use gwk_domain::envelope::{Actor, CommandEnvelope, ENVELOPE_SCHEMA_VERSION, Origin};
 use gwk_domain::ids::{
-    AttentionItemId, AuthorityGrantId, ByteCount, CommandId, IdempotencyKey, ProjectId, Seq,
-    Timestamp,
+    AttemptId, AttentionItemId, AuthorityGrantId, ByteCount, CommandId, IdempotencyKey, ProjectId,
+    PtySessionId, Seq, Timestamp,
 };
 use gwk_domain::protocol::{
-    CONTRACT_VERSION, KernelErrorCode, KernelRequest, KernelResult, ServerControl,
+    CONTRACT_VERSION, KernelErrorCode, KernelRequest, KernelResult, ProjectionKind,
+    ProjectionRecord, ServerControl,
 };
+use gwk_tui::board::{
+    BoardState, BoardTarget, BoardView, activity_brief, agent_fleet, attempt_budget, cost_rollup,
+    estate_overview, replace_attempt_budget, stop_attempt,
+};
+use gwk_tui::replay::ReplayTimeline;
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 
@@ -163,6 +171,60 @@ async fn execute(verb: Verb, pretty: bool) -> Result<(), Failure> {
             ask(KernelRequest::ReadEvents { cursor, limit }, pretty).await
         }
         Verb::EventFollow { cursor } => follow(cursor, pretty).await,
+        Verb::EventTail {
+            cursor,
+            aggregate_type,
+            event_type,
+        } => tui::event_tail(cursor, aggregate_type, event_type).await,
+        Verb::EstateOverview => {
+            let state = load_summary_state(false).await?;
+            emit_serialized(&estate_overview(&state), pretty)
+        }
+        Verb::ActivityBrief => {
+            let state = load_summary_state(true).await?;
+            emit_serialized(&activity_brief(&state), pretty)
+        }
+        Verb::CostRollup => {
+            let state = load_cost_state().await?;
+            emit_serialized(&cost_rollup(&state), pretty)
+        }
+        Verb::AgentFleet => {
+            let state = load_fleet_state().await?;
+            emit_serialized(&agent_fleet(&state), pretty)
+        }
+        Verb::AttemptStop { id } => {
+            let target = BoardTarget::Attempt(AttemptId::new(id.clone()));
+            let command = stop_attempt(&target).expect("an attempt target supports stop_attempt");
+            submit(&command, &format!("stop_attempt:{id}"), pretty).await
+        }
+        Verb::AttemptBudget { id } => {
+            let attempt = load_attempt(&id).await?;
+            emit_serialized(&attempt_budget(&attempt), pretty)
+        }
+        Verb::AttemptBudgetUpdate {
+            id,
+            expected_version,
+            budget,
+        } => {
+            let command =
+                replace_attempt_budget(AttemptId::new(id.clone()), expected_version, budget);
+            submit(
+                &command,
+                &format!("update_budget:{id}:{expected_version}"),
+                pretty,
+            )
+            .await
+        }
+        Verb::SessionSnapshot { id } => {
+            ask(
+                KernelRequest::PtySnapshot {
+                    session_id: PtySessionId::new(id),
+                },
+                pretty,
+            )
+            .await
+        }
+        Verb::SessionAttach { id } => tui::session_attach(PtySessionId::new(id)).await,
         Verb::Tui { motion } => tui::run(motion).await,
         Verb::Theme => {
             emit(&chrome_theme()?, pretty);
@@ -276,6 +338,225 @@ async fn execute(verb: Verb, pretty: bool) -> Result<(), Failure> {
     }
 }
 
+const SUMMARY_PAGE_LIMIT: u32 = 256;
+const SUMMARY_SNAPSHOT_ATTEMPTS: usize = 3;
+const ESTATE_PROJECTIONS: &[ProjectionKind] = &[
+    ProjectionKind::Task,
+    ProjectionKind::Attempt,
+    ProjectionKind::AttentionItem,
+    ProjectionKind::Worktree,
+    ProjectionKind::Lease,
+];
+const ACTIVITY_PROJECTIONS: &[ProjectionKind] = &[
+    ProjectionKind::Task,
+    ProjectionKind::Attempt,
+    ProjectionKind::AttentionItem,
+    ProjectionKind::Worktree,
+    ProjectionKind::Lease,
+    ProjectionKind::CostEntry,
+];
+const FLEET_PROJECTIONS: &[ProjectionKind] = &[
+    ProjectionKind::EngineSession,
+    ProjectionKind::DispatchNode,
+    ProjectionKind::Attempt,
+    ProjectionKind::Worktree,
+    ProjectionKind::Lease,
+];
+const COST_PROJECTIONS: &[ProjectionKind] = &[ProjectionKind::CostEntry];
+
+/// Read every projection consumed by the summary twins at one projector
+/// watermark. Projection pages are not snapshots, so a write between kinds
+/// makes the whole fold retry rather than silently joining different moments.
+async fn load_summary_state(include_cost: bool) -> Result<BoardState, Failure> {
+    if include_cost {
+        load_board_state(ACTIVITY_PROJECTIONS, BoardView::Activity).await
+    } else {
+        load_board_state(ESTATE_PROJECTIONS, BoardView::Estate).await
+    }
+}
+
+async fn load_fleet_state() -> Result<BoardState, Failure> {
+    load_board_state(FLEET_PROJECTIONS, BoardView::Fleet).await
+}
+
+async fn load_cost_state() -> Result<BoardState, Failure> {
+    load_board_state(COST_PROJECTIONS, BoardView::CostHealth).await
+}
+
+async fn load_attempt(id: &str) -> Result<gwk_domain::entity::Attempt, Failure> {
+    let result = connect()
+        .await?
+        .ask(KernelRequest::GetProjection {
+            projection: ProjectionKind::Attempt,
+            id: id.to_owned(),
+        })
+        .await?;
+    match result {
+        KernelResult::Projection {
+            record: ProjectionRecord::Attempt { attempt },
+        } => Ok(attempt),
+        KernelResult::Error {
+            code,
+            message,
+            detail,
+        } => Err(kernel_failure(code, message, detail)),
+        other => Err(Failure::internal(format!(
+            "read attempt budget: kernel answered with {other:?}"
+        ))),
+    }
+}
+
+async fn load_board_state(
+    kinds: &[ProjectionKind],
+    view: BoardView,
+) -> Result<BoardState, Failure> {
+    let mut last_watermarks = Vec::new();
+    for _ in 0..SUMMARY_SNAPSHOT_ATTEMPTS {
+        let mut client = connect().await?;
+        let (state, watermarks) = load_board_state_once(&mut client, kinds, view).await?;
+        let coherent = watermarks
+            .first()
+            .is_none_or(|first| watermarks.iter().all(|watermark| watermark == first));
+        if coherent {
+            return Ok(state);
+        }
+        last_watermarks = watermarks;
+    }
+    Err(Failure::new(
+        KernelErrorCode::StaleVersion,
+        format!(
+            "summary projections did not share one watermark after {SUMMARY_SNAPSHOT_ATTEMPTS} reads: {last_watermarks:?}"
+        ),
+    ))
+}
+
+async fn load_board_state_once(
+    client: &mut Client,
+    kinds: &[ProjectionKind],
+    view: BoardView,
+) -> Result<(BoardState, Vec<Option<Seq>>), Failure> {
+    let mut state = BoardState {
+        view,
+        tasks: Vec::new(),
+        attempts: Vec::new(),
+        nodes: Vec::new(),
+        messages: Vec::new(),
+        events: Vec::new(),
+        event_tail: gwk_tui::board::EventTail::default(),
+        attention: Vec::new(),
+        replay: ReplayTimeline::empty(),
+        sessions: Vec::new(),
+        worktrees: Vec::new(),
+        leases: Vec::new(),
+        costs: Vec::new(),
+        ingested: Vec::new(),
+        receipts: Vec::new(),
+        complete: true,
+        watermark: None,
+    };
+    let mut watermarks = Vec::new();
+    for &kind in kinds {
+        let mut cursor = None;
+        let mut seen = BTreeSet::new();
+        loop {
+            let result = client
+                .ask(KernelRequest::ListProjection {
+                    projection: kind,
+                    cursor: cursor.clone(),
+                    limit: Some(SUMMARY_PAGE_LIMIT),
+                })
+                .await?;
+            let (records, next_cursor, watermark) = match result {
+                KernelResult::ProjectionPage {
+                    records,
+                    next_cursor,
+                    watermark,
+                } => (records, next_cursor, watermark),
+                KernelResult::Error { code, message, .. } => {
+                    return Err(Failure::new(code, message));
+                }
+                other => {
+                    return Err(Failure::internal(format!(
+                        "read summary projections: kernel answered with {other:?}"
+                    )));
+                }
+            };
+            if !records.is_empty() && watermark.is_none() {
+                return Err(Failure::new(
+                    KernelErrorCode::Schema,
+                    format!(
+                        "{} projection rows arrived without a page watermark",
+                        kind.as_str()
+                    ),
+                ));
+            }
+            watermarks.push(watermark);
+            for record in records {
+                push_board_record(&mut state, kind, record)?;
+            }
+            let Some(next) = next_cursor else {
+                break;
+            };
+            if !seen.insert(next.clone()) {
+                return Err(Failure::internal(format!(
+                    "{} projection cursor repeated {next:?}",
+                    kind.as_str()
+                )));
+            }
+            cursor = Some(next);
+        }
+    }
+    state.watermark = watermarks.first().copied().flatten();
+    Ok((state, watermarks))
+}
+
+fn push_board_record(
+    state: &mut BoardState,
+    wanted: ProjectionKind,
+    record: ProjectionRecord,
+) -> Result<(), Failure> {
+    match (wanted, record) {
+        (ProjectionKind::Task, ProjectionRecord::Task { task }) => state.tasks.push(task),
+        (ProjectionKind::Attempt, ProjectionRecord::Attempt { attempt }) => {
+            state.attempts.push(attempt);
+        }
+        (ProjectionKind::EngineSession, ProjectionRecord::EngineSession { engine_session }) => {
+            state.sessions.push(engine_session);
+        }
+        (ProjectionKind::DispatchNode, ProjectionRecord::DispatchNode { dispatch_node }) => {
+            state.nodes.push(dispatch_node);
+        }
+        (ProjectionKind::AttentionItem, ProjectionRecord::AttentionItem { attention_item }) => {
+            state.attention.push(attention_item);
+        }
+        (ProjectionKind::Worktree, ProjectionRecord::Worktree { worktree }) => {
+            state.worktrees.push(worktree);
+        }
+        (ProjectionKind::Lease, ProjectionRecord::Lease { lease }) => state.leases.push(lease),
+        (ProjectionKind::CostEntry, ProjectionRecord::CostEntry { cost_entry }) => {
+            state.costs.push(cost_entry);
+        }
+        (_, record) => {
+            return Err(Failure::new(
+                KernelErrorCode::Schema,
+                format!(
+                    "{} projection page carried a {} row",
+                    wanted.as_str(),
+                    record.kind().as_str()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn emit_serialized(value: &impl serde::Serialize, pretty: bool) -> Result<(), Failure> {
+    let value = serde_json::to_value(value)
+        .map_err(|why| Failure::internal(format!("render a summary: {why}")))?;
+    emit(&value, pretty);
+    Ok(())
+}
+
 /// The resolved workspace chrome theme.
 ///
 /// The twin of what the workspace paints: same resolver, same closed role
@@ -343,18 +624,22 @@ fn answer(result: KernelResult, pretty: bool) -> Result<(), Failure> {
         detail,
     } = result
     {
-        let mut failure = Failure::new(code, message);
-        if let Some(detail) = detail {
-            // Kept, because the contract puts machine-readable specifics there —
-            // the version behind a stale_version, the field behind a validation.
-            failure.message = format!("{}: {detail}", failure.message);
-        }
-        return Err(failure);
+        return Err(kernel_failure(code, message, detail));
     }
     let value = serde_json::to_value(&result)
         .map_err(|e| Failure::internal(format!("render an answer: {e}")))?;
     emit(&value, pretty);
     Ok(())
+}
+
+fn kernel_failure(code: KernelErrorCode, message: String, detail: Option<Value>) -> Failure {
+    let mut failure = Failure::new(code, message);
+    if let Some(detail) = detail {
+        // Kept, because the contract puts machine-readable specifics there —
+        // the version behind a stale_version, the field behind a validation.
+        failure.message = format!("{}: {detail}", failure.message);
+    }
+    failure
 }
 
 /// Submit a command this program minted, in the kernel's own project.

@@ -63,6 +63,18 @@ const ATTEMPT_CURSOR: &str = "SELECT state, version FROM gwk.attempt WHERE id = 
 const ATTEMPT_VERSION: &str = "SELECT version FROM gwk.attempt WHERE id = $1";
 const LEASE_VERSION: &str = "SELECT version FROM gwk.lease WHERE id = $1";
 const DISPATCH_NODE_VERSION: &str = "SELECT version FROM gwk.dispatch_node WHERE id = $1";
+const WORKSPACE_NODE_VERSION: &str = "SELECT version FROM gwk.workspace_node WHERE id = $1";
+const WORKSPACE_NODE_KIND: &str = "SELECT kind FROM gwk.workspace_node WHERE id = $1";
+const WORKSPACE_NODE_HAS_CHILDREN: &str =
+    "SELECT 1 FROM gwk.workspace_node WHERE parent_id = $1 LIMIT 1";
+// Walks upward from a candidate parent; a hit on the moved node's own id means
+// the move would make the node its own ancestor.
+const WORKSPACE_NODE_ANCESTOR: &str = "WITH RECURSIVE ancestors AS ( \
+       SELECT id, parent_id FROM gwk.workspace_node WHERE id = $1 \
+       UNION ALL \
+       SELECT n.id, n.parent_id FROM gwk.workspace_node n \
+         JOIN ancestors a ON n.id = a.parent_id \
+     ) SELECT 1 FROM ancestors WHERE id = $2 LIMIT 1";
 const AGGREGATE_OWNER: &str = "SELECT project_id FROM gwk.event \
      WHERE aggregate_type = $1 AND aggregate_id = $2 \
      ORDER BY aggregate_version LIMIT 1";
@@ -78,14 +90,6 @@ struct Route {
     aggregate_type: &'static str,
     aggregate_id: String,
     event_type: &'static str,
-}
-
-fn workspace_layout_unavailable() -> Refusal {
-    Refusal::new(
-        KernelErrorCode::Capability,
-        "workspace_layout is not available until the workspace_node projection is installed",
-    )
-    .with_detail(serde_json::json!({ "capability": "workspace_layout" }))
 }
 
 /// What the log already holds under this command's idempotency key.
@@ -393,15 +397,77 @@ fn route_of(envelope: &CommandEnvelope, command: &KernelCommand) -> Result<Route
             "worktree_released",
         ),
 
-        // The contract lands before its additive projection DDL by design.
-        // Keep the interim revision explicit: these verbs exist on the wire,
-        // but no event may be appended until the projector can replay it.
-        C::CreateWorkspaceNode { .. }
-        | C::MoveWorkspaceNode { .. }
-        | C::RebindWorkspacePane { .. }
-        | C::CloseWorkspaceNode { .. } => {
-            return Err(workspace_layout_unavailable());
+        // The tree-shape rules that need no row lookup are refused here;
+        // decide() holds the ones that must read the parent. The table's
+        // triggers stay the backstop, not the error path.
+        C::CreateWorkspaceNode {
+            workspace_node_id,
+            kind,
+            parent_id,
+            session_id,
+        } => {
+            use gwk_domain::entity::WorkspaceNodeKind as K;
+            if session_id.is_some() && *kind != K::Pane {
+                return Err(Refusal::validation(format!(
+                    "a {} carries no session binding — only a pane does",
+                    kind.as_str()
+                )));
+            }
+            match (kind, parent_id) {
+                (K::Workspace, Some(_)) => {
+                    return Err(Refusal::validation(
+                        "a workspace is a root and cannot have a parent".to_owned(),
+                    ));
+                }
+                (K::Tab | K::Pane, None) => {
+                    return Err(Refusal::validation(format!(
+                        "a {} must sit under a parent",
+                        kind.as_str()
+                    )));
+                }
+                _ => {}
+            }
+            if parent_id.as_ref() == Some(workspace_node_id) {
+                return Err(Refusal::validation(
+                    "a node cannot parent itself".to_owned(),
+                ));
+            }
+            (
+                "workspace_node",
+                workspace_node_id.as_str().to_owned(),
+                "workspace_node_created",
+            )
         }
+        C::MoveWorkspaceNode {
+            workspace_node_id,
+            parent_id,
+            ..
+        } => {
+            if parent_id == workspace_node_id {
+                return Err(Refusal::validation(
+                    "a node cannot parent itself".to_owned(),
+                ));
+            }
+            (
+                "workspace_node",
+                workspace_node_id.as_str().to_owned(),
+                "workspace_node_moved",
+            )
+        }
+        C::RebindWorkspacePane {
+            workspace_node_id, ..
+        } => (
+            "workspace_node",
+            workspace_node_id.as_str().to_owned(),
+            "workspace_pane_rebound",
+        ),
+        C::CloseWorkspaceNode {
+            workspace_node_id, ..
+        } => (
+            "workspace_node",
+            workspace_node_id.as_str().to_owned(),
+            "workspace_node_closed",
+        ),
 
         C::RegisterDispatchNode {
             dispatch_node_id, ..
@@ -908,11 +974,114 @@ async fn decide(
         // at the instant of the append, not merely when the epoch was read.
         C::ActivateKernel { .. } => 1,
 
-        C::CreateWorkspaceNode { .. }
-        | C::MoveWorkspaceNode { .. }
-        | C::RebindWorkspacePane { .. }
-        | C::CloseWorkspaceNode { .. } => {
-            return Err(workspace_layout_unavailable());
+        // The tree rules that read another row are decided here, before the
+        // append; the parentage trigger in the projection is the backstop.
+        // Version 0 on create for the same reason as the block below: the
+        // aggregate must not exist yet, and the append's CAS proves it.
+        C::CreateWorkspaceNode {
+            kind, parent_id, ..
+        } => {
+            if let Some(parent) = parent_id {
+                assert_legal_parent(conn, *kind, parent.as_str()).await?;
+            }
+            0
+        }
+        C::MoveWorkspaceNode {
+            workspace_node_id,
+            parent_id,
+            expected_version,
+        } => {
+            let kind = workspace_node_kind(conn, workspace_node_id.as_str())
+                .await?
+                .ok_or_else(|| {
+                    Refusal::validation(format!(
+                        "workspace_node {workspace_node_id} does not exist"
+                    ))
+                })?;
+            if kind == "workspace" {
+                return Err(Refusal::validation(
+                    "a workspace is a root and cannot be moved under a parent".to_owned(),
+                ));
+            }
+            let kind = match kind.as_str() {
+                "tab" => gwk_domain::entity::WorkspaceNodeKind::Tab,
+                _ => gwk_domain::entity::WorkspaceNodeKind::Pane,
+            };
+            assert_legal_parent(conn, kind, parent_id.as_str()).await?;
+            // A hit means the moved node sits above its would-be parent, so
+            // the move would close a cycle and orphan the subtree from every
+            // root — refused with both ids so the caller can see the loop.
+            let cycle = sqlx::query(WORKSPACE_NODE_ANCESTOR)
+                .bind(parent_id.as_str())
+                .bind(workspace_node_id.as_str())
+                .fetch_optional(&mut *conn)
+                .await
+                .map_err(|e| Refusal::storage(format!("walk workspace ancestry: {e}")))?;
+            if cycle.is_some() {
+                return Err(Refusal::validation(format!(
+                    "moving {workspace_node_id} under {parent_id} would make it its own ancestor"
+                )));
+            }
+            decide_cas(
+                conn,
+                WORKSPACE_NODE_VERSION,
+                &route.aggregate_id,
+                "workspace_node",
+                *expected_version,
+            )
+            .await?
+        }
+        C::RebindWorkspacePane {
+            workspace_node_id,
+            expected_version,
+            ..
+        } => {
+            match workspace_node_kind(conn, workspace_node_id.as_str()).await? {
+                None => {
+                    return Err(Refusal::validation(format!(
+                        "workspace_node {workspace_node_id} does not exist"
+                    )));
+                }
+                Some(kind) if kind != "pane" => {
+                    return Err(Refusal::validation(format!(
+                        "a {kind} carries no session binding — only a pane does"
+                    )));
+                }
+                Some(_) => {}
+            }
+            decide_cas(
+                conn,
+                WORKSPACE_NODE_VERSION,
+                &route.aggregate_id,
+                "workspace_node",
+                *expected_version,
+            )
+            .await?
+        }
+        C::CloseWorkspaceNode {
+            workspace_node_id,
+            expected_version,
+        } => {
+            // Close is a real DELETE in the projection, so a node with live
+            // children must not leave first — the subtree closes bottom-up.
+            let child = sqlx::query(WORKSPACE_NODE_HAS_CHILDREN)
+                .bind(workspace_node_id.as_str())
+                .fetch_optional(&mut *conn)
+                .await
+                .map_err(|e| Refusal::storage(format!("check workspace children: {e}")))?;
+            if child.is_some() {
+                return Err(Refusal::validation(format!(
+                    "workspace_node {workspace_node_id} still has children — close them first"
+                )));
+            }
+            decide_cas(
+                conn,
+                WORKSPACE_NODE_VERSION,
+                &route.aggregate_id,
+                "workspace_node",
+                *expected_version,
+            )
+            .await?
         }
 
         // Version 0 is the assertion "this aggregate has no events" — so the
@@ -1161,6 +1330,42 @@ async fn fsm_cursor<S: DeserializeOwned>(
     })
 }
 
+/// The kind column of one workspace node, or `None` when no such row exists.
+async fn workspace_node_kind(conn: &mut PgConnection, id: &str) -> Result<Option<String>, Refusal> {
+    sqlx::query_scalar::<_, String>(WORKSPACE_NODE_KIND)
+        .bind(id)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(|e| Refusal::storage(format!("read workspace_node kind: {e}")))
+}
+
+/// The parentage table the projection's trigger also enforces — refused here
+/// first so the trigger stays a backstop instead of the error path.
+async fn assert_legal_parent(
+    conn: &mut PgConnection,
+    kind: gwk_domain::entity::WorkspaceNodeKind,
+    parent_id: &str,
+) -> Result<(), Refusal> {
+    use gwk_domain::entity::WorkspaceNodeKind as K;
+    let parent_kind = workspace_node_kind(conn, parent_id).await?.ok_or_else(|| {
+        Refusal::validation(format!("parent workspace_node {parent_id} does not exist"))
+    })?;
+    let legal = match kind {
+        // Creates refuse a parented workspace before reaching here.
+        K::Workspace => false,
+        K::Tab => parent_kind == "workspace",
+        K::Pane => parent_kind == "tab" || parent_kind == "pane",
+    };
+    if legal {
+        Ok(())
+    } else {
+        Err(Refusal::validation(format!(
+            "a {} must not sit under a {parent_kind}",
+            kind.as_str()
+        )))
+    }
+}
+
 fn row_version(row: &sqlx::postgres::PgRow) -> Result<u32, Refusal> {
     let version: i64 = row
         .try_get("version")
@@ -1385,40 +1590,64 @@ mod tests {
     }
 
     #[test]
-    fn workspace_commands_refuse_until_the_projection_handler_lands() {
+    fn workspace_tree_shape_rules_refuse_before_any_row_is_read() {
         use gwk_domain::{PtySessionId, WorkspaceNodeId, WorkspaceNodeKind};
 
+        // Each command breaks one structural rule a route needs no database
+        // to see: a session on a non-pane, a parented workspace, a floating
+        // tab, and the two self-parent spellings.
         let commands = [
+            KernelCommand::CreateWorkspaceNode {
+                workspace_node_id: WorkspaceNodeId::new("tab-1"),
+                kind: WorkspaceNodeKind::Tab,
+                parent_id: Some(WorkspaceNodeId::new("ws-1")),
+                session_id: Some(PtySessionId::new("pty-1")),
+            },
+            KernelCommand::CreateWorkspaceNode {
+                workspace_node_id: WorkspaceNodeId::new("ws-1"),
+                kind: WorkspaceNodeKind::Workspace,
+                parent_id: Some(WorkspaceNodeId::new("ws-0")),
+                session_id: None,
+            },
+            KernelCommand::CreateWorkspaceNode {
+                workspace_node_id: WorkspaceNodeId::new("tab-1"),
+                kind: WorkspaceNodeKind::Tab,
+                parent_id: None,
+                session_id: None,
+            },
             KernelCommand::CreateWorkspaceNode {
                 workspace_node_id: WorkspaceNodeId::new("pane-1"),
                 kind: WorkspaceNodeKind::Pane,
-                parent_id: Some(WorkspaceNodeId::new("tab-1")),
-                session_id: Some(PtySessionId::new("pty-1")),
+                parent_id: Some(WorkspaceNodeId::new("pane-1")),
+                session_id: None,
             },
             KernelCommand::MoveWorkspaceNode {
                 workspace_node_id: WorkspaceNodeId::new("pane-1"),
-                parent_id: WorkspaceNodeId::new("tab-2"),
+                parent_id: WorkspaceNodeId::new("pane-1"),
                 expected_version: 1,
-            },
-            KernelCommand::RebindWorkspacePane {
-                workspace_node_id: WorkspaceNodeId::new("pane-1"),
-                session_id: PtySessionId::new("pty-2"),
-                expected_version: 2,
-            },
-            KernelCommand::CloseWorkspaceNode {
-                workspace_node_id: WorkspaceNodeId::new("pane-1"),
-                expected_version: 3,
             },
         ];
 
         for command in commands {
-            let refusal = route_of(&envelope(&command), &command).expect_err("not backed yet");
-            assert_eq!(refusal.code, KernelErrorCode::Capability);
-            assert_eq!(
-                refusal.detail,
-                Some(serde_json::json!({ "capability": "workspace_layout" }))
-            );
+            let refusal = route_of(&envelope(&command), &command).expect_err("shape rule");
+            assert_eq!(refusal.code, KernelErrorCode::Validation, "{refusal:?}");
         }
+    }
+
+    #[test]
+    fn a_legal_workspace_command_routes_to_the_workspace_aggregate() {
+        use gwk_domain::{PtySessionId, WorkspaceNodeId, WorkspaceNodeKind};
+
+        let command = KernelCommand::CreateWorkspaceNode {
+            workspace_node_id: WorkspaceNodeId::new("pane-1"),
+            kind: WorkspaceNodeKind::Pane,
+            parent_id: Some(WorkspaceNodeId::new("tab-1")),
+            session_id: Some(PtySessionId::new("pty-1")),
+        };
+        let route = route_of(&envelope(&command), &command).expect("legal shape");
+        assert_eq!(route.aggregate_type, "workspace_node");
+        assert_eq!(route.aggregate_id, "pane-1");
+        assert_eq!(route.event_type, "workspace_node_created");
     }
 
     #[test]
