@@ -171,6 +171,20 @@ test("workspace node: durable tree structure and pane binding", async () => {
   await reemit("workspace-node.json", node);
 });
 
+test("workflow run: an open-string step and a terminal close that keeps the row", async () => {
+  const raw = await golden("workflow-run.json");
+  if (!isRecord(raw)) throw new Error("golden is not an object");
+  const run = raw as B.WorkflowRun_Serialize;
+  // `step` is template vocabulary, typed as a plain string — a union here
+  // would mean the kernel grew an act taxonomy (decision 17 forbids it).
+  const step: string | null | undefined = run.step;
+  expect(step).toBe("ship");
+  expect(run.state).toBe("completed");
+  expect(run.template_ref).toBe("seven-act@1");
+  expect(run.closed_at).toBe("2026-08-09T13:00:00Z");
+  await reemit("workflow-run.json", run);
+});
+
 test("transition results: tagged snake_case kinds, exhaustive", async () => {
   const raw = await golden("transition-results.json");
   if (!Array.isArray(raw)) throw new Error("golden is not an array");

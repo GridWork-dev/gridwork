@@ -166,6 +166,7 @@ async fn init_applies_the_contract_is_idempotent_and_refuses_a_stranger() {
             "message",
             "orchestrator_checkpoint",
             "task",
+            "workflow_run",
             "worktree",
         ];
         let rows = sqlx::query(
@@ -182,7 +183,7 @@ async fn init_applies_the_contract_is_idempotent_and_refuses_a_stranger() {
         .fetch_all(&mut conn)
         .await
         .expect("query the grant matrix");
-        assert_eq!(rows.len(), 19, "the contract schema changed shape");
+        assert_eq!(rows.len(), 20, "the contract schema changed shape");
         for row in &rows {
             let table: String = row.try_get("relname").expect("relname");
             let get = |col| -> bool { row.try_get(col).expect("bool") };

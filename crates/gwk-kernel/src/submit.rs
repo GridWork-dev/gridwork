@@ -75,6 +75,8 @@ const WORKSPACE_NODE_ANCESTOR: &str = "WITH RECURSIVE ancestors AS ( \
        SELECT n.id, n.parent_id FROM gwk.workspace_node n \
          JOIN ancestors a ON n.id = a.parent_id \
      ) SELECT 1 FROM ancestors WHERE id = $2 LIMIT 1";
+const WORKFLOW_RUN_VERSION: &str = "SELECT version FROM gwk.workflow_run WHERE id = $1";
+const WORKFLOW_RUN_STATE: &str = "SELECT state FROM gwk.workflow_run WHERE id = $1";
 const AGGREGATE_OWNER: &str = "SELECT project_id FROM gwk.event \
      WHERE aggregate_type = $1 AND aggregate_id = $2 \
      ORDER BY aggregate_version LIMIT 1";
@@ -468,6 +470,65 @@ fn route_of(envelope: &CommandEnvelope, command: &KernelCommand) -> Result<Route
             workspace_node_id.as_str().to_owned(),
             "workspace_node_closed",
         ),
+
+        // The step's VALUE is template data (decision 17) — the kernel checks
+        // shape only, never the name.
+        C::OpenWorkflowRun {
+            workflow_run_id,
+            template_ref,
+            template_sha256,
+            ..
+        } => {
+            if template_ref.trim().is_empty() {
+                return Err(Refusal::validation(
+                    "a workflow run must name the template it follows".to_owned(),
+                ));
+            }
+            if let Some(digest) = template_sha256
+                && !gwk_domain::is_sha256_hex(digest)
+            {
+                return Err(Refusal::validation(
+                    "template_sha256 must be 64 lowercase hex characters".to_owned(),
+                ));
+            }
+            (
+                "workflow_run",
+                workflow_run_id.as_str().to_owned(),
+                "workflow_run_opened",
+            )
+        }
+        C::AdvanceWorkflowRun {
+            workflow_run_id,
+            step,
+            ..
+        } => {
+            if step.trim().is_empty() {
+                return Err(Refusal::validation(
+                    "a workflow run advances to a named step".to_owned(),
+                ));
+            }
+            (
+                "workflow_run",
+                workflow_run_id.as_str().to_owned(),
+                "workflow_run_advanced",
+            )
+        }
+        C::CloseWorkflowRun {
+            workflow_run_id,
+            outcome,
+            ..
+        } => {
+            if !matches!(outcome.as_str(), "completed" | "failed" | "canceled") {
+                return Err(Refusal::validation(format!(
+                    "a workflow run closes as completed, failed, or canceled — not {outcome:?}"
+                )));
+            }
+            (
+                "workflow_run",
+                workflow_run_id.as_str().to_owned(),
+                "workflow_run_closed",
+            )
+        }
 
         C::RegisterDispatchNode {
             dispatch_node_id, ..
@@ -1098,8 +1159,45 @@ async fn decide(
         | C::OpenGate { .. }
         | C::RecordEvidence { .. }
         | C::RecordCostEntry { .. }
+        | C::OpenWorkflowRun { .. }
         | C::GrantAuthority { .. }
         | C::RaiseAttention { .. } => 0,
+
+        // A run leaves `running` exactly once; both verbs read the state under
+        // the writer lock so a closed run refuses before the CAS can even see
+        // a stale version. The no-delete trigger keeps the row around to say so.
+        C::AdvanceWorkflowRun {
+            workflow_run_id,
+            expected_version,
+            ..
+        }
+        | C::CloseWorkflowRun {
+            workflow_run_id,
+            expected_version,
+            ..
+        } => {
+            match workflow_run_state(conn, workflow_run_id.as_str()).await? {
+                None => {
+                    return Err(Refusal::not_found(format!(
+                        "no workflow_run {workflow_run_id}"
+                    )));
+                }
+                Some(state) if state != "running" => {
+                    return Err(Refusal::validation(format!(
+                        "workflow_run {workflow_run_id} already closed as {state}"
+                    )));
+                }
+                Some(_) => {}
+            }
+            decide_cas(
+                conn,
+                WORKFLOW_RUN_VERSION,
+                &route.aggregate_id,
+                "workflow_run",
+                *expected_version,
+            )
+            .await?
+        }
 
         // Neither row carries a version column, so there is no CAS to express:
         // a grant is live until revoked and an item is open until resolved,
@@ -1337,6 +1435,15 @@ async fn workspace_node_kind(conn: &mut PgConnection, id: &str) -> Result<Option
         .fetch_optional(&mut *conn)
         .await
         .map_err(|e| Refusal::storage(format!("read workspace_node kind: {e}")))
+}
+
+/// The state column of one workflow run, or `None` when no such row exists.
+async fn workflow_run_state(conn: &mut PgConnection, id: &str) -> Result<Option<String>, Refusal> {
+    sqlx::query_scalar::<_, String>(WORKFLOW_RUN_STATE)
+        .bind(id)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(|e| Refusal::storage(format!("read workflow_run state: {e}")))
 }
 
 /// The parentage table the projection's trigger also enforces — refused here

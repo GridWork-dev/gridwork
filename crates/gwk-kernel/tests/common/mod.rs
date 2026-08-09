@@ -28,8 +28,8 @@ use gwk_domain::fsm::LeaseMode;
 use gwk_domain::ids::{
     AttemptId, AttentionItemId, AuthorityGrantId, ByteCount, CommandId, CostEntryId, CostMicros,
     DispatchNodeId, EngineId, EngineSessionId, EvidenceId, GateId, IdempotencyKey, LeaseId,
-    MessageId, ProjectId, PtySessionId, Seq, TaskId, Timestamp, TokenCount, WorkspaceNodeId,
-    WorktreeId,
+    MessageId, ProjectId, PtySessionId, Seq, TaskId, Timestamp, TokenCount, WorkflowRunId,
+    WorkspaceNodeId, WorktreeId,
 };
 use gwk_domain::ingestion::IngestionKind;
 use gwk_domain::inherited::OrchestratorCheckpoint;
@@ -774,6 +774,31 @@ pub async fn populate(store: &PgEventStore) {
             kind: WorkspaceNodeKind::Pane,
             parent_id: Some(WorkspaceNodeId::new("wtab-1")),
             session_id: Some(PtySessionId::new("pty-1")),
+        },
+    )
+    .await;
+    // Advanced once so the parity check sees a non-null step, and left running
+    // so `closed_at` exercises the nullable half of the closed-iff-terminal
+    // constraint.
+    apply(
+        store,
+        "wfr",
+        KernelCommand::OpenWorkflowRun {
+            workflow_run_id: WorkflowRunId::new("wfr-1"),
+            template_ref: "seven-act@1".to_owned(),
+            template_sha256: Some("a".repeat(64)),
+            task_id: Some(TaskId::new("t-1")),
+            title: Some("the parity fixture run".to_owned()),
+        },
+    )
+    .await;
+    apply(
+        store,
+        "wfr-adv",
+        KernelCommand::AdvanceWorkflowRun {
+            workflow_run_id: WorkflowRunId::new("wfr-1"),
+            step: "spec".to_owned(),
+            expected_version: 1,
         },
     )
     .await;

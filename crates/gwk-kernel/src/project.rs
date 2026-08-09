@@ -1135,6 +1135,72 @@ pub(crate) async fn apply_event(
             require_one(done, "workspace_node", workspace_node_id.as_str())?;
         }
 
+        // ---- workflow runs ----
+        KernelCommand::OpenWorkflowRun {
+            workflow_run_id,
+            template_ref,
+            template_sha256,
+            task_id,
+            title,
+        } => {
+            sqlx::query(
+                "INSERT INTO gwk.workflow_run \
+                   (id, version, state, template_ref, template_sha256, task_id, title, \
+                    opened_at, updated_at) \
+                 VALUES ($1, $2, 'running', $3, $4, $5, $6, $7::timestamptz, $7::timestamptz)",
+            )
+            .bind(workflow_run_id.as_str())
+            .bind(version)
+            .bind(template_ref)
+            .bind(template_sha256.as_deref())
+            .bind(task_id.as_ref().map(|t| t.as_str()))
+            .bind(title.as_deref())
+            .bind(at)
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| db("open workflow run", e))?;
+        }
+        KernelCommand::AdvanceWorkflowRun {
+            workflow_run_id,
+            step,
+            ..
+        } => {
+            let done = sqlx::query(
+                "UPDATE gwk.workflow_run SET step = $2, version = $3, \
+                   updated_at = $4::timestamptz \
+                 WHERE id = $1",
+            )
+            .bind(workflow_run_id.as_str())
+            .bind(step)
+            .bind(version)
+            .bind(at)
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| db("advance workflow run", e))?;
+            require_one(done, "workflow_run", workflow_run_id.as_str())?;
+        }
+        KernelCommand::CloseWorkflowRun {
+            workflow_run_id,
+            outcome,
+            ..
+        } => {
+            // No DELETE here: a run is ledger history, and the no-delete
+            // trigger holds the row in place. Close stamps the terminal state.
+            let done = sqlx::query(
+                "UPDATE gwk.workflow_run SET state = $2, version = $3, \
+                   closed_at = $4::timestamptz, updated_at = $4::timestamptz \
+                 WHERE id = $1",
+            )
+            .bind(workflow_run_id.as_str())
+            .bind(outcome)
+            .bind(version)
+            .bind(at)
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| db("close workflow run", e))?;
+            require_one(done, "workflow_run", workflow_run_id.as_str())?;
+        }
+
         // The epoch boundary is the log itself — there is no row behind it.
         KernelCommand::ActivateKernel { .. } => {}
 

@@ -85,6 +85,7 @@ async fn every_projection_round_trips_through_its_contract_type() {
         "orchestrator_checkpoint",
         "receipt",
         "task",
+        "workflow_run",
         "workspace_node",
         "worktree",
     ] {
