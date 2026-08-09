@@ -1,0 +1,16 @@
+ unknown -- 1 fact not in the log
+   tail buffer: 2 older events removed from memory -- resume from a visible sequence
+ 2 events  live after 40  filter aggregate=attempt event=*
+   #43  10:23  attempt_succeeded  attempt/attempt-43                                       ev-43
+   #41  10:21  attempt_started  attempt/attempt-41                                         ev-41
+
+
+
+
+
+
+
+
+
+
+BOARD estate brief dag flow [events] replay fleet cost audit  0 run @43

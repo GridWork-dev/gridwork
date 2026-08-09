@@ -3,4 +3,4 @@
 
 
 
-BOARD estate brief [dag] flow replay fleet cost audit  0 run  as-of -
+BOARD estate brief [dag] flow events replay fleet cost audit  0 run @-

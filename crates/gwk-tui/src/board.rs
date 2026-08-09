@@ -1,7 +1,7 @@
 //! The Board lens — estate and activity summaries, work structure, message
 //! flow, terminal replay, the running fleet, cost/health, and audit receipts.
 //!
-//! All eight views are row surfaces over kernel facts. Work rows print state
+//! All nine views are row surfaces over kernel facts. Work rows print state
 //! as a word and use the mark cell for the graph tier; replay rows carry
 //! elapsed time, event kind, and sequence from the typed recording reader
 //! without inventing another graph-tier mark.
@@ -71,10 +71,11 @@ use gwk_domain::entity::{
     Attempt, AttentionItem, CostEntry, DispatchNode, EngineSession, IngestedRecord, Lease, Message,
     Receipt, Task, Worktree,
 };
+use gwk_domain::envelope::EventEnvelope;
 use gwk_domain::fsm::{AttemptState, LeaseState, MessageState, TaskState};
 use gwk_domain::ids::{
-    AttemptId, AttentionItemId, CostEntryId, DispatchNodeId, EngineSessionId, IngestedRecordId,
-    LeaseId, MessageId, ReceiptId, Seq, TaskId, Timestamp, WorktreeId,
+    AttemptId, AttentionItemId, CostEntryId, DispatchNodeId, EngineSessionId, EventId,
+    IngestedRecordId, LeaseId, MessageId, ReceiptId, Seq, TaskId, Timestamp, WorktreeId,
 };
 use gwk_domain::ingestion::IngestionKind;
 use gwk_theme::marks::{GlyphSet, Mark, StateBinding};
@@ -88,7 +89,7 @@ use crate::input::HitMap;
 use crate::replay::{ReplayFrame, ReplayTimeline};
 use crate::theme;
 
-/// Which Board panel the frame shows. One lens, eight views, one visible at
+/// Which Board panel the frame shows. One lens, nine views, one visible at
 /// a time — the others are a keystroke away, never extra panes fighting for
 /// the same columns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -98,6 +99,7 @@ pub enum BoardView {
     Activity,
     Dag,
     Flow,
+    Events,
     Replay,
     Fleet,
     CostHealth,
@@ -107,11 +109,12 @@ pub enum BoardView {
 impl BoardView {
     /// Every panel in the Board's stable navigation order — the order
     /// [`Self::next`] walks, and the order the status bar's tab strip prints.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Estate,
         Self::Activity,
         Self::Dag,
         Self::Flow,
+        Self::Events,
         Self::Replay,
         Self::Fleet,
         Self::CostHealth,
@@ -125,6 +128,7 @@ impl BoardView {
             Self::Activity => "brief",
             Self::Dag => "dag",
             Self::Flow => "flow",
+            Self::Events => "events",
             Self::Replay => "replay",
             Self::Fleet => "fleet",
             Self::CostHealth => "cost",
@@ -138,7 +142,8 @@ impl BoardView {
             Self::Estate => Self::Activity,
             Self::Activity => Self::Dag,
             Self::Dag => Self::Flow,
-            Self::Flow => Self::Replay,
+            Self::Flow => Self::Events,
+            Self::Events => Self::Replay,
             Self::Replay => Self::Fleet,
             Self::Fleet => Self::CostHealth,
             Self::CostHealth => Self::Audit,
@@ -153,12 +158,26 @@ impl BoardView {
             Self::Activity => Self::Estate,
             Self::Dag => Self::Activity,
             Self::Flow => Self::Dag,
-            Self::Replay => Self::Flow,
+            Self::Events => Self::Flow,
+            Self::Replay => Self::Events,
             Self::Fleet => Self::Replay,
             Self::CostHealth => Self::Fleet,
             Self::Audit => Self::CostHealth,
         }
     }
+}
+
+/// The operator's position and exact-match filters for the event tail. The
+/// cursor remains the requested starting point while `BoardState::watermark`
+/// advances with delivered batches.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct EventTail {
+    pub cursor: Option<Seq>,
+    pub aggregate_type: Option<String>,
+    pub event_type: Option<String>,
+    pub live: bool,
+    /// Older delivered rows removed from the bounded in-memory tail.
+    pub dropped: usize,
 }
 
 /// Everything the lens paints, assembled by the caller from projection
@@ -170,6 +189,9 @@ pub struct BoardState {
     pub attempts: Vec<Attempt>,
     pub nodes: Vec<DispatchNode>,
     pub messages: Vec<Message>,
+    /// Immutable event facts retained by the bounded tail view.
+    pub events: Vec<EventEnvelope>,
+    pub event_tail: EventTail,
     /// Current attention facts used by the estate head and activity debt.
     pub attention: Vec<AttentionItem>,
     /// The persisted recording selected for the replay panel.
@@ -209,6 +231,7 @@ pub enum BoardTarget {
     Attempt(AttemptId),
     Node(DispatchNodeId),
     Message(MessageId),
+    Event(EventId),
     Attention(AttentionItemId),
     ReplayFrame(u64),
     Session(EngineSessionId),
@@ -300,6 +323,39 @@ pub struct ActivityBrief {
     pub cost: CostHeadline,
     pub findings: Vec<String>,
     pub unknowns: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct FleetCounts {
+    pub sessions: usize,
+    pub unended_sessions: usize,
+    pub running_attempts: usize,
+    pub attempts_without_session: usize,
+    pub spawns: usize,
+    pub held_worktrees: usize,
+    pub held_leases: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct FleetUnknown {
+    pub subject: &'static str,
+    pub why: String,
+}
+
+/// The typed machine twin of the Board fleet panel.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AgentFleet {
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    pub complete: bool,
+    pub watermark: Option<Seq>,
+    pub counts: FleetCounts,
+    pub sessions: Vec<EngineSession>,
+    pub dispatch_nodes: Vec<DispatchNode>,
+    pub worktrees: Vec<Worktree>,
+    pub leases: Vec<Lease>,
+    pub findings: Vec<String>,
+    pub unknowns: Vec<FleetUnknown>,
 }
 
 /// A spawn chain deeper than this stops indenting further: the tree is
@@ -871,6 +927,95 @@ fn message_row(message: &Message, indent: u16, tier: ColorTier) -> Row {
         target: Some(BoardTarget::Message(message.id.clone())),
         diagnostic: false,
     }
+}
+
+fn event_rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
+    let muted = theme::state_style(theme::binding("idle"), tier);
+    let (mut events, duplicate_events) =
+        unique_by_id(&state.events, |event| event.event_id.as_str());
+    events.retain(|event| {
+        state
+            .event_tail
+            .cursor
+            .is_none_or(|cursor| event.global_sequence > cursor)
+            && state
+                .event_tail
+                .aggregate_type
+                .as_deref()
+                .is_none_or(|kind| event.aggregate_type == kind)
+            && state
+                .event_tail
+                .event_type
+                .as_deref()
+                .is_none_or(|kind| event.event_type == kind)
+    });
+    events.sort_by(|left, right| {
+        right
+            .global_sequence
+            .cmp(&left.global_sequence)
+            .then_with(|| left.event_id.as_str().cmp(right.event_id.as_str()))
+    });
+
+    let findings = duplicate_finding(duplicate_events, "event")
+        .into_iter()
+        .collect();
+    let unknowns = (state.event_tail.dropped > 0)
+        .then(|| UnknownNote {
+            subject: "tail buffer",
+            why: format!(
+                "{} removed from memory -- resume from a visible sequence",
+                plural(state.event_tail.dropped, "older event", "older events")
+            ),
+        })
+        .into_iter()
+        .collect();
+    let mut out = pinned_block(findings, unknowns, muted);
+    let cursor = state
+        .event_tail
+        .cursor
+        .map_or_else(|| "beginning".to_owned(), |cursor| cursor.to_string());
+    let aggregate = state.event_tail.aggregate_type.as_deref().unwrap_or("*");
+    let event_type = state.event_tail.event_type.as_deref().unwrap_or("*");
+    out.push(Row::plain(
+        format!(
+            "{}  {} after {cursor}  filter aggregate={aggregate} event={event_type}",
+            plural(events.len(), "event", "events"),
+            if state.event_tail.live {
+                "live"
+            } else {
+                "page"
+            },
+        ),
+        muted,
+    ));
+    if events.is_empty() {
+        out.push(Row::plain(
+            if state.event_tail.live {
+                "no matching events delivered -- tail is waiting".to_owned()
+            } else {
+                "no matching events on this page".to_owned()
+            },
+            muted,
+        ));
+        return out;
+    }
+    out.extend(events.into_iter().map(|event| Row {
+        indent: INDENT_STEP,
+        mark: None,
+        text: format!(
+            "#{}  {}  {}  {}/{}",
+            event.global_sequence,
+            hhmm(&event.appended_at),
+            event.event_type,
+            event.aggregate_type,
+            event.aggregate_id.as_str(),
+        ),
+        right: Some(event.event_id.as_str().to_owned()),
+        style: Style::default(),
+        target: Some(BoardTarget::Event(event.event_id.clone())),
+        diagnostic: false,
+    }));
+    out
 }
 
 fn replay_seq(frame: &ReplayFrame) -> u64 {
@@ -1487,9 +1632,7 @@ fn lease_face(state: LeaseState) -> (&'static str, &'static StateBinding) {
 
 /// The running estate: engine sessions, the worktrees and leases they hold,
 /// and the attempt/spawn counts the DAG panel details.
-fn fleet_rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
-    let muted = theme::state_style(theme::binding("idle"), tier);
-
+pub fn agent_fleet(state: &BoardState) -> AgentFleet {
     let (sessions, duplicate_sessions) =
         unique_by_id(&state.sessions, |session| session.id.as_str());
     let (worktrees, duplicate_worktrees) =
@@ -1498,7 +1641,7 @@ fn fleet_rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
     let (attempts, _) = unique_by_id(&state.attempts, |attempt| attempt.id.as_str());
     let (nodes, _) = unique_by_id(&state.nodes, |node| node.id.as_str());
 
-    let findings: Vec<String> = [
+    let findings = [
         duplicate_finding(duplicate_sessions, "session"),
         duplicate_finding(duplicate_worktrees, "worktree"),
         duplicate_finding(duplicate_leases, "lease"),
@@ -1531,9 +1674,9 @@ fn fleet_rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
             .count()
     };
 
-    let mut unknowns = Vec::new();
+    let mut unknowns: Vec<FleetUnknown> = Vec::new();
     if unended > 0 {
-        unknowns.push(UnknownNote {
+        unknowns.push(FleetUnknown {
             subject: "liveness",
             why: format!(
                 "no end stamp on {unended} of {} -- unended is not alive",
@@ -1542,7 +1685,7 @@ fn fleet_rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
         });
     }
     if attempts_without_session > 0 {
-        unknowns.push(UnknownNote {
+        unknowns.push(FleetUnknown {
             subject: "engine binding",
             why: format!(
                 "none on this page for {}",
@@ -1555,26 +1698,63 @@ fn fleet_rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
         });
     }
     if !state.complete {
-        unknowns.push(UnknownNote {
+        unknowns.push(FleetUnknown {
             subject: "fleet size",
             why: "read short of the last page -- counts are floors".to_owned(),
         });
     }
 
-    let mut out = pinned_block(findings, unknowns, muted);
+    AgentFleet {
+        kind: "agent_fleet",
+        complete: state.complete,
+        watermark: state.watermark,
+        counts: FleetCounts {
+            sessions: sessions.len(),
+            unended_sessions: unended,
+            running_attempts: attempts
+                .iter()
+                .filter(|attempt| attempt.state == AttemptState::Running)
+                .count(),
+            attempts_without_session,
+            spawns: nodes.len(),
+            held_worktrees,
+            held_leases,
+        },
+        sessions: sessions.into_iter().cloned().collect(),
+        dispatch_nodes: nodes.into_iter().cloned().collect(),
+        worktrees: worktrees.into_iter().cloned().collect(),
+        leases: leases.into_iter().cloned().collect(),
+        findings,
+        unknowns,
+    }
+}
+
+fn fleet_rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
+    let muted = theme::state_style(theme::binding("idle"), tier);
+    let summary = agent_fleet(state);
+    let unknowns = summary
+        .unknowns
+        .iter()
+        .map(|unknown| UnknownNote {
+            subject: unknown.subject,
+            why: unknown.why.clone(),
+        })
+        .collect();
+
+    let mut out = pinned_block(summary.findings.clone(), unknowns, muted);
     out.push(Row::plain(
         format!(
             "{}  {} running  {} held  {} held  {}",
-            plural(sessions.len(), "session", "sessions"),
-            plural(running_count(state), "attempt", "attempts"),
-            plural(held_worktrees, "worktree", "worktrees"),
-            plural(held_leases, "lease", "leases"),
-            plural(nodes.len(), "spawn", "spawns"),
+            plural(summary.counts.sessions, "session", "sessions"),
+            plural(summary.counts.running_attempts, "attempt", "attempts"),
+            plural(summary.counts.held_worktrees, "worktree", "worktrees"),
+            plural(summary.counts.held_leases, "lease", "leases"),
+            plural(summary.counts.spawns, "spawn", "spawns"),
         ),
         muted,
     ));
 
-    if sessions.is_empty() && worktrees.is_empty() && leases.is_empty() {
+    if summary.sessions.is_empty() && summary.worktrees.is_empty() && summary.leases.is_empty() {
         out.push(Row::plain(
             "no fleet -- no sessions, worktrees, or leases on this page".to_owned(),
             muted,
@@ -1582,9 +1762,9 @@ fn fleet_rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
         return out;
     }
 
-    if !sessions.is_empty() {
+    if !summary.sessions.is_empty() {
         out.push(Row::plain("engine sessions".to_owned(), muted));
-        out.extend(sessions.iter().map(|session| {
+        out.extend(summary.sessions.iter().map(|session| {
             let (word, bind) = session_face(session);
             Row {
                 indent: INDENT_STEP,
@@ -1603,9 +1783,9 @@ fn fleet_rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
         }));
     }
 
-    if !worktrees.is_empty() {
+    if !summary.worktrees.is_empty() {
         out.push(Row::plain("worktrees".to_owned(), muted));
-        out.extend(worktrees.iter().map(|worktree| {
+        out.extend(summary.worktrees.iter().map(|worktree| {
             let (word, bind) = worktree_face(worktree);
             let mut text = format!("{}  {}  {word}", worktree.repo, worktree.branch);
             if worktree.dirty {
@@ -1626,9 +1806,9 @@ fn fleet_rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
         }));
     }
 
-    if !leases.is_empty() {
+    if !summary.leases.is_empty() {
         out.push(Row::plain("leases".to_owned(), muted));
-        out.extend(leases.iter().map(|lease| {
+        out.extend(summary.leases.iter().map(|lease| {
             let (word, bind) = lease_face(lease.state);
             Row {
                 indent: INDENT_STEP,
@@ -2050,6 +2230,7 @@ fn rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
         BoardView::Activity => activity_rows(state, tier),
         BoardView::Dag => dag_rows(state, tier),
         BoardView::Flow => flow_rows(state, tier),
+        BoardView::Events => event_rows(state, tier),
         BoardView::Replay => replay_rows(state, tier),
         BoardView::Fleet => fleet_rows(state, tier),
         BoardView::CostHealth => cost_health_rows(state, tier),
@@ -2209,6 +2390,39 @@ fn detail_lines(state: &BoardState, target: &BoardTarget) -> Option<Vec<String>>
                     message.created_at.as_str(),
                     message.updated_at.as_str()
                 ),
+            ])
+        }
+        BoardTarget::Event(id) => {
+            let event = state
+                .events
+                .iter()
+                .find(|event| event.event_id.as_str() == id.as_str())?;
+            Some(vec![
+                format!(
+                    "event {}  sequence {}  version {}",
+                    event.event_id.as_str(),
+                    event.global_sequence,
+                    event.aggregate_version
+                ),
+                format!(
+                    "{}  {}/{}",
+                    event.event_type,
+                    event.aggregate_type,
+                    event.aggregate_id.as_str()
+                ),
+                format!(
+                    "actor {}{}  origin {}{}",
+                    event.actor.kind,
+                    opt("id", event.actor.id.as_deref()),
+                    event.origin.system,
+                    opt("ref", event.origin.r#ref.as_deref()),
+                ),
+                format!(
+                    "occurred {}  appended {}",
+                    event.occurred_at.as_str(),
+                    event.appended_at.as_str()
+                ),
+                format!("payload {}", event.payload),
             ])
         }
         BoardTarget::Attention(id) => {
@@ -2692,7 +2906,7 @@ pub fn render(
         .watermark
         .as_ref()
         .map_or_else(|| "-".to_string(), |w| w.to_string());
-    let status = format!("BOARD {tabs}  {} run  as-of {as_of}", running_count(state));
+    let status = format!("BOARD {tabs}  {} run @{as_of}", running_count(state));
     let safe_status = theme::safe_text(&status, area.width as usize);
     buf.set_stringn(
         area.x,
@@ -2705,7 +2919,9 @@ pub fn render(
 
 #[cfg(test)]
 mod tests {
-    use gwk_domain::ids::{CorrelationId, CostMicros, EngineId, IdempotencyKey, TokenCount};
+    use gwk_domain::ids::{
+        AggregateId, CorrelationId, CostMicros, EngineId, IdempotencyKey, ProjectId, TokenCount,
+    };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -2829,6 +3045,34 @@ mod tests {
         }
     }
 
+    fn event(id: &str, seq: u64, aggregate: &str, kind: &str, appended: &str) -> EventEnvelope {
+        EventEnvelope {
+            event_id: EventId::new(id),
+            project_id: ProjectId::new("system"),
+            aggregate_type: aggregate.into(),
+            aggregate_id: AggregateId::new(format!("{aggregate}-{seq}")),
+            aggregate_version: 1,
+            event_type: kind.into(),
+            schema_version: 1,
+            global_sequence: Seq::new(seq),
+            occurred_at: ts(appended),
+            appended_at: ts(appended),
+            actor: gwk_domain::envelope::Actor {
+                kind: "kernel".into(),
+                id: None,
+            },
+            origin: gwk_domain::envelope::Origin {
+                system: "gwk".into(),
+                r#ref: None,
+            },
+            causation_id: None,
+            correlation_id: None,
+            idempotency_key: None,
+            payload: serde_json::json!({"sequence": seq}),
+            payload_ref: None,
+        }
+    }
+
     fn empty_state() -> BoardState {
         BoardState {
             view: BoardView::Dag,
@@ -2836,6 +3080,8 @@ mod tests {
             attempts: Vec::new(),
             nodes: Vec::new(),
             messages: Vec::new(),
+            events: Vec::new(),
+            event_tail: EventTail::default(),
             attention: Vec::new(),
             replay: ReplayTimeline::empty(),
             sessions: Vec::new(),
@@ -3065,6 +3311,43 @@ mod tests {
         state
     }
 
+    fn event_state() -> BoardState {
+        let mut state = empty_state();
+        state.view = BoardView::Events;
+        state.watermark = Some(Seq::new(43));
+        state.event_tail = EventTail {
+            cursor: Some(Seq::new(40)),
+            aggregate_type: Some("attempt".into()),
+            event_type: None,
+            live: true,
+            dropped: 2,
+        };
+        state.events = vec![
+            event(
+                "ev-41",
+                41,
+                "attempt",
+                "attempt_started",
+                "2026-08-06T10:21:00Z",
+            ),
+            event(
+                "ev-42",
+                42,
+                "task",
+                "task_completed",
+                "2026-08-06T10:22:00Z",
+            ),
+            event(
+                "ev-43",
+                43,
+                "attempt",
+                "attempt_succeeded",
+                "2026-08-06T10:23:00Z",
+            ),
+        ];
+        state
+    }
+
     fn workday_state() -> BoardState {
         let mut lead = attempt(
             "at-01",
@@ -3168,6 +3451,8 @@ mod tests {
                 node("d-2", Some("at-01"), Some("d-1"), "lint", "registered"),
             ],
             messages: vec![brief, findings, dead, pending],
+            events: Vec::new(),
+            event_tail: EventTail::default(),
             attention: Vec::new(),
             replay: ReplayTimeline::empty(),
             sessions: Vec::new(),
@@ -3268,7 +3553,7 @@ mod tests {
             "absence in words:\n{dump}"
         );
         assert!(
-            dump.contains("as-of -"),
+            dump.contains("@-"),
             "an empty log's watermark is said, not skipped:\n{dump}"
         );
         assert_matches_golden("board-empty", &dump);
@@ -3367,6 +3652,42 @@ mod tests {
     }
 
     #[test]
+    fn board_event_tail_applies_cursor_and_exact_filters() {
+        let state = event_state();
+        let (dump, hits, _) = dump_frame(96, 16, &state, None);
+        assert!(
+            dump.contains("2 events  live after 40  filter aggregate=attempt event=*"),
+            "{dump}"
+        );
+        assert!(dump.contains("#43  10:23  attempt_succeeded"), "{dump}");
+        assert!(dump.contains("#41  10:21  attempt_started"), "{dump}");
+        assert!(!dump.contains("task_completed"), "{dump}");
+        assert!(
+            dump.contains("2 older events removed from memory"),
+            "{dump}"
+        );
+        assert!(
+            hits.targets()
+                .any(|target| *target == BoardTarget::Event(EventId::new("ev-43"))),
+            "an event row opens its detail pane:\n{dump}"
+        );
+    }
+
+    #[test]
+    fn board_event_detail_keeps_envelope_provenance() {
+        let target = BoardTarget::Event(EventId::new("ev-43"));
+        let (dump, _, _) = dump_frame(96, 16, &event_state(), Some(&target));
+        for expected in [
+            "event ev-43  sequence 43  version 1",
+            "attempt_succeeded  attempt/attempt-43",
+            "actor kernel  origin gwk",
+            "payload {\"sequence\":43}",
+        ] {
+            assert!(dump.contains(expected), "missing {expected:?}:\n{dump}");
+        }
+    }
+
+    #[test]
     fn board_fleet_says_unended_rather_than_alive() {
         let (dump, hits, _) = dump_frame(72, 24, &fleet_state(), None);
         assert!(
@@ -3394,6 +3715,28 @@ mod tests {
             hits.targets()
                 .any(|t| *t == BoardTarget::Session(EngineSessionId::new("es-01"))),
             "a session row is clickable into the detail pane:\n{dump}"
+        );
+    }
+
+    #[test]
+    fn agent_fleet_is_the_typed_value_behind_the_board_panel() {
+        let summary = agent_fleet(&fleet_state());
+        assert_eq!(summary.kind, "agent_fleet");
+        assert_eq!(summary.watermark, Some(Seq::new(407)));
+        assert_eq!(summary.counts.sessions, 2);
+        assert_eq!(summary.counts.unended_sessions, 1);
+        assert_eq!(summary.counts.running_attempts, 2);
+        assert_eq!(summary.counts.attempts_without_session, 1);
+        assert_eq!(summary.counts.spawns, 2);
+        assert_eq!(summary.counts.held_worktrees, 1);
+        assert_eq!(summary.counts.held_leases, 1);
+        assert_eq!(summary.sessions.len(), 2);
+        assert_eq!(summary.dispatch_nodes.len(), 2);
+        assert!(
+            summary
+                .unknowns
+                .iter()
+                .any(|unknown| unknown.subject == "liveness")
         );
     }
 
@@ -3656,6 +3999,12 @@ mod tests {
         state.view = BoardView::Activity;
         let (dump, _, _) = dump_frame(96, 18, &state, None);
         assert_matches_golden("board-activity", &dump);
+    }
+
+    #[test]
+    fn board_an_event_tail_matches_its_golden() {
+        let (dump, _, _) = dump_frame(96, 16, &event_state(), None);
+        assert_matches_golden("board-events", &dump);
     }
 
     #[test]
@@ -4431,7 +4780,7 @@ mod tests {
         let (dump, _, _) = dump_frame(72, 18, &state, None);
         assert_eq!(
             dump.lines().nth(17),
-            Some("BOARD estate brief [dag] flow replay fleet cost audit  2 run  as-of 407"),
+            Some("BOARD estate brief [dag] flow events replay fleet cost audit  2 run @407"),
             "the bar names the view, the pulse, and the page:\n{dump}"
         );
         assert!(
@@ -4444,7 +4793,7 @@ mod tests {
         let (dump, _, _) = dump_frame(72, 18, &flow, None);
         assert_eq!(
             dump.lines().nth(17),
-            Some("BOARD estate brief dag [flow] replay fleet cost audit  2 run  as-of 407"),
+            Some("BOARD estate brief dag [flow] events replay fleet cost audit  2 run @407"),
             "the flow view keeps the ambient pulse:\n{dump}"
         );
     }

@@ -26,12 +26,14 @@ use crate::exit::Failure;
 
 /// Every flag in the tree that takes a value.
 const VALUE_FLAGS: &[&str] = &[
+    "--aggregate-type",
     "--archive-manifest-sha256",
     "--base",
     "--body",
     "--body-file",
     "--cursor",
     "--cutover-id",
+    "--event-type",
     "--file",
     "--head",
     "--key",
@@ -125,11 +127,23 @@ pub enum Verb {
     EventFollow {
         cursor: Option<Seq>,
     },
+    EventTail {
+        cursor: Option<Seq>,
+        aggregate_type: Option<String>,
+        event_type: Option<String>,
+    },
 
     /// A coherent fold over the projections that describe current work.
     EstateOverview,
     /// The newest projection facts and the work those same pages leave owed.
     ActivityBrief,
+    AgentFleet,
+    SessionSnapshot {
+        id: String,
+    },
+    SessionAttach {
+        id: String,
+    },
 
     Tui {
         motion: MotionMode,
@@ -213,8 +227,14 @@ gw — the GridWork kernel's command line
   gw projection list <type> [--cursor <key>] [--limit <n>]
   gw event read [--cursor <seq>] [--limit <n>]
   gw event follow [--cursor <seq>]
+  gw event tail [--cursor <seq>] [--aggregate-type <type>] [--event-type <type>]
   gw estate overview
   gw activity brief
+  gw agent fleet
+  gw session list [--cursor <key>] [--limit <n>]
+  gw session inspect <engine-session-id>
+  gw session snapshot <pty-session-id>
+  gw session attach <pty-session-id>
   gw tui [--motion=off|reduced|full]
   gw theme
   gw attention list [--cursor <key>] [--limit <n>]
@@ -238,7 +258,7 @@ gw — the GridWork kernel's command line
   --version  same answer as `build-info`, under the name every CLI is asked by
   --help     this
 
-Every command answer is JSON on standard output; `tui` is interactive. Exits: 0 success, 2 usage or input,
+Every command answer is JSON on standard output; `tui`, `event tail`, and `session attach` are interactive. Exits: 0 success, 2 usage or input,
 3 refused, 4 not found, 5 unavailable, 6 does not verify, 10 a fault in gw.
 
 `pr` is the one verb that speaks to `gh` instead of the socket — always an
@@ -278,8 +298,15 @@ pub fn parse(argv: &[String]) -> Result<Invocation, Failure> {
     let pretty = rest.switch("--pretty");
     let verb = verb(&mut rest)?;
     rest.done()?;
-    if pretty && matches!(verb, Verb::Tui { .. }) {
-        return Err(Failure::usage("--pretty does not apply to tui"));
+    if pretty
+        && matches!(
+            verb,
+            Verb::Tui { .. } | Verb::EventTail { .. } | Verb::SessionAttach { .. }
+        )
+    {
+        return Err(Failure::usage(
+            "--pretty does not apply to interactive views",
+        ));
     }
     Ok(Invocation { verb, pretty })
 }
@@ -307,6 +334,24 @@ fn verb(rest: &mut Rest) -> Result<Verb, Failure> {
         "activity" => match rest.word("activity")?.as_str() {
             "brief" => Ok(Verb::ActivityBrief),
             other => Err(unknown("activity", other)),
+        },
+        "agent" => match rest.word("agent")?.as_str() {
+            "fleet" => Ok(Verb::AgentFleet),
+            other => Err(unknown("agent", other)),
+        },
+        "session" => match rest.word("session")?.as_str() {
+            "list" => rest.page(ProjectionKind::EngineSession),
+            "inspect" => Ok(Verb::ProjectionGet {
+                kind: ProjectionKind::EngineSession,
+                id: rest.word("session inspect")?,
+            }),
+            "snapshot" => Ok(Verb::SessionSnapshot {
+                id: rest.word("session snapshot")?,
+            }),
+            "attach" => Ok(Verb::SessionAttach {
+                id: rest.word("session attach")?,
+            }),
+            other => Err(unknown("session", other)),
         },
         "tui" => Ok(Verb::Tui {
             motion: rest
@@ -446,6 +491,11 @@ fn event(rest: &mut Rest) -> Result<Verb, Failure> {
                 .unwrap_or(DEFAULT_EVENT_LIMIT),
         }),
         "follow" => Ok(Verb::EventFollow { cursor }),
+        "tail" => Ok(Verb::EventTail {
+            cursor,
+            aggregate_type: rest.flag("--aggregate-type"),
+            event_type: rest.flag("--event-type"),
+        }),
         other => Err(unknown("event", other)),
     }
 }
@@ -727,6 +777,30 @@ mod tests {
             parsed("activity brief").expect("parse").verb,
             Verb::ActivityBrief
         );
+        assert_eq!(parsed("agent fleet").expect("parse").verb, Verb::AgentFleet);
+        assert_eq!(
+            parsed("session list").expect("parse").verb,
+            Verb::ProjectionList {
+                kind: ProjectionKind::EngineSession,
+                cursor: None,
+                limit: None,
+            }
+        );
+        assert_eq!(
+            parsed("session inspect es-1").expect("parse").verb,
+            Verb::ProjectionGet {
+                kind: ProjectionKind::EngineSession,
+                id: "es-1".into(),
+            }
+        );
+        assert_eq!(
+            parsed("session snapshot pty-1").expect("parse").verb,
+            Verb::SessionSnapshot { id: "pty-1".into() }
+        );
+        assert_eq!(
+            parsed("session attach pty-1").expect("parse").verb,
+            Verb::SessionAttach { id: "pty-1".into() }
+        );
         assert_eq!(
             parsed("tui --motion=reduced").expect("parse").verb,
             Verb::Tui {
@@ -812,6 +886,16 @@ mod tests {
                 limit: DEFAULT_EVENT_LIMIT
             }
         );
+        assert_eq!(
+            parsed("event tail --cursor 40 --aggregate-type attempt --event-type attempt_started")
+                .expect("parse")
+                .verb,
+            Verb::EventTail {
+                cursor: Some(Seq::new(40)),
+                aggregate_type: Some("attempt".into()),
+                event_type: Some("attempt_started".into()),
+            }
+        );
     }
 
     #[test]
@@ -864,6 +948,8 @@ mod tests {
             "tui --motion=fast",
             "tui --motion=",
             "tui --pretty",
+            "event tail --pretty",
+            "session attach pty-1 --pretty",
             "blob stat not-an-address",
             "pr open",
             "pr open --title t",
