@@ -23,7 +23,7 @@
 //! disappearing silently; every other carried style attribute paints directly.
 
 use gwk_domain::frame::{CellColor, CellStyle, PtyAnsiSlot, PtyDelta, PtyFrame};
-use gwk_domain::ids::{PtyFrameSeq, PtySessionId, RequestId};
+use gwk_domain::ids::{PtyFrameSeq, PtySessionGeneration, PtySessionId, RequestId};
 use gwk_domain::protocol::{KernelErrorCode, KernelResult, ServerControl};
 use gwk_theme::tier::ColorTier;
 use ratatui::buffer::Buffer;
@@ -69,6 +69,7 @@ enum StreamStatus {
 pub struct DrilldownState {
     session_id: PtySessionId,
     attach_request_id: Option<RequestId>,
+    generation: Option<PtySessionGeneration>,
     frame: Option<PtyFrame>,
     frame_seq: Option<PtyFrameSeq>,
     last_seq: Option<PtyFrameSeq>,
@@ -84,6 +85,7 @@ impl DrilldownState {
         Self {
             session_id,
             attach_request_id: None,
+            generation: None,
             frame: None,
             frame_seq: None,
             last_seq: None,
@@ -101,6 +103,10 @@ impl DrilldownState {
 
     pub fn frame(&self) -> Option<&PtyFrame> {
         self.frame.as_ref()
+    }
+
+    pub fn generation(&self) -> Option<&PtySessionGeneration> {
+        self.generation.as_ref()
     }
 
     pub fn frame_seq(&self) -> Option<PtyFrameSeq> {
@@ -137,6 +143,7 @@ impl DrilldownState {
                 result:
                     KernelResult::PtyAttached {
                         session_id,
+                        generation,
                         rows,
                         cols,
                         cursor,
@@ -153,14 +160,18 @@ impl DrilldownState {
                     return IngestDisposition::Counted;
                 }
                 self.attach_request_id = Some(request_id.clone());
+                let generation_changed = self.switch_generation(generation);
                 self.expected_size = Some((*cols, *rows));
-                if cursor.is_some_and(|cursor| self.frame_seq.is_none_or(|seq| cursor > seq)) {
+                if !generation_changed
+                    && cursor.is_some_and(|cursor| self.frame_seq.is_none_or(|seq| cursor > seq))
+                {
                     self.frame = None;
                     self.frame_seq = None;
                 }
-                self.last_seq = match (self.last_seq, *cursor) {
-                    (Some(current), Some(attached)) => Some(current.max(attached)),
-                    (current, attached) => current.or(attached),
+                self.last_seq = match (generation_changed, self.last_seq, *cursor) {
+                    (true, _, attached) => attached,
+                    (false, Some(current), Some(attached)) => Some(current.max(attached)),
+                    (false, current, attached) => current.or(attached),
                 };
                 self.stream_status = StreamStatus::Live;
                 self.clamp_viewport();
@@ -170,11 +181,12 @@ impl DrilldownState {
                 result:
                     KernelResult::PtySnapshot {
                         session_id,
+                        generation,
                         seq,
                         frame,
                     },
                 ..
-            } => self.apply_snapshot(session_id, *seq, frame),
+            } => self.apply_snapshot(session_id, generation, *seq, frame),
             ServerControl::Response {
                 request_id,
                 result: KernelResult::Error { code, .. },
@@ -189,15 +201,19 @@ impl DrilldownState {
             ServerControl::PtyDeltaBatch {
                 request_id,
                 session_id,
+                generation,
                 deltas,
                 seq,
-            } => self.apply_batch(request_id, session_id, deltas, *seq),
+            } => self.apply_batch(request_id, session_id, generation, deltas, *seq),
             ServerControl::PtyStreamClosed {
                 request_id,
+                generation,
                 code,
                 last_seq,
             } => {
-                if self.attach_request_id.as_ref() != Some(request_id) {
+                if self.attach_request_id.as_ref() != Some(request_id)
+                    || self.generation.as_ref() != Some(generation)
+                {
                     self.diagnostics.foreign_references =
                         self.diagnostics.foreign_references.saturating_add(1);
                     IngestDisposition::Counted
@@ -217,6 +233,7 @@ impl DrilldownState {
     fn apply_snapshot(
         &mut self,
         session_id: &PtySessionId,
+        generation: &PtySessionGeneration,
         seq: PtyFrameSeq,
         frame: &PtyFrame,
     ) -> IngestDisposition {
@@ -225,14 +242,27 @@ impl DrilldownState {
                 self.diagnostics.foreign_references.saturating_add(1);
             return IngestDisposition::Counted;
         }
-        if self.last_seq.is_some_and(|last| seq < last) {
-            self.diagnostics.stale_batches = self.diagnostics.stale_batches.saturating_add(1);
-            return IngestDisposition::Counted;
-        }
         let Some(size) = rectangular_size(frame) else {
             self.diagnostics.invalid_frames = self.diagnostics.invalid_frames.saturating_add(1);
             return IngestDisposition::Counted;
         };
+        // Only the correlated attach response may replace an established life.
+        // A snapshot can seed an empty lens, but an untracked delayed response
+        // must not roll an active stream backward to a retired generation.
+        if self
+            .generation
+            .as_ref()
+            .is_some_and(|current| current != generation)
+        {
+            self.diagnostics.foreign_references =
+                self.diagnostics.foreign_references.saturating_add(1);
+            return IngestDisposition::Counted;
+        }
+        if self.last_seq.is_some_and(|last| seq < last) {
+            self.diagnostics.stale_batches = self.diagnostics.stale_batches.saturating_add(1);
+            return IngestDisposition::Counted;
+        }
+        self.switch_generation(generation);
         self.frame = Some(frame.clone());
         self.frame_seq = Some(seq);
         self.last_seq = Some(seq);
@@ -248,10 +278,14 @@ impl DrilldownState {
         &mut self,
         request_id: &RequestId,
         session_id: &PtySessionId,
+        generation: &PtySessionGeneration,
         deltas: &[PtyDelta],
         seq: PtyFrameSeq,
     ) -> IngestDisposition {
-        if session_id != &self.session_id || self.attach_request_id.as_ref() != Some(request_id) {
+        if session_id != &self.session_id
+            || self.attach_request_id.as_ref() != Some(request_id)
+            || self.generation.as_ref() != Some(generation)
+        {
             self.diagnostics.foreign_references =
                 self.diagnostics.foreign_references.saturating_add(1);
             return IngestDisposition::Counted;
@@ -303,6 +337,17 @@ impl DrilldownState {
         } else {
             IngestDisposition::Counted
         }
+    }
+
+    fn switch_generation(&mut self, generation: &PtySessionGeneration) -> bool {
+        if self.generation.as_ref() == Some(generation) {
+            return false;
+        }
+        self.generation = Some(generation.clone());
+        self.frame = None;
+        self.frame_seq = None;
+        self.last_seq = None;
+        true
     }
 
     fn clamp_viewport(&mut self) {
@@ -560,6 +605,7 @@ mod tests {
     use gwk_domain::frame::{
         CellColor, CellStyle, CellUnderline, PtyAnsiSlot, PtyCellUpdate, PtyDelta, StyledCell,
     };
+    use gwk_domain::ids::PtySessionGeneration;
     use gwk_domain::protocol::{KernelResult, ServerControl};
     use ratatui::style::{Color, Modifier};
 
@@ -609,10 +655,22 @@ mod tests {
         cols: u16,
         cursor: Option<u64>,
     ) -> ServerControl {
+        attached_at_in_generation(request, session, "life-1", rows, cols, cursor)
+    }
+
+    fn attached_at_in_generation(
+        request: &str,
+        session: &str,
+        generation: &str,
+        rows: u16,
+        cols: u16,
+        cursor: Option<u64>,
+    ) -> ServerControl {
         ServerControl::Response {
             request_id: RequestId::new(request),
             result: KernelResult::PtyAttached {
                 session_id: PtySessionId::new(session),
+                generation: PtySessionGeneration::new(generation),
                 rows,
                 cols,
                 cursor: cursor.map(PtyFrameSeq::new),
@@ -621,10 +679,21 @@ mod tests {
     }
 
     fn snapshot(request: &str, session: &str, seq: u64, frame: PtyFrame) -> ServerControl {
+        snapshot_in_generation(request, session, "life-1", seq, frame)
+    }
+
+    fn snapshot_in_generation(
+        request: &str,
+        session: &str,
+        generation: &str,
+        seq: u64,
+        frame: PtyFrame,
+    ) -> ServerControl {
         ServerControl::Response {
             request_id: RequestId::new(request),
             result: KernelResult::PtySnapshot {
                 session_id: PtySessionId::new(session),
+                generation: PtySessionGeneration::new(generation),
                 seq: PtyFrameSeq::new(seq),
                 frame,
             },
@@ -632,9 +701,20 @@ mod tests {
     }
 
     fn batch(request: &str, session: &str, seq: u64, deltas: Vec<PtyDelta>) -> ServerControl {
+        batch_in_generation(request, session, "life-1", seq, deltas)
+    }
+
+    fn batch_in_generation(
+        request: &str,
+        session: &str,
+        generation: &str,
+        seq: u64,
+        deltas: Vec<PtyDelta>,
+    ) -> ServerControl {
         ServerControl::PtyDeltaBatch {
             request_id: RequestId::new(request),
             session_id: PtySessionId::new(session),
+            generation: PtySessionGeneration::new(generation),
             deltas,
             seq: PtyFrameSeq::new(seq),
         }
@@ -837,6 +917,162 @@ mod tests {
     }
 
     #[test]
+    fn drilldown_new_generation_discards_an_equal_sequence_mirror() {
+        let mut state = DrilldownState::new(PtySessionId::new("pty-1"));
+        state.ingest(&attached_at_in_generation(
+            "attach-1",
+            "pty-1",
+            "life-1",
+            1,
+            1,
+            Some(4),
+        ));
+        state.ingest(&snapshot_in_generation(
+            "snapshot-1",
+            "pty-1",
+            "life-1",
+            4,
+            frame(&[&["old"]]),
+        ));
+        assert!(state.frame().is_some());
+
+        state.begin_attach(RequestId::new("attach-2"));
+        state.ingest(&attached_at_in_generation(
+            "attach-2",
+            "pty-1",
+            "life-2",
+            1,
+            1,
+            Some(4),
+        ));
+
+        assert!(
+            state.frame().is_none(),
+            "equal frame sequences from different lives cannot share a mirror"
+        );
+    }
+
+    #[test]
+    fn drilldown_snapshot_cannot_replace_the_attached_generation() {
+        let mut state = DrilldownState::new(PtySessionId::new("pty-1"));
+        state.ingest(&attached_at_in_generation(
+            "attach-1",
+            "pty-1",
+            "life-1",
+            1,
+            1,
+            Some(4),
+        ));
+
+        assert_eq!(
+            state.ingest(&snapshot_in_generation(
+                "snapshot-late",
+                "pty-1",
+                "life-2",
+                4,
+                frame(&[&["foreign"]]),
+            )),
+            IngestDisposition::Counted
+        );
+        assert_eq!(
+            state.generation(),
+            Some(&PtySessionGeneration::new("life-1"))
+        );
+        assert_eq!(state.diagnostics().foreign_references, 1);
+        assert_eq!(
+            state.ingest(&ServerControl::PtyStreamClosed {
+                request_id: RequestId::new("attach-1"),
+                generation: PtySessionGeneration::new("life-1"),
+                code: gwk_domain::protocol::KernelErrorCode::SlowConsumer,
+                last_seq: Some(PtyFrameSeq::new(4)),
+            }),
+            IngestDisposition::Applied,
+            "the active generation's stream remains correlated"
+        );
+    }
+
+    #[test]
+    fn drilldown_invalid_snapshot_does_not_adopt_its_generation() {
+        let mut state = DrilldownState::new(PtySessionId::new("pty-1"));
+        let ragged = frame(&[&["a", "b"], &["c"]]);
+
+        assert_eq!(
+            state.ingest(&snapshot_in_generation(
+                "snapshot-1",
+                "pty-1",
+                "life-invalid",
+                1,
+                ragged,
+            )),
+            IngestDisposition::Counted
+        );
+        assert!(state.generation().is_none());
+        assert_eq!(state.diagnostics().invalid_frames, 1);
+    }
+
+    #[test]
+    fn drilldown_stale_generation_pushes_cannot_mutate_or_close_the_current_life() {
+        let mut state = DrilldownState::new(PtySessionId::new("pty-1"));
+        state.begin_attach(RequestId::new("attach-2"));
+        state.ingest(&attached_at_in_generation(
+            "attach-2",
+            "pty-1",
+            "life-2",
+            1,
+            1,
+            Some(4),
+        ));
+        state.ingest(&snapshot_in_generation(
+            "snapshot-2",
+            "pty-1",
+            "life-2",
+            4,
+            frame(&[&["current"]]),
+        ));
+
+        assert_eq!(
+            state.ingest(&batch_in_generation(
+                "attach-1",
+                "pty-1",
+                "life-1",
+                5,
+                vec![PtyDelta::CellsChanged {
+                    updates: vec![PtyCellUpdate {
+                        row: 0,
+                        col: 0,
+                        cell: cell("stale"),
+                    }],
+                }],
+            )),
+            IngestDisposition::Counted
+        );
+        assert_eq!(
+            state.frame().expect("current mirror").cells[0][0].glyph,
+            "current"
+        );
+        assert_eq!(
+            state.ingest(&ServerControl::PtyStreamClosed {
+                request_id: RequestId::new("attach-1"),
+                generation: PtySessionGeneration::new("life-1"),
+                code: gwk_domain::protocol::KernelErrorCode::SlowConsumer,
+                last_seq: Some(PtyFrameSeq::new(5)),
+            }),
+            IngestDisposition::Counted
+        );
+        assert_eq!(state.diagnostics().foreign_references, 2);
+        assert_eq!(
+            state.ingest(&ServerControl::PtyStreamClosed {
+                request_id: RequestId::new("attach-2"),
+                generation: PtySessionGeneration::new("life-2"),
+                code: gwk_domain::protocol::KernelErrorCode::SlowConsumer,
+                last_seq: Some(PtyFrameSeq::new(4)),
+            }),
+            IngestDisposition::Applied,
+            "the current stream remains correlated after stale pushes"
+        );
+    }
+
+    #[test]
     fn drilldown_typed_stream_close_remains_visible() {
         let mut state = DrilldownState::new(PtySessionId::new("pty-1"));
         state.ingest(&attached("attach-1", "pty-1", 1, 1));
@@ -845,6 +1081,7 @@ mod tests {
         assert_eq!(
             state.ingest(&ServerControl::PtyStreamClosed {
                 request_id: RequestId::new("attach-1"),
+                generation: PtySessionGeneration::new("life-1"),
                 code: gwk_domain::protocol::KernelErrorCode::SlowConsumer,
                 last_seq: Some(PtyFrameSeq::new(4)),
             }),

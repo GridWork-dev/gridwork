@@ -30,7 +30,8 @@ use std::sync::Arc;
 use base64::prelude::{BASE64_STANDARD, Engine as _};
 use gwk_domain::blob::BLOB_CHUNK_BYTES;
 use gwk_domain::ids::{
-    ByteCount, EventCount, EventId, PtyFrameSeq, PtySessionId, RequestId, Seq, WriterEpoch,
+    ByteCount, EventCount, EventId, PtyFrameSeq, PtySessionGeneration, PtySessionId, RequestId,
+    Seq, WriterEpoch,
 };
 use gwk_domain::port::{BlobError, BlobStore, EventStore, MAX_READ_LIMIT};
 use gwk_domain::protocol::{
@@ -200,7 +201,7 @@ impl Daemon {
             public_revision,
             writer_epoch,
             wake: Arc::new(wake),
-            pty: PtyHub::default(),
+            pty: PtyHub::new(writer_epoch),
         })
     }
 
@@ -497,15 +498,21 @@ impl Daemon {
             // session registry the pin-advance comment here used to promise.
             // An attach is admitted like a subscription and started by the
             // request loop, for the same first-batch-after-the-ack ordering.
-            KernelRequest::PtyAttach { session_id, cursor } => subs.admit_pty(
+            KernelRequest::PtyAttach {
+                session_id,
+                generation,
+                cursor,
+            } => subs.admit_pty(
                 &self.pty,
                 request_id,
                 session_id,
+                generation.as_ref(),
                 cursor.map(|seq| seq.value()),
             ),
             KernelRequest::PtySnapshot { session_id } => match self.pty.snapshot(session_id) {
-                Ok((seq, frame)) => KernelResult::PtySnapshot {
+                Ok((generation, seq, frame)) => KernelResult::PtySnapshot {
                     session_id: session_id.clone(),
+                    generation,
                     seq: PtyFrameSeq::new(seq),
                     frame,
                 },
@@ -761,17 +768,19 @@ impl<'a> Subscriptions<'a> {
         hub: &PtyHub,
         request_id: &RequestId,
         session_id: &PtySessionId,
+        generation: Option<&PtySessionGeneration>,
         cursor: Option<u64>,
     ) -> KernelResult {
         if let Some(refusal) = self.full() {
             return refusal;
         }
-        let attached = match hub.attach(session_id, cursor) {
+        let attached = match hub.attach(session_id, generation, cursor) {
             Ok(attached) => attached,
             Err(refusal) => return refusal.into_result(),
         };
         let result = KernelResult::PtyAttached {
             session_id: session_id.clone(),
+            generation: attached.generation.clone(),
             rows: attached.rows,
             cols: attached.cols,
             cursor: attached.cursor.map(PtyFrameSeq::new),

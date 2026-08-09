@@ -19,6 +19,7 @@ default-members = [
   "crates/gwk-cert",
   "crates/gwk-domain",
   "crates/gwk-kernel",
+  "crates/gwk-text",
   "crates/gwk-theme",
   "crates/gwk-tui",
   "xtask",
@@ -68,6 +69,7 @@ gwk-kernel = { path = "crates/gwk-kernel", version = "0.0.3" }
 # Path-only, no version: unpublished (`publish = false`), like the adapter
 # crates that depend on it.
 gwk-pty = { path = "crates/gwk-pty" }
+gwk-text = { path = "crates/gwk-text" }
 gwk-theme = { path = "crates/gwk-theme", version = "0.0.3" }
 # The installed `gw` binary carries the production terminal loop.
 gwk-tui = { path = "crates/gwk-tui", version = "0.0.2" }

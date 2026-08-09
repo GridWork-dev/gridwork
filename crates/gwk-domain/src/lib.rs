@@ -53,8 +53,8 @@ pub use ids::{
     AggregateId, AttemptId, AttentionItemId, AuthorityGrantId, BlobUploadId, ByteCount, CommandId,
     CorrelationId, CostEntryId, CostMicros, DispatchNodeId, EngineId, EngineSessionId, EventCount,
     EventId, EvidenceId, FenceToken, GateId, IdempotencyKey, IngestedRecordId, LeaseId, MessageId,
-    ProjectId, PtyFrameSeq, PtySessionId, ReceiptId, RequestId, Seq, TaskId, Timestamp, TokenCount,
-    WorktreeId, WriterEpoch,
+    ProjectId, PtyFrameSeq, PtySessionGeneration, PtySessionId, ReceiptId, RequestId, Seq, TaskId,
+    Timestamp, TokenCount, WorktreeId, WriterEpoch,
 };
 pub use ingestion::IngestionKind;
 pub use inherited::{

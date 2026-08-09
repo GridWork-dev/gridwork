@@ -160,6 +160,7 @@ code.
 | `gwk-pty-host` | Resident PTY engine host: session registry, spawn, detach/reattach routing | in tree, unpublished — not part of `cargo install gridwork` until its own release |
 | `gwk-adapter-*` | Per-engine ACP + hooks adapters | in tree, unpublished |
 | `gwk-parity` | The engine parity matrix harness — runs locally against logged-in engines, never in CI | in tree, unpublished |
+| `gwk-text` | Pure column arithmetic and extended grapheme boundaries | in tree, unpublished |
 | `gwk-tui` | The client: modes, lenses, palette | in tree, unpublished — five lenses and the live estate runtime; publish-flagged, ships with a future `gridwork` release |
 
 `gwk` is published deliberately as a **name reservation with no API** — a module doc

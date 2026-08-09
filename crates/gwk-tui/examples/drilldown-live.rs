@@ -135,7 +135,7 @@ fn main() -> ExitCode {
 mod tests {
     use std::io::Cursor;
 
-    use gwk_domain::ids::{PtyFrameSeq, PtySessionId, RequestId};
+    use gwk_domain::ids::{PtyFrameSeq, PtySessionGeneration, PtySessionId, RequestId};
     use gwk_domain::protocol::{KernelResult, ServerControl};
 
     use super::*;
@@ -145,6 +145,7 @@ mod tests {
             request_id: RequestId::new("snapshot-1"),
             result: KernelResult::PtySnapshot {
                 session_id: PtySessionId::new("pty-1"),
+                generation: PtySessionGeneration::new("pty-life-1"),
                 seq: PtyFrameSeq::new(1),
                 frame: gwk_domain::frame::PtyFrame { cells: Vec::new() },
             },
