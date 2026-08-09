@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# State reduction for the two-run hosted performance check. The first attempt is
-# allowed to miss because runner-wide contention is outside the sample-level
-# slack model; only a wholly successful attempt or fresh-runner retry passes.
+# State reduction for two parallel fresh-runner performance measurements.
+# Runner-wide contention is outside the sample-level slack model, so one clean
+# run passes and only two misses fail.
 set -euo pipefail
 
 if [[ $# -ne 3 ]]; then
@@ -23,8 +23,12 @@ if [[ "$mode" == "attempt" ]]; then
 fi
 
 if [[ "$mode" == "final" ]]; then
-  if [[ "$first_outcome" == "success" && "$second_outcome" == "skipped" ]]; then
-    echo "perf-job-guard: first runner passed; no retry needed"
+  if [[ "$first_outcome" == "success" && "$second_outcome" == "success" ]]; then
+    echo "perf-job-guard: both fresh runners passed"
+    exit 0
+  fi
+  if [[ "$first_outcome" == "success" && "$second_outcome" == "failure" ]]; then
+    echo "perf-job-guard: first runner passed; second fresh runner missed"
     exit 0
   fi
   if [[ "$first_outcome" != "success" && "$second_outcome" == "success" ]]; then
