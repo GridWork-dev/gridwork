@@ -42,6 +42,7 @@ fn replay_state(timeline: ReplayTimeline) -> BoardState {
         attempts: Vec::new(),
         nodes: Vec::new(),
         messages: Vec::new(),
+        attention: Vec::new(),
         replay: timeline,
         sessions: Vec::new(),
         worktrees: Vec::new(),
@@ -210,7 +211,7 @@ fn replay_board_panel_presents_recorded_frames_and_selected_detail() {
         "17ms  resize  120x42",
         "frame 4  elapsed 0ms",
         "output 6 bytes",
-        "BOARD  dag flow [replay]",
+        "BOARD estate brief dag flow [replay]",
     ] {
         assert!(
             rendered.contains(expected),
@@ -225,13 +226,16 @@ fn replay_board_panel_presents_recorded_frames_and_selected_detail() {
 
 #[test]
 fn replay_board_navigation_cycles_views_and_walks_frames_in_recorded_order() {
+    assert_eq!(BoardView::Estate.next(), BoardView::Activity);
+    assert_eq!(BoardView::Activity.next(), BoardView::Dag);
     assert_eq!(BoardView::Dag.next(), BoardView::Flow);
     assert_eq!(BoardView::Flow.next(), BoardView::Replay);
     assert_eq!(BoardView::Replay.next(), BoardView::Fleet);
     assert_eq!(BoardView::Fleet.next(), BoardView::CostHealth);
     assert_eq!(BoardView::CostHealth.next(), BoardView::Audit);
-    assert_eq!(BoardView::Audit.next(), BoardView::Dag);
-    assert_eq!(BoardView::Dag.previous(), BoardView::Audit);
+    assert_eq!(BoardView::Audit.next(), BoardView::Estate);
+    assert_eq!(BoardView::Estate.previous(), BoardView::Audit);
+    assert_eq!(BoardView::Dag.previous(), BoardView::Activity);
 
     let bytes = recording([
         (40, 0, Frame::Output(b"one".to_vec())),

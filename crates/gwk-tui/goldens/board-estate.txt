@@ -1,0 +1,18 @@
+ 3 tasks  2 active  4 attempts  2 running
+ 2 unresolved attention items  1 worktree held  1 lease held
+ attention head
+   operator decision required                                                              ai-p0
+ recent activity
+   attention_item  raised  review the late result                                          10:20
+   attention_item  raised  operator decision required                                      10:19
+   attempt  codex  running                                                                 10:12
+   task  harden the auth path  working                                                     10:12
+   attempt  codex  running                                                                 10:00
+
+
+
+
+
+
+
+BOARD [estate] brief dag flow replay fleet cost audit  2 run  as-of 407

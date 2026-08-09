@@ -1,0 +1,18 @@
+ what happened
+   attention_item  raised  review the late result                                          10:20
+   attention_item  raised  operator decision required                                      10:19
+   attempt  codex  running                                                                 10:12
+   task  harden the auth path  working                                                     10:12
+   attempt  codex  running                                                                 10:00
+ what is owed  5 facts
+   attempt at-02  blocked
+   attention_item ai-low  review the late result
+   attention_item ai-p0  operator decision required
+   task t-docs  input required
+   worktree wt-01  held and unpushed
+ cost  2 entries  1 priced  1 unpriced  125000 micros
+
+
+
+
+BOARD estate [brief] dag flow replay fleet cost audit  2 run  as-of 407
