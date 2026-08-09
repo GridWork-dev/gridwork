@@ -651,6 +651,11 @@ fn paging_count(
 
 /// Walk the fixed density ladder: baseline, gutter shrink, collapses, one-cell
 /// expression glyphs, then paging.
+///
+/// This ladder compacts Hall layout only; it does not raise the hosted-screen
+/// transport ceiling. A full screen is practically limited to about 13.8k
+/// cells by the 2 MiB publish budget at roughly 152 serialized bytes per cell,
+/// until the wire gains a compacter cell serialization.
 pub fn solve_density(area: Rect, input: &FrameInput) -> DensityPlan {
     let districts = ordered_visible_districts(input);
     if districts.is_empty() {
