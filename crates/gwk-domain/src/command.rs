@@ -20,7 +20,7 @@ use crate::fsm::{
 use crate::ids::{
     AttemptId, AttentionItemId, AuthorityGrantId, ByteCount, CommandId, CorrelationId, CostEntryId,
     CostMicros, DispatchNodeId, EngineId, EngineSessionId, EvidenceId, GateId, LeaseId, MessageId,
-    ReceiptId, TaskId, Timestamp, TokenCount, WorktreeId,
+    PtySessionId, ReceiptId, TaskId, Timestamp, TokenCount, WorkspaceNodeId, WorktreeId,
 };
 use crate::ingestion::IngestionKind;
 use crate::inherited::{FindingAction, OrchestratorCheckpoint, RoundFindingSummary};
@@ -470,6 +470,32 @@ pub enum KernelCommand {
         disposition: Option<String>,
     },
 
+    // ---- workspace layout ----
+    CreateWorkspaceNode {
+        workspace_node_id: WorkspaceNodeId,
+        kind: crate::entity::WorkspaceNodeKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[specta(optional)]
+        parent_id: Option<WorkspaceNodeId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[specta(optional)]
+        session_id: Option<PtySessionId>,
+    },
+    MoveWorkspaceNode {
+        workspace_node_id: WorkspaceNodeId,
+        parent_id: WorkspaceNodeId,
+        expected_version: u32,
+    },
+    RebindWorkspacePane {
+        workspace_node_id: WorkspaceNodeId,
+        session_id: PtySessionId,
+        expected_version: u32,
+    },
+    CloseWorkspaceNode {
+        workspace_node_id: WorkspaceNodeId,
+        expected_version: u32,
+    },
+
     // ---- dispatch tree ----
     RegisterDispatchNode {
         dispatch_node_id: DispatchNodeId,
@@ -588,6 +614,10 @@ impl KernelCommand {
             Self::RegisterWorktree { .. } => "register_worktree",
             Self::UpdateWorktree { .. } => "update_worktree",
             Self::ReleaseWorktree { .. } => "release_worktree",
+            Self::CreateWorkspaceNode { .. } => "create_workspace_node",
+            Self::MoveWorkspaceNode { .. } => "move_workspace_node",
+            Self::RebindWorkspacePane { .. } => "rebind_workspace_pane",
+            Self::CloseWorkspaceNode { .. } => "close_workspace_node",
             Self::RegisterDispatchNode { .. } => "register_dispatch_node",
             Self::TransitionDispatchNode { .. } => "transition_dispatch_node",
             Self::WriteOrchestratorCheckpoint { .. } => "write_orchestrator_checkpoint",
@@ -662,7 +692,7 @@ mod tests {
         // slip in `command_type()` would silently route the wrong handler. Walk
         // the serialized tag of a value from EVERY variant instead.
         let all = all_variants();
-        assert_eq!(all.len(), 39, "the v1 command set is 39 variants");
+        assert_eq!(all.len(), 43, "the v1 command set is 43 variants");
         for command in &all {
             let json = serde_json::to_value(command).expect("serialize");
             let tag = json["type"].as_str().expect("tagged with a string type");
@@ -1027,6 +1057,26 @@ mod tests {
             KernelCommand::ReleaseWorktree {
                 worktree_id: WorktreeId::new("wt-1"),
                 disposition: None,
+            },
+            KernelCommand::CreateWorkspaceNode {
+                workspace_node_id: WorkspaceNodeId::new("pane-1"),
+                kind: crate::entity::WorkspaceNodeKind::Pane,
+                parent_id: Some(WorkspaceNodeId::new("tab-1")),
+                session_id: Some(PtySessionId::new("pty-1")),
+            },
+            KernelCommand::MoveWorkspaceNode {
+                workspace_node_id: WorkspaceNodeId::new("pane-1"),
+                parent_id: WorkspaceNodeId::new("tab-2"),
+                expected_version: 1,
+            },
+            KernelCommand::RebindWorkspacePane {
+                workspace_node_id: WorkspaceNodeId::new("pane-1"),
+                session_id: PtySessionId::new("pty-2"),
+                expected_version: 2,
+            },
+            KernelCommand::CloseWorkspaceNode {
+                workspace_node_id: WorkspaceNodeId::new("pane-1"),
+                expected_version: 3,
             },
             KernelCommand::RegisterDispatchNode {
                 dispatch_node_id: DispatchNodeId::new("node-1"),

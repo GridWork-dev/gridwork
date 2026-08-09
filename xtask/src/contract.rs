@@ -15,7 +15,9 @@ use std::path::{Path, PathBuf};
 use gwk_domain::blob::{BlobAddress, BlobDescriptor};
 use gwk_domain::checkpoint::{CHECKPOINT_SCHEMA_VERSION, Checkpoint};
 use gwk_domain::command::KernelCommand;
-use gwk_domain::entity::{Attempt, Budget, Command, Message, Task};
+use gwk_domain::entity::{
+    Attempt, Budget, Command, Message, Task, WorkspaceNode, WorkspaceNodeKind,
+};
 use gwk_domain::envelope::{Actor, CommandEnvelope, EventEnvelope, Origin, PayloadRef};
 use gwk_domain::frame::{
     CellColor, CellStyle, CellUnderline, PtyAnsiSlot, PtyCellUpdate, PtyDelta, PtyFrame, StyledCell,
@@ -24,7 +26,7 @@ use gwk_domain::fsm::{AttemptState, CommandState, MessageState, Outcome, TaskSta
 use gwk_domain::ids::{
     AggregateId, AttemptId, BlobUploadId, ByteCount, CommandId, CorrelationId, CostMicros,
     EngineId, EventCount, EventId, IdempotencyKey, LeaseId, MessageId, ProjectId, PtyFrameSeq,
-    PtySessionGeneration, PtySessionId, RequestId, Seq, TaskId, Timestamp,
+    PtySessionGeneration, PtySessionId, RequestId, Seq, TaskId, Timestamp, WorkspaceNodeId,
 };
 use gwk_domain::inherited::{BudgetCursor, OrchestratorCheckpoint, PendingApproval};
 use gwk_domain::protocol::{
@@ -75,6 +77,7 @@ fn bindings() -> String {
         .register::<gwk_domain::entity::AttentionItem>()
         .register::<gwk_domain::entity::Budget>()
         .register::<gwk_domain::entity::Worktree>()
+        .register::<gwk_domain::entity::WorkspaceNode>()
         .register::<gwk_domain::entity::Lease>()
         .register::<gwk_domain::entity::DispatchNode>()
         .register::<TransitionResult<TaskState>>()
@@ -280,6 +283,18 @@ fn golden_command_terminal() -> Command {
         outcome: Some(Outcome::Clean),
         created_at: Timestamp::new("2026-07-27T12:05:00Z"),
         updated_at: Timestamp::new("2026-07-27T12:06:00Z"),
+    }
+}
+
+fn golden_workspace_node() -> WorkspaceNode {
+    WorkspaceNode {
+        id: WorkspaceNodeId::new("pane-0001"),
+        version: 3,
+        kind: WorkspaceNodeKind::Pane,
+        parent_id: Some(WorkspaceNodeId::new("tab-0001")),
+        session_id: Some(PtySessionId::new("pty-1")),
+        created_at: Timestamp::new("2026-08-09T12:00:00Z"),
+        updated_at: Timestamp::new("2026-08-09T12:05:00Z"),
     }
 }
 
@@ -713,6 +728,7 @@ fn goldens() -> Vec<(&'static str, String)> {
             "command-verification-complete.json",
             pretty(&golden_command_terminal()),
         ),
+        ("workspace-node.json", pretty(&golden_workspace_node())),
         (
             "transition-results.json",
             pretty(&golden_transition_results()),
@@ -871,6 +887,11 @@ pub fn run(check: bool) {
             &ts_goldens_dir,
             find("command-verification-complete.json"),
         ),
+        round_trip::<WorkspaceNode>(
+            "workspace-node.json",
+            &ts_goldens_dir,
+            find("workspace-node.json"),
+        ),
         round_trip::<Vec<TransitionResult<TaskState>>>(
             "transition-results.json",
             &ts_goldens_dir,
@@ -921,7 +942,7 @@ mod tests {
     /// manual root registry described in its doc comment. Update this
     /// constant AND the `.register()` chain together in the same change;
     /// a mismatch means one moved without the other.
-    const REGISTERED_ROOT_COUNT: usize = 24;
+    const REGISTERED_ROOT_COUNT: usize = 25;
 
     #[test]
     fn bindings_registry_matches_its_pin() {
