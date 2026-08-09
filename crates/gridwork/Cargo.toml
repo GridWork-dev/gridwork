@@ -11,22 +11,23 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
-# The seven-act binding test's dev dependency (gwk-tui) is path-only, which
-# packaging strips from the manifest — so the tarball must not carry the test
-# either, or it ships a target that cannot compile outside this workspace.
-exclude = ["tests/seven_act.rs"]
-
 [[bin]]
 name = "gw"
 path = "src/main.rs"
 
 [dependencies]
 base64.workspace = true
+crossterm.workspace = true
 gwk-domain.workspace = true
 gwk-kernel.workspace = true
+gwk-tui.workspace = true
+# The production terminal loop resolves the same color environment as every
+# lens rather than translating through a second local enum.
+gwk-theme.workspace = true
 # `admin` derives the scratch DSN from the admin one, which means holding a
 # secret long enough to change one path segment in it.
 secrecy.workspace = true
+ratatui.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 # A blob's address is a digest over its own plaintext, and `commit` refuses one
@@ -45,12 +46,6 @@ tokio = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
-# Dev-only and path-only, which `cargo package` strips: the seven-act binding
-# test reads the walk's choreography template — gwk-tui data — against this
-# CLI's own face. NOT the dependency gwk-tui's manifest is waiting for; the
-# installed binary still carries no lens code (`cargo tree --edges normal`
-# stays clean, and CI asserts it).
-gwk-tui.workspace = true
 # The live case stands up a real daemon on a temp socket and drives the built
 # binary against it, which needs a database to point the daemon at.
 sqlx = { workspace = true, features = ["json"] }

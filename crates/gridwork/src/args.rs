@@ -19,6 +19,7 @@ use gwk_domain::blob::BlobAddress;
 use gwk_domain::ids::Seq;
 use gwk_domain::ingestion::IngestionKind;
 use gwk_domain::protocol::ProjectionKind;
+use gwk_tui::hall::MotionMode;
 
 use crate::admin::Retention;
 use crate::exit::Failure;
@@ -37,6 +38,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--kind",
     "--limit",
     "--media-type",
+    "--motion",
     "--output",
     "--project",
     "--reason",
@@ -123,6 +125,10 @@ pub enum Verb {
         cursor: Option<Seq>,
     },
 
+    Tui {
+        motion: MotionMode,
+    },
+
     AttentionResolve {
         id: String,
         resolution: Option<String>,
@@ -182,6 +188,7 @@ gw — the GridWork kernel's command line
   gw projection list <type> [--cursor <key>] [--limit <n>]
   gw event read [--cursor <seq>] [--limit <n>]
   gw event follow [--cursor <seq>]
+  gw tui [--motion=off|reduced|full]
   gw attention list [--cursor <key>] [--limit <n>]
   gw attention resolve <id> [--resolution <text>]
   gw authority list [--cursor <key>] [--limit <n>]
@@ -200,7 +207,7 @@ gw — the GridWork kernel's command line
   --version  same answer as `build-info`, under the name every CLI is asked by
   --help     this
 
-Every answer is JSON on standard output. Exits: 0 success, 2 usage or input,
+Every command answer is JSON on standard output; `tui` is interactive. Exits: 0 success, 2 usage or input,
 3 refused, 4 not found, 5 unavailable, 6 does not verify, 10 a fault in gw.
 
 `pr` is the one verb that speaks to `gh` instead of the socket — always an
@@ -236,6 +243,9 @@ pub fn parse(argv: &[String]) -> Result<Invocation, Failure> {
     let pretty = rest.switch("--pretty");
     let verb = verb(&mut rest)?;
     rest.done()?;
+    if pretty && matches!(verb, Verb::Tui { .. }) {
+        return Err(Failure::usage("--pretty does not apply to tui"));
+    }
     Ok(Invocation { verb, pretty })
 }
 
@@ -255,6 +265,13 @@ fn verb(rest: &mut Rest) -> Result<Verb, Failure> {
         },
         "projection" => projection(rest),
         "event" => event(rest),
+        "tui" => Ok(Verb::Tui {
+            motion: rest
+                .flag("--motion")
+                .map(|value| motion_mode(&value))
+                .transpose()?
+                .unwrap_or(MotionMode::Full),
+        }),
         // `attention list` and `authority list` ARE projection pages under
         // another name, so they resolve to the same verb rather than to a second
         // way of asking one question.
@@ -489,6 +506,17 @@ fn ingestion_kind(name: &str) -> Result<IngestionKind, Failure> {
         })
 }
 
+fn motion_mode(name: &str) -> Result<MotionMode, Failure> {
+    match name {
+        "off" => Ok(MotionMode::Off),
+        "reduced" => Ok(MotionMode::Reduced),
+        "full" => Ok(MotionMode::Full),
+        _ => Err(Failure::usage(format!(
+            "motion is {name:?}; one of: off, reduced, full"
+        ))),
+    }
+}
+
 fn blob_address(value: &str) -> Result<BlobAddress, Failure> {
     BlobAddress::parse(value).map_err(|e| Failure::usage(format!("{value:?}: {e}")))
 }
@@ -518,6 +546,17 @@ impl Rest {
                     return Err(Failure::usage(format!("{item} was given twice")));
                 }
                 switches.push(item.clone());
+            } else if let Some((name, value)) = item.split_once('=') {
+                if !VALUE_FLAGS.contains(&name) {
+                    return Err(Failure::usage(format!("no such flag {name:?}")));
+                }
+                if value.is_empty() {
+                    return Err(Failure::usage(format!("{name} needs a value")));
+                }
+                if flags.iter().any(|(flag, _)| flag == name) {
+                    return Err(Failure::usage(format!("{name} was given twice")));
+                }
+                flags.push((name.to_owned(), value.to_owned()));
             } else if VALUE_FLAGS.contains(&item.as_str()) {
                 let value = items
                     .next()
@@ -620,6 +659,18 @@ mod tests {
     #[test]
     fn the_documented_tree_parses() {
         assert_eq!(parsed("build-info").expect("parse").verb, Verb::BuildInfo);
+        assert_eq!(
+            parsed("tui --motion=reduced").expect("parse").verb,
+            Verb::Tui {
+                motion: MotionMode::Reduced
+            }
+        );
+        assert_eq!(
+            parsed("tui --motion off").expect("parse").verb,
+            Verb::Tui {
+                motion: MotionMode::Off
+            }
+        );
         assert_eq!(parsed("kernel health").expect("parse").verb, Verb::Health);
         assert_eq!(
             parsed("kernel verify-sealed").expect("parse").verb,
@@ -701,6 +752,9 @@ mod tests {
             "ingest submit --file -",
             "ingest submit --kind nonsense --file - --project p",
             "event read --limit twelve",
+            "tui --motion=fast",
+            "tui --motion=",
+            "tui --pretty",
             "blob stat not-an-address",
             "pr open",
             "pr open --title t",
@@ -782,7 +836,14 @@ mod tests {
         // the very binary that advertised it.
         for line in HELP.lines() {
             for word in line.split_whitespace() {
-                let name = word.trim_start_matches('[').trim_end_matches(']');
+                let name = word
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .split_once('=')
+                    .map_or_else(
+                        || word.trim_start_matches('[').trim_end_matches(']'),
+                        |pair| pair.0,
+                    );
                 if !name.starts_with("--") {
                     continue;
                 }

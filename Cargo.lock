@@ -1131,9 +1131,12 @@ name = "gridwork"
 version = "0.0.3"
 dependencies = [
  "base64 0.23.0",
+ "crossterm",
  "gwk-domain",
  "gwk-kernel",
+ "gwk-theme",
  "gwk-tui",
+ "ratatui",
  "secrecy",
  "serde",
  "serde_json",
@@ -1292,7 +1295,9 @@ dependencies = [
  "gwk-domain",
  "gwk-theme",
  "ratatui",
+ "rustix",
  "serde_json",
+ "sha2 0.11.0",
  "tachyonfx",
  "tempfile",
  "thiserror 2.0.19",
