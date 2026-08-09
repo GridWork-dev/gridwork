@@ -147,8 +147,14 @@ pub struct SessionErrorData {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     /// The stream's own liveness, not a fact about any session.
+    ///
+    /// Anything keying readiness on this event is keying on `GET /event`
+    /// specifically — never on `GET /global/event`.
     // Derivation: OPENCODE-SERVER §Events — `GET /event`: "First event is
-    // `server.connected`, then bus events."
+    // `server.connected`, then bus events." Stated for that stream ONLY:
+    // the same endpoint table lists `GET /global/event` with no first-event
+    // sentence at all, so nothing here — or downstream of here — may treat
+    // the global stream as opening with `server.connected`.
     StreamConnected,
     SessionCreated {
         session_id: String,
