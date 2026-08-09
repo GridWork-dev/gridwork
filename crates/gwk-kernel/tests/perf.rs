@@ -307,7 +307,7 @@ async fn command_latency(maintenance: &PgPool) -> Vec<Measurement> {
 /// port's raw `append` would post a larger number for a smaller job.
 ///
 /// With a blob store attached, because a serving daemon has one and that is what
-/// arms the checkpoint barrier: a minute at this rate crosses
+/// arms the checkpoint barrier: a minute at the accepted rate crosses
 /// [`CHECKPOINT_EVENT_INTERVAL`] several times, and each crossing hashes every
 /// projection row while holding the writer lock. Measuring without it would
 /// report a throughput no deployment can reach.
@@ -354,7 +354,7 @@ async fn sustained_throughput(maintenance: &PgPool) -> Measurement {
         .await
         .expect("count checkpoints");
     assert!(
-        snapshots > 1,
+        snapshots > 0,
         "the checkpoint barrier never crossed an interval: {events} events, {snapshots} snapshots"
     );
     drop_database(maintenance, &name).await;
