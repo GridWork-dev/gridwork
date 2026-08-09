@@ -1,9 +1,11 @@
 //! The GridWork terminal console — the thin client half.
 //!
-//! **Four lenses exist.** The [`queue`] — the workday screen — the [`board`]
-//! — the task/attempt DAG and the A2A message flow — and [`config`] — the
-//! four-file git-backed reconciler — sit beside [`drilldown`], the hosted
-//! session's styled-cell view.
+//! **Five lenses exist.** The [`queue`] — the workday screen — the [`board`]
+//! — the task/attempt DAG and the A2A message flow — [`hall`] — the estate
+//! frame, a deterministic spatial layout over caller-normalized facts (the
+//! live projection/event join lives in [`estate`], the terminal loop in
+//! [`runtime`]) — and [`config`] — the four-file git-backed reconciler — sit
+//! beside [`drilldown`], the hosted session's styled-cell view.
 //! Beneath the lenses sits the substrate they consume: [`theme`], the
 //! one function that turns a resolved token into a renderer colour;
 //! [`probe`], which measures what the drawing terminal does with the glyph

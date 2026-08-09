@@ -47,13 +47,19 @@ real PostgreSQL 16 and its performance envelope measured, not asserted.
 Stage 3's crates are in this tree, deliberately unpublished until 1.0 packaging:
 `gwk-pty` (a real server-side VT engine), the three `gwk-adapter-*` crates, the
 parity harness that certifies them, and `gwk-pty-host` (the resident host:
-session supervision, wire-frame conversion, and command origination — no
-consumer-facing attach route yet). Stage 4 — the console — is in flight:
-`gwk-tui` now carries four lenses (Queue, Board, Config, and the session
-drill-down), none of it wired into a surface you can sit in front of — so the
-terminal-native and engine-agnostic bullets above are still describing what GridWork is
-being built to be, and the daemon you can run today has a JSON command line as its only
-face.
+session supervision, wire-frame conversion, command origination, and a
+consumer-facing attach route — the host publishes each session's snapshots and
+deltas into the kernel's session registry, and `PtyAttach`/`PtySnapshot` answer
+consumers from there; routing a consumer's input, resize, and stop to a hosted
+session is still open, and sessions still start from the operator's declaration
+rather than a request). Stage 4 — the console — is in flight: `gwk-tui` now
+carries five lenses (Queue, Board, Hall — the live fleet view — Config, and the
+session drill-down), and `gw tui` wires the Hall lens into a production
+terminal loop over the kernel's live projections and events. Queue, Board,
+Config, and the drill-down are not part of that installed surface yet — so the
+terminal-native and engine-agnostic bullets above are still partly describing
+what GridWork is being built to be, but the daemon's human face is no longer
+JSON output alone.
 
 The build order — contract → kernel → engines → console → workspace → context
 runtime — with what each
@@ -154,7 +160,7 @@ code.
 | `gwk-pty-host` | Resident PTY engine host: session registry, spawn, detach/reattach routing | in tree, unpublished — not part of `cargo install gridwork` until its own release |
 | `gwk-adapter-*` | Per-engine ACP + hooks adapters | in tree, unpublished |
 | `gwk-parity` | The engine parity matrix harness — runs locally against logged-in engines, never in CI | in tree, unpublished |
-| `gwk-tui` | The client: modes, lenses, palette | in tree, unpublished — skeleton |
+| `gwk-tui` | The client: modes, lenses, palette | in tree, unpublished — five lenses and the live estate runtime; publish-flagged, ships with a future `gridwork` release |
 
 `gwk` is published deliberately as a **name reservation with no API** — a module doc
 block pointing at the crates that do the work. It is not a library and is not padded
@@ -201,7 +207,7 @@ The contract first, then the one place that enforces it:
 
 | | |
 |---|---|
-| [ROADMAP.md](ROADMAP.md) | The five stages and what each delivers |
+| [ROADMAP.md](ROADMAP.md) | The six stages and what each delivers |
 | [docs/architecture.md](docs/architecture.md) | What owns truth, what the pieces are, which decisions are locked |
 | [docs/protocol.md](docs/protocol.md) | The client↔kernel contract — framing, hello, requests, subscriptions |
 | [docs/operations.md](docs/operations.md) | Running the daemon: startup and fencing, recovery, shutdown, KEK rotation |
@@ -215,8 +221,9 @@ The contract first, then the one place that enforces it:
 ## Building
 
 Stable Rust, MSRV 1.94. This builds the contract crates, the kernel, and the `gw` binary
-— but not a usable product: there is no human surface yet (see
-[ROADMAP.md](ROADMAP.md)).
+— including `gw tui`, the early console surface. It is still not a finished product:
+the stage-5 workspace (the real multiplexer) does not exist yet, and the engine host
+remains a separate, unpublished process (see [ROADMAP.md](ROADMAP.md)).
 
 ```bash
 cargo build

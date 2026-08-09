@@ -3,7 +3,7 @@
   "pages": [
     {
       "destination": "content/docs/index.mdx",
-      "sha256": "48056a6db3ecb69f8f28a03d3589fec4277eefb68df02408b67e298f441039bf",
+      "sha256": "0f7bcd4b128fba32bf49ab313572c0d11cb0ee3115b8a1e5d53f425a5e54b7ee",
       "sources": [
         {
           "path": "README.md"
@@ -12,7 +12,7 @@
     },
     {
       "destination": "content/docs/quickstart.mdx",
-      "sha256": "2f4f26dd1b97c0995cc63daabb57919ead5edad864c582bf424ef82338b0cc54",
+      "sha256": "04e8b3c77d2560b0e59ca13e2979203b57ae9632da7884e6707ac795877d4e46",
       "sources": [
         {
           "path": "README.md"
@@ -21,7 +21,7 @@
     },
     {
       "destination": "content/docs/architecture.mdx",
-      "sha256": "edc9b8389efd7d2bec0dff069cab0b83b2222a8f2c931316ff6e0d7e85ee7360",
+      "sha256": "e83a307f152fd3ff54cadbe8bc3b73430fbc46d259db8fb914d9b0a0b8618b25",
       "sources": [
         {
           "path": "docs/architecture.md"
@@ -57,7 +57,7 @@
     },
     {
       "destination": "content/docs/security/index.mdx",
-      "sha256": "0143df1ff3d2f94af156b1c8ed6ebe89805df31d4eed42d2716f54587d6cc178",
+      "sha256": "c6c03bdf7ad3f81925c275053e8088143d805d1f76f81167b0f06af5d6368152",
       "sources": [
         {
           "path": "docs/security/THREAT_MODEL.md"

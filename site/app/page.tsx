@@ -244,16 +244,21 @@ $ gw kernel health
                 <span aria-hidden="true">◇</span> Not built yet
               </h3>
               <ul>
-                <li>The complete PTY engine.</li>
-                <li>Complete engine adapters.</li>
-                <li>The TUI.</li>
-                <li>The daemon&apos;s current human face is JSON command output.</li>
+                <li>
+                  The full TUI — <code>gw tui</code> wires only the Hall lens
+                  live today.
+                </li>
+                <li>The workspace: the real multiplexer.</li>
+                <li>
+                  Engine host packaging — a separate, unpublished process until
+                  1.0.
+                </li>
               </ul>
             </section>
           </div>
 
           <p className="landing-section-route">
-            <a href="/docs/roadmap">Read the five-stage roadmap</a>
+            <a href="/docs/roadmap">Read the six-stage roadmap</a>
           </p>
         </section>
 
