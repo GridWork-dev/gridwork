@@ -1277,6 +1277,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "gwk-text"
+version = "0.0.1"
+
+[[package]]
 name = "gwk-theme"
 version = "0.0.3"
 dependencies = [

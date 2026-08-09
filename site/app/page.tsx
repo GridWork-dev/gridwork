@@ -82,6 +82,12 @@ const crates = [
     "in tree, unpublished",
   ],
   [
+    "gwk-text",
+    null,
+    "Pure column arithmetic and extended grapheme boundaries",
+    "in tree, unpublished",
+  ],
+  [
     "gwk-tui",
     null,
     "The client: modes, lenses, palette",
