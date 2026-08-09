@@ -50,13 +50,40 @@ pub fn engine_id() -> EngineId {
 ///
 /// Nothing is asserted about what it draws — the PTY layer owns structural
 /// truth — and nothing is ever typed into it by this adapter.
+///
+/// And nothing is asserted about what the engine loads: a pane's working
+/// directory does not select the engine's plugin set, and no artifact in
+/// this workspace may claim it does.
+// Derivation: OPENCODE-PLUGINS — the page fixes the plugin homes
+// (`.opencode/plugins/` project-level, `~/.config/opencode/plugins/`
+// global, npm packages from config) and hands a plugin `directory` ("the
+// current working directory") and `worktree` ("the git worktree path") as
+// DISTINCT context values, while stating no rule that connects the working
+// directory to which plugins load. cwd-equals-project is therefore an
+// inference the document does not license, and this crate does not make it.
 pub fn spawn_tui(cols: u16, rows: u16) -> Result<Session, SpawnError> {
     Session::spawn(pty_process::Command::new(ENGINE), cols, rows)
 }
 
 /// The control half's subprocess configuration.
+///
+/// A pane hosting this mode inherits NONE of the mux's persistence, detach,
+/// or multi-client guarantees. Those guarantees are properties of the PTY
+/// session path (`spawn_tui` under the host's session registry); this is a
+/// JSON-RPC subprocess whose life is its stdio connection, and the document
+/// that licenses it grants nothing that would extend the mux's guarantees
+/// over it — so nothing here may imply the surrounding mux covers it.
 // Derivation: OPENCODE-ACP — `opencode acp` runs the engine as an
-// ACP-compatible subprocess communicating over JSON-RPC via stdio.
+// ACP-compatible subprocess communicating over JSON-RPC via stdio. The
+// page's parity claim ("works the same via ACP as it does in the terminal.
+// All features are supported") carries its own named, time-qualified
+// exception ("some built-in slash commands like `/undo` and `/redo` are
+// currently unsupported") — and it is a claim about features, on a page
+// that says nothing about session persistence, detach or reattach,
+// multiple simultaneous clients, or stderr. That such a silence grants no
+// guarantee — that a pane hosting this mode must claim none of the four —
+// is this crate's reading of the document's scope, not a sentence it
+// contains.
 pub fn acp_agent_config() -> AcpAgentConfig {
     AcpAgentConfig::new(ENGINE).arg("acp")
 }
