@@ -158,6 +158,52 @@ jobs:
           fi
           echo "cargo.lock carries exactly one ratatui-core; the seeded second one is counted"
 
+  unicode-conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Unicode tables and the published grapheme corpus agree
+        run: cargo test -p gwk-text --all-targets --locked
+      - name: prove the Unicode table-version gate can fail (seeded violation)
+        run: |
+          set -euo pipefail
+          source=crates/gwk-text/src/lib.rs
+          cp "$source" /tmp/gwk-text-lib.rs
+          trap 'cp /tmp/gwk-text-lib.rs "$source"' EXIT
+
+          sed -i 's/pub const UNICODE_VERSION: (u64, u64, u64) = (17, 0, 0);/pub const UNICODE_VERSION: (u64, u64, u64) = (16, 0, 0);/' "$source"
+          if cargo check -p gwk-text --locked > /tmp/unicode-version-seed.log 2>&1; then
+            echo 'gwk-text compiled with a Unicode table version mismatch' >&2
+            exit 1
+          fi
+          grep -q 'evaluation of constant value failed' /tmp/unicode-version-seed.log
+
+          cp /tmp/gwk-text-lib.rs "$source"
+          cargo check -p gwk-text --locked
+          echo "unicode-version: seeded table mismatch correctly rejected"
+      - name: prove the grapheme corpus gate can fail (seeded violation)
+        run: |
+          set -euo pipefail
+          fixture=crates/gwk-text/fixtures/ucd-17.0.0/GraphemeBreakTest.txt
+          cp "$fixture" /tmp/GraphemeBreakTest.txt
+          trap 'cp /tmp/GraphemeBreakTest.txt "$fixture"' EXIT
+
+          sed -i 's/^÷ 000D × 000A ÷/÷ 000D ÷ 000A ÷/' "$fixture"
+          if cargo test -p gwk-text --test unicode_conformance published_grapheme_break_cases_match_the_pinned_unicode_version --locked > /tmp/grapheme-seed.log 2>&1; then
+            echo 'grapheme conformance accepted a seeded false boundary' >&2
+            exit 1
+          fi
+          grep -q '\[3.0\]' /tmp/grapheme-seed.log
+
+          cp /tmp/GraphemeBreakTest.txt "$fixture"
+          cargo test -p gwk-text --test unicode_conformance --locked
+          echo "grapheme-conformance: seeded false boundary correctly rejected"
+
   # The kernel's ignored integration suite needs a live PostgreSQL superuser:
   # each case creates and initializes its own database plus the runtime role.
   # Keep this separate so service failures do not read as Rust regressions.
