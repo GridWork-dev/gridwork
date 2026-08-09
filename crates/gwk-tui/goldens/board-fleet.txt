@@ -19,4 +19,4 @@
 
 
 
-BOARD estate brief dag flow events replay [fleet] cost audit  2 run @407
+BOARD estate brief run dag flow events replay [fleet] cost audit  r2@407
