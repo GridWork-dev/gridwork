@@ -169,6 +169,27 @@ impl Session {
         self.grid
             .resize(cols, rows)
             .ok_or(SpawnError::Dimensions { cols, rows })?;
+        // Get, then set, on the same fd. The read is what makes this a relay
+        // rather than a blind write: when the PTY already holds the requested
+        // size — because the child moved it there itself — there is nothing
+        // to relay, and skipping the set leaves the child exactly as
+        // undisturbed as the delivers-nothing rule above says a no-op set
+        // would. The grid half has already reflowed either way, so this is
+        // also the path that lets the two halves CONVERGE after a
+        // child-initiated move, instead of the manager stomping it.
+        //
+        // Derivation: POSIX-WINSIZE §APPLICATION USAGE (informative) — the
+        // two-sentence relay guidance: the manager relays a new size to the
+        // child, and a size set from the subsidiary side is one the manager
+        // "should attempt to change the screen to reflect". The skip below
+        // is that reflection: a size already held because the child moved
+        // it there is reflected, not overwritten. Informative text, cited
+        // as such: it guides the shape of this method, it does not bind it.
+        if let Ok(held) = rustix::termios::tcgetwinsize(&self.pty)
+            && (held.ws_col, held.ws_row) == (cols, rows)
+        {
+            return Ok(());
+        }
         if let Err(e) = self.pty.resize(Size::new(rows, cols)) {
             // Ask the kernel what to roll back to rather than remembering it.
             //
@@ -207,6 +228,36 @@ impl Session {
             return Err(e.into());
         }
         Ok(())
+    }
+
+    /// Adopt the size the PTY actually holds — the child's half of the relay.
+    ///
+    /// `tcsetwinsize()` is not reserved to whoever opened the PTY: a child
+    /// running `stty rows 50 cols 100` moves the kernel's size without this
+    /// type hearing about it, and until this call the grid keeps reflowing
+    /// output for a size nothing is at. Reading the fd and reflowing to what
+    /// it holds is the other direction of [`resize`](Self::resize)'s relay —
+    /// get on the same fd, no set, because the kernel copy is already the
+    /// truth being adopted.
+    ///
+    /// Returns the size the PTY holds. If the grid refuses it (a zero in
+    /// either axis is refusable — the child can put one there), the grid is
+    /// left where it was and the returned pair still reports the kernel's
+    /// answer, so the caller can see the two halves disagree rather than
+    /// being told they converged.
+    // Derivation: POSIX-WINSIZE §APPLICATION USAGE (informative) — the
+    // manager-side relay guidance covers both directions of a size relay;
+    // this is the read-and-adopt half. The delivers-nothing rule on the
+    // marker above `resize` is why adopting a size never needs a set: the
+    // kernel already holds it, and a set to the held value would tell the
+    // child nothing anyway.
+    pub fn pull_size(&mut self) -> io::Result<(u16, u16)> {
+        let held = rustix::termios::tcgetwinsize(&self.pty)
+            .map_err(|errno| io::Error::from_raw_os_error(errno.raw_os_error()))?;
+        if self.grid.size() != Some((held.ws_col, held.ws_row)) {
+            let _ = self.grid.resize(held.ws_col, held.ws_row);
+        }
+        Ok((held.ws_col, held.ws_row))
     }
 
     /// The authoritative grid.
@@ -411,6 +462,308 @@ mod tests {
             "resize put the axes on the pty the wrong way round"
         );
         assert_eq!(session.grid().size(), Some((100, 30)));
+    }
+
+    /// Pump until some row contains `needle`, failing on hang-up. The trap
+    /// tests below all follow one shape: install a handler, print a marker,
+    /// block; the test waits for the marker instead of sleeping and hoping.
+    async fn drain_until(session: &mut Session, needle: &str) {
+        while !grid_contains(session, needle) {
+            assert!(
+                session.pump().await.expect("pty read failed") > 0,
+                "eof before {needle:?} appeared"
+            );
+        }
+    }
+
+    fn grid_contains(session: &Session, needle: &str) -> bool {
+        let Some((_, rows)) = session.grid().size() else {
+            return false;
+        };
+        (0..rows).any(|y| {
+            session
+                .grid()
+                .row_text(y)
+                .is_some_and(|text| text.contains(needle))
+        })
+    }
+
+    fn rows_containing(session: &Session, needle: &str) -> usize {
+        let Some((_, rows)) = session.grid().size() else {
+            return 0;
+        };
+        (0..rows)
+            .filter(|y| {
+                session
+                    .grid()
+                    .row_text(*y)
+                    .is_some_and(|text| text.contains(needle))
+            })
+            .count()
+    }
+
+    /// The line discipline's special character for `index`, read from the
+    /// same fd the session holds — asked of the terminal rather than assumed,
+    /// because no standard fixes the byte values and a hardcoded ^C would be
+    /// an assertion this repository has no row for.
+    fn special_code(session: &Session, index: rustix::termios::SpecialCodeIndex) -> u8 {
+        let attrs = rustix::termios::tcgetattr(&session.pty).expect("reading termios");
+        attrs.special_codes[index]
+    }
+
+    #[tokio::test]
+    async fn the_child_holds_a_controlling_terminal_and_reads_as_the_foreground_group() {
+        // Derivation: POSIX-TERM §11.1.1 — opening /dev/tty is the named
+        // way "to obtain a file descriptor for the controlling terminal".
+        // That a process with no controlling terminal has nothing for that
+        // open to resolve — so a successful open asserts the ctty exists —
+        // is this crate's reading of that access path, not a sentence the
+        // chapter contains. And
+        // §11.1.4 — a process in the foreground process group may read from
+        // the controlling terminal; only background process groups draw
+        // SIGTTIN. The read completing proves the child sits in the
+        // foreground group, not merely that its stdin is a terminal.
+        let mut session = Session::spawn(
+            pty_process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg("exec 3</dev/tty && echo READY && read -r line <&3 && echo \"GOT:$line\""),
+            80,
+            24,
+        )
+        .expect("spawning /bin/sh on a pty");
+
+        drain_until(&mut session, "READY").await;
+        session.send(b"ping\n").await.expect("writing to the pty");
+        drain_until(&mut session, "GOT:ping").await;
+        assert!(session.wait().await.expect("reaping").success());
+    }
+
+    #[tokio::test]
+    async fn the_intr_character_reaches_the_foreground_group_as_sigint() {
+        // Derivation: POSIX-TERM §11.1.9 — the INTR special character
+        // generates a SIGINT signal, sent to all processes in the foreground
+        // process group for which the terminal is the controlling terminal.
+        // The byte itself is read from this terminal's own c_cc array: the
+        // standard names the character's JOB, not its value.
+        let mut session = Session::spawn(
+            pty_process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg("trap 'echo CAUGHT-INT; exit 42' INT; echo READY; read -r line; exit 9"),
+            80,
+            24,
+        )
+        .expect("spawning /bin/sh on a pty");
+
+        drain_until(&mut session, "READY").await;
+        let intr = special_code(&session, rustix::termios::SpecialCodeIndex::VINTR);
+        session.send(&[intr]).await.expect("sending INTR");
+        drain_until(&mut session, "CAUGHT-INT").await;
+        let status = session.wait().await.expect("reaping");
+        assert_eq!(status.code(), Some(42), "the trap's exit code, not read's");
+    }
+
+    #[tokio::test]
+    async fn the_quit_character_reaches_the_foreground_group_as_sigquit() {
+        // Derivation: POSIX-TERM §11.1.9 — the QUIT special character
+        // generates a SIGQUIT signal, sent to all processes in the
+        // foreground process group. Trapped rather than defaulted: the
+        // trap turns the delivery into a line the test can read and a
+        // chosen exit code it can assert.
+        let mut session = Session::spawn(
+            pty_process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg("trap 'echo CAUGHT-QUIT; exit 43' QUIT; echo READY; read -r line; exit 9"),
+            80,
+            24,
+        )
+        .expect("spawning /bin/sh on a pty");
+
+        drain_until(&mut session, "READY").await;
+        let quit = special_code(&session, rustix::termios::SpecialCodeIndex::VQUIT);
+        session.send(&[quit]).await.expect("sending QUIT");
+        drain_until(&mut session, "CAUGHT-QUIT").await;
+        assert_eq!(session.wait().await.expect("reaping").code(), Some(43));
+    }
+
+    #[tokio::test]
+    async fn the_susp_character_reaches_the_foreground_group_as_sigtstp() {
+        // Derivation: POSIX-TERM §11.1.9 — the SUSP special character
+        // generates a SIGTSTP signal, sent to all processes in the
+        // foreground process group. Trapped so the child reports instead of
+        // stopping: a stopped child never exits, and this test's subject is
+        // the delivery, not the default disposition.
+        let mut session = Session::spawn(
+            pty_process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg("trap 'echo CAUGHT-TSTP; exit 44' TSTP; echo READY; read -r line; exit 9"),
+            80,
+            24,
+        )
+        .expect("spawning /bin/sh on a pty");
+
+        drain_until(&mut session, "READY").await;
+        let susp = special_code(&session, rustix::termios::SpecialCodeIndex::VSUSP);
+        session.send(&[susp]).await.expect("sending SUSP");
+        drain_until(&mut session, "CAUGHT-TSTP").await;
+        assert_eq!(session.wait().await.expect("reaping").code(), Some(44));
+    }
+
+    #[tokio::test]
+    async fn a_background_read_draws_sigttin_and_its_write_passes_without_tostop() {
+        // Derivation: POSIX-TERM §11.1.4 — a process in a background process
+        // group reading from its controlling terminal has SIGTTIN sent to
+        // its group; and, absent TOSTOP, a background write is ALLOWED. Both
+        // rules ride one script: the background job's trap reports the
+        // SIGTTIN by writing to the very terminal it may not read — the
+        // report arriving is the write rule, the report firing is the read
+        // rule.
+        //
+        // bash explicitly, not /bin/sh: the script needs `set -m` honored in
+        // a non-interactive shell so the background job lands in its own
+        // process group — without that there is no background group and
+        // nothing to deliver SIGTTIN to.
+        // The handler exits the job: a returning handler would let the shell
+        // retry the read, draw SIGTTIN again, and report forever — a livelock
+        // dressed as enthusiasm. One delivery is the fact being asserted.
+        let mut session = Session::spawn(
+            pty_process::Command::new("/bin/bash").arg("-c").arg(
+                "set -m; echo READY; \
+                 { trap 'echo BG-TTIN; exit 7' TTIN; read -r x < /dev/tty; } & \
+                 wait; echo BYE",
+            ),
+            80,
+            24,
+        )
+        .expect("spawning /bin/bash on a pty");
+
+        drain_until(&mut session, "READY").await;
+        drain_until(&mut session, "BG-TTIN").await;
+        drain_until(&mut session, "BYE").await;
+        assert!(session.wait().await.expect("reaping").success());
+    }
+
+    #[tokio::test]
+    async fn a_background_write_with_tostop_set_draws_sigttou() {
+        // Derivation: POSIX-TERM §11.1.4 — with TOSTOP set, a process in a
+        // background process group writing to its controlling terminal has
+        // SIGTTOU sent to its group. The trap's own report goes to a file,
+        // not the terminal — under TOSTOP the terminal is exactly where a
+        // background report may not go, so the foreground shell reads the
+        // file and speaks for it.
+        let mut session = Session::spawn(
+            pty_process::Command::new("/bin/bash").arg("-c").arg(
+                "set -m; m=$(mktemp); stty tostop; echo READY; \
+                 { trap 'echo mark > \"$m\"' TTOU; echo attempt > /dev/tty; } & \
+                 wait; stty -tostop; \
+                 if [ -s \"$m\" ]; then echo CAUGHT-TTOU; fi; rm -f \"$m\"; echo BYE",
+            ),
+            80,
+            24,
+        )
+        .expect("spawning /bin/bash on a pty");
+
+        drain_until(&mut session, "CAUGHT-TTOU").await;
+        drain_until(&mut session, "BYE").await;
+        assert!(session.wait().await.expect("reaping").success());
+    }
+
+    #[tokio::test]
+    async fn a_resize_delivers_sigwinch_and_an_identical_reset_is_observably_silent() {
+        // Derivation: POSIX-WINSIZE — `tcsetwinsize()` delivers SIGWINCH to
+        // the foreground process group when the size WAS CHANGED, and
+        // delivers nothing when it is set to the value it already had. Both
+        // halves of that sentence are asserted here by counting: two real
+        // changes with an identical re-set between them must produce exactly
+        // two reports — a third report is the delivers-nothing clause
+        // failing, a missing one is the delivery clause failing.
+        //
+        // The ACK protocol is what makes the count safe to read without
+        // trusting either signal timing or the shell's read-interruption
+        // behavior. Each sent line comes back as an ACK, and the shell runs
+        // pending traps at command boundaries — so by the time an ACK is on
+        // the grid, every report the preceding resize was ever going to
+        // produce is on it too. Counting between ACKs also defeats
+        // coalescing: a wrongly-delivered re-set signal cannot hide inside
+        // the next real one's delivery, because an ACK separates them.
+        //
+        // The read is retried on failure because the trapped signal lands
+        // while the shell is sitting in `read`, and what a failed
+        // interrupted read does to a `while read` loop turned out to be the
+        // shell's choice: one shell resumes reading after running the trap,
+        // another lets the loop end — the first version of this loop passed
+        // on the development machine and exited BYE before the first ACK
+        // under CI's /bin/sh. The retry bound keeps a genuine end-of-file
+        // from spinning the loop instead.
+        let mut session = Session::spawn(
+            pty_process::Command::new("/bin/sh").arg("-c").arg(
+                "trap 'echo GOT-WINCH' WINCH; echo READY; fails=0; \
+                 while [ \"$fails\" -lt 10 ]; do \
+                   if read -r line; then \
+                     echo \"ACK:$line\"; \
+                     if [ \"$line\" = done ]; then break; fi; \
+                   else fails=$((fails+1)); fi; \
+                 done; echo BYE",
+            ),
+            80,
+            24,
+        )
+        .expect("spawning /bin/sh on a pty");
+
+        drain_until(&mut session, "READY").await;
+
+        session.resize(100, 30).expect("first real resize");
+        session.send(b"t1\n").await.expect("first ack round-trip");
+        drain_until(&mut session, "ACK:t1").await;
+        assert_eq!(rows_containing(&session, "GOT-WINCH"), 1);
+
+        // The identical re-set: same fd, same size, nothing to say — and its
+        // own ACK round-trip, so a delivery here would be visible on its own
+        // rather than coalescing into the next change's signal.
+        session.resize(100, 30).expect("identical re-set");
+        session.send(b"t2\n").await.expect("second ack round-trip");
+        drain_until(&mut session, "ACK:t2").await;
+        assert_eq!(
+            rows_containing(&session, "GOT-WINCH"),
+            1,
+            "an identical re-set must be observably silent to the child"
+        );
+
+        session.resize(90, 28).expect("second real resize");
+        session.send(b"done\n").await.expect("releasing the child");
+        drain_until(&mut session, "BYE").await;
+        assert_eq!(rows_containing(&session, "GOT-WINCH"), 2);
+        assert!(session.wait().await.expect("reaping").success());
+    }
+
+    #[tokio::test]
+    async fn pull_size_adopts_a_child_moved_size() {
+        // The other direction of the relay: the child moves the kernel's
+        // size, and the manager reads-and-adopts instead of stomping it. The
+        // convergence `a_child_can_move_the_pty_size_behind_the_grids_back`
+        // proves is missing is exactly what this call supplies.
+        let mut session = Session::spawn(
+            pty_process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg("stty rows 50 cols 100"),
+            80,
+            24,
+        )
+        .expect("spawning /bin/sh on a pty");
+
+        drain(&mut session).await;
+
+        let adopted = session.pull_size().expect("reading the pty size");
+        assert_eq!(adopted, (100, 50));
+        assert_eq!(
+            session.grid().size(),
+            Some((100, 50)),
+            "the grid follows the kernel, not the other way round"
+        );
+
+        // And a resize to the size the PTY already holds is the relay's
+        // no-op: the halves agree and the child is not disturbed.
+        session.resize(100, 50).expect("resizing to the held size");
+        assert_eq!(session.grid().size(), Some((100, 50)));
     }
 
     #[tokio::test]
