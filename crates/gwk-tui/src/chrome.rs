@@ -224,23 +224,30 @@ impl ChromeTheme {
 
     /// Read and resolve a theme file.
     pub fn load(path: &Path) -> Result<Self, ChromeError> {
+        use std::io::Read as _;
+
         let display = path.display().to_string();
-        let size = std::fs::metadata(path)
-            .map_err(|source| ChromeError::Unreadable {
-                path: display.clone(),
-                source,
-            })?
-            .len();
-        if size > MAX_THEME_BYTES {
+        let unreadable = |source| ChromeError::Unreadable {
+            path: display.clone(),
+            source,
+        };
+        // Bound the READ, not a stat of the path. A character device or a FIFO
+        // reports a length of zero and then hands over as many bytes as it
+        // likes, so a size gate would pass `/dev/zero` and the read after it
+        // would never end. Taking one byte past the bound also closes the
+        // window between checking a size and reading the file.
+        let mut text = String::new();
+        std::fs::File::open(path)
+            .map_err(&unreadable)?
+            .take(MAX_THEME_BYTES + 1)
+            .read_to_string(&mut text)
+            .map_err(&unreadable)?;
+        if text.len() as u64 > MAX_THEME_BYTES {
             return Err(ChromeError::TooLarge {
                 path: display,
-                actual: size,
+                actual: text.len() as u64,
             });
         }
-        let text = std::fs::read_to_string(path).map_err(|source| ChromeError::Unreadable {
-            path: display,
-            source,
-        })?;
         Self::parse_toml(&text)
     }
 
@@ -454,6 +461,24 @@ mod tests {
         assert!(
             error.to_string().contains("could not be read"),
             "a typo'd path is an error, never a silent revert: {error}"
+        );
+    }
+
+    #[test]
+    fn chrome_the_size_bound_reads_bytes_rather_than_trusting_a_stat() {
+        // The bound has to hold for a path whose METADATA lies about its size:
+        // a character device or a FIFO reports zero and then hands over as
+        // many bytes as it likes, so a stat gate would pass `/dev/zero` and
+        // the read after it would never end. Bounding the read closes that and
+        // the check-then-read window in one move. A plain oversized file is
+        // what a test can portably build; the device case shares the path.
+        let path = std::env::temp_dir().join(format!("gwk-chrome-big-{}", std::process::id()));
+        std::fs::write(&path, "#".repeat(MAX_THEME_BYTES as usize + 1)).expect("write");
+        let error = ChromeTheme::load(&path).expect_err("oversized theme");
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            matches!(error, ChromeError::TooLarge { .. }),
+            "an oversized theme is refused by size, not by parse: {error}"
         );
     }
 
