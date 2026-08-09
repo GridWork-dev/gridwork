@@ -753,6 +753,40 @@ CREATE TRIGGER workspace_node_parentage
 ALTER TABLE gwk.workspace_node ENABLE ALWAYS TRIGGER workspace_node_cas;
 ALTER TABLE gwk.workspace_node ENABLE ALWAYS TRIGGER workspace_node_parentage;
 
+-- One run of a workflow: the choreography as a ledger object. The RUN, not
+-- the template — `template_ref` is opaque client-side data, and `step` is an
+-- open string because the act taxonomy is template data (decision 17): the
+-- kernel asserts nothing about what the steps are called. Closed runs keep
+-- their rows; the Board reads history from them, and the delete guard below
+-- is what makes "ledger object" a property instead of prose.
+CREATE TABLE gwk.workflow_run (
+  id              text PRIMARY KEY,
+  version         bigint NOT NULL DEFAULT 1 CHECK (version BETWEEN 1 AND 4294967295),
+  state           text NOT NULL DEFAULT 'running',
+  step            text,
+  template_ref    text NOT NULL,
+  template_sha256 text CHECK (template_sha256 IS NULL OR template_sha256 ~ '^[0-9a-f]{64}$'),
+  task_id         text REFERENCES gwk.task(id),
+  title           text,
+  opened_at       timestamptz NOT NULL DEFAULT now(),
+  updated_at      timestamptz NOT NULL DEFAULT now(),
+  closed_at       timestamptz,
+  -- A run is closed exactly when it left `running`; half-closed rows are the
+  -- bug this pins down.
+  CONSTRAINT workflow_run_closed_iff_terminal
+    CHECK ((state = 'running') = (closed_at IS NULL))
+);
+
+CREATE TRIGGER workflow_run_cas
+  BEFORE UPDATE ON gwk.workflow_run
+  FOR EACH ROW EXECUTE FUNCTION gwk.assert_version_cas('workflow_run');
+CREATE TRIGGER workflow_run_no_delete
+  BEFORE DELETE ON gwk.workflow_run
+  FOR EACH ROW EXECUTE FUNCTION gwk.forbid_state_row_delete('workflow_run');
+
+ALTER TABLE gwk.workflow_run ENABLE ALWAYS TRIGGER workflow_run_cas;
+ALTER TABLE gwk.workflow_run ENABLE ALWAYS TRIGGER workflow_run_no_delete;
+
 -- The orchestrator's crash-recovery snapshot, latest-per-orchestrator.
 --
 -- Distinct from `gwk-domain::checkpoint::Checkpoint`, which is the kernel's own

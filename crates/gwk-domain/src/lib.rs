@@ -36,7 +36,7 @@ pub use engine::{EngineAdapter, EngineEvent, EngineStatus, LifecycleFact};
 pub use entity::{
     Attempt, AttentionItem, AuthorityGrant, Budget, Command, CostEntry,
     DISPATCH_NODE_INITIAL_STATE, DispatchNode, EngineSession, Evidence, Gate, IngestedRecord,
-    Lease, Message, Receipt, Task, WorkspaceNode, WorkspaceNodeKind, Worktree,
+    Lease, Message, Receipt, Task, WorkflowRun, WorkspaceNode, WorkspaceNodeKind, Worktree,
 };
 pub use envelope::{
     Actor, CommandEnvelope, ENVELOPE_SCHEMA_VERSION, EventEnvelope, INLINE_PAYLOAD_MAX_BYTES,
@@ -54,7 +54,7 @@ pub use ids::{
     CorrelationId, CostEntryId, CostMicros, DispatchNodeId, EngineId, EngineSessionId, EventCount,
     EventId, EvidenceId, FenceToken, GateId, IdempotencyKey, IngestedRecordId, LeaseId, MessageId,
     ProjectId, PtyFrameSeq, PtySessionGeneration, PtySessionId, ReceiptId, RequestId, Seq, TaskId,
-    Timestamp, TokenCount, WorkspaceNodeId, WorktreeId, WriterEpoch,
+    Timestamp, TokenCount, WorkflowRunId, WorkspaceNodeId, WorktreeId, WriterEpoch,
 };
 pub use ingestion::IngestionKind;
 pub use inherited::{
