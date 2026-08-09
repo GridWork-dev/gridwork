@@ -169,31 +169,58 @@ async fn execute(verb: Verb, pretty: bool) -> Result<(), Failure> {
             Ok(())
         }
 
-        // The three quieting acts. Each is idempotent last-write-wins in the
-        // kernel and carries no expected version, so the key is the act and
-        // its subject: a retried ack is the SAME ack, which is what a retry
-        // should mean here.
+        // The three quieting acts, and the one place their key must NOT be
+        // the subject alone.
+        //
+        // Quiet is reversible. `mute a-1 --until T1`, `unmute a-1`, `mute a-1
+        // --until T2`, `unmute a-1` is an ordinary morning, and a key of
+        // `unmute_attention:a-1` makes that last call a replay of the first:
+        // the kernel short-circuits before the projector runs, answers
+        // `command_applied` with the ORIGINAL sequence, exits 0 — and the item
+        // stays muted. The operator asked for it back and was told yes.
+        //
+        // So the caller's instant joins the key, at nanosecond resolution
+        // rather than the envelope's whole-second `issued_at` — two unmutes in
+        // one second is an operator pressing a key twice, which is precisely
+        // the case being fixed. That is exactly right for these three: all are
+        // last-write-wins stamps carrying NO expected version, so applying one
+        // twice is harmless by construction, which is why the contract lets
+        // them skip the CAS in the first place. The dedup they give up buys
+        // nothing; the correctness it costs is real.
+        //
+        // `resolve` below keeps its subject-only key, and that is not an
+        // oversight: a resolve LATCHES — `resolved_at` is set once and the
+        // item is closed — so a replay of it is the truth. A second resolve
+        // with different words changes the payload and earns an idempotency
+        // CONFLICT, which is also the truth.
         Verb::AttentionAck { id } => {
             let command = KernelCommand::AckAttention {
                 attention_item_id: AttentionItemId::new(id.clone()),
             };
-            submit(&command, &format!("ack_attention:{id}"), pretty).await
+            submit(&command, &format!("ack_attention:{id}:{}", nonce()), pretty).await
         }
         Verb::AttentionMute { id, until } => {
             let command = KernelCommand::MuteAttention {
                 attention_item_id: AttentionItemId::new(id.clone()),
                 muted_until: Timestamp::new(until.clone()),
             };
-            // The deadline is part of the act: re-muting the same item to a
-            // NEW instant is a second, legitimate mute, and keying on the id
-            // alone would make the kernel treat it as the first one replayed.
-            submit(&command, &format!("mute_attention:{id}:{until}"), pretty).await
+            submit(
+                &command,
+                &format!("mute_attention:{id}:{until}:{}", nonce()),
+                pretty,
+            )
+            .await
         }
         Verb::AttentionUnmute { id } => {
             let command = KernelCommand::UnmuteAttention {
                 attention_item_id: AttentionItemId::new(id.clone()),
             };
-            submit(&command, &format!("unmute_attention:{id}"), pretty).await
+            submit(
+                &command,
+                &format!("unmute_attention:{id}:{}", nonce()),
+                pretty,
+            )
+            .await
         }
         Verb::AttentionResolve { id, resolution } => {
             let command = KernelCommand::ResolveAttention {
@@ -369,6 +396,41 @@ fn envelope(command: &KernelCommand, key: &str, project: &str) -> CommandEnvelop
         // Infallible for a command built here — every variant serializes — and
         // a null payload would be refused by the kernel anyway.
         payload: serde_json::to_value(command).unwrap_or(Value::Null),
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+
+    /// The bug this pins: `unmute a-1` twice, with a re-mute between, used to
+    /// send the SAME idempotency key. The kernel answers a repeated key by
+    /// replaying the first command's events WITHOUT running the projector, so
+    /// the second unmute exited 0 and left the item muted.
+    #[test]
+    fn reversible_quieting_acts_never_reuse_an_idempotency_key() {
+        for build in [
+            (|| format!("ack_attention:a-1:{}", nonce())) as fn() -> String,
+            || format!("mute_attention:a-1:2026-08-09T12:00:00Z:{}", nonce()),
+            || format!("unmute_attention:a-1:{}", nonce()),
+        ] {
+            let first = build();
+            let second = build();
+            assert_ne!(
+                first, second,
+                "two calls of a reversible act shared a key: {first}"
+            );
+        }
+    }
+
+    /// And the latching act still does, deliberately: a resolve sets
+    /// `resolved_at` once and closes the item, so replaying it is the truth.
+    #[test]
+    fn resolve_keeps_its_subject_only_key_because_it_latches() {
+        assert_eq!(
+            format!("resolve_attention:{}", "a-1"),
+            format!("resolve_attention:{}", "a-1")
+        );
     }
 }
 
@@ -605,6 +667,18 @@ fn hex_lower(bytes: &[u8]) -> String {
 /// place the CLI needs a calendar and the conversion is a dozen lines. UTC only:
 /// a local offset in an `issued_at` would be a second thing to reconcile against
 /// the kernel's own UTC-pinned clock.
+/// A per-invocation nonce for the idempotency keys of commands that must NOT
+/// dedup across separate calls (see the attention-quieting arms above).
+///
+/// Wall-clock nanoseconds, not a counter: the process is one invocation long,
+/// so a counter would restart at zero on every call and collide immediately.
+fn nonce() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default()
+}
+
 fn now() -> Timestamp {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

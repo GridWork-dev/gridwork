@@ -866,7 +866,10 @@ fn pinned_block(findings: Vec<String>, unknowns: Vec<UnknownNote>, muted: Style)
     let mut out = Vec::new();
     if !findings.is_empty() {
         out.push(Row::diagnostic(
-            format!("invalid page -- {} findings", findings.len()),
+            format!(
+                "invalid page -- {}",
+                plural(findings.len(), "finding", "findings")
+            ),
             muted,
         ));
         out.extend(
@@ -877,7 +880,10 @@ fn pinned_block(findings: Vec<String>, unknowns: Vec<UnknownNote>, muted: Style)
     }
     if !unknowns.is_empty() {
         out.push(Row::diagnostic(
-            format!("unknown -- {} facts not in the log", unknowns.len()),
+            format!(
+                "unknown -- {} not in the log",
+                plural(unknowns.len(), "fact", "facts")
+            ),
             muted,
         ));
         out.extend(
@@ -1223,7 +1229,14 @@ fn cost_health_rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
     if health == 0 {
         unknowns.push(UnknownNote {
             subject: "health",
-            why: "no records -- ingestion is operator-driven, no producer".to_owned(),
+            // "no records" is a claim about the whole ledger and this count is
+            // over one page, so a partial read says so — the same distinction
+            // the floor note below draws, applied where it is also true.
+            why: if state.complete {
+                "no records -- ingestion is operator-driven, no producer".to_owned()
+            } else {
+                "none on this page -- ingestion is operator-driven, no producer".to_owned()
+            },
         });
     }
     if !state.complete {
@@ -1913,7 +1926,13 @@ pub fn render(
     let detail_rows = if detail_rows < 2 { 0 } else { detail_rows };
     let body_rows = after_status - detail_rows;
 
+    // Pinned rows keep first claim on the body, because a corruption finding
+    // outranks a row: `board_invalid_page_diagnostics_survive_body_overflow`
+    // is the older invariant and it stands. What changed is that neither of
+    // the two cuts a short frame forces is silent any more — see `pinned_cut`
+    // below and the `ordinary_body_rows` guard on the overflow marker.
     let pinned = diagnostic_rows.min(body_rows as usize);
+    let pinned_cut = diagnostic_rows - pinned;
     let ordinary_body_rows = body_rows.saturating_sub(pinned as u16);
     let overflow = ordinary.len().saturating_sub(ordinary_body_rows as usize);
     let visible = if overflow > 0 {
@@ -1943,7 +1962,16 @@ pub fn render(
 
     for (i, row) in built.iter().take(pinned).enumerate() {
         let y = area.y + i as u16;
-        let text = theme::safe_text(&row.text, area.width.saturating_sub(1) as usize);
+        // A pinned block too tall for the frame names its own cut in its last
+        // row. The block's header states a count, so silently painting fewer
+        // rows than it claims is the one failure a pinned block must not have:
+        // the operator would read three stated findings and see two.
+        let cut = pinned_cut > 0 && i + 1 == pinned;
+        let text = if cut {
+            std::borrow::Cow::Owned(format!("+{pinned_cut} more pinned -- frame too short"))
+        } else {
+            theme::safe_text(&row.text, area.width.saturating_sub(1) as usize)
+        };
         buf.set_stringn(
             area.x + 1,
             y,
@@ -1996,7 +2024,20 @@ pub fn render(
         }
     }
 
-    if overflow > 0 {
+    // `ordinary_body_rows == 0` means the pinned block took the whole body, so
+    // there is no row left to print a marker into. The old code painted one
+    // at `area.y + body_rows` anyway — the status-bar row — where the bar
+    // overwrote it a moment later. Guarding it changes nothing an operator
+    // sees, which is exactly why it is worth saying out loud: the marker was
+    // never visible there, so this removes a pointless write rather than
+    // fixing a visible bug, and there is no frame assertion that could tell
+    // the two versions apart.
+    //
+    // Recorded ceiling: at a body this short the ordinary rows go unstated —
+    // pinned rows keep first claim (the corruption invariant), and there is
+    // genuinely no row left for a count. Real frames clear it at one row past
+    // the pinned block; the Board is not wired into `gw tui` at any height yet.
+    if overflow > 0 && ordinary_body_rows > 0 {
         let y = area.y + pinned as u16 + ordinary_body_rows.saturating_sub(1);
         buf.set_stringn(
             area.x + 1,
@@ -2812,6 +2853,60 @@ mod tests {
         assert!(
             dump.contains("no receipts -- nothing attested on this page"),
             "absence in words:\n{dump}"
+        );
+    }
+
+    #[test]
+    fn board_a_short_frame_never_scribbles_on_the_status_bar_or_cuts_in_silence() {
+        // Two regressions, both from a pinned block taller than the body. The
+        // fleet and cost panels emit two to four pinned rows on an ORDINARY
+        // frame, so this stopped being the rare invalid-page geometry it was.
+        let mut state = fleet_state();
+        state.complete = false;
+        // One header plus three notes; no selection, so no detail pane and
+        // the body is `height - 1`. The block therefore fits from height 5.
+        const PINNED: u16 = 4;
+
+        for height in 2..=20u16 {
+            let (dump, _, _) = dump_frame(72, height, &state, None);
+            let lines: Vec<&str> = dump.lines().collect();
+
+            // The status bar survives every geometry. Deliberately NOT the
+            // regression test for the stray marker write: the bar always
+            // painted last and overwrote it, so no frame assertion can tell
+            // the guarded and unguarded versions apart — verified by mutation.
+            assert!(
+                lines
+                    .get(usize::from(height - 1))
+                    .is_some_and(|bar| bar.starts_with("BOARD")),
+                "height {height} lost the status bar:\n{dump}"
+            );
+
+            // The finding this DOES pin: a pinned block that does not fit says
+            // how much it lost. Its
+            //    header states a count, so showing fewer rows than it claims
+            //    is the one failure a pinned block must not have.
+            let cut = dump.contains("more pinned -- frame too short");
+            assert_eq!(
+                cut,
+                height - 1 < PINNED,
+                "height {height}: pinned-cut notice {} when the body holds {} of {PINNED}:\n{dump}",
+                if cut { "shown" } else { "absent" },
+                height - 1,
+            );
+        }
+
+        // 3. Where a body row exists for it, the ordinary block's own marker
+        //    is present rather than lost off the bottom.
+        let (dump, _, _) = dump_frame(72, 7, &state, None);
+        assert!(
+            dump.contains("more"),
+            "a frame with a body row must name the rows it cut:\n{dump}"
+        );
+        let (dump, _, _) = dump_frame(72, 20, &state, None);
+        assert!(
+            dump.contains("engine sessions") && dump.contains("leases"),
+            "a tall frame paints its rows and raises no cut:\n{dump}"
         );
     }
 
