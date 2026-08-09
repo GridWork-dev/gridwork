@@ -179,10 +179,10 @@ async fn execute(verb: Verb, pretty: bool) -> Result<(), Failure> {
         // `command_applied` with the ORIGINAL sequence, exits 0 — and the item
         // stays muted. The operator asked for it back and was told yes.
         //
-        // So the caller's instant joins the key, at nanosecond resolution
-        // rather than the envelope's whole-second `issued_at` — two unmutes in
-        // one second is an operator pressing a key twice, which is precisely
-        // the case being fixed. That is exactly right for these three: all are
+        // So a per-call nonce joins the key — the caller's instant paired with
+        // a process-local counter, because the clock alone is only as fine as
+        // the host makes it (see [`nonce`]). That is exactly right for these
+        // three: all are
         // last-write-wins stamps carrying NO expected version, so applying one
         // twice is harmless by construction, which is why the contract lets
         // them skip the CAS in the first place. The dedup they give up buys
@@ -670,13 +670,20 @@ fn hex_lower(bytes: &[u8]) -> String {
 /// A per-invocation nonce for the idempotency keys of commands that must NOT
 /// dedup across separate calls (see the attention-quieting arms above).
 ///
-/// Wall-clock nanoseconds, not a counter: the process is one invocation long,
-/// so a counter would restart at zero on every call and collide immediately.
+/// Wall-clock nanoseconds carry the cross-invocation uniqueness — the process
+/// is one invocation long, so a counter alone would restart at zero on every
+/// call and collide immediately. But the clock alone is not enough either:
+/// macOS ticks `SystemTime` in microseconds, so two calls inside one process
+/// (or two invocations landing in the same tick) read the same value. The low
+/// 32 bits fold in the pid and an in-process counter to break those ties.
 fn nonce() -> u128 {
-    std::time::SystemTime::now()
+    static CALL: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+    let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    let call = CALL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    (nanos << 32) | u128::from(std::process::id() as u16) << 16 | u128::from(call)
 }
 
 fn now() -> Timestamp {
