@@ -25,8 +25,8 @@
 use crate::blob::{BlobAddress, BlobDescriptor};
 use crate::entity::{
     Attempt, AttentionItem, AuthorityGrant, Command, CostEntry, DispatchNode, EngineSession,
-    Evidence, Gate, IngestedRecord, Lease, Message, Receipt, Task, WorkflowRun, WorkspaceNode,
-    Worktree,
+    Evidence, Gate, IngestedRecord, Lease, Message, PtySession, Receipt, Task, WorkflowRun,
+    WorkspaceNode, Worktree,
 };
 use crate::envelope::{CommandEnvelope, EventEnvelope, JsonValue};
 use crate::frame::{PtyDelta, PtyFrame};
@@ -463,6 +463,7 @@ pub enum ProjectionKind {
     CostEntry,
     WorkspaceNode,
     WorkflowRun,
+    PtySession,
 }
 
 impl ProjectionKind {
@@ -486,6 +487,7 @@ impl ProjectionKind {
         Self::CostEntry,
         Self::WorkspaceNode,
         Self::WorkflowRun,
+        Self::PtySession,
     ];
 
     /// The wire name — the same string `serde` writes, and the same one that
@@ -513,6 +515,7 @@ impl ProjectionKind {
             Self::CostEntry => "cost_entry",
             Self::WorkspaceNode => "workspace_node",
             Self::WorkflowRun => "workflow_run",
+            Self::PtySession => "pty_session",
         }
     }
 }
@@ -587,6 +590,9 @@ pub enum ProjectionRecord {
     WorkflowRun {
         workflow_run: WorkflowRun,
     },
+    PtySession {
+        pty_session: PtySession,
+    },
 }
 
 impl ProjectionRecord {
@@ -612,6 +618,7 @@ impl ProjectionRecord {
             Self::CostEntry { .. } => ProjectionKind::CostEntry,
             Self::WorkspaceNode { .. } => ProjectionKind::WorkspaceNode,
             Self::WorkflowRun { .. } => ProjectionKind::WorkflowRun,
+            Self::PtySession { .. } => ProjectionKind::PtySession,
         }
     }
 }
@@ -1529,6 +1536,20 @@ mod tests {
                     template_ref: "phase-lifecycle".into(),
                     template_sha256: None,
                     task_id: Some(TaskId::new("task-1")),
+                    title: None,
+                    opened_at: ts(),
+                    updated_at: ts(),
+                    closed_at: None,
+                },
+            },
+            ProjectionRecord::PtySession {
+                pty_session: PtySession {
+                    id: PtySessionId::new("pty-1"),
+                    version: 3,
+                    state: "running".into(),
+                    generation: crate::ids::PtySessionGeneration::new("gen-1"),
+                    attach_count: 2,
+                    detach_count: 1,
                     title: None,
                     opened_at: ts(),
                     updated_at: ts(),

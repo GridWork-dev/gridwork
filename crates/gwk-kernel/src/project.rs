@@ -1201,6 +1201,72 @@ pub(crate) async fn apply_event(
             require_one(done, "workflow_run", workflow_run_id.as_str())?;
         }
 
+        // ---- pty sessions ----
+        KernelCommand::OpenPtySession {
+            pty_session_id,
+            generation,
+            title,
+        } => {
+            sqlx::query(
+                "INSERT INTO gwk.pty_session \
+                   (id, version, state, generation, attach_count, detach_count, title, \
+                    opened_at, updated_at) \
+                 VALUES ($1, $2, 'running', $3, 0, 0, $4, $5::timestamptz, $5::timestamptz)",
+            )
+            .bind(pty_session_id.as_str())
+            .bind(version)
+            .bind(generation.as_str())
+            .bind(title.as_deref())
+            .bind(at)
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| db("open pty session", e))?;
+        }
+        KernelCommand::RecordPtyAttach { pty_session_id, .. } => {
+            let done = sqlx::query(
+                "UPDATE gwk.pty_session SET attach_count = attach_count + 1, \
+                   version = $2, updated_at = $3::timestamptz \
+                 WHERE id = $1",
+            )
+            .bind(pty_session_id.as_str())
+            .bind(version)
+            .bind(at)
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| db("record pty attach", e))?;
+            require_one(done, "pty_session", pty_session_id.as_str())?;
+        }
+        KernelCommand::RecordPtyDetach { pty_session_id, .. } => {
+            let done = sqlx::query(
+                "UPDATE gwk.pty_session SET detach_count = detach_count + 1, \
+                   version = $2, updated_at = $3::timestamptz \
+                 WHERE id = $1",
+            )
+            .bind(pty_session_id.as_str())
+            .bind(version)
+            .bind(at)
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| db("record pty detach", e))?;
+            require_one(done, "pty_session", pty_session_id.as_str())?;
+        }
+        KernelCommand::ClosePtySession { pty_session_id, .. } => {
+            // No DELETE: the S8 receipt reads closed sessions' rows, and the
+            // no-delete trigger holds them in place. Close stamps the state.
+            let done = sqlx::query(
+                "UPDATE gwk.pty_session SET state = 'closed', version = $2, \
+                   closed_at = $3::timestamptz, updated_at = $3::timestamptz \
+                 WHERE id = $1",
+            )
+            .bind(pty_session_id.as_str())
+            .bind(version)
+            .bind(at)
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| db("close pty session", e))?;
+            require_one(done, "pty_session", pty_session_id.as_str())?;
+        }
+
         // The epoch boundary is the log itself — there is no row behind it.
         KernelCommand::ActivateKernel { .. } => {}
 

@@ -20,8 +20,8 @@ use crate::fsm::{
 use crate::ids::{
     AttemptId, AttentionItemId, AuthorityGrantId, ByteCount, CommandId, CorrelationId, CostEntryId,
     CostMicros, DispatchNodeId, EngineId, EngineSessionId, EvidenceId, GateId, LeaseId, MessageId,
-    PtySessionId, ReceiptId, TaskId, Timestamp, TokenCount, WorkflowRunId, WorkspaceNodeId,
-    WorktreeId,
+    PtySessionGeneration, PtySessionId, ReceiptId, TaskId, Timestamp, TokenCount, WorkflowRunId,
+    WorkspaceNodeId, WorktreeId,
 };
 use crate::ingestion::IngestionKind;
 use crate::inherited::{FindingAction, OrchestratorCheckpoint, RoundFindingSummary};
@@ -527,6 +527,33 @@ pub enum KernelCommand {
         expected_version: u32,
     },
 
+    // ---- pty sessions ----
+    //
+    // Lifecycle authority for hosted PTY sessions (P17), emitted by the
+    // pty-host at publish/retire/attach/detach. Not telemetry (S6 stands):
+    // these rows are what the S8 cutover receipt reads — peak concurrency
+    // against B4's floor, attach/detach counts, and host restarts via the
+    // generation token.
+    OpenPtySession {
+        pty_session_id: PtySessionId,
+        generation: PtySessionGeneration,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[specta(optional)]
+        title: Option<String>,
+    },
+    RecordPtyAttach {
+        pty_session_id: PtySessionId,
+        expected_version: u32,
+    },
+    RecordPtyDetach {
+        pty_session_id: PtySessionId,
+        expected_version: u32,
+    },
+    ClosePtySession {
+        pty_session_id: PtySessionId,
+        expected_version: u32,
+    },
+
     // ---- dispatch tree ----
     RegisterDispatchNode {
         dispatch_node_id: DispatchNodeId,
@@ -652,6 +679,10 @@ impl KernelCommand {
             Self::OpenWorkflowRun { .. } => "open_workflow_run",
             Self::AdvanceWorkflowRun { .. } => "advance_workflow_run",
             Self::CloseWorkflowRun { .. } => "close_workflow_run",
+            Self::OpenPtySession { .. } => "open_pty_session",
+            Self::RecordPtyAttach { .. } => "record_pty_attach",
+            Self::RecordPtyDetach { .. } => "record_pty_detach",
+            Self::ClosePtySession { .. } => "close_pty_session",
             Self::RegisterDispatchNode { .. } => "register_dispatch_node",
             Self::TransitionDispatchNode { .. } => "transition_dispatch_node",
             Self::WriteOrchestratorCheckpoint { .. } => "write_orchestrator_checkpoint",

@@ -801,6 +801,46 @@ ALTER TABLE gwk.workflow_run ENABLE ALWAYS TRIGGER workflow_run_cas;
 ALTER TABLE gwk.workflow_run ENABLE ALWAYS TRIGGER workflow_run_no_delete;
 ALTER TABLE gwk.workflow_run ENABLE ALWAYS TRIGGER workflow_run_no_truncate;
 
+-- One lifetime of a hosted PTY session: lifecycle authority for the S8
+-- cutover receipt (P17), not telemetry. The pty-host records publish/retire
+-- and attach/detach here; peak concurrency reads open/close intervals, the
+-- counters carry attach/detach totals, and distinct generations count host
+-- restarts. Closed sessions keep their rows — the receipt reads history, and
+-- the delete guard below makes "ledger object" a property instead of prose.
+CREATE TABLE gwk.pty_session (
+  id           text PRIMARY KEY,
+  version      bigint NOT NULL DEFAULT 1 CHECK (version BETWEEN 1 AND 4294967295),
+  state        text NOT NULL DEFAULT 'running' CHECK (state IN ('running', 'closed')),
+  generation   text NOT NULL,
+  attach_count bigint NOT NULL DEFAULT 0 CHECK (attach_count >= 0),
+  detach_count bigint NOT NULL DEFAULT 0 CHECK (detach_count >= 0),
+  title        text,
+  opened_at    timestamptz NOT NULL DEFAULT now(),
+  updated_at   timestamptz NOT NULL DEFAULT now(),
+  closed_at    timestamptz,
+  -- A session is closed exactly when it left `running`; half-closed rows are
+  -- the bug this pins down.
+  CONSTRAINT pty_session_closed_iff_terminal
+    CHECK ((state = 'running') = (closed_at IS NULL))
+);
+
+CREATE TRIGGER pty_session_cas
+  BEFORE UPDATE ON gwk.pty_session
+  FOR EACH ROW EXECUTE FUNCTION gwk.assert_version_cas('pty_session');
+CREATE TRIGGER pty_session_no_delete
+  BEFORE DELETE ON gwk.pty_session
+  FOR EACH ROW EXECUTE FUNCTION gwk.forbid_state_row_delete('pty_session');
+-- Statement-level TRUNCATE partner, as on gwk.workflow_run: row triggers
+-- never fire on TRUNCATE, and a truncated ledger is the walk-around the
+-- delete guard exists to stop.
+CREATE TRIGGER pty_session_no_truncate
+  BEFORE TRUNCATE ON gwk.pty_session
+  FOR EACH STATEMENT EXECUTE FUNCTION gwk.forbid_state_row_delete('pty_session');
+
+ALTER TABLE gwk.pty_session ENABLE ALWAYS TRIGGER pty_session_cas;
+ALTER TABLE gwk.pty_session ENABLE ALWAYS TRIGGER pty_session_no_delete;
+ALTER TABLE gwk.pty_session ENABLE ALWAYS TRIGGER pty_session_no_truncate;
+
 -- The orchestrator's crash-recovery snapshot, latest-per-orchestrator.
 --
 -- Distinct from `gwk-domain::checkpoint::Checkpoint`, which is the kernel's own
@@ -961,4 +1001,4 @@ COMMIT;
 // unwrapped 64-hex line lands past 100 columns — the generator and
 // rustfmt would then fight, showing up as permanent contract drift.
 pub const CONTRACT_SQL_SHA256: &str =
-    "d748f5490675cebfeab4086e8552976bb8907a6a21bb4a87f848ddeb9796035b";
+    "aba2f647bc7bb447e7b53307196f63df0bc718d479ec4693f6dd34ec9bf7b545";

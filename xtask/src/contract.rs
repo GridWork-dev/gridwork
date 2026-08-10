@@ -16,7 +16,8 @@ use gwk_domain::blob::{BlobAddress, BlobDescriptor};
 use gwk_domain::checkpoint::{CHECKPOINT_SCHEMA_VERSION, Checkpoint};
 use gwk_domain::command::KernelCommand;
 use gwk_domain::entity::{
-    Attempt, Budget, Command, Message, Task, WorkflowRun, WorkspaceNode, WorkspaceNodeKind,
+    Attempt, Budget, Command, Message, PtySession, Task, WorkflowRun, WorkspaceNode,
+    WorkspaceNodeKind,
 };
 use gwk_domain::envelope::{Actor, CommandEnvelope, EventEnvelope, Origin, PayloadRef};
 use gwk_domain::frame::{
@@ -80,6 +81,7 @@ fn bindings() -> String {
         .register::<gwk_domain::entity::Worktree>()
         .register::<gwk_domain::entity::WorkspaceNode>()
         .register::<gwk_domain::entity::WorkflowRun>()
+        .register::<gwk_domain::entity::PtySession>()
         .register::<gwk_domain::entity::Lease>()
         .register::<gwk_domain::entity::DispatchNode>()
         .register::<TransitionResult<TaskState>>()
@@ -315,6 +317,21 @@ fn golden_workflow_run() -> WorkflowRun {
         opened_at: Timestamp::new("2026-08-09T12:00:00Z"),
         updated_at: Timestamp::new("2026-08-09T13:00:00Z"),
         closed_at: Some(Timestamp::new("2026-08-09T13:00:00Z")),
+    }
+}
+
+fn golden_pty_session() -> PtySession {
+    PtySession {
+        id: PtySessionId::new("pty-0001"),
+        version: 5,
+        state: "closed".to_owned(),
+        generation: PtySessionGeneration::new("gen-0001"),
+        attach_count: 3,
+        detach_count: 3,
+        title: Some("the daily driver".to_owned()),
+        opened_at: Timestamp::new("2026-08-09T12:00:00Z"),
+        updated_at: Timestamp::new("2026-08-09T18:00:00Z"),
+        closed_at: Some(Timestamp::new("2026-08-09T18:00:00Z")),
     }
 }
 
@@ -757,6 +774,7 @@ fn goldens() -> Vec<(&'static str, String)> {
         ),
         ("workspace-node.json", pretty(&golden_workspace_node())),
         ("workflow-run.json", pretty(&golden_workflow_run())),
+        ("pty-session.json", pretty(&golden_pty_session())),
         (
             "transition-results.json",
             pretty(&golden_transition_results()),
@@ -925,6 +943,11 @@ pub fn run(check: bool) {
             &ts_goldens_dir,
             find("workflow-run.json"),
         ),
+        round_trip::<PtySession>(
+            "pty-session.json",
+            &ts_goldens_dir,
+            find("pty-session.json"),
+        ),
         round_trip::<Vec<TransitionResult<TaskState>>>(
             "transition-results.json",
             &ts_goldens_dir,
@@ -975,7 +998,7 @@ mod tests {
     /// manual root registry described in its doc comment. Update this
     /// constant AND the `.register()` chain together in the same change;
     /// a mismatch means one moved without the other.
-    const REGISTERED_ROOT_COUNT: usize = 26;
+    const REGISTERED_ROOT_COUNT: usize = 27;
 
     #[test]
     fn bindings_registry_matches_its_pin() {

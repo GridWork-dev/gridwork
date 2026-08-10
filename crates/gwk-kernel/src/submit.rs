@@ -77,6 +77,8 @@ const WORKSPACE_NODE_ANCESTOR: &str = "WITH RECURSIVE ancestors AS ( \
      ) SELECT 1 FROM ancestors WHERE id = $2 LIMIT 1";
 const WORKFLOW_RUN_VERSION: &str = "SELECT version FROM gwk.workflow_run WHERE id = $1";
 const WORKFLOW_RUN_STATE: &str = "SELECT state FROM gwk.workflow_run WHERE id = $1";
+const PTY_SESSION_VERSION: &str = "SELECT version FROM gwk.pty_session WHERE id = $1";
+const PTY_SESSION_STATE: &str = "SELECT state FROM gwk.pty_session WHERE id = $1";
 const AGGREGATE_OWNER: &str = "SELECT project_id FROM gwk.event \
      WHERE aggregate_type = $1 AND aggregate_id = $2 \
      ORDER BY aggregate_version LIMIT 1";
@@ -529,6 +531,38 @@ fn route_of(envelope: &CommandEnvelope, command: &KernelCommand) -> Result<Route
                 "workflow_run_closed",
             )
         }
+
+        C::OpenPtySession {
+            pty_session_id,
+            generation,
+            ..
+        } => {
+            if generation.as_str().trim().is_empty() {
+                return Err(Refusal::validation(
+                    "a pty session opens under a named host generation".to_owned(),
+                ));
+            }
+            (
+                "pty_session",
+                pty_session_id.as_str().to_owned(),
+                "pty_session_opened",
+            )
+        }
+        C::RecordPtyAttach { pty_session_id, .. } => (
+            "pty_session",
+            pty_session_id.as_str().to_owned(),
+            "pty_attach_recorded",
+        ),
+        C::RecordPtyDetach { pty_session_id, .. } => (
+            "pty_session",
+            pty_session_id.as_str().to_owned(),
+            "pty_detach_recorded",
+        ),
+        C::ClosePtySession { pty_session_id, .. } => (
+            "pty_session",
+            pty_session_id.as_str().to_owned(),
+            "pty_session_closed",
+        ),
 
         C::RegisterDispatchNode {
             dispatch_node_id, ..
@@ -1160,6 +1194,7 @@ async fn decide(
         | C::RecordEvidence { .. }
         | C::RecordCostEntry { .. }
         | C::OpenWorkflowRun { .. }
+        | C::OpenPtySession { .. }
         | C::GrantAuthority { .. }
         | C::RaiseAttention { .. } => 0,
 
@@ -1194,6 +1229,45 @@ async fn decide(
                 WORKFLOW_RUN_VERSION,
                 &route.aggregate_id,
                 "workflow_run",
+                *expected_version,
+            )
+            .await?
+        }
+
+        // A pty session leaves `running` exactly once, and every counter bump
+        // rides the same discipline: all three verbs read the state under the
+        // writer lock so a closed session refuses before the CAS can see a
+        // stale version. The no-delete trigger keeps the row for the receipt.
+        C::RecordPtyAttach {
+            pty_session_id,
+            expected_version,
+        }
+        | C::RecordPtyDetach {
+            pty_session_id,
+            expected_version,
+        }
+        | C::ClosePtySession {
+            pty_session_id,
+            expected_version,
+        } => {
+            match pty_session_state(conn, pty_session_id.as_str()).await? {
+                None => {
+                    return Err(Refusal::not_found(format!(
+                        "no pty_session {pty_session_id}"
+                    )));
+                }
+                Some(state) if state != "running" => {
+                    return Err(Refusal::validation(format!(
+                        "pty_session {pty_session_id} already closed as {state}"
+                    )));
+                }
+                Some(_) => {}
+            }
+            decide_cas(
+                conn,
+                PTY_SESSION_VERSION,
+                &route.aggregate_id,
+                "pty_session",
                 *expected_version,
             )
             .await?
@@ -1435,6 +1509,15 @@ async fn workspace_node_kind(conn: &mut PgConnection, id: &str) -> Result<Option
         .fetch_optional(&mut *conn)
         .await
         .map_err(|e| Refusal::storage(format!("read workspace_node kind: {e}")))
+}
+
+/// The state column of one pty session, or `None` when no such row exists.
+async fn pty_session_state(conn: &mut PgConnection, id: &str) -> Result<Option<String>, Refusal> {
+    sqlx::query_scalar::<_, String>(PTY_SESSION_STATE)
+        .bind(id)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(|e| Refusal::storage(format!("read pty_session state: {e}")))
 }
 
 /// The state column of one workflow run, or `None` when no such row exists.
