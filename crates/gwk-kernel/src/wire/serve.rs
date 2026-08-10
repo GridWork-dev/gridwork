@@ -1635,6 +1635,11 @@ mod tests {
         assert!(!active.load(std::sync::atomic::Ordering::Acquire));
         assert_eq!(delivered.load(std::sync::atomic::Ordering::Acquire), 0);
 
+        hub.attach(&session_id, None, None)
+            .expect("raw backpressure must not retire the primary render stream");
+        hub.publish_raw_output(host, &session_id, offered + 1, vec![b'y'])
+            .expect("raw backpressure must not retire the hosted publisher");
+
         // Once writing resumes, the priority response gets through and every
         // queued item from the invalidated stream is discarded before its
         // header. The close therefore cannot sit behind the full queue it
