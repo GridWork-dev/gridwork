@@ -28,8 +28,8 @@ use gwk_domain::fsm::LeaseMode;
 use gwk_domain::ids::{
     AttemptId, AttentionItemId, AuthorityGrantId, ByteCount, CommandId, CostEntryId, CostMicros,
     DispatchNodeId, EngineId, EngineSessionId, EvidenceId, GateId, IdempotencyKey, LeaseId,
-    MessageId, ProjectId, PtySessionId, Seq, TaskId, Timestamp, TokenCount, WorkflowRunId,
-    WorkspaceNodeId, WorktreeId,
+    MessageId, ProjectId, PtySessionGeneration, PtySessionId, Seq, TaskId, Timestamp, TokenCount,
+    WorkflowRunId, WorkspaceNodeId, WorktreeId,
 };
 use gwk_domain::ingestion::IngestionKind;
 use gwk_domain::inherited::OrchestratorCheckpoint;
@@ -798,6 +798,27 @@ pub async fn populate(store: &PgEventStore) {
         KernelCommand::AdvanceWorkflowRun {
             workflow_run_id: WorkflowRunId::new("wfr-1"),
             step: "spec".to_owned(),
+            expected_version: 1,
+        },
+    )
+    .await;
+    // Attached once and left running, so the parity check sees a live counter
+    // and `closed_at` exercises the nullable half of closed-iff-terminal.
+    apply(
+        store,
+        "pty",
+        KernelCommand::OpenPtySession {
+            pty_session_id: PtySessionId::new("pty-1"),
+            generation: PtySessionGeneration::new("gen-1"),
+            title: Some("the parity fixture session".to_owned()),
+        },
+    )
+    .await;
+    apply(
+        store,
+        "pty-att",
+        KernelCommand::RecordPtyAttach {
+            pty_session_id: PtySessionId::new("pty-1"),
             expected_version: 1,
         },
     )

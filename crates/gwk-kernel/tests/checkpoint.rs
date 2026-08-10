@@ -83,6 +83,7 @@ async fn every_projection_round_trips_through_its_contract_type() {
         "lease",
         "message",
         "orchestrator_checkpoint",
+        "pty_session",
         "receipt",
         "task",
         "workflow_run",

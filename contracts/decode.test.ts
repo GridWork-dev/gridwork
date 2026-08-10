@@ -185,6 +185,20 @@ test("workflow run: an open-string step and a terminal close that keeps the row"
   await reemit("workflow-run.json", run);
 });
 
+test("pty session: lifecycle counters and a terminal close that keeps the row", async () => {
+  const raw = await golden("pty-session.json");
+  if (!isRecord(raw)) throw new Error("golden is not an object");
+  const session = raw as B.PtySession_Serialize;
+  expect(session.state).toBe("closed");
+  // The generation names one host lifetime — distinct generations are how
+  // the S8 receipt counts host restarts.
+  expect(session.generation).toBe("gen-0001");
+  expect(session.attach_count).toBe(3);
+  expect(session.detach_count).toBe(3);
+  expect(session.closed_at).toBe("2026-08-09T18:00:00Z");
+  await reemit("pty-session.json", session);
+});
+
 test("transition results: tagged snake_case kinds, exhaustive", async () => {
   const raw = await golden("transition-results.json");
   if (!Array.isArray(raw)) throw new Error("golden is not an array");
