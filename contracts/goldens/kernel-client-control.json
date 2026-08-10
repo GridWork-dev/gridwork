@@ -99,82 +99,100 @@
       "session_id": "pty-1",
       "seq": "43",
       "frame": {
-        "cells": [
+        "styles": [
+          {
+            "bold": false,
+            "dim": false,
+            "italic": false,
+            "blink": false,
+            "inverse": false,
+            "invisible": false,
+            "strikethrough": false,
+            "overline": false
+          },
+          {
+            "bold": true,
+            "dim": false,
+            "italic": false,
+            "blink": true,
+            "inverse": false,
+            "invisible": false,
+            "strikethrough": false,
+            "overline": false,
+            "fg": {
+              "type": "ansi16",
+              "slot": "bright_cyan"
+            }
+          },
+          {
+            "bold": false,
+            "dim": true,
+            "italic": true,
+            "blink": false,
+            "inverse": false,
+            "invisible": false,
+            "strikethrough": false,
+            "overline": false,
+            "underline": {
+              "type": "curly"
+            },
+            "fg": {
+              "type": "truecolor",
+              "r": 255,
+              "g": 0,
+              "b": 128
+            },
+            "bg": {
+              "type": "xterm256",
+              "index": 236
+            },
+            "underline_color": {
+              "type": "ansi16",
+              "slot": "red"
+            }
+          },
+          {
+            "bold": false,
+            "dim": false,
+            "italic": false,
+            "blink": false,
+            "inverse": true,
+            "invisible": true,
+            "strikethrough": true,
+            "overline": true
+          }
+        ],
+        "rows": [
           [
             {
-              "glyph": "g",
-              "style": {
-                "bold": false,
-                "dim": false,
-                "italic": false,
-                "blink": false,
-                "inverse": false,
-                "invisible": false,
-                "strikethrough": false,
-                "overline": false
-              }
+              "type": "cells",
+              "style": 0,
+              "glyphs": [
+                "g",
+                "w"
+              ]
             },
             {
-              "glyph": "w",
-              "style": {
-                "bold": true,
-                "dim": false,
-                "italic": false,
-                "blink": true,
-                "inverse": false,
-                "invisible": false,
-                "strikethrough": false,
-                "overline": false,
-                "fg": {
-                  "type": "ansi16",
-                  "slot": "bright_cyan"
-                }
-              }
+              "type": "fill",
+              "style": 1,
+              "glyph": " ",
+              "count": 1
             }
           ],
           [
             {
-              "glyph": "k",
-              "style": {
-                "bold": false,
-                "dim": true,
-                "italic": true,
-                "blink": false,
-                "inverse": false,
-                "invisible": false,
-                "strikethrough": false,
-                "overline": false,
-                "underline": {
-                  "type": "curly"
-                },
-                "fg": {
-                  "type": "truecolor",
-                  "r": 255,
-                  "g": 0,
-                  "b": 128
-                },
-                "bg": {
-                  "type": "xterm256",
-                  "index": 236
-                },
-                "underline_color": {
-                  "type": "ansi16",
-                  "slot": "red"
-                }
-              }
+              "type": "cells",
+              "style": 2,
+              "glyphs": [
+                "k",
+                ""
+              ]
             },
             {
-              "glyph": "",
-              "style": {
-                "bold": false,
-                "dim": false,
-                "italic": false,
-                "blink": false,
-                "inverse": true,
-                "invisible": true,
-                "strikethrough": true,
-                "overline": true
-              }
+              "type": "fill",
+              "style": 3,
+              "glyph": " ",
+              "count": 1
             }
           ]
         ]
@@ -191,40 +209,30 @@
       "deltas": [
         {
           "type": "cells_changed",
+          "styles": [
+            {
+              "bold": false,
+              "dim": false,
+              "italic": false,
+              "blink": false,
+              "inverse": false,
+              "invisible": false,
+              "strikethrough": false,
+              "overline": false
+            }
+          ],
           "updates": [
             {
               "row": 0,
               "col": 0,
-              "cell": {
-                "glyph": "G",
-                "style": {
-                  "bold": false,
-                  "dim": false,
-                  "italic": false,
-                  "blink": false,
-                  "inverse": false,
-                  "invisible": false,
-                  "strikethrough": false,
-                  "overline": false
-                }
-              }
+              "glyph": "G",
+              "style": 0
             },
             {
               "row": 0,
               "col": 1,
-              "cell": {
-                "glyph": "W",
-                "style": {
-                  "bold": false,
-                  "dim": false,
-                  "italic": false,
-                  "blink": false,
-                  "inverse": false,
-                  "invisible": false,
-                  "strikethrough": false,
-                  "overline": false
-                }
-              }
+              "glyph": "W",
+              "style": 0
             }
           ]
         },
