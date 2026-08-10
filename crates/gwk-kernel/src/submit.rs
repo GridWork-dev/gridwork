@@ -1234,15 +1234,12 @@ async fn decide(
             .await?
         }
 
-        // A pty session leaves `running` exactly once, and every counter bump
-        // rides the same discipline: all three verbs read the state under the
-        // writer lock so a closed session refuses before the CAS can see a
-        // stale version. The no-delete trigger keeps the row for the receipt.
+        // A pty session leaves `running` exactly once, and an attach requires
+        // a session that can still be attached: both verbs read the state
+        // under the writer lock so a closed session refuses before the CAS
+        // can see a stale version. The no-delete trigger keeps the row for
+        // the receipt.
         C::RecordPtyAttach {
-            pty_session_id,
-            expected_version,
-        }
-        | C::RecordPtyDetach {
             pty_session_id,
             expected_version,
         }
@@ -1262,6 +1259,32 @@ async fn decide(
                     )));
                 }
                 Some(_) => {}
+            }
+            decide_cas(
+                conn,
+                PTY_SESSION_VERSION,
+                &route.aggregate_id,
+                "pty_session",
+                *expected_version,
+            )
+            .await?
+        }
+
+        // A detach is TRUE HISTORY even on a closed row: a retire drops the
+        // broadcast sender and the live attach streams end AFTER the close
+        // lands, so refusing here would systematically undercount the S8
+        // receipt's detach figure. Existence is still required.
+        C::RecordPtyDetach {
+            pty_session_id,
+            expected_version,
+        } => {
+            if pty_session_state(conn, pty_session_id.as_str())
+                .await?
+                .is_none()
+            {
+                return Err(Refusal::not_found(format!(
+                    "no pty_session {pty_session_id}"
+                )));
             }
             decide_cas(
                 conn,

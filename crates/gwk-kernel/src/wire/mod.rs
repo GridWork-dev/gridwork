@@ -22,6 +22,7 @@ pub mod frame;
 pub mod hello;
 pub mod listen;
 pub mod pty;
+pub(crate) mod receipts;
 pub mod serve;
 pub mod strict;
 pub mod subscribe;

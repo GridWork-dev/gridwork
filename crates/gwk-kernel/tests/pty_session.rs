@@ -98,22 +98,34 @@ async fn a_session_counts_attaches_and_closes_terminal() {
 
 #[tokio::test]
 #[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
-async fn a_closed_session_refuses_every_further_verb() {
+async fn a_closed_session_refuses_reattach_and_reclose_but_records_a_late_detach() {
     let maintenance = maintenance_pool().await;
     let (name, store) = fresh_store(&maintenance, "pty_closed", 8).await;
 
     apply(&store, "open", open("pty-1", "gen-1")).await;
-    apply(&store, "done", close("pty-1", 1)).await;
+    apply(&store, "att", attach("pty-1", 1)).await;
+    apply(&store, "done", close("pty-1", 2)).await;
 
-    let (code, msg) = refuse(&store, "att-after", attach("pty-1", 2)).await;
+    let (code, msg) = refuse(&store, "att-after", attach("pty-1", 3)).await;
     assert_eq!(code, KernelErrorCode::Validation);
     assert!(msg.contains("already closed as closed"), "{msg}");
-    let (code, msg) = refuse(&store, "det-after", detach("pty-1", 2)).await;
+    let (code, msg) = refuse(&store, "close-again", close("pty-1", 3)).await;
     assert_eq!(code, KernelErrorCode::Validation);
     assert!(msg.contains("already closed"), "{msg}");
-    let (code, msg) = refuse(&store, "close-again", close("pty-1", 2)).await;
-    assert_eq!(code, KernelErrorCode::Validation);
-    assert!(msg.contains("already closed"), "{msg}");
+
+    // A detach AFTER the close is true history: a retire drops the broadcast
+    // sender and the attach streams end after the close lands. Refusing it
+    // would systematically undercount the receipt's detach figure.
+    apply(&store, "det-after", detach("pty-1", 3)).await;
+    let row = sqlx::query(
+        "SELECT state, attach_count, detach_count FROM gwk.pty_session WHERE id = 'pty-1'",
+    )
+    .fetch_one(store.pool())
+    .await
+    .expect("the closed row");
+    assert_eq!(row.get::<String, _>("state"), "closed");
+    assert_eq!(row.get::<i64, _>("attach_count"), 1);
+    assert_eq!(row.get::<i64, _>("detach_count"), 1);
 
     drop(store);
     drop_database(&maintenance, &name).await;
