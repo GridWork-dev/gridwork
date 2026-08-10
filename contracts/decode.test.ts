@@ -327,7 +327,8 @@ test("client control: tagged frames, number major, decimal-string cursor", async
   expect(publishRequest["seq"]).toMatch(DECIMAL);
   const publishedFrame = publishRequest["frame"];
   if (!isRecord(publishedFrame)) throw new Error("published frame missing");
-  expect(Array.isArray(publishedFrame["cells"])).toBe(true);
+  expect(Array.isArray(publishedFrame["styles"])).toBe(true);
+  expect(Array.isArray(publishedFrame["rows"])).toBe(true);
 
   const publishDeltas = raw[9];
   if (!isRecord(publishDeltas)) throw new Error("frame 9 missing");
@@ -465,7 +466,21 @@ test("server control: refusals are values, cursors survive a disconnect", async 
   expect(snapshotResult["seq"]).toMatch(DECIMAL);
   const frame = snapshotResult["frame"];
   if (!isRecord(frame)) throw new Error("pty frame missing");
-  expect(Array.isArray(frame["cells"])).toBe(true);
+  const styles = frame["styles"];
+  const rows = frame["rows"];
+  if (!Array.isArray(styles) || !Array.isArray(rows)) {
+    throw new Error("interned frame halves missing");
+  }
+  // Every run names its style by index into the frame's own table — no index
+  // space outlives the message.
+  for (const row of rows) {
+    if (!Array.isArray(row)) throw new Error("row is not a run list");
+    for (const run of row) {
+      if (!isRecord(run)) throw new Error("run missing");
+      expect(typeof run["style"]).toBe("number");
+      expect((run["style"] as number) < styles.length).toBe(true);
+    }
+  }
   const frameJson = JSON.stringify(frame);
   for (const tier of ["ansi16", "xterm256", "truecolor"]) {
     expect(frameJson).toContain(`"type":"${tier}"`);
