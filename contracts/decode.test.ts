@@ -24,6 +24,27 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+function bytesFromHex(hex: string): Uint8Array {
+  if (!/^(?:[0-9a-f]{2})+$/.test(hex)) throw new Error("wire golden is not lowercase hex");
+  return Uint8Array.from(hex.match(/../g) ?? [], (byte) => Number.parseInt(byte, 16));
+}
+
+function readWireFrame(
+  wire: Uint8Array,
+  offset: number,
+): { kind: number; body: Uint8Array; next: number } {
+  if (wire.length - offset < 5) throw new Error("truncated frame header");
+  const length = new DataView(wire.buffer, wire.byteOffset, wire.byteLength).getUint32(offset, false);
+  if (length < 1) throw new Error("frame length omitted the kind byte");
+  const next = offset + 4 + length;
+  if (next > wire.length) throw new Error("truncated frame body");
+  return {
+    kind: wire[offset + 4]!,
+    body: wire.slice(offset + 5, next),
+    next,
+  };
+}
+
 // ---- compile-time contract: mutual structural assignability ----
 // A hand-written expectation of the envelope's serialize shape; if either
 // direction stops extending, the contract moved and this file goes red.
@@ -243,22 +264,32 @@ test("client control: tagged frames, number major, decimal-string cursor", async
     "request",
     "request",
     "request",
+    "request",
+    "pty_raw_publish_snapshot",
+    "pty_raw_publish_output",
+    "request",
   ]);
 
   for (const frame of frames) {
-    // Exhaustive narrow: a third ClientControl variant fails the `never` arm.
+    // Exhaustive narrow: any unhandled ClientControl variant fails the `never` arm.
     switch (frame.type) {
       case "hello": {
         // The version is a bounded JSON NUMBER — the decimal-string rule is
         // for 64-bit counters, not for this.
         const major: number = frame.protocol_major;
         expect(major).toBe(1);
-        expect(frame.capabilities).toEqual(["event_subscribe", "blob"]);
+        expect(frame.capabilities).toEqual(["event_subscribe", "blob", "pty_raw"]);
         for (const name of frame.capabilities) expect(name).toMatch(/^[a-z][a-z0-9_]*$/);
         break;
       }
       case "request": {
         expect(typeof frame.request_id).toBe("string");
+        break;
+      }
+      case "pty_raw_publish_snapshot":
+      case "pty_raw_publish_output": {
+        expect(typeof frame.request_id).toBe("string");
+        expect(frame.byte_size).toMatch(DECIMAL);
         break;
       }
       default: {
@@ -344,6 +375,31 @@ test("client control: tagged frames, number major, decimal-string cursor", async
   if (!isRecord(retireRequest)) throw new Error("pty retire request missing");
   expect(retireRequest["type"]).toBe("pty_retire");
 
+  const rawAttach = raw[11];
+  if (!isRecord(rawAttach)) throw new Error("frame 11 missing");
+  const rawAttachRequest = rawAttach["request"];
+  if (!isRecord(rawAttachRequest)) throw new Error("raw attach request missing");
+  expect(rawAttachRequest["type"]).toBe("pty_raw_attach");
+  expect(rawAttachRequest["cursor"]).toMatch(DECIMAL);
+
+  const rawSnapshot = raw[12];
+  if (!isRecord(rawSnapshot)) throw new Error("frame 12 missing");
+  expect(rawSnapshot["type"]).toBe("pty_raw_publish_snapshot");
+  expect(rawSnapshot["byte_size"]).toMatch(DECIMAL);
+  expect("seq" in rawSnapshot).toBe(false);
+
+  const rawOutput = raw[13];
+  if (!isRecord(rawOutput)) throw new Error("frame 13 missing");
+  expect(rawOutput["type"]).toBe("pty_raw_publish_output");
+  expect(rawOutput["seq"]).toMatch(DECIMAL);
+
+  const rawResize = raw[14];
+  if (!isRecord(rawResize)) throw new Error("frame 14 missing");
+  const rawResizeRequest = rawResize["request"];
+  if (!isRecord(rawResizeRequest)) throw new Error("raw resize request missing");
+  expect(rawResizeRequest["type"]).toBe("pty_publish_raw_resize");
+  expect(rawResizeRequest["seq"]).toMatch(DECIMAL);
+
   await reemit("kernel-client-control.json", frames);
 });
 
@@ -365,15 +421,21 @@ test("server control: refusals are values, cursors survive a disconnect", async 
     "pty_stream_closed",
     "response",
     "response",
+    "response",
+    "pty_raw_snapshot",
+    "pty_raw_chunk",
+    "pty_raw_resized",
+    "pty_raw_stream_closed",
+    "response",
   ]);
 
   for (const frame of frames) {
     // Exhaustive narrow over every server frame kind.
     switch (frame.type) {
       case "hello_ack": {
-        // The INTERSECTION: the client asked for two capabilities and was
-        // granted one. A client must not assume the one that is absent.
-        expect(frame.capabilities).toEqual(["event_subscribe"]);
+        // The INTERSECTION: the client asked for three capabilities and was
+        // granted one. A client must not assume either absent capability.
+        expect(frame.capabilities).toEqual(["pty_raw"]);
         expect(frame.sealed).toBe(true);
         break;
       }
@@ -409,6 +471,29 @@ test("server control: refusals are values, cursors survive a disconnect", async 
         expect(frame.code).toBe("slow_consumer");
         // The PTY analogue of `stream_closed.last_cursor`, on its own
         // sequence axis — a reattach resumes from here, not from `Seq`.
+        expect(frame.last_seq).toMatch(DECIMAL);
+        break;
+      }
+      case "pty_raw_snapshot": {
+        expect(frame.generation).toBe("pty-life-1");
+        expect(frame.byte_size).toMatch(DECIMAL);
+        expect(frame.seq).toBeUndefined();
+        break;
+      }
+      case "pty_raw_chunk": {
+        expect(frame.generation).toBe("pty-life-1");
+        expect(frame.byte_size).toMatch(DECIMAL);
+        expect(frame.seq).toMatch(DECIMAL);
+        break;
+      }
+      case "pty_raw_resized": {
+        expect(frame.generation).toBe("pty-life-1");
+        expect(frame.seq).toMatch(DECIMAL);
+        break;
+      }
+      case "pty_raw_stream_closed": {
+        expect(frame.generation).toBe("pty-life-1");
+        expect(frame.code).toBe("slow_consumer");
         expect(frame.last_seq).toMatch(DECIMAL);
         break;
       }
@@ -499,7 +584,62 @@ test("server control: refusals are values, cursors survive a disconnect", async 
   if (!isRecord(retiredResult)) throw new Error("pty retired result missing");
   expect(retiredResult["type"]).toBe("pty_retired");
 
+  const rawAttached = raw[13];
+  if (!isRecord(rawAttached)) throw new Error("frame 13 missing");
+  const rawAttachedResult = rawAttached["result"];
+  if (!isRecord(rawAttachedResult)) throw new Error("raw attached result missing");
+  expect(rawAttachedResult["type"]).toBe("pty_raw_attached");
+  expect("cursor" in rawAttachedResult).toBe(false);
+
+  const rawSnapshot = raw[14];
+  if (!isRecord(rawSnapshot)) throw new Error("frame 14 missing");
+  expect(rawSnapshot["type"]).toBe("pty_raw_snapshot");
+  expect(rawSnapshot["byte_size"]).toMatch(DECIMAL);
+  expect("seq" in rawSnapshot).toBe(false);
+
+  const rawChunk = raw[15];
+  if (!isRecord(rawChunk)) throw new Error("frame 15 missing");
+  expect(rawChunk["type"]).toBe("pty_raw_chunk");
+  expect(rawChunk["seq"]).toMatch(DECIMAL);
+
+  const rawClosed = raw[17];
+  if (!isRecord(rawClosed)) throw new Error("frame 17 missing");
+  expect(rawClosed["type"]).toBe("pty_raw_stream_closed");
+  expect(rawClosed["code"]).toBe("slow_consumer");
+
   await reemit("kernel-server-control.json", frames);
+});
+
+test("raw PTY wire goldens pair each JSON header with one byte-exact kind-0x02 frame", async () => {
+  const raw = await golden("pty-raw-wire.json");
+  if (!isRecord(raw)) throw new Error("raw wire golden is not an object");
+
+  for (const direction of ["publish", "delivery"] as const) {
+    const pair = raw[direction];
+    if (!isRecord(pair) || typeof pair["wire_hex"] !== "string") {
+      throw new Error(`${direction} raw wire pair missing`);
+    }
+    const wire = bytesFromHex(pair["wire_hex"]);
+    const headerFrame = readWireFrame(wire, 0);
+    const payloadFrame = readWireFrame(wire, headerFrame.next);
+    expect(headerFrame.kind).toBe(0x01);
+    expect(payloadFrame.kind).toBe(0x02);
+    expect(payloadFrame.next).toBe(wire.length);
+
+    const header = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(headerFrame.body));
+    if (direction === "publish") {
+      const typed = header as B.ClientControl_Serialize;
+      expect(typed.type).toBe("pty_raw_publish_output");
+    } else {
+      const typed = header as B.ServerControl_Serialize;
+      expect(typed.type).toBe("pty_raw_chunk");
+    }
+    if (!isRecord(header)) throw new Error(`${direction} header is not an object`);
+    expect(header["byte_size"]).toBe(String(payloadFrame.body.length));
+    expect(Array.from(payloadFrame.body)).toEqual([0x00, 0xff, 0x1b, 0x5b, 0xc3]);
+  }
+
+  await reemit("pty-raw-wire.json", raw);
 });
 
 test("kernel checkpoint: decimal-string sequence, lowercase digest", async () => {

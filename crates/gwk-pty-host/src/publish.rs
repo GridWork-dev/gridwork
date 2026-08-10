@@ -5,7 +5,8 @@
 //! connection — the client asks one question at a time by design, and a
 //! session's stream is exactly one conversation. The task attaches to its
 //! own registry session like any consumer would, publishes the catch-up
-//! snapshot, then forwards every live batch; on any break in continuity —
+//! render snapshot and raw VT seed, then forwards every live delta and raw
+//! event; on any break in continuity —
 //! the kernel restarting, this connection refused as stale, the local
 //! broadcast lagging — it drops the connection and starts over from a fresh
 //! local attach, which is always sufficient: a snapshot reseed is the
@@ -29,7 +30,7 @@ use tokio::sync::watch;
 
 use crate::kernel_client::{KernelClient, KernelClientError};
 use crate::registry::Attacher;
-use crate::session::{CatchUp, RestartPolicy, SessionConfig};
+use crate::session::{CatchUp, RawEvent, RestartPolicy, SessionConfig};
 
 /// The operator's session declarations: comma-separated
 /// `name=engine:COLSxROWS` entries, e.g.
@@ -275,42 +276,77 @@ async fn publish_once(
         return Outcome::Retry("a fresh attach was not snapshotted".to_owned());
     };
     let mut live = attached.live;
+    let mut raw_live = attached.raw_live;
     if let Err(e) = client.publish_snapshot(id, seed.seq, seed.frame).await {
         return refusal_outcome("seed", &e);
     }
+    let raw_enabled = client.raw_enabled();
+    if raw_enabled {
+        let Some(raw_snapshot) = attached.raw_snapshot else {
+            return Outcome::Fatal("the session could not produce a raw VT snapshot".to_owned());
+        };
+        if let Err(e) = client.publish_raw_snapshot(id, &raw_snapshot).await {
+            return refusal_outcome("raw seed", &e);
+        }
+    }
 
     loop {
-        let batch = tokio::select! {
-            batch = live.recv() => batch,
+        tokio::select! {
+            batch = live.recv() => match batch {
+                Ok(batch) => {
+                    if let Err(e) = client
+                        .publish_deltas(id, batch.seq, batch.deltas.as_ref().clone())
+                        .await
+                    {
+                        // A stale-view refusal resyncs through the retry's fresh
+                        // snapshot; a validation refusal never would.
+                        return refusal_outcome("deltas", &e);
+                    }
+                }
+                // This publisher fell behind its own session's broadcast. The
+                // batches it missed are unrecoverable on this subscription, so
+                // resync the way the wire contract resyncs any gap: reconnect
+                // and reseed from a fresh snapshot.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                    return Outcome::Retry(format!(
+                        "lagged {missed} batches behind the session"
+                    ));
+                }
+                // The session's task ended: tell the kernel now instead of
+                // waiting for the socket to say it.
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    let _ = client.retire(id).await;
+                    return Outcome::SessionOver;
+                }
+            },
+            raw = raw_live.recv(), if raw_enabled => match raw {
+                Ok(raw) => {
+                    let published = match raw.event {
+                        RawEvent::Output(bytes) => client
+                            .publish_raw_output(id, raw.seq, bytes.as_slice())
+                            .await,
+                        RawEvent::Resize { cols, rows } => client
+                            .publish_raw_resize(id, raw.seq, rows, cols)
+                            .await,
+                    };
+                    if let Err(e) = published {
+                        return refusal_outcome("raw event", &e);
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                    return Outcome::Retry(format!(
+                        "lagged {missed} raw events behind the session"
+                    ));
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    let _ = client.retire(id).await;
+                    return Outcome::SessionOver;
+                }
+            },
             _ = stop.changed() => {
                 // A last courtesy so consumers see a typed close now rather
                 // than at the socket teardown; failure is fine — hanging up
                 // retires just the same.
-                let _ = client.retire(id).await;
-                return Outcome::SessionOver;
-            }
-        };
-        match batch {
-            Ok(batch) => {
-                if let Err(e) = client
-                    .publish_deltas(id, batch.seq, batch.deltas.as_ref().clone())
-                    .await
-                {
-                    // A stale-view refusal resyncs through the retry's fresh
-                    // snapshot; a validation refusal never would.
-                    return refusal_outcome("deltas", &e);
-                }
-            }
-            // This publisher fell behind its own session's broadcast. The
-            // batches it missed are unrecoverable on this subscription, so
-            // resync the way the wire contract resyncs any gap: reconnect
-            // and reseed from a fresh snapshot.
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
-                return Outcome::Retry(format!("lagged {missed} batches behind the session"));
-            }
-            // The session's task ended: tell the kernel now instead of
-            // waiting for the socket to say it.
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                 let _ = client.retire(id).await;
                 return Outcome::SessionOver;
             }

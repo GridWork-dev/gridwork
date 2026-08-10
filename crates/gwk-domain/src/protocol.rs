@@ -4,7 +4,8 @@
 //! `body_length` INCLUDES the kind byte and EXCLUDES the four-byte prefix, so a
 //! reader bounds its allocation before it parses anything. Kind `0x01` carries
 //! exactly one UTF-8 JSON control value: a [`ClientControl`] or a
-//! [`ServerControl`].
+//! [`ServerControl`]. Capability-gated kind `0x02` carries the raw PTY payload
+//! announced by the JSON header immediately before it.
 //!
 //! **Scope of this module.** It defines the frame bounds and the control
 //! grammar. It does NOT decode frames: ADR 0001 requires a *validating*
@@ -113,6 +114,9 @@ pub const FRAME_BODY_MIN_BYTES: u32 = 1;
 /// Largest legal `body_length`, kind byte included. Checked BEFORE allocation.
 pub const FRAME_BODY_MAX_BYTES: u32 = 4 * 1024 * 1024;
 
+/// Largest payload one frame can carry after its kind byte.
+pub const FRAME_PAYLOAD_MAX_BYTES: usize = FRAME_BODY_MAX_BYTES as usize - 1;
+
 /// The first frame must be a hello no larger than this.
 pub const HELLO_MAX_BYTES: u32 = 64 * 1024;
 
@@ -169,6 +173,14 @@ pub const MAX_CAPABILITIES: usize = 64;
 /// Longest capability name, in bytes.
 pub const CAPABILITY_NAME_MAX_BYTES: usize = 64;
 
+/// Negotiates the raw PTY fallback. A peer must not send kind `0x02`, ask for
+/// a raw attach, or publish a raw payload unless this name was granted by the
+/// hello.
+pub const PTY_RAW_CAPABILITY: &str = "pty_raw";
+
+/// Longest a publisher may leave a raw header without its paired payload.
+pub const PTY_RAW_PAYLOAD_DEADLINE_SECS: u64 = 5;
+
 // Relations between the bounds, checked at COMPILE time in every build — a
 // later edit that makes the hello cap exceed the frame cap, or the blob chunk
 // size unshippable once base64 expands it (4 bytes out per 3 in), fails to
@@ -176,6 +188,9 @@ pub const CAPABILITY_NAME_MAX_BYTES: usize = 64;
 const _: () = {
     assert!(HELLO_MAX_BYTES < FRAME_BODY_MAX_BYTES);
     assert!(FRAME_BODY_MIN_BYTES >= 1);
+    assert!(
+        FRAME_PAYLOAD_MAX_BYTES + FRAME_BODY_MIN_BYTES as usize == FRAME_BODY_MAX_BYTES as usize
+    );
     // A poll slower than the slow-consumer timeout would let a subscriber be
     // disconnected for not keeping up before it had been offered a second thing
     // to read.
@@ -189,23 +204,21 @@ const _: () = {
 pub enum FrameKind {
     /// Exactly one UTF-8 JSON control value.
     Json = 0x01,
+    /// One raw terminal payload. Its JSON header immediately precedes it and
+    /// carries the session/request correlation and byte count.
+    PtyRaw = 0x02,
 }
-
-/// Reserved for the terminal engine's raw bytes. It is neither advertised
-/// nor accepted in v1 — reserving the number here is what stops v1 from
-/// spending it on something else.
-pub const FRAME_KIND_RESERVED_STREAM: u8 = 0x02;
 
 impl FrameKind {
     pub const fn as_u8(self) -> u8 {
         self as u8
     }
 
-    /// Decode a kind byte. The reserved engine kind and every unknown byte are the
-    /// same answer: `None`, refused before any body is parsed.
+    /// Decode a kind byte. Every unknown byte is refused before any body is parsed.
     pub const fn from_u8(value: u8) -> Option<Self> {
         match value {
             0x01 => Some(Self::Json),
+            0x02 => Some(Self::PtyRaw),
             _ => None,
         }
     }
@@ -722,6 +735,22 @@ pub enum KernelRequest {
         #[specta(optional)]
         cursor: Option<PtyFrameSeq>,
     },
+    /// Attach to the same hosted session as [`Self::PtyAttach`], but receive
+    /// its model-produced VT snapshot and subsequent child-output bytes rather
+    /// than styled render-state deltas. A matching generation/cursor replays
+    /// the retained raw events; any stale or evicted position reseeds with a
+    /// fresh raw snapshot. Kind `0x02` payloads are always announced by a
+    /// [`ServerControl::PtyRawSnapshot`] or [`ServerControl::PtyRawChunk`]
+    /// header, so arbitrary bytes never have to encode their own metadata.
+    PtyRawAttach {
+        session_id: PtySessionId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[specta(optional)]
+        generation: Option<PtySessionGeneration>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[specta(optional)]
+        cursor: Option<PtyFrameSeq>,
+    },
     /// One full styled frame at its current revision — the seed a client
     /// applies later deltas onto. Served whether or not the session is
     /// attached, like [`Self::ReadEvents`] beside [`Self::SubscribeEvents`].
@@ -768,6 +797,15 @@ pub enum KernelRequest {
         session_id: PtySessionId,
         seq: PtyFrameSeq,
         deltas: Vec<PtyDelta>,
+    },
+    /// Publish the non-byte half of the raw stream. A resize is an operation on
+    /// the terminal interface, not bytes a child wrote, so it stays a typed
+    /// control value while output and snapshots use kind `0x02`.
+    PtyPublishRawResize {
+        session_id: PtySessionId,
+        seq: PtyFrameSeq,
+        rows: u16,
+        cols: u16,
     },
     /// Retire a hosted session the publishing connection claimed: attached
     /// consumers see [`ServerControl::PtyStreamClosed`] and later requests
@@ -900,6 +938,18 @@ pub enum KernelResult {
         #[specta(optional)]
         cursor: Option<PtyFrameSeq>,
     },
+    /// The raw fallback attach is live. `cursor` is the head the catch-up will
+    /// reach; a client whose requested cursor is echoed receives retained raw
+    /// events only, while any other answer starts with a raw snapshot.
+    PtyRawAttached {
+        session_id: PtySessionId,
+        generation: PtySessionGeneration,
+        rows: u16,
+        cols: u16,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[specta(optional)]
+        cursor: Option<PtyFrameSeq>,
+    },
     PtySnapshot {
         session_id: PtySessionId,
         generation: PtySessionGeneration,
@@ -952,6 +1002,27 @@ pub enum ClientControl {
     Request {
         request_id: RequestId,
         request: KernelRequest,
+    },
+    /// Header for a model-produced VT snapshot. The next frame MUST be kind
+    /// `0x02` with exactly `byte_size` bytes; the response is delayed until
+    /// both frames have been validated and the snapshot has landed.
+    PtyRawPublishSnapshot {
+        request_id: RequestId,
+        session_id: PtySessionId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[specta(optional)]
+        seq: Option<PtyFrameSeq>,
+        rows: u16,
+        cols: u16,
+        byte_size: ByteCount,
+    },
+    /// Header for child-output bytes. The next frame MUST be kind `0x02` with
+    /// exactly `byte_size` bytes; those bytes stay opaque to the kernel.
+    PtyRawPublishOutput {
+        request_id: RequestId,
+        session_id: PtySessionId,
+        seq: PtyFrameSeq,
+        byte_size: ByteCount,
     },
 }
 
@@ -1006,12 +1077,53 @@ pub enum ServerControl {
         deltas: Vec<PtyDelta>,
         seq: PtyFrameSeq,
     },
+    /// Announces that the immediately following kind `0x02` frame is a VT
+    /// snapshot. `byte_size` lets the client reject a missing, wrong-kind, or
+    /// wrong-length payload before feeding any bytes to its terminal model.
+    /// `seq` is absent when the hosted session has not produced a revision yet.
+    PtyRawSnapshot {
+        request_id: RequestId,
+        generation: PtySessionGeneration,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[specta(optional)]
+        seq: Option<PtyFrameSeq>,
+        rows: u16,
+        cols: u16,
+        byte_size: ByteCount,
+    },
+    /// Announces that the immediately following kind `0x02` frame is child
+    /// output at `seq`.
+    PtyRawChunk {
+        request_id: RequestId,
+        generation: PtySessionGeneration,
+        seq: PtyFrameSeq,
+        byte_size: ByteCount,
+    },
+    /// A resize on the raw fallback stream. It carries no byte payload.
+    PtyRawResized {
+        request_id: RequestId,
+        generation: PtySessionGeneration,
+        seq: PtyFrameSeq,
+        rows: u16,
+        cols: u16,
+    },
     /// A PTY attach ended. `generation` qualifies `last_seq`, the last delta
     /// revision the consumer actually received — the PTY analogue of
     /// [`Self::StreamClosed`], kept as its own variant rather than reusing that
     /// one because the two carry different sequence axes ([`Seq`] there,
     /// [`PtyFrameSeq`] here).
     PtyStreamClosed {
+        request_id: RequestId,
+        generation: PtySessionGeneration,
+        code: KernelErrorCode,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[specta(optional)]
+        last_seq: Option<PtyFrameSeq>,
+    },
+    /// A raw fallback attach ended. `last_seq` is conservative: it never leads
+    /// the last payload fully written to the client, so replay may repeat but
+    /// cannot skip output.
+    PtyRawStreamClosed {
         request_id: RequestId,
         generation: PtySessionGeneration,
         code: KernelErrorCode,
@@ -1065,13 +1177,43 @@ mod tests {
     }
 
     #[test]
-    fn frame_kind_admits_json_only_and_reserves_the_engine_byte() {
+    fn frame_kind_admits_json_and_the_raw_pty_stream_only() {
         assert_eq!(FrameKind::Json.as_u8(), 0x01);
+        assert_eq!(FrameKind::PtyRaw.as_u8(), 0x02);
         assert_eq!(FrameKind::from_u8(0x01), Some(FrameKind::Json));
-        // Reserved for the engine stage: refused in v1 like an unknown byte.
-        assert_eq!(FrameKind::from_u8(FRAME_KIND_RESERVED_STREAM), None);
+        assert_eq!(FrameKind::from_u8(0x02), Some(FrameKind::PtyRaw));
         assert_eq!(FrameKind::from_u8(0x00), None);
         assert_eq!(FrameKind::from_u8(0xFF), None);
+    }
+
+    #[test]
+    fn raw_publish_headers_and_attach_controls_round_trip_without_touching_the_bytes() {
+        let header = ClientControl::PtyRawPublishOutput {
+            request_id: RequestId::new("raw-publish-1"),
+            session_id: PtySessionId::new("pty-1"),
+            seq: PtyFrameSeq::new(8),
+            byte_size: ByteCount::new(5),
+        };
+        let json = serde_json::to_value(&header).expect("serialize raw header");
+        assert_eq!(json["type"], "pty_raw_publish_output");
+        assert_eq!(json["byte_size"], "5");
+        assert_eq!(
+            serde_json::from_value::<ClientControl>(json).expect("decode raw header"),
+            header
+        );
+
+        let attach = KernelRequest::PtyRawAttach {
+            session_id: PtySessionId::new("pty-1"),
+            generation: Some(PtySessionGeneration::new("life-1")),
+            cursor: Some(PtyFrameSeq::new(7)),
+        };
+        let json = serde_json::to_value(&attach).expect("serialize raw attach");
+        assert_eq!(json["type"], "pty_raw_attach");
+        assert_eq!(json["cursor"], "7");
+        assert_eq!(
+            serde_json::from_value::<KernelRequest>(json).expect("decode raw attach"),
+            attach
+        );
     }
 
     #[test]

@@ -10,6 +10,7 @@
 //! bun tests, committed) back through serde to prove TS -> Rust decoding agrees.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use gwk_domain::blob::{BlobAddress, BlobDescriptor};
@@ -31,8 +32,8 @@ use gwk_domain::ids::{
 };
 use gwk_domain::inherited::{BudgetCursor, OrchestratorCheckpoint, PendingApproval};
 use gwk_domain::protocol::{
-    CapabilityName, ClientControl, KernelErrorCode, KernelRequest, KernelResult, PROTOCOL_MINOR,
-    ProjectionKind, ProtocolVersion, ServerControl,
+    CapabilityName, ClientControl, FrameKind, KernelErrorCode, KernelRequest, KernelResult,
+    PROTOCOL_MINOR, ProjectionKind, ProtocolVersion, ServerControl,
 };
 use gwk_domain::transition::TransitionResult;
 
@@ -99,10 +100,17 @@ fn bindings() -> String {
     // PhasesFormat, not the unified Format: `skip_serializing_if` (the
     // tri-state omission) is direction-dependent, which unified mode refuses
     // to represent.
-    specta_typescript::Typescript::default()
+    let exported = specta_typescript::Typescript::default()
         .header(HEADER)
         .export(&types, specta_serde::PhasesFormat)
-        .expect("typescript export")
+        .expect("typescript export");
+    // The exporter leaves a separator space at the end of multiline unions.
+    // Generated output is still source: keep it clean under `git diff --check`.
+    exported
+        .split('\n')
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn signal_theme_json() -> String {
@@ -530,7 +538,11 @@ fn golden_client_control() -> Vec<ClientControl> {
         ClientControl::Hello {
             protocol_major: ProtocolVersion::V1,
             protocol_minor: PROTOCOL_MINOR,
-            capabilities: vec![capability("event_subscribe"), capability("blob")],
+            capabilities: vec![
+                capability("event_subscribe"),
+                capability("blob"),
+                capability("pty_raw"),
+            ],
             client: Some("gw".into()),
         },
         ClientControl::Request {
@@ -604,6 +616,37 @@ fn golden_client_control() -> Vec<ClientControl> {
                 session_id: pty_session_id(),
             },
         },
+        ClientControl::Request {
+            request_id: RequestId::new("req-11"),
+            request: KernelRequest::PtyRawAttach {
+                session_id: pty_session_id(),
+                generation: Some(pty_generation()),
+                cursor: Some(PtyFrameSeq::new(44)),
+            },
+        },
+        ClientControl::PtyRawPublishSnapshot {
+            request_id: RequestId::new("req-12"),
+            session_id: pty_session_id(),
+            seq: None,
+            rows: 24,
+            cols: 80,
+            byte_size: ByteCount::new(1_024),
+        },
+        ClientControl::PtyRawPublishOutput {
+            request_id: RequestId::new("req-13"),
+            session_id: pty_session_id(),
+            seq: PtyFrameSeq::new(0),
+            byte_size: ByteCount::new(7),
+        },
+        ClientControl::Request {
+            request_id: RequestId::new("req-14"),
+            request: KernelRequest::PtyPublishRawResize {
+                session_id: pty_session_id(),
+                seq: PtyFrameSeq::new(1),
+                rows: 30,
+                cols: 100,
+            },
+        },
     ]
 }
 
@@ -612,9 +655,9 @@ fn golden_server_control() -> Vec<ServerControl> {
         ServerControl::HelloAck {
             protocol_major: ProtocolVersion::V1,
             protocol_minor: PROTOCOL_MINOR,
-            // The INTERSECTION: the client asked for blob too, this kernel
-            // grants only the subscription.
-            capabilities: vec![capability("event_subscribe")],
+            // The INTERSECTION: the client asked for three capabilities; this
+            // kernel offers only the raw PTY fallback.
+            capabilities: vec![capability("pty_raw")],
             sealed: true,
             watermark: Some(Seq::new(9_007_199_254_740_993)),
         },
@@ -713,6 +756,49 @@ fn golden_server_control() -> Vec<ServerControl> {
                 session_id: pty_session_id(),
             },
         },
+        ServerControl::Response {
+            request_id: RequestId::new("req-11"),
+            result: KernelResult::PtyRawAttached {
+                session_id: pty_session_id(),
+                generation: pty_generation(),
+                rows: 24,
+                cols: 80,
+                cursor: None,
+            },
+        },
+        ServerControl::PtyRawSnapshot {
+            request_id: RequestId::new("req-11"),
+            generation: pty_generation(),
+            seq: None,
+            rows: 24,
+            cols: 80,
+            byte_size: ByteCount::new(1_024),
+        },
+        ServerControl::PtyRawChunk {
+            request_id: RequestId::new("req-11"),
+            generation: pty_generation(),
+            seq: PtyFrameSeq::new(0),
+            byte_size: ByteCount::new(7),
+        },
+        ServerControl::PtyRawResized {
+            request_id: RequestId::new("req-11"),
+            generation: pty_generation(),
+            seq: PtyFrameSeq::new(1),
+            rows: 30,
+            cols: 100,
+        },
+        ServerControl::PtyRawStreamClosed {
+            request_id: RequestId::new("req-11"),
+            generation: pty_generation(),
+            code: KernelErrorCode::SlowConsumer,
+            last_seq: Some(PtyFrameSeq::new(1)),
+        },
+        ServerControl::Response {
+            request_id: RequestId::new("req-13"),
+            result: KernelResult::PtyPublished {
+                session_id: pty_session_id(),
+            },
+        },
     ]
 }
 
@@ -729,6 +815,61 @@ fn golden_kernel_checkpoint() -> Checkpoint {
             evidence_pin: None,
         },
         created_at: Timestamp::new("2026-07-28T12:00:03Z"),
+    }
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct RawWirePairGolden {
+    wire_hex: String,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct RawWireGolden {
+    publish: RawWirePairGolden,
+    delivery: RawWirePairGolden,
+}
+
+fn framed_bytes(kind: FrameKind, body: &[u8]) -> Vec<u8> {
+    let body_length = u32::try_from(body.len() + 1).expect("golden frame length fits u32");
+    let mut wire = Vec::with_capacity(4 + body_length as usize);
+    wire.extend_from_slice(&body_length.to_be_bytes());
+    wire.push(kind.as_u8());
+    wire.extend_from_slice(body);
+    wire
+}
+
+fn framed_pair<T: serde::Serialize>(header: &T, payload: &[u8]) -> RawWirePairGolden {
+    let json = serde_json::to_vec(header).expect("serialize raw wire header");
+    let mut wire = framed_bytes(FrameKind::Json, &json);
+    wire.extend(framed_bytes(FrameKind::PtyRaw, payload));
+    let mut wire_hex = String::with_capacity(wire.len() * 2);
+    for byte in wire {
+        write!(&mut wire_hex, "{byte:02x}").expect("write hex to string");
+    }
+    RawWirePairGolden { wire_hex }
+}
+
+fn golden_raw_wire() -> RawWireGolden {
+    let payload = [0x00, 0xff, 0x1b, b'[', 0xc3];
+    RawWireGolden {
+        publish: framed_pair(
+            &ClientControl::PtyRawPublishOutput {
+                request_id: RequestId::new("raw-wire-publish"),
+                session_id: pty_session_id(),
+                seq: PtyFrameSeq::new(7),
+                byte_size: ByteCount::new(payload.len() as u64),
+            },
+            &payload,
+        ),
+        delivery: framed_pair(
+            &ServerControl::PtyRawChunk {
+                request_id: RequestId::new("raw-wire-attach"),
+                generation: pty_generation(),
+                seq: PtyFrameSeq::new(7),
+                byte_size: ByteCount::new(payload.len() as u64),
+            },
+            &payload,
+        ),
     }
 }
 
@@ -770,6 +911,7 @@ fn goldens() -> Vec<(&'static str, String)> {
             "kernel-server-control.json",
             pretty(&golden_server_control()),
         ),
+        ("pty-raw-wire.json", pretty(&golden_raw_wire())),
         (
             "kernel-checkpoint.json",
             pretty(&golden_kernel_checkpoint()),
@@ -944,6 +1086,11 @@ pub fn run(check: bool) {
             "kernel-server-control.json",
             &ts_goldens_dir,
             find("kernel-server-control.json"),
+        ),
+        round_trip::<RawWireGolden>(
+            "pty-raw-wire.json",
+            &ts_goldens_dir,
+            find("pty-raw-wire.json"),
         ),
         round_trip::<Checkpoint>(
             "kernel-checkpoint.json",

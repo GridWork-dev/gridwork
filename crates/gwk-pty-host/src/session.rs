@@ -69,6 +69,31 @@ pub struct DeltaBatch {
     pub deltas: Arc<Vec<PtyDelta>>,
 }
 
+/// The raw fallback's non-snapshot events. Output stays byte-exact; resize is
+/// typed because it never travelled through the child's output stream.
+// Derivation: none — original raw-fallback channel plumbing over the engine's
+// already-typed output and resize events; no external protocol is reproduced.
+#[derive(Debug, Clone)]
+pub enum RawEvent {
+    Output(Arc<Vec<u8>>),
+    Resize { cols: u16, rows: u16 },
+}
+
+#[derive(Debug, Clone)]
+pub struct RawBatch {
+    pub seq: u64,
+    pub event: RawEvent,
+}
+
+/// A model-produced VT seed for a raw consumer starting from no state.
+#[derive(Debug, Clone)]
+pub struct RawSnapshot {
+    pub seq: Option<u64>,
+    pub cols: u16,
+    pub rows: u16,
+    pub bytes: Vec<u8>,
+}
+
 /// The full screen at a revision. `seq` is absent only while the session
 /// has produced no frame yet, matching `PtyAttached.cursor`'s contract.
 #[derive(Debug, Clone)]
@@ -100,6 +125,8 @@ pub struct Attached {
     pub cursor: Option<u64>,
     pub catch_up: CatchUp,
     pub live: broadcast::Receiver<DeltaBatch>,
+    pub raw_snapshot: Option<RawSnapshot>,
+    pub raw_live: broadcast::Receiver<RawBatch>,
 }
 
 /// Why a session's task ended.
@@ -146,6 +173,7 @@ pub(crate) async fn run(
     config: SessionConfig,
     mut commands: mpsc::Receiver<SessionCommand>,
     deltas_tx: broadcast::Sender<DeltaBatch>,
+    raw_tx: broadcast::Sender<RawBatch>,
 ) -> SessionExit {
     let started = Instant::now();
     let mut recording = Recording::new(config.recording_cap);
@@ -213,6 +241,10 @@ pub(crate) async fn run(
                 // as a resize too — the respawn really did size a fresh PTY,
                 // and that fact travels outside the byte stream.
                 let seq = recording.record(offset_ms(started), Event::Resize { cols, rows });
+                let _ = raw_tx.send(RawBatch {
+                    seq,
+                    event: RawEvent::Resize { cols, rows },
+                });
                 screen = WireScreen::new(cols, rows);
                 last_seq = Some(seq);
                 publish(
@@ -227,7 +259,12 @@ pub(crate) async fn run(
                 );
             }
             Wake::Chunk(Ok(chunk)) => {
-                let seq = recording.record(offset_ms(started), Event::Output(chunk));
+                let raw = Arc::new(chunk);
+                let seq = recording.record(offset_ms(started), Event::Output(raw.as_ref().clone()));
+                let _ = raw_tx.send(RawBatch {
+                    seq,
+                    event: RawEvent::Output(Arc::clone(&raw)),
+                });
                 last_seq = Some(seq);
                 let Some(frame) = renderer.frame(session.grid(), seq) else {
                     return SessionExit::Failed("the renderer could not read the grid".to_owned());
@@ -270,6 +307,10 @@ pub(crate) async fn run(
                         // reach consumers.
                         let seq =
                             recording.record(offset_ms(started), Event::Resize { cols, rows });
+                        let _ = raw_tx.send(RawBatch {
+                            seq,
+                            event: RawEvent::Resize { cols, rows },
+                        });
                         last_seq = Some(seq);
                         let Some(frame) = renderer.frame(session.grid(), seq) else {
                             return SessionExit::Failed(
@@ -303,14 +344,23 @@ pub(crate) async fn run(
                 // every batch after the catch-up point is either in the
                 // catch-up or in the subscription, never in neither.
                 let live = deltas_tx.subscribe();
+                let raw_live = raw_tx.subscribe();
                 let catch_up = catch_up(cursor, last_seq, evicted_through, &retained, &screen);
                 let (cols, rows) = screen.size();
+                let raw_snapshot = session.grid().snapshot_vt().map(|bytes| RawSnapshot {
+                    seq: last_seq,
+                    cols,
+                    rows,
+                    bytes,
+                });
                 let _ = reply.send(Attached {
                     cols,
                     rows,
                     cursor: last_seq,
                     catch_up,
                     live,
+                    raw_snapshot,
+                    raw_live,
                 });
             }
         }

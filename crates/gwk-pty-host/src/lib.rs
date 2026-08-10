@@ -37,9 +37,10 @@
 //! `pty_publish_deltas` / `pty_retire` family is how [`publish`] pushes
 //! what [`registry::SessionRegistry::attach`] serves locally into the
 //! kernel's own session registry (`crates/gwk-kernel/src/wire/pty.rs`),
-//! and `PtyAttach`/`PtySnapshot` answer consumers from there. Frame kind
-//! `0x02` stays reserved-and-refused — the family rides ordinary JSON
-//! control frames. What remains is the rest of the verb set: nothing on
+//! and `PtyAttach`/`PtySnapshot` answer consumers from there. The raw fallback
+//! is published beside that primary render-state path: JSON headers carry
+//! correlation and kind `0x02` carries the byte-exact snapshot/output payload.
+//! What remains is the rest of the verb set: nothing on
 //! the wire yet carries a consumer's input, resize, or stop to a hosted
 //! session, and sessions START from the operator's own declaration
 //! ([`publish::SESSIONS_ENV`]) rather than from a request — routing

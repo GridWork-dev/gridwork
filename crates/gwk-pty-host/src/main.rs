@@ -6,8 +6,8 @@
 //! The registry joined this main loop when the attach hookup landed: each
 //! declared session runs under [`gwk_pty_host::registry`], and a
 //! [`gwk_pty_host::publish`] task per session carries its snapshot and
-//! delta batches to the kernel, where `PtyAttach`/`PtySnapshot` serve them
-//! to any consumer on the socket. What no one declares, this binary still
+//! delta batches plus the raw fallback to the kernel, where render and raw
+//! attaches serve them to any consumer on the socket. What no one declares, this binary still
 //! does not run — an empty declaration is a legal resident state, and was
 //! the only state before the hookup existed.
 //!

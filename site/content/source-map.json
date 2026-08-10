@@ -30,7 +30,7 @@
     },
     {
       "destination": "content/docs/protocol.mdx",
-      "sha256": "88c85909716222f5652f681f494f436ca5f8f7067c2fb8c980a132fee235a8b8",
+      "sha256": "a44a5233e24ff361896c71b22b5799bf09bc01d3cd684770bc650e72f34a6b35",
       "sources": [
         {
           "path": "docs/protocol.md"
