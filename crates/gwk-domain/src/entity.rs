@@ -16,8 +16,8 @@ use crate::fsm::{
 use crate::ids::{
     AttemptId, AttentionItemId, AuthorityGrantId, ByteCount, CommandId, CorrelationId, CostEntryId,
     CostMicros, DispatchNodeId, EngineId, EngineSessionId, EvidenceId, FenceToken, GateId,
-    IdempotencyKey, IngestedRecordId, LeaseId, MessageId, ReceiptId, Seq, TaskId, Timestamp,
-    TokenCount, WorkflowRunId, WorkspaceNodeId, WorktreeId,
+    IdempotencyKey, IngestedRecordId, LeaseId, MessageId, PtySessionGeneration, PtySessionId,
+    ReceiptId, Seq, TaskId, Timestamp, TokenCount, WorkflowRunId, WorkspaceNodeId, WorktreeId,
 };
 use crate::ingestion::IngestionKind;
 
@@ -570,6 +570,39 @@ pub struct WorkflowRun {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[specta(optional)]
     pub task_id: Option<TaskId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub title: Option<String>,
+    pub opened_at: Timestamp,
+    pub updated_at: Timestamp,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub closed_at: Option<Timestamp>,
+}
+
+/// One lifetime of a hosted PTY session as a kernel ledger object (P17).
+///
+/// Lifecycle authority, not telemetry (S6 stands): the pty-host records
+/// publish/retire and attach/detach here so the S8 cutover receipt can be
+/// read from the log — peak concurrency against B4's floor from open/close
+/// intervals, attach/detach counts from the counters, host restarts from
+/// distinct generation tokens. Closed sessions keep their row; a replay
+/// rebuilds it from the log.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
+#[serde(deny_unknown_fields)]
+pub struct PtySession {
+    pub id: PtySessionId,
+    pub version: u32,
+    /// `running` until closed; a close writes `closed`.
+    pub state: String,
+    /// The host lifetime this session belongs to. A reclaimed id under a new
+    /// generation is a NEW aggregate lifetime on the wire, but ledger ids are
+    /// unique per open — the generation is recorded, never re-keyed.
+    pub generation: PtySessionGeneration,
+    /// Live attaches opened against this session over its lifetime.
+    pub attach_count: u32,
+    /// Attach ends recorded against this session over its lifetime.
+    pub detach_count: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[specta(optional)]
     pub title: Option<String>,
