@@ -17,7 +17,8 @@
 //! fact — see [`color`].
 
 use gwk_domain::frame::{
-    CellColor, CellStyle as WireStyle, CellUnderline, PtyCellUpdate, PtyDelta, PtyFrame, StyledCell,
+    CellColor, CellStyle as WireStyle, CellUnderline, PtyCellUpdate, PtyDelta, PtyFrame,
+    StyleInterner, StyledCell,
 };
 use gwk_pty::render::{Frame, Row};
 use gwk_pty::style::{CellStyle as EngineStyle, Color, Underline};
@@ -117,11 +118,12 @@ impl WireScreen {
         (cols, rows)
     }
 
-    /// The full screen, for a `PtySnapshot` answer.
+    /// The full screen, for a `PtySnapshot` answer — interned into the wire
+    /// form: a first-appearance style table, maximal same-style runs per row
+    /// (the `from_cells` canonical form), which is what turns a blank screen
+    /// from megabytes of repeated style objects into kilobytes of fills.
     pub fn snapshot(&self) -> PtyFrame {
-        PtyFrame {
-            cells: self.cells.clone(),
-        }
+        PtyFrame::from_cells(&self.cells)
     }
 
     /// Apply one engine frame; the returned deltas bring a consumer holding
@@ -142,12 +144,18 @@ impl WireScreen {
                 cols: frame.cols,
             });
         }
+        // The batch's own style table, built as the updates are: every
+        // message self-contained, no index space outliving it.
+        let mut styles = StyleInterner::default();
         let mut updates = Vec::new();
         for row in &frame.changed {
-            self.apply_row(row, &mut updates);
+            self.apply_row(row, &mut styles, &mut updates);
         }
         if !updates.is_empty() || deltas.is_empty() {
-            deltas.push(PtyDelta::CellsChanged { updates });
+            deltas.push(PtyDelta::CellsChanged {
+                styles: styles.into_styles(),
+                updates,
+            });
         }
         deltas
     }
@@ -158,7 +166,12 @@ impl WireScreen {
     /// column (`Row::cols`); the columns a cluster skips are its spacer
     /// cells — the trailing half of a wide glyph — which the wire carries as
     /// empty-glyph cells styled like their head, per `StyledCell`'s doc.
-    fn apply_row(&mut self, row: &Row, updates: &mut Vec<PtyCellUpdate>) {
+    fn apply_row(
+        &mut self,
+        row: &Row,
+        styles: &mut StyleInterner,
+        updates: &mut Vec<PtyCellUpdate>,
+    ) {
         let Some(mirror_row) = self.cells.get_mut(usize::from(row.y)) else {
             // A row outside the mirror is a frame racing a resize; the full
             // repaint that follows the resize will carry it. Dropping it is
@@ -192,6 +205,7 @@ impl WireScreen {
                     glyph,
                     style: wire_style.clone(),
                 },
+                styles,
                 updates,
             );
             // The spacer columns this cluster covers: empty glyph, same
@@ -206,6 +220,7 @@ impl WireScreen {
                         glyph: String::new(),
                         style: wire_style.clone(),
                     },
+                    styles,
                     updates,
                 );
             }
@@ -216,23 +231,27 @@ impl WireScreen {
 /// Write one cell into the mirror and record the update — but only when it
 /// changed. The engine's row granularity means an edited row re-reports every
 /// cell in it; forwarding the unchanged ones would make every keystroke cost
-/// a row's worth of wire traffic.
+/// a row's worth of wire traffic. Only a CHANGED cell interns its style, so
+/// the batch table carries exactly the styles its updates reference.
 fn set_cell(
     mirror_row: &mut [StyledCell],
     y: u16,
     col: usize,
     cell: StyledCell,
+    styles: &mut StyleInterner,
     updates: &mut Vec<PtyCellUpdate>,
 ) {
     if mirror_row[col] == cell {
         return;
     }
-    mirror_row[col] = cell.clone();
+    let style = styles.intern(&cell.style);
     updates.push(PtyCellUpdate {
         row: y,
         col: col as u16,
-        cell,
+        glyph: cell.glyph.clone(),
+        style,
     });
+    mirror_row[col] = cell;
 }
 
 /// Split a row's text back into the clusters that were pushed into it.
@@ -334,13 +353,17 @@ mod tests {
         assert_eq!(glyph_at(&screen, 0, 2), " ");
 
         // The updates describe exactly the mirror's non-blank state: a
-        // consumer starting blank and applying them ends up at the mirror.
-        let PtyDelta::CellsChanged { updates } = &deltas[0] else {
+        // consumer starting blank, resolving each update through the batch's
+        // own style table, ends up at the mirror.
+        let PtyDelta::CellsChanged { styles, updates } = &deltas[0] else {
             panic!("expected cell updates, got {deltas:?}");
         };
         let mut replayed = WireScreen::new(10, 2);
         for update in updates {
-            replayed.cells[usize::from(update.row)][usize::from(update.col)] = update.cell.clone();
+            replayed.cells[usize::from(update.row)][usize::from(update.col)] = StyledCell {
+                glyph: update.glyph.clone(),
+                style: styles[update.style as usize].clone(),
+            };
         }
         assert_eq!(replayed.cells, screen.cells);
     }
@@ -406,8 +429,9 @@ mod tests {
         // when one is produced at all, carries nothing.
         let deltas = screen.apply(&renderer.frame(&grid, 1).expect("frame"));
         for delta in &deltas {
-            if let PtyDelta::CellsChanged { updates } = delta {
+            if let PtyDelta::CellsChanged { styles, updates } = delta {
                 assert!(updates.is_empty(), "unchanged cells re-sent: {updates:?}");
+                assert!(styles.is_empty(), "an empty batch interned styles anyway");
             }
         }
     }
@@ -416,8 +440,116 @@ mod tests {
     fn snapshot_is_rectangular_and_matches_the_mirror() {
         let (_, screen) = apply_once(8, 3, b"one\r\ntwo");
         let frame = screen.snapshot();
-        assert_eq!(frame.cells.len(), 3);
-        assert!(frame.cells.iter().all(|row| row.len() == 8));
-        assert_eq!(frame.cells, screen.cells);
+        let cells = frame.cells().expect("a snapshot expands");
+        assert_eq!(cells.len(), 3);
+        assert!(cells.iter().all(|row| row.len() == 8));
+        assert_eq!(cells, screen.cells);
+    }
+
+    // ---- The size floor the interned shape exists for (P16) ----
+    //
+    // The spike measured the per-cell shape at 151.009-151.031 bytes/cell:
+    // blank 240x70 = 2,536,951 bytes, busting the 2,097,152-byte publish
+    // budget alone; attr-heavy 200x60 = 4,032,131. These tests pin the
+    // interned shape against those geometries with real serialization.
+
+    /// Half of `FRAME_BODY_MAX_BYTES`, as the kernel and `publish` both
+    /// derive it; recomputed here so a size test compares against the same
+    /// number the wire enforces.
+    fn publish_byte_budget() -> usize {
+        usize::try_from(gwk_domain::protocol::FRAME_BODY_MAX_BYTES).expect("fits usize") / 2
+    }
+
+    fn measured(screen: &WireScreen) -> usize {
+        serde_json::to_vec(&screen.snapshot())
+            .expect("serialize")
+            .len()
+    }
+
+    #[test]
+    fn a_blank_240x70_frame_serializes_in_kilobytes_not_megabytes() {
+        // Was 2,536,951 bytes — 439,799 past the budget before any envelope
+        // existed. One blank style plus 70 fill runs now. The bound leaves
+        // headroom over the expected ~3.5 KB so a serde or style-field
+        // change cannot flap it, while any per-cell regression (which lands
+        // back at megabytes) still fails loudly.
+        let bytes = measured(&WireScreen::new(240, 70));
+        assert!(
+            bytes < 16 * 1024,
+            "{bytes} bytes: the interned blank frame regressed toward per-cell size"
+        );
+    }
+
+    #[test]
+    fn eight_blank_80x24_screens_fit_one_publish_budget_together() {
+        // The B4-floor arrangement the spike measured OVER at 8 sessions
+        // (2,319,832 bytes): eight blank 80x24 screens together now sit far
+        // inside one publish budget.
+        let bytes = measured(&WireScreen::new(80, 24));
+        assert!(
+            bytes * 8 <= publish_byte_budget(),
+            "8 x {bytes} bytes busts the {}-byte budget",
+            publish_byte_budget()
+        );
+    }
+
+    #[test]
+    fn the_attr_heavy_fixture_re_measured_under_the_interned_shape() {
+        // The spike's synthetic attr-heavy fixture, driven through the same
+        // shipped path (Grid -> Renderer -> WireScreen): every cell an `X`
+        // written through the real VT parser with all eight boolean
+        // attributes, a single underline, and independent three-digit
+        // truecolor fg/bg/underline colors. 200x60 measured 4,032,131 bytes
+        // under the per-cell shape; interned it is one style table entry
+        // plus 60 uniform fill rows.
+        use std::fmt::Write as _;
+        let mut input = String::new();
+        input.push_str(
+            "\x1b[1;2;3;4;5;7;8;9;53m\x1b[38;2;210;220;230m\x1b[48;2;110;120;130m\x1b[58:2::140:150:160m",
+        );
+        for row in 1..=60 {
+            write!(&mut input, "\x1b[{row};1H").expect("write a row address");
+            input.push_str(&"X".repeat(200));
+        }
+        let (_, screen) = apply_once(200, 60, input.as_bytes());
+        let bytes = measured(&screen);
+        // Re-measured 2026-08-09 for the record the SPEC asks for: 3,455
+        // bytes (was 4,032,131). Pinned exactly — a style-field or serde
+        // change moves this number, and the point of recording it is that
+        // the move is looked at rather than absorbed.
+        assert_eq!(bytes, 3_455, "the attr-heavy fixture moved: {bytes} bytes");
+        assert!(bytes <= publish_byte_budget());
+    }
+
+    #[test]
+    fn the_worst_legal_case_still_serializes_and_the_budget_judges_it_by_bytes() {
+        // Every cell a DISTINCT style — the one screen interning cannot
+        // compress. 200x60 = 12,000 table entries plus 12,000 width-1 runs,
+        // roughly today's per-cell size plus table overhead. It must still
+        // serialize, and whether the budget admits it is exactly what the
+        // actual-bytes rule says — no arithmetic shortcut on either side.
+        let mut screen = WireScreen::new(200, 60);
+        for (y, row) in screen.cells.iter_mut().enumerate() {
+            for (x, cell) in row.iter_mut().enumerate() {
+                cell.glyph = "X".to_owned();
+                cell.style.fg = Some(CellColor::Truecolor {
+                    r: y as u8,
+                    g: (x % 200) as u8,
+                    b: (x / 200) as u8,
+                });
+            }
+        }
+        let frame = screen.snapshot();
+        assert_eq!(frame.styles.len(), 200 * 60, "every style distinct");
+        let bytes = serde_json::to_vec(&frame).expect("still serializes").len();
+        // Re-measured 2026-08-09: 2,716,431 bytes (was 4,032,131 with the
+        // same per-cell payload) — over the 2,097,152-byte budget, so the
+        // actual-bytes rule refuses this screen exactly as it did before
+        // the interning landed.
+        assert_eq!(
+            bytes, 2_716_431,
+            "the worst legal case moved: {bytes} bytes"
+        );
+        assert!(bytes > publish_byte_budget());
     }
 }

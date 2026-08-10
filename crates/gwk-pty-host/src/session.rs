@@ -376,7 +376,7 @@ fn publish(
 /// Does a batch move a consumer at all?
 fn has_content(deltas: &[PtyDelta]) -> bool {
     deltas.iter().any(|delta| match delta {
-        PtyDelta::CellsChanged { updates } => !updates.is_empty(),
+        PtyDelta::CellsChanged { updates, .. } => !updates.is_empty(),
         PtyDelta::Resized { .. } => true,
     })
 }

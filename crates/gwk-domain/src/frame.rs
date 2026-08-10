@@ -8,6 +8,20 @@
 //! terminal grid into this shape is a later task; this module only fixes the
 //! wire contract it converts INTO.
 //!
+//! # The interned form
+//!
+//! A frame does not carry a style object per cell. It carries every distinct
+//! [`CellStyle`] exactly once in a frame-scoped table, and each row as a run
+//! list referencing that table by index — because the style object measured
+//! as 85–93% of every cell's serialized bytes, and a screen repeats a
+//! handful of styles across thousands of cells. Deltas intern the same way,
+//! with a batch-scoped table: a full-screen repaint arrives as one
+//! `cells_changed` batch, and without its own table it would re-pay the
+//! per-cell style cost the frame shape just removed. No index space ever
+//! crosses a message boundary — every frame and every batch is
+//! self-contained, so a late joiner is correct by construction and no
+//! consumer holds a persistent table.
+//!
 //! [`PtyAnsiSlot`] duplicates `gwk_theme::tier::AnsiSlot`'s sixteen names
 //! deliberately rather than sharing it: that type is a THEME token's
 //! rendering disposition, this one is the raw ANSI slot a wire cell reports.
@@ -16,6 +30,12 @@
 //! dependency would couple them for no reason — and specta's TypeScript
 //! export refuses two registered types that share a bare name, so a shared
 //! name here would not even compile once both crates reach `bindings.ts`.
+//!
+//! Derivation: none — original wire encoding over this repository's own
+//! existing style type; no terminal-protocol byte is parsed and no new
+//! colour, SGR, or keyboard fact is asserted anywhere in this module.
+
+use std::collections::HashMap;
 
 /// One of the sixteen slots a terminal's own theme owns. Declaration order IS
 /// slot order — pinned by `ansi_slot_declaration_order_is_slot_index`.
@@ -97,7 +117,9 @@ impl PtyAnsiSlot {
 /// non-mono tiers by deliberate analogy (see the module doc); there is no
 /// mono variant because mono is a RENDERING choice a client makes, not a fact
 /// the wire carries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, specta::Type,
+)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CellColor {
     /// One of the terminal's sixteen user-themed slots.
@@ -117,7 +139,9 @@ pub enum CellColor {
 /// underline where the child asked for a dotted one is displaying something
 /// the child did not send. The variants match what `gwk_pty::Underline`
 /// carries, so the engine-to-wire conversion is total in both directions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, specta::Type,
+)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CellUnderline {
     Single,
@@ -127,8 +151,15 @@ pub enum CellUnderline {
     Dashed,
 }
 
-/// The attribute bits and colors a [`StyledCell`] carries, independent of its
-/// glyph.
+/// The attribute bits and colors a cell carries, independent of its glyph.
+///
+/// This is the object the wire interns: a frame or a delta batch carries each
+/// distinct value of this struct exactly once in its `styles` table, and
+/// every run or update references it by index. The struct itself is unchanged
+/// by that move — the table stores this existing type verbatim.
+///
+/// `Hash` exists for exactly that interning (a first-appearance
+/// `HashMap<CellStyle, u32>` in [`StyleInterner`]), not for any wire fact.
 ///
 /// The eight attributes below are plain, always-present booleans — not
 /// `Option<bool>` — matching how this contract already carries `dirty` and
@@ -148,7 +179,7 @@ pub enum CellUnderline {
 /// attribute this struct does not carry, a consumer attaching to a session
 /// silently loses it — so the two move together, and a widening of one without
 /// the other is the defect, not the fix.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, specta::Type)]
 #[serde(deny_unknown_fields)]
 pub struct CellStyle {
     pub bold: bool,
@@ -181,43 +212,237 @@ pub struct CellStyle {
 
 /// One terminal cell: a displayed glyph plus the style it carries.
 ///
+/// NOT a wire type since the interned form landed: the wire carries glyphs
+/// inside [`PtyRun`]s and styles in a table, and this struct is what a
+/// decoded frame EXPANDS to — the per-cell model every mirror and render
+/// path keeps ([`PtyFrame::cells`] produces it, [`PtyFrame::from_cells`]
+/// consumes it). The wire shape stops at the decode boundary; this is what
+/// lives on the other side.
+///
 /// `glyph` is a `String`, not a `char` — a cell can hold a full grapheme
 /// cluster (a combining mark, a ZWJ emoji sequence), which a single Rust
 /// `char` cannot represent. An empty string is a legal glyph: a blank cell,
 /// or the trailing half of a double-width character. Column width — a wide
 /// glyph occupies two grid cells — is deliberately NOT modeled here: deciding
-/// it is part of the engine-side conversion this task defers.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
-#[serde(deny_unknown_fields)]
+/// it is part of the engine-side conversion this crate defers.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StyledCell {
     pub glyph: String,
     pub style: CellStyle,
 }
 
+/// One run of consecutive same-style cells inside a row.
+///
+/// Two carriers, one meaning: `width()` cells sharing one interned style.
+/// `Cells` holds per-cell glyphs, NOT a joined string — the wire deliberately
+/// does not model column width, so a joined string could never be re-split
+/// into cells (an empty glyph is a wide cluster's trailing half, and nothing
+/// in the text itself says where it sits). `Fill` is the blank-screen
+/// carrier: one glyph repeated `count` cells, which is what makes an
+/// all-blank row O(1) bytes instead of O(cols).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PtyRun {
+    /// Consecutive same-style cells, one glyph per cell.
+    Cells { style: u32, glyphs: Vec<String> },
+    /// One glyph repeated `count` cells.
+    Fill {
+        style: u32,
+        glyph: String,
+        count: u32,
+    },
+}
+
+impl PtyRun {
+    /// The number of grid cells this run covers.
+    pub fn width(&self) -> usize {
+        match self {
+            Self::Cells { glyphs, .. } => glyphs.len(),
+            Self::Fill { count, .. } => *count as usize,
+        }
+    }
+
+    /// The run's index into its frame's `styles` table.
+    pub const fn style_index(&self) -> u32 {
+        match self {
+            Self::Cells { style, .. } | Self::Fill { style, .. } => *style,
+        }
+    }
+}
+
 /// A full styled frame: every cell of a hosted PTY session's grid at one
-/// [`crate::ids::PtyFrameSeq`], row-major (`cells[row][col]`).
+/// [`crate::ids::PtyFrameSeq`], as a frame-scoped style table plus row-major
+/// runs (`rows[row]` = that row's runs, left to right).
 ///
 /// `rows`/`cols` are not stored as separate fields — they are exactly
-/// `cells.len()` and `cells[0].len()`, every row is the same length, and this
-/// type has no constructor that could let a stored pair disagree with the
-/// grid it describes. That shape rule is the kernel wire layer's to enforce
-/// (see `crate::protocol`'s module doc on the split between what a type
-/// admits and what the strict decoder refuses), not this type's to
+/// `rows.len()` and each row's summed run width, every row the same width,
+/// and this type has no constructor that could let a stored pair disagree
+/// with the runs it describes. That shape rule — and every other invariant
+/// the type admits but the contract refuses (style indices in range, no
+/// duplicate table entry, no zero-width run) — is the kernel wire layer's to
+/// enforce (see `crate::protocol`'s module doc on the split between what a
+/// type admits and what the strict decoder refuses), not this type's to
 /// self-validate: a wire type validates itself only when its value set is
 /// CLOSED, and a rectangular grid of arbitrary size is not.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
 #[serde(deny_unknown_fields)]
 pub struct PtyFrame {
-    pub cells: Vec<Vec<StyledCell>>,
+    /// Every distinct style in the frame, exactly once, first-appearance
+    /// order.
+    pub styles: Vec<CellStyle>,
+    /// `rows[row]` = the row's runs, left to right.
+    pub rows: Vec<Vec<PtyRun>>,
 }
 
-/// One cell's new content, addressed by zero-indexed grid position.
+impl PtyFrame {
+    /// Intern an expanded grid into the wire form: a first-appearance style
+    /// table and maximal same-style runs per row, with a run that repeats one
+    /// glyph carried as [`PtyRun::Fill`] and every other run as
+    /// [`PtyRun::Cells`].
+    ///
+    /// This is the canonical producer form: adjacent runs never share a
+    /// style, so a decoder holding the tolerate-non-maximal ruling still
+    /// never sees a non-maximal run from this constructor.
+    pub fn from_cells(cells: &[Vec<StyledCell>]) -> Self {
+        let mut interner = StyleInterner::default();
+        let mut rows = Vec::with_capacity(cells.len());
+        for row in cells {
+            let mut runs: Vec<PtyRun> = Vec::new();
+            let mut start = 0usize;
+            while start < row.len() {
+                let style = &row[start].style;
+                let mut end = start + 1;
+                while end < row.len() && &row[end].style == style {
+                    end += 1;
+                }
+                let index = interner.intern(style);
+                let run = &row[start..end];
+                let uniform = run.iter().all(|cell| cell.glyph == run[0].glyph);
+                runs.push(if uniform {
+                    PtyRun::Fill {
+                        style: index,
+                        glyph: run[0].glyph.clone(),
+                        // A row is far below u32::MAX cells; the expansion
+                        // bound in `cells()` is what holds the other side.
+                        count: run.len() as u32,
+                    }
+                } else {
+                    PtyRun::Cells {
+                        style: index,
+                        glyphs: run.iter().map(|cell| cell.glyph.clone()).collect(),
+                    }
+                });
+                start = end;
+            }
+            rows.push(runs);
+        }
+        Self {
+            styles: interner.into_styles(),
+            rows,
+        }
+    }
+
+    /// Expand back to the per-cell grid the runs describe, or `None` for a
+    /// frame no rectangular grid matches: a style index outside the table,
+    /// rows of unequal width, or a dimension past `u16` (the wire's grid
+    /// universe — and the bound that stops a small `fill` run from demanding
+    /// an enormous allocation).
+    ///
+    /// Deliberately more tolerant than the kernel's strict decoder: a
+    /// duplicate table entry, a zero-width run, or two adjacent runs sharing
+    /// a style all expand fine and are canonicality concerns, not expansion
+    /// blockers — refusing them is the kernel wire layer's job, where the
+    /// refusal has an error vocabulary to answer in.
+    pub fn cells(&self) -> Option<Vec<Vec<StyledCell>>> {
+        if self.rows.len() > usize::from(u16::MAX) {
+            return None;
+        }
+        let mut cells = Vec::with_capacity(self.rows.len());
+        let mut width: Option<usize> = None;
+        for row in &self.rows {
+            // Width and index checks before this row allocates anything: a
+            // `fill` naming billions of cells must die as arithmetic.
+            let mut total = 0u64;
+            for run in row {
+                if usize::try_from(run.style_index())
+                    .ok()
+                    .is_none_or(|index| index >= self.styles.len())
+                {
+                    return None;
+                }
+                total += run.width() as u64;
+            }
+            if total > u64::from(u16::MAX) {
+                return None;
+            }
+            let total = total as usize;
+            if *width.get_or_insert(total) != total {
+                return None;
+            }
+            let mut expanded = Vec::with_capacity(total);
+            for run in row {
+                let style = &self.styles[run.style_index() as usize];
+                match run {
+                    PtyRun::Cells { glyphs, .. } => {
+                        expanded.extend(glyphs.iter().map(|glyph| StyledCell {
+                            glyph: glyph.clone(),
+                            style: style.clone(),
+                        }));
+                    }
+                    PtyRun::Fill { glyph, count, .. } => {
+                        expanded.extend((0..*count).map(|_| StyledCell {
+                            glyph: glyph.clone(),
+                            style: style.clone(),
+                        }));
+                    }
+                }
+            }
+            cells.push(expanded);
+        }
+        Some(cells)
+    }
+}
+
+/// A first-appearance style table under construction — the
+/// `HashMap<CellStyle, u32>` interning every producer of the wire shape
+/// shares: [`PtyFrame::from_cells`] for frames, the host's delta batching
+/// for updates.
+#[derive(Debug, Default)]
+pub struct StyleInterner {
+    styles: Vec<CellStyle>,
+    index: HashMap<CellStyle, u32>,
+}
+
+impl StyleInterner {
+    /// The table index for `style`, minting the next first-appearance slot on
+    /// first sight.
+    pub fn intern(&mut self, style: &CellStyle) -> u32 {
+        if let Some(&index) = self.index.get(style) {
+            return index;
+        }
+        // A table cannot outgrow its frame's cell count, and a u16-bounded
+        // grid holds fewer than 2^32 cells.
+        let index = self.styles.len() as u32;
+        self.styles.push(style.clone());
+        self.index.insert(style.clone(), index);
+        index
+    }
+
+    /// The finished table, first-appearance order.
+    pub fn into_styles(self) -> Vec<CellStyle> {
+        self.styles
+    }
+}
+
+/// One cell's new content, addressed by zero-indexed grid position. `style`
+/// indexes the CARRYING batch's `styles` table — never any other message's.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
 #[serde(deny_unknown_fields)]
 pub struct PtyCellUpdate {
     pub row: u16,
     pub col: u16,
-    pub cell: StyledCell,
+    pub glyph: String,
+    pub style: u32,
 }
 
 /// One incremental change since the previous frame revision.
@@ -233,8 +458,15 @@ pub struct PtyCellUpdate {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PtyDelta {
     /// Zero or more cells changed. Each update's `row`/`col` is valid against
-    /// the grid's CURRENT size — the most recent snapshot or `resized` delta.
-    CellsChanged { updates: Vec<PtyCellUpdate> },
+    /// the grid's CURRENT size — the most recent snapshot or `resized` delta
+    /// — and each update's `style` indexes this batch's own `styles` table.
+    /// The table is batch-scoped so every message is self-contained: no index
+    /// space ever crosses a message boundary, a late joiner via catch-up is
+    /// correct by construction, and no mirror holds a persistent table.
+    CellsChanged {
+        styles: Vec<CellStyle>,
+        updates: Vec<PtyCellUpdate>,
+    },
     /// The session's grid was resized. Cell content outside the new bounds is
     /// gone; a client that needs the new content re-requests
     /// [`crate::protocol::KernelRequest::PtySnapshot`].
@@ -245,22 +477,36 @@ pub enum PtyDelta {
 mod tests {
     use super::*;
 
+    fn style() -> CellStyle {
+        CellStyle {
+            bold: false,
+            dim: false,
+            italic: false,
+            blink: false,
+            inverse: false,
+            invisible: false,
+            strikethrough: false,
+            overline: false,
+            underline: None,
+            fg: None,
+            bg: None,
+            underline_color: None,
+        }
+    }
+
     fn cell(glyph: &str) -> StyledCell {
         StyledCell {
             glyph: glyph.to_owned(),
+            style: style(),
+        }
+    }
+
+    fn bold(glyph: &str) -> StyledCell {
+        StyledCell {
+            glyph: glyph.to_owned(),
             style: CellStyle {
-                bold: false,
-                dim: false,
-                italic: false,
-                blink: false,
-                inverse: false,
-                invisible: false,
-                strikethrough: false,
-                overline: false,
-                underline: None,
-                fg: None,
-                bg: None,
-                underline_color: None,
+                bold: true,
+                ..style()
             },
         }
     }
@@ -319,10 +565,11 @@ mod tests {
     }
 
     #[test]
-    fn styled_cell_attributes_are_always_present_never_optional() {
-        let json = serde_json::to_value(cell("x")).expect("serialize");
+    fn cell_style_attributes_are_always_present_never_optional() {
+        // `CellStyle` is what the wire's `styles` tables carry, so the
+        // always-present-boolean discipline is now pinned on it directly.
+        let json = serde_json::to_value(style()).expect("serialize");
         let object = json.as_object().expect("object");
-        let style = object["style"].as_object().expect("style object");
         for attr in [
             "bold",
             "dim",
@@ -333,8 +580,8 @@ mod tests {
             "strikethrough",
             "overline",
         ] {
-            assert!(style.contains_key(attr), "missing {attr}");
-            assert_eq!(style[attr], serde_json::json!(false));
+            assert!(object.contains_key(attr), "missing {attr}");
+            assert_eq!(object[attr], serde_json::json!(false));
         }
         // `underline` is deliberately NOT in that list. It was an
         // always-present boolean until it had to carry a shape, and a cell is
@@ -342,21 +589,21 @@ mod tests {
         // holds. It is an omitted optional now, like the colors.
         //
         // Absent optionals are OMITTED, not null (the tri-state discipline).
-        assert!(!style.contains_key("underline"));
-        assert!(!style.contains_key("fg"));
-        assert!(!style.contains_key("bg"));
-        assert!(!style.contains_key("underline_color"));
+        assert!(!object.contains_key("underline"));
+        assert!(!object.contains_key("fg"));
+        assert!(!object.contains_key("bg"));
+        assert!(!object.contains_key("underline_color"));
     }
 
     #[test]
     fn underline_shape_survives_the_wire() {
-        // The regression this whole widening exists to prevent: a curly
+        // The regression the underline widening exists to prevent: a curly
         // underline reported as indistinguishable from a plain one. Under the
         // previous `bool` both of these serialized to `"underline": true`.
-        let mut curly = cell("x");
-        curly.style.underline = Some(CellUnderline::Curly);
-        let mut single = cell("x");
-        single.style.underline = Some(CellUnderline::Single);
+        let mut curly = style();
+        curly.underline = Some(CellUnderline::Curly);
+        let mut single = style();
+        single.underline = Some(CellUnderline::Single);
 
         let curly_json = serde_json::to_value(&curly).expect("serialize");
         let single_json = serde_json::to_value(&single).expect("serialize");
@@ -365,33 +612,33 @@ mod tests {
             "two different underline shapes serialized identically"
         );
 
-        let back: StyledCell = serde_json::from_value(curly_json).expect("deserialize");
-        assert_eq!(back.style.underline, Some(CellUnderline::Curly));
+        let back: CellStyle = serde_json::from_value(curly_json).expect("deserialize");
+        assert_eq!(back.underline, Some(CellUnderline::Curly));
     }
 
     #[test]
     fn underline_color_is_independent_of_the_foreground() {
         // SGR 58 sets the underline's own color; a wire that folded it into
         // `fg` would report a red-underlined white word as a red word.
-        let mut styled = cell("x");
-        styled.style.fg = Some(CellColor::Ansi16 {
+        let mut styled = style();
+        styled.fg = Some(CellColor::Ansi16 {
             slot: PtyAnsiSlot::White,
         });
-        styled.style.underline = Some(CellUnderline::Single);
-        styled.style.underline_color = Some(CellColor::Ansi16 {
+        styled.underline = Some(CellUnderline::Single);
+        styled.underline_color = Some(CellColor::Ansi16 {
             slot: PtyAnsiSlot::Red,
         });
 
         let json = serde_json::to_value(&styled).expect("serialize");
-        let back: StyledCell = serde_json::from_value(json).expect("deserialize");
+        let back: CellStyle = serde_json::from_value(json).expect("deserialize");
         assert_eq!(
-            back.style.fg,
+            back.fg,
             Some(CellColor::Ansi16 {
                 slot: PtyAnsiSlot::White
             })
         );
         assert_eq!(
-            back.style.underline_color,
+            back.underline_color,
             Some(CellColor::Ansi16 {
                 slot: PtyAnsiSlot::Red
             })
@@ -401,37 +648,226 @@ mod tests {
     #[test]
     fn glyph_may_be_a_multi_codepoint_grapheme_cluster() {
         // A single Rust `char` could not hold this: family emoji is four
-        // scalars joined by ZWJ. The wire shape's whole reason for using
-        // `String` instead of `char` is that this must round-trip intact.
+        // scalars joined by ZWJ. The run shape's whole reason for carrying
+        // per-cell glyph STRINGS is that this must round-trip intact.
         let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}";
-        let styled = cell(family);
-        let json = serde_json::to_value(&styled).expect("serialize");
-        let back: StyledCell = serde_json::from_value(json).expect("deserialize");
-        assert_eq!(back.glyph, family);
+        let frame = PtyFrame::from_cells(&[vec![cell(family), cell("x")]]);
+        let json = serde_json::to_value(&frame).expect("serialize");
+        let back: PtyFrame = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(back.cells().expect("expand")[0][0].glyph, family);
+    }
+
+    #[test]
+    fn empty_glyph_cells_survive_the_wire() {
+        // The trailing half of a double-width character is an empty-string
+        // glyph styled like its head. A joined-string encoding would lose the
+        // cell entirely; the per-cell glyph list is what keeps it.
+        let wide = vec![cell("\u{5BEC}"), cell(""), cell("b")];
+        let frame = PtyFrame::from_cells(std::slice::from_ref(&wide));
+        let json = serde_json::to_value(&frame).expect("serialize");
+        let back: PtyFrame = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(back.cells().expect("expand")[0], wide);
     }
 
     #[test]
     fn pty_frame_dimensions_are_derived_not_stored() {
-        let frame = PtyFrame {
-            cells: vec![vec![cell("a"), cell("b")], vec![cell("c"), cell("d")]],
-        };
+        let frame = PtyFrame::from_cells(&[vec![cell("a"), bold("b")], vec![cell("c"), cell("d")]]);
         let json = serde_json::to_value(&frame).expect("serialize");
         let object = json.as_object().expect("object");
-        assert!(!object.contains_key("rows"), "rows must not be a field");
+        assert!(!object.contains_key("rows_count"), "no stored geometry");
         assert!(!object.contains_key("cols"), "cols must not be a field");
-        assert_eq!(frame.cells.len(), 2);
-        assert_eq!(frame.cells[0].len(), 2);
+        let mut keys = object.keys().collect::<Vec<_>>();
+        keys.sort();
+        assert_eq!(keys, ["rows", "styles"], "exactly the table and the runs");
         let back: PtyFrame = serde_json::from_value(json).expect("deserialize");
         assert_eq!(back, frame);
     }
 
     #[test]
-    fn pty_delta_kinds_are_tagged_and_resize_carries_no_cell_coordinates() {
+    fn runs_are_tagged_and_round_trip() {
+        let cells_run = PtyRun::Cells {
+            style: 0,
+            glyphs: vec!["h".to_owned(), "i".to_owned()],
+        };
+        let fill_run = PtyRun::Fill {
+            style: 1,
+            glyph: " ".to_owned(),
+            count: 78,
+        };
+
+        let json = serde_json::to_value(&cells_run).expect("serialize");
+        assert_eq!(json["type"], "cells");
+        assert_eq!(
+            serde_json::from_value::<PtyRun>(json).expect("deserialize"),
+            cells_run
+        );
+
+        let json = serde_json::to_value(&fill_run).expect("serialize");
+        assert_eq!(json["type"], "fill");
+        assert_eq!(json["count"], 78);
+        assert_eq!(
+            serde_json::from_value::<PtyRun>(json).expect("deserialize"),
+            fill_run
+        );
+
+        assert_eq!(cells_run.width(), 2);
+        assert_eq!(fill_run.width(), 78);
+
+        // Unknown fields are refused — the same strictness every other wire
+        // shape in this contract carries.
+        assert!(
+            serde_json::from_value::<PtyRun>(serde_json::json!({
+                "type": "fill", "style": 0, "glyph": " ", "count": 1, "extra": true
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn from_cells_interns_first_appearance_and_scans_maximal_runs() {
+        // Row 0: two blank cells, then two bold — two maximal runs. Row 1:
+        // bold first, so the table order is decided by row 0 (first
+        // appearance), not by any later reuse.
+        let frame = PtyFrame::from_cells(&[
+            vec![cell(" "), cell(" "), bold("a"), bold("b")],
+            vec![bold("x"), cell("y"), cell("y"), cell("y")],
+        ]);
+
+        assert_eq!(frame.styles.len(), 2, "two distinct styles, each once");
+        assert!(!frame.styles[0].bold, "blank appeared first");
+        assert!(frame.styles[1].bold);
+
+        assert_eq!(
+            frame.rows[0],
+            vec![
+                PtyRun::Fill {
+                    style: 0,
+                    glyph: " ".to_owned(),
+                    count: 2,
+                },
+                PtyRun::Cells {
+                    style: 1,
+                    glyphs: vec!["a".to_owned(), "b".to_owned()],
+                },
+            ],
+            "maximal runs: a uniform-glyph run is a fill, a mixed one is cells"
+        );
+        assert_eq!(
+            frame.rows[1],
+            vec![
+                PtyRun::Fill {
+                    style: 1,
+                    glyph: "x".to_owned(),
+                    count: 1,
+                },
+                PtyRun::Fill {
+                    style: 0,
+                    glyph: "y".to_owned(),
+                    count: 3,
+                },
+            ],
+            "reused styles reference the table; a single cell is a width-1 fill"
+        );
+    }
+
+    #[test]
+    fn from_cells_then_cells_is_the_identity() {
+        let grid = vec![
+            vec![cell("g"), cell("w"), bold("!")],
+            vec![bold("k"), cell(""), cell(" ")],
+        ];
+        let frame = PtyFrame::from_cells(&grid);
+        assert_eq!(frame.cells().expect("expand"), grid);
+    }
+
+    #[test]
+    fn expansion_refuses_an_out_of_range_style_index() {
+        let frame = PtyFrame {
+            styles: vec![style()],
+            rows: vec![vec![PtyRun::Cells {
+                style: 1,
+                glyphs: vec!["x".to_owned()],
+            }]],
+        };
+        assert!(frame.cells().is_none(), "index 1 into a one-entry table");
+    }
+
+    #[test]
+    fn expansion_refuses_ragged_rows() {
+        let frame = PtyFrame {
+            styles: vec![style()],
+            rows: vec![
+                vec![PtyRun::Fill {
+                    style: 0,
+                    glyph: " ".to_owned(),
+                    count: 4,
+                }],
+                vec![PtyRun::Fill {
+                    style: 0,
+                    glyph: " ".to_owned(),
+                    count: 3,
+                }],
+            ],
+        };
+        assert!(frame.cells().is_none(), "rows of width 4 and 3");
+    }
+
+    #[test]
+    fn expansion_bounds_a_fill_before_allocating_it() {
+        // A ~45-byte fill naming four billion cells must be answered by
+        // arithmetic, not survived by allocation: the wire's grid universe is
+        // u16 x u16 and expansion refuses anything past it.
+        let frame = PtyFrame {
+            styles: vec![style()],
+            rows: vec![vec![PtyRun::Fill {
+                style: 0,
+                glyph: " ".to_owned(),
+                count: u32::MAX,
+            }]],
+        };
+        assert!(frame.cells().is_none());
+    }
+
+    #[test]
+    fn expansion_tolerates_non_maximal_runs_and_zero_width_runs() {
+        // The tolerate ruling: adjacent same-style runs and zero-width runs
+        // are non-canonical, not corrupt. A producer should merge; expansion
+        // — and every decoder — buys no correctness by refusing here. The
+        // kernel's strict decoder refuses the zero-width case with a typed
+        // error; at this layer the value still expands to the grid it names.
+        let frame = PtyFrame {
+            styles: vec![style()],
+            rows: vec![vec![
+                PtyRun::Cells {
+                    style: 0,
+                    glyphs: vec!["a".to_owned()],
+                },
+                PtyRun::Cells {
+                    style: 0,
+                    glyphs: vec!["b".to_owned()],
+                },
+                PtyRun::Fill {
+                    style: 0,
+                    glyph: " ".to_owned(),
+                    count: 0,
+                },
+            ]],
+        };
+        let cells = frame.cells().expect("tolerated");
+        assert_eq!(cells[0].len(), 2);
+        assert_eq!(cells[0][0].glyph, "a");
+        assert_eq!(cells[0][1].glyph, "b");
+    }
+
+    #[test]
+    fn pty_delta_kinds_are_tagged_and_the_batch_table_is_self_contained() {
         let cells_changed = PtyDelta::CellsChanged {
+            styles: vec![style()],
             updates: vec![PtyCellUpdate {
                 row: 0,
                 col: 0,
-                cell: cell("x"),
+                glyph: "x".to_owned(),
+                style: 0,
             }],
         };
         let resized = PtyDelta::Resized {
@@ -442,6 +878,12 @@ mod tests {
         let json = serde_json::to_value(&cells_changed).expect("serialize");
         assert_eq!(json["type"], "cells_changed");
         assert_eq!(
+            json["styles"].as_array().expect("table").len(),
+            1,
+            "the batch carries its own style table"
+        );
+        assert_eq!(json["updates"][0]["style"], 0);
+        assert_eq!(
             serde_json::from_value::<PtyDelta>(json).expect("deserialize"),
             cells_changed
         );
@@ -451,6 +893,7 @@ mod tests {
         assert_eq!(json["rows"], 40);
         assert_eq!(json["cols"], 120);
         assert!(json.get("updates").is_none());
+        assert!(json.get("styles").is_none());
         assert_eq!(
             serde_json::from_value::<PtyDelta>(json).expect("deserialize"),
             resized

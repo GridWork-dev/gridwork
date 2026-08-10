@@ -36,11 +36,11 @@
 //! deltas are typed wire values produced and consumed elsewhere; the hub
 //! only stores, validates bounds, and fans out.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use gwk_domain::frame::{CellStyle, PtyDelta, PtyFrame, StyledCell};
+use gwk_domain::frame::{CellStyle, PtyDelta, PtyFrame, PtyRun, StyledCell};
 use gwk_domain::ids::{PtyFrameSeq, PtySessionGeneration, PtySessionId, RequestId, WriterEpoch};
 use gwk_domain::protocol::{
     FRAME_BODY_MAX_BYTES, KernelErrorCode, KernelResult, SLOW_CONSUMER_TIMEOUT_SECS, ServerControl,
@@ -70,9 +70,12 @@ const PUBLISH_BYTE_BUDGET: usize = (FRAME_BODY_MAX_BYTES as usize) / 2;
 /// Serialized bytes one cell update may carry. A glyph is one grapheme
 /// cluster — tens of bytes at its ZWJ-emoji worst — so this bound never
 /// touches a real screen; what it bounds is the mirror's growth, which
-/// accumulates across batches and is measured by no single publish. With
-/// the area bounded by [`PUBLISH_BYTE_BUDGET`] at the seed and at every
-/// resize, this is the other factor of the mirror's byte ceiling.
+/// accumulates across batches and is measured by no single publish. The
+/// area's own bound is the u16 grid universe the strict decode enforces —
+/// under the interned shape a publish's bytes no longer scale with its
+/// area, so the byte budget stopped being an area bound; the publisher
+/// behind the same-EUID socket is the resident host, and the geometry it
+/// declares is the operator's own.
 const MAX_GLYPH_BYTES: usize = 64;
 
 /// Capacity of a session's live broadcast. A consumer that falls this many
@@ -236,7 +239,7 @@ impl PtyHub {
         seq: Option<u64>,
         frame: PtyFrame,
     ) -> Result<(), PtyRefusal> {
-        let (_, _) = frame_size(&frame)?;
+        let (rows, cols, cells) = strict_frame(&frame)?;
         let bytes = measured(&frame)?;
         let mut sessions = self.lock();
         match sessions.get_mut(id) {
@@ -255,7 +258,7 @@ impl PtyHub {
                         owner: conn,
                         generation,
                         seq,
-                        cells: frame.cells,
+                        cells,
                         retained: VecDeque::new(),
                         retained_bytes: 0,
                         // The claim's whole history is evicted by definition:
@@ -298,10 +301,6 @@ impl PtyHub {
                     (None, Some(_)) => true,
                     _ => false,
                 };
-                let (rows, cols) = (
-                    frame.cells.len() as u16,
-                    frame.cells.first().map_or(0, |row| row.len() as u16),
-                );
                 if !advanced {
                     // A reseed at the head re-announces the screen a revision
                     // already names; two dimensions under one revision would
@@ -319,7 +318,7 @@ impl PtyHub {
                         ));
                     }
                 }
-                session.cells = frame.cells;
+                session.cells = cells;
                 session.seq = seq;
                 if advanced {
                     // The head moved without deltas covering the distance.
@@ -387,8 +386,15 @@ impl PtyHub {
                     rows = *new_rows;
                     cols = *new_cols;
                 }
-                PtyDelta::CellsChanged { updates } => {
+                PtyDelta::CellsChanged { styles, updates } => {
+                    duplicate_free(styles)?;
                     for update in updates {
+                        if usize::try_from(update.style)
+                            .ok()
+                            .is_none_or(|index| index >= styles.len())
+                        {
+                            return Err(out_of_range(update.style, styles.len()));
+                        }
                         if update.row >= rows || update.col >= cols {
                             return Err(PtyRefusal::new(
                                 KernelErrorCode::Validation,
@@ -399,13 +405,13 @@ impl PtyHub {
                                 ),
                             ));
                         }
-                        if update.cell.glyph.len() > MAX_GLYPH_BYTES {
+                        if update.glyph.len() > MAX_GLYPH_BYTES {
                             return Err(PtyRefusal::new(
                                 KernelErrorCode::Validation,
                                 format!(
                                     "pty session {id}: a {}-byte glyph at ({}, {}) exceeds \
                                      the {MAX_GLYPH_BYTES}-byte cell bound",
-                                    update.cell.glyph.len(),
+                                    update.glyph.len(),
                                     update.row,
                                     update.col
                                 ),
@@ -421,10 +427,16 @@ impl PtyHub {
                 PtyDelta::Resized { rows, cols } => {
                     session.cells = vec![vec![blank(); usize::from(*cols)]; usize::from(*rows)];
                 }
-                PtyDelta::CellsChanged { updates } => {
+                PtyDelta::CellsChanged { styles, updates } => {
+                    // Resolve each update through the batch's own table and
+                    // forget the table: the mirror stays a plain grid, and no
+                    // index space outlives the message that carried it.
                     for update in updates {
                         session.cells[usize::from(update.row)][usize::from(update.col)] =
-                            update.cell.clone();
+                            StyledCell {
+                                glyph: update.glyph.clone(),
+                                style: styles[update.style as usize].clone(),
+                            };
                     }
                 }
             }
@@ -526,9 +538,9 @@ impl PtyHub {
                 format!("pty session {id} has produced no frame yet"),
             )
         })?;
-        let frame = PtyFrame {
-            cells: session.cells.clone(),
-        };
+        // A fresh first-appearance-order table per answer: the mirror holds
+        // no persistent index space, so serving is where interning happens.
+        let frame = PtyFrame::from_cells(&session.cells);
         let bytes = serde_json::to_vec(&frame)
             .map_err(|e| {
                 PtyRefusal::new(KernelErrorCode::Storage, format!("measure a snapshot: {e}"))
@@ -721,20 +733,81 @@ async fn send(
     }
 }
 
-/// The dimensions of a rectangular frame, or the refusal for a ragged or
-/// over-`u16` one. The shape rule `gwk_domain::frame::PtyFrame` assigns to
-/// this layer.
-fn frame_size(frame: &PtyFrame) -> Result<(u16, u16), PtyRefusal> {
-    let rows = u16::try_from(frame.cells.len()).map_err(|_| oversized(frame.cells.len()))?;
-    let cols = frame.cells.first().map_or(0, Vec::len);
-    if frame.cells.iter().any(|row| row.len() != cols) {
-        return Err(PtyRefusal::new(
-            KernelErrorCode::Validation,
-            "a pty frame must be rectangular: every row the same length",
-        ));
+/// The strict decode of a published frame: the refusals the type admits and
+/// this layer refuses (the shape rule `gwk_domain::frame::PtyFrame` assigns
+/// here), then the expansion into the mirror's grid form. Every refusal
+/// lands BEFORE any grid allocation — a ~45-byte `fill` run can name
+/// billions of cells, so the walk that judges the frame touches only
+/// arithmetic, and the expansion runs on values already proven bounded.
+///
+/// Refused: a style index outside the table; a duplicate table entry
+/// (interning that isn't interning is a lie on the wire); ragged rows; a
+/// zero-width run; a dimension past `u16`. Tolerated by the ruled form:
+/// adjacent runs sharing a style — a producer should merge, but a merge rule
+/// in the decoder buys no correctness and costs every decoder.
+fn strict_frame(frame: &PtyFrame) -> Result<(u16, u16, Vec<Vec<StyledCell>>), PtyRefusal> {
+    duplicate_free(&frame.styles)?;
+    let rows = u16::try_from(frame.rows.len()).map_err(|_| oversized(frame.rows.len()))?;
+    let mut width: Option<u64> = None;
+    for row in &frame.rows {
+        let mut total = 0u64;
+        for run in row {
+            if run.width() == 0 {
+                return Err(PtyRefusal::new(
+                    KernelErrorCode::Validation,
+                    "a pty frame run must cover at least one cell",
+                ));
+            }
+            if usize::try_from(run.style_index())
+                .ok()
+                .is_none_or(|index| index >= frame.styles.len())
+            {
+                return Err(out_of_range(run.style_index(), frame.styles.len()));
+            }
+            total += run.width() as u64;
+        }
+        if total > u64::from(u16::MAX) {
+            return Err(oversized(total as usize));
+        }
+        if *width.get_or_insert(total) != total {
+            return Err(PtyRefusal::new(
+                KernelErrorCode::Validation,
+                "a pty frame must be rectangular: every row the same width",
+            ));
+        }
     }
-    let cols = u16::try_from(cols).map_err(|_| oversized(cols))?;
-    Ok((cols, rows))
+    let cols = width.unwrap_or(0) as u16;
+    // Everything the expansion checks was just refused typed, so this arm is
+    // a defensive impossibility, not a second decoder.
+    let cells = frame.cells().ok_or_else(|| {
+        PtyRefusal::new(
+            KernelErrorCode::Validation,
+            "a pty frame passed the strict decode and still failed to expand",
+        )
+    })?;
+    Ok((rows, cols, cells))
+}
+
+/// The one-canonical-table refusal, shared by the frame and batch decoders.
+fn duplicate_free(styles: &[CellStyle]) -> Result<(), PtyRefusal> {
+    let mut seen = HashSet::with_capacity(styles.len());
+    for style in styles {
+        if !seen.insert(style) {
+            return Err(PtyRefusal::new(
+                KernelErrorCode::Validation,
+                "a pty style table carries a duplicate entry — one canonical table only",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The style-index refusal, shared by the frame and batch decoders.
+fn out_of_range(index: u32, table: usize) -> PtyRefusal {
+    PtyRefusal::new(
+        KernelErrorCode::Validation,
+        format!("a pty style index {index} is outside its {table}-entry table"),
+    )
 }
 
 /// Serialized size of a publish, measured once and checked against the
@@ -792,25 +865,41 @@ fn oversized(dimension: usize) -> PtyRefusal {
 /// The exact serialized size of a `rows`x`cols` all-blank [`PtyFrame`] —
 /// what applying a `Resized` delta would put in the mirror — computed by
 /// arithmetic so the answer never costs the allocation it exists to refuse.
-/// Every blank cell serializes identically, so the whole grid is one
-/// measured cell plus JSON punctuation: each row is `[c,c,…]`, the cell
-/// list is `[row,row,…]`, and the frame wraps it as `{"cells":…}`.
-/// Saturating, because `u16::MAX`² cells times ~150 bytes is the size of
-/// lie this function is here to catch. The host's declaration check
-/// (`gwk-pty-host`'s `publish` module) mirrors this arithmetic.
+///
+/// Re-derived for the interned shape: a blank grid is one table entry (the
+/// blank style, measured once) plus one `fill` run per row (measured once —
+/// its `count` field is `cols`, so the digits are right by construction) and
+/// JSON punctuation: each row is `[fill]`, the row list is `[row,row,…]`,
+/// and the frame wraps both as `{"styles":[s],"rows":…}`. O(rows) bytes, so
+/// every practical u16 geometry now seeds trivially — the refusal this
+/// feeds keeps its job at the far edge (`u16::MAX`-row screens still bust),
+/// and the actual-serialized-bytes rule at publish time remains the real
+/// enforcement. The host's declaration check (`gwk-pty-host`'s `publish`
+/// module) mirrors this arithmetic.
 fn blank_grid_bytes(rows: u16, cols: u16) -> u64 {
-    let cell = serde_json::to_vec(&blank())
-        .expect("a blank cell serializes")
-        .len() as u64;
     let (rows, cols) = (u64::from(rows), u64::from(cols));
-    if rows == 0 || cols == 0 {
-        // `[]` or `[[],…]`, plus the wrapper — tiny either way; exactness
-        // below zero cells buys nothing.
-        return 12 + rows * 3;
+    if rows == 0 {
+        // `{"styles":[],"rows":[]}` — no cells, no table entry.
+        return 23;
     }
-    let row = 2 + cols * cell + (cols - 1);
-    let cells = 2 + rows * row + (rows - 1);
-    cells.saturating_add(10)
+    if cols == 0 {
+        // Zero-width rows carry no runs and intern nothing:
+        // `{"styles":[],"rows":[[],[],…]}`.
+        return 21 + 3 * rows + 1;
+    }
+    let style = serde_json::to_vec(&blank().style)
+        .expect("a blank style serializes")
+        .len() as u64;
+    let fill = serde_json::to_vec(&PtyRun::Fill {
+        style: 0,
+        glyph: " ".to_owned(),
+        count: cols as u32,
+    })
+    .expect("a fill run serializes")
+    .len() as u64;
+    // `{"styles":[` style `],"rows":[` rows x `[` fill `]` joined by commas
+    // `]}` — 22 punctuation bytes outside the per-row term.
+    (style + 22).saturating_add(rows.saturating_mul(fill + 3))
 }
 
 /// A blank cell, matching the host's own convention for a fresh screen: the
@@ -846,19 +935,28 @@ mod tests {
     }
 
     fn frame(rows: u16, cols: u16) -> PtyFrame {
-        PtyFrame {
-            cells: vec![vec![blank(); usize::from(cols)]; usize::from(rows)],
-        }
+        PtyFrame::from_cells(&vec![vec![blank(); usize::from(cols)]; usize::from(rows)])
     }
 
     fn update(row: u16, col: u16, glyph: &str) -> PtyCellUpdate {
-        let mut cell = blank();
-        cell.glyph = glyph.to_owned();
-        PtyCellUpdate { row, col, cell }
+        // Index 0 into the one-entry blank table `cells_changed` carries.
+        PtyCellUpdate {
+            row,
+            col,
+            glyph: glyph.to_owned(),
+            style: 0,
+        }
     }
 
     fn cells_changed(updates: Vec<PtyCellUpdate>) -> Vec<PtyDelta> {
-        vec![PtyDelta::CellsChanged { updates }]
+        vec![PtyDelta::CellsChanged {
+            styles: vec![blank().style],
+            updates,
+        }]
+    }
+
+    fn expanded(frame: &PtyFrame) -> Vec<Vec<StyledCell>> {
+        frame.cells().expect("a served snapshot expands")
     }
 
     #[test]
@@ -951,8 +1049,9 @@ mod tests {
 
         let (_, seq, snapshot) = hub.snapshot(&id("s")).expect("snapshot");
         assert_eq!(seq, 1);
-        assert_eq!(snapshot.cells[0][0].glyph, "x");
-        assert_eq!(snapshot.cells[0][1].glyph, " ");
+        let cells = expanded(&snapshot);
+        assert_eq!(cells[0][0].glyph, "x");
+        assert_eq!(cells[0][1].glyph, " ");
     }
 
     #[test]
@@ -974,7 +1073,11 @@ mod tests {
         assert_eq!(refused.code, KernelErrorCode::Validation);
         let (_, seq, snapshot) = hub.snapshot(&id("s")).expect("snapshot");
         assert_eq!(seq, 0, "a refused batch must not advance the head");
-        assert_eq!(snapshot.cells[0][0].glyph, " ", "nothing may have landed");
+        assert_eq!(
+            expanded(&snapshot)[0][0].glyph,
+            " ",
+            "nothing may have landed"
+        );
 
         // A resize inside the batch moves the bounds for the updates after it.
         hub.publish_deltas(
@@ -984,13 +1087,14 @@ mod tests {
             vec![
                 PtyDelta::Resized { rows: 10, cols: 10 },
                 PtyDelta::CellsChanged {
+                    styles: vec![blank().style],
                     updates: vec![update(9, 9, "z")],
                 },
             ],
         )
         .expect("in bounds after the resize");
         let (_, _, snapshot) = hub.snapshot(&id("s")).expect("snapshot");
-        assert_eq!(snapshot.cells[9][9].glyph, "z");
+        assert_eq!(expanded(&snapshot)[9][9].glyph, "z");
     }
 
     #[test]
@@ -998,7 +1102,12 @@ mod tests {
         let hub = PtyHub::default();
         let host = hub.connection();
         let mut ragged = frame(2, 4);
-        ragged.cells[1].pop();
+        // Rows of width 4 and 3.
+        ragged.rows[1] = vec![PtyRun::Fill {
+            style: 0,
+            glyph: " ".to_owned(),
+            count: 3,
+        }];
         assert_eq!(
             hub.publish_snapshot(host, &id("s"), None, ragged)
                 .expect_err("ragged")
@@ -1006,7 +1115,8 @@ mod tests {
             KernelErrorCode::Validation
         );
         let tall = PtyFrame {
-            cells: vec![Vec::new(); usize::from(u16::MAX) + 1],
+            styles: Vec::new(),
+            rows: vec![Vec::new(); usize::from(u16::MAX) + 1],
         };
         assert_eq!(
             hub.publish_snapshot(host, &id("s"), None, tall)
@@ -1014,6 +1124,146 @@ mod tests {
                 .code,
             KernelErrorCode::Validation
         );
+        // A row wider than u16 is the same lie told sideways — and it is a
+        // ~50-byte value naming four billion cells, so the refusal must be
+        // arithmetic, not a survived allocation.
+        let wide = PtyFrame {
+            styles: vec![blank().style],
+            rows: vec![vec![PtyRun::Fill {
+                style: 0,
+                glyph: " ".to_owned(),
+                count: u32::MAX,
+            }]],
+        };
+        assert_eq!(
+            hub.publish_snapshot(host, &id("s"), None, wide)
+                .expect_err("a row past u16")
+                .code,
+            KernelErrorCode::Validation
+        );
+    }
+
+    #[test]
+    fn a_style_index_outside_the_table_is_refused_in_frames_and_batches() {
+        let hub = PtyHub::default();
+        let host = hub.connection();
+        let dangling = PtyFrame {
+            styles: vec![blank().style],
+            rows: vec![vec![PtyRun::Cells {
+                style: 1,
+                glyphs: vec!["x".to_owned()],
+            }]],
+        };
+        assert_eq!(
+            hub.publish_snapshot(host, &id("s"), None, dangling)
+                .expect_err("index 1 into a one-entry table")
+                .code,
+            KernelErrorCode::Validation
+        );
+
+        hub.publish_snapshot(host, &id("s"), Some(0), frame(2, 4))
+            .expect("seed");
+        let mut orphan = update(0, 0, "x");
+        orphan.style = 7;
+        let refused = hub
+            .publish_deltas(host, &id("s"), 1, cells_changed(vec![orphan]))
+            .expect_err("an update indexing past its batch table");
+        assert_eq!(refused.code, KernelErrorCode::Validation);
+        let (_, seq, _) = hub.snapshot(&id("s")).expect("snapshot");
+        assert_eq!(seq, 0, "the refusal must not advance the head");
+    }
+
+    #[test]
+    fn a_duplicate_style_table_entry_is_refused_in_frames_and_batches() {
+        let hub = PtyHub::default();
+        let host = hub.connection();
+        let twice = PtyFrame {
+            styles: vec![blank().style, blank().style],
+            rows: vec![vec![PtyRun::Fill {
+                style: 0,
+                glyph: " ".to_owned(),
+                count: 2,
+            }]],
+        };
+        assert_eq!(
+            hub.publish_snapshot(host, &id("s"), None, twice)
+                .expect_err("interning that isn't interning")
+                .code,
+            KernelErrorCode::Validation
+        );
+
+        hub.publish_snapshot(host, &id("s"), Some(0), frame(2, 4))
+            .expect("seed");
+        let refused = hub
+            .publish_deltas(
+                host,
+                &id("s"),
+                1,
+                vec![PtyDelta::CellsChanged {
+                    styles: vec![blank().style, blank().style],
+                    updates: vec![update(0, 0, "x")],
+                }],
+            )
+            .expect_err("a duplicate batch table");
+        assert_eq!(refused.code, KernelErrorCode::Validation);
+    }
+
+    #[test]
+    fn a_zero_width_run_is_refused_and_non_maximal_runs_are_tolerated() {
+        let hub = PtyHub::default();
+        let host = hub.connection();
+        for empty_run in [
+            PtyRun::Fill {
+                style: 0,
+                glyph: " ".to_owned(),
+                count: 0,
+            },
+            PtyRun::Cells {
+                style: 0,
+                glyphs: Vec::new(),
+            },
+        ] {
+            let zero = PtyFrame {
+                styles: vec![blank().style],
+                rows: vec![vec![
+                    empty_run,
+                    PtyRun::Fill {
+                        style: 0,
+                        glyph: " ".to_owned(),
+                        count: 2,
+                    },
+                ]],
+            };
+            assert_eq!(
+                hub.publish_snapshot(host, &id("s"), None, zero)
+                    .expect_err("a zero-width run")
+                    .code,
+                KernelErrorCode::Validation
+            );
+        }
+
+        // The tolerate ruling: two adjacent runs sharing a style are
+        // non-canonical, not corrupt — a producer should merge, a decoder
+        // that refuses buys no correctness. The split blank row publishes.
+        let non_maximal = PtyFrame {
+            styles: vec![blank().style],
+            rows: vec![vec![
+                PtyRun::Fill {
+                    style: 0,
+                    glyph: " ".to_owned(),
+                    count: 1,
+                },
+                PtyRun::Fill {
+                    style: 0,
+                    glyph: " ".to_owned(),
+                    count: 1,
+                },
+            ]],
+        };
+        hub.publish_snapshot(host, &id("s"), None, non_maximal)
+            .expect("non-maximal runs are tolerated");
+        let attached = hub.attach(&id("s"), None, None).expect("attach");
+        assert_eq!((attached.rows, attached.cols), (1, 2));
     }
 
     #[test]
@@ -1326,7 +1576,11 @@ mod tests {
         assert_eq!(refused.code, KernelErrorCode::Validation);
         let (_, seq, snapshot) = hub.snapshot(&id("s")).expect("snapshot");
         assert_eq!(seq, 0, "the refusal must not advance the head");
-        assert_eq!(snapshot.cells.len(), 2, "the refusal must touch nothing");
+        assert_eq!(
+            expanded(&snapshot).len(),
+            2,
+            "the refusal must touch nothing"
+        );
     }
 
     #[test]
@@ -1359,21 +1613,41 @@ mod tests {
         let hub = PtyHub::default();
         let host = hub.connection();
         // A grid whose BLANK form fits the publish budget…
-        hub.publish_snapshot(host, &id("s"), Some(0), frame(120, 100))
+        hub.publish_snapshot(host, &id("s"), Some(0), frame(150, 100))
             .expect("seed");
-        // …grown cell by bounded cell across batches until its serialized
-        // form no longer fits one response frame. No single publish was the
-        // oversized one.
-        let glyph = "x".repeat(MAX_GLYPH_BYTES);
-        for half in 0..2u16 {
+        // …grown across batches into per-cell DISTINCT styles — the worst
+        // legal case, the one shape interning cannot compress — until the
+        // mirror's serialized form no longer fits one response frame. No
+        // single publish was the oversized one: each batch carries only its
+        // own band's styles in its own table.
+        for band in 0..3u16 {
+            let mut styles = Vec::new();
             let mut updates = Vec::new();
-            for row in 0..60u16 {
+            for row in 0..50u16 {
                 for col in 0..100u16 {
-                    updates.push(update(half * 60 + row, col, &glyph));
+                    let index = styles.len() as u32;
+                    let mut style = blank().style;
+                    style.fg = Some(gwk_domain::frame::CellColor::Truecolor {
+                        r: (band * 50 + row) as u8,
+                        g: col as u8,
+                        b: 1,
+                    });
+                    styles.push(style);
+                    updates.push(PtyCellUpdate {
+                        row: band * 50 + row,
+                        col,
+                        glyph: "x".to_owned(),
+                        style: index,
+                    });
                 }
             }
-            hub.publish_deltas(host, &id("s"), u64::from(half) + 1, cells_changed(updates))
-                .expect("each batch is inside the publish budget");
+            hub.publish_deltas(
+                host,
+                &id("s"),
+                u64::from(band) + 1,
+                vec![PtyDelta::CellsChanged { styles, updates }],
+            )
+            .expect("each batch is inside the publish budget");
         }
 
         let refused = hub
@@ -1387,7 +1661,17 @@ mod tests {
 
     #[test]
     fn blank_grid_arithmetic_matches_real_serialization() {
-        for (rows, cols) in [(1u16, 1u16), (2, 4), (24, 80), (1, 7)] {
+        // (70, 240) is the phase's deciding geometry: a blank 240x70 screen,
+        // 2,536,951 bytes under the per-cell shape, now O(rows).
+        for (rows, cols) in [
+            (1u16, 1u16),
+            (2, 4),
+            (24, 80),
+            (1, 7),
+            (70, 240),
+            (0, 0),
+            (3, 0),
+        ] {
             let actual = serde_json::to_vec(&frame(rows, cols))
                 .expect("serialize")
                 .len() as u64;
@@ -1480,9 +1764,15 @@ mod tests {
     fn an_oversized_publish_is_refused_by_bytes() {
         let hub = PtyHub::default();
         let host = hub.connection();
-        // One glyph large enough that the serialized frame passes the budget.
-        let mut big = frame(1, 1);
-        big.cells[0][0].glyph = "x".repeat(PUBLISH_BYTE_BUDGET + 1);
+        // One glyph large enough that the serialized frame passes the budget:
+        // well-shaped by every strict-decode rule, refused by measurement.
+        let big = PtyFrame {
+            styles: vec![blank().style],
+            rows: vec![vec![PtyRun::Cells {
+                style: 0,
+                glyphs: vec!["x".repeat(PUBLISH_BYTE_BUDGET + 1)],
+            }]],
+        };
         assert_eq!(
             hub.publish_snapshot(host, &id("s"), None, big)
                 .expect_err("over budget")
@@ -1498,10 +1788,10 @@ mod tests {
         hub.publish_snapshot(host, &id("s"), Some(0), frame(80, 70))
             .expect("seed");
         // Each batch repaints the whole screen with bound-sized glyphs —
-        // ~1.3 MiB serialized — so the byte bound must evict long before the
-        // count bound would.
+        // ~0.5 MiB serialized under the interned update shape — so sixteen
+        // of them cross the byte bound long before the count bound would.
         let glyph = "x".repeat(MAX_GLYPH_BYTES);
-        for seq in 1..=8u64 {
+        for seq in 1..=16u64 {
             let mut updates = Vec::new();
             for row in 0..80u16 {
                 for col in 0..70u16 {

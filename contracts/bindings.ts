@@ -330,8 +330,15 @@ export type CellColor =
 { type: "truecolor"; r: number; g: number; b: number };
 
 /**
- *  The attribute bits and colors a [`StyledCell`] carries, independent of its
- *  glyph.
+ *  The attribute bits and colors a cell carries, independent of its glyph.
+ * 
+ *  This is the object the wire interns: a frame or a delta batch carries each
+ *  distinct value of this struct exactly once in its `styles` table, and
+ *  every run or update references it by index. The struct itself is unchanged
+ *  by that move — the table stores this existing type verbatim.
+ * 
+ *  `Hash` exists for exactly that interning (a first-appearance
+ *  `HashMap<CellStyle, u32>` in [`StyleInterner`]), not for any wire fact.
  * 
  *  The eight attributes below are plain, always-present booleans — not
  *  `Option<bool>` — matching how this contract already carries `dirty` and
@@ -355,8 +362,15 @@ export type CellColor =
 export type CellStyle = CellStyle_Serialize | CellStyle_Deserialize;
 
 /**
- *  The attribute bits and colors a [`StyledCell`] carries, independent of its
- *  glyph.
+ *  The attribute bits and colors a cell carries, independent of its glyph.
+ * 
+ *  This is the object the wire interns: a frame or a delta batch carries each
+ *  distinct value of this struct exactly once in its `styles` table, and
+ *  every run or update references it by index. The struct itself is unchanged
+ *  by that move — the table stores this existing type verbatim.
+ * 
+ *  `Hash` exists for exactly that interning (a first-appearance
+ *  `HashMap<CellStyle, u32>` in [`StyleInterner`]), not for any wire fact.
  * 
  *  The eight attributes below are plain, always-present booleans — not
  *  `Option<bool>` — matching how this contract already carries `dirty` and
@@ -401,8 +415,15 @@ export type CellStyle_Deserialize = {
 };
 
 /**
- *  The attribute bits and colors a [`StyledCell`] carries, independent of its
- *  glyph.
+ *  The attribute bits and colors a cell carries, independent of its glyph.
+ * 
+ *  This is the object the wire interns: a frame or a delta batch carries each
+ *  distinct value of this struct exactly once in its `styles` table, and
+ *  every run or update references it by index. The struct itself is unchanged
+ *  by that move — the table stores this existing type verbatim.
+ * 
+ *  `Hash` exists for exactly that interning (a first-appearance
+ *  `HashMap<CellStyle, u32>` in [`StyleInterner`]), not for any wire fact.
  * 
  *  The eight attributes below are plain, always-present booleans — not
  *  `Option<bool>` — matching how this contract already carries `dirty` and
@@ -2136,21 +2157,15 @@ export type ProjectionRecord_Serialize = ({ projection_type: "task"; task: Task_
  */
 export type PtyAnsiSlot = "black" | "red" | "green" | "yellow" | "blue" | "magenta" | "cyan" | "white" | "bright_black" | "bright_red" | "bright_green" | "bright_yellow" | "bright_blue" | "bright_magenta" | "bright_cyan" | "bright_white";
 
-/**  One cell's new content, addressed by zero-indexed grid position. */
-export type PtyCellUpdate = PtyCellUpdate_Serialize | PtyCellUpdate_Deserialize;
-
-/**  One cell's new content, addressed by zero-indexed grid position. */
-export type PtyCellUpdate_Deserialize = {
+/**
+ *  One cell's new content, addressed by zero-indexed grid position. `style`
+ *  indexes the CARRYING batch's `styles` table — never any other message's.
+ */
+export type PtyCellUpdate = {
 	row: number,
 	col: number,
-	cell: StyledCell_Deserialize,
-};
-
-/**  One cell's new content, addressed by zero-indexed grid position. */
-export type PtyCellUpdate_Serialize = {
-	row: number,
-	col: number,
-	cell: StyledCell_Serialize,
+	glyph: string,
+	style: number,
 };
 
 /**
@@ -2180,15 +2195,19 @@ export type PtyDelta = PtyDelta_Serialize | PtyDelta_Deserialize;
 export type PtyDelta_Deserialize = 
 /**
  *  Zero or more cells changed. Each update's `row`/`col` is valid against
- *  the grid's CURRENT size — the most recent snapshot or `resized` delta.
+ *  the grid's CURRENT size — the most recent snapshot or `resized` delta
+ *  — and each update's `style` indexes this batch's own `styles` table.
+ *  The table is batch-scoped so every message is self-contained: no index
+ *  space ever crosses a message boundary, a late joiner via catch-up is
+ *  correct by construction, and no mirror holds a persistent table.
  */
-({ type: "cells_changed"; updates: PtyCellUpdate_Deserialize[] }) & { cols?: never; rows?: never } | 
+({ type: "cells_changed"; styles: CellStyle_Deserialize[]; updates: PtyCellUpdate[] }) & { cols?: never; rows?: never } | 
 /**
  *  The session's grid was resized. Cell content outside the new bounds is
  *  gone; a client that needs the new content re-requests
  *  [`crate::protocol::KernelRequest::PtySnapshot`].
  */
-({ type: "resized"; rows: number; cols: number }) & { updates?: never };
+({ type: "resized"; rows: number; cols: number }) & { styles?: never; updates?: never };
 
 /**
  *  One incremental change since the previous frame revision.
@@ -2204,26 +2223,33 @@ export type PtyDelta_Deserialize =
 export type PtyDelta_Serialize = 
 /**
  *  Zero or more cells changed. Each update's `row`/`col` is valid against
- *  the grid's CURRENT size — the most recent snapshot or `resized` delta.
+ *  the grid's CURRENT size — the most recent snapshot or `resized` delta
+ *  — and each update's `style` indexes this batch's own `styles` table.
+ *  The table is batch-scoped so every message is self-contained: no index
+ *  space ever crosses a message boundary, a late joiner via catch-up is
+ *  correct by construction, and no mirror holds a persistent table.
  */
-({ type: "cells_changed"; updates: PtyCellUpdate_Serialize[] }) & { cols?: never; rows?: never } | 
+({ type: "cells_changed"; styles: CellStyle_Serialize[]; updates: PtyCellUpdate[] }) & { cols?: never; rows?: never } | 
 /**
  *  The session's grid was resized. Cell content outside the new bounds is
  *  gone; a client that needs the new content re-requests
  *  [`crate::protocol::KernelRequest::PtySnapshot`].
  */
-({ type: "resized"; rows: number; cols: number }) & { updates?: never };
+({ type: "resized"; rows: number; cols: number }) & { styles?: never; updates?: never };
 
 /**
  *  A full styled frame: every cell of a hosted PTY session's grid at one
- *  [`crate::ids::PtyFrameSeq`], row-major (`cells[row][col]`).
+ *  [`crate::ids::PtyFrameSeq`], as a frame-scoped style table plus row-major
+ *  runs (`rows[row]` = that row's runs, left to right).
  * 
  *  `rows`/`cols` are not stored as separate fields — they are exactly
- *  `cells.len()` and `cells[0].len()`, every row is the same length, and this
- *  type has no constructor that could let a stored pair disagree with the
- *  grid it describes. That shape rule is the kernel wire layer's to enforce
- *  (see `crate::protocol`'s module doc on the split between what a type
- *  admits and what the strict decoder refuses), not this type's to
+ *  `rows.len()` and each row's summed run width, every row the same width,
+ *  and this type has no constructor that could let a stored pair disagree
+ *  with the runs it describes. That shape rule — and every other invariant
+ *  the type admits but the contract refuses (style indices in range, no
+ *  duplicate table entry, no zero-width run) — is the kernel wire layer's to
+ *  enforce (see `crate::protocol`'s module doc on the split between what a
+ *  type admits and what the strict decoder refuses), not this type's to
  *  self-validate: a wire type validates itself only when its value set is
  *  CLOSED, and a rectangular grid of arbitrary size is not.
  */
@@ -2231,37 +2257,72 @@ export type PtyFrame = PtyFrame_Serialize | PtyFrame_Deserialize;
 
 /**
  *  A full styled frame: every cell of a hosted PTY session's grid at one
- *  [`crate::ids::PtyFrameSeq`], row-major (`cells[row][col]`).
+ *  [`crate::ids::PtyFrameSeq`], as a frame-scoped style table plus row-major
+ *  runs (`rows[row]` = that row's runs, left to right).
  * 
  *  `rows`/`cols` are not stored as separate fields — they are exactly
- *  `cells.len()` and `cells[0].len()`, every row is the same length, and this
- *  type has no constructor that could let a stored pair disagree with the
- *  grid it describes. That shape rule is the kernel wire layer's to enforce
- *  (see `crate::protocol`'s module doc on the split between what a type
- *  admits and what the strict decoder refuses), not this type's to
+ *  `rows.len()` and each row's summed run width, every row the same width,
+ *  and this type has no constructor that could let a stored pair disagree
+ *  with the runs it describes. That shape rule — and every other invariant
+ *  the type admits but the contract refuses (style indices in range, no
+ *  duplicate table entry, no zero-width run) — is the kernel wire layer's to
+ *  enforce (see `crate::protocol`'s module doc on the split between what a
+ *  type admits and what the strict decoder refuses), not this type's to
  *  self-validate: a wire type validates itself only when its value set is
  *  CLOSED, and a rectangular grid of arbitrary size is not.
  */
 export type PtyFrame_Deserialize = {
-	cells: StyledCell_Deserialize[][],
+	/**
+	 *  Every distinct style in the frame, exactly once, first-appearance
+	 *  order.
+	 */
+	styles: CellStyle_Deserialize[],
+	/**  `rows[row]` = the row's runs, left to right. */
+	rows: PtyRun[][],
 };
 
 /**
  *  A full styled frame: every cell of a hosted PTY session's grid at one
- *  [`crate::ids::PtyFrameSeq`], row-major (`cells[row][col]`).
+ *  [`crate::ids::PtyFrameSeq`], as a frame-scoped style table plus row-major
+ *  runs (`rows[row]` = that row's runs, left to right).
  * 
  *  `rows`/`cols` are not stored as separate fields — they are exactly
- *  `cells.len()` and `cells[0].len()`, every row is the same length, and this
- *  type has no constructor that could let a stored pair disagree with the
- *  grid it describes. That shape rule is the kernel wire layer's to enforce
- *  (see `crate::protocol`'s module doc on the split between what a type
- *  admits and what the strict decoder refuses), not this type's to
+ *  `rows.len()` and each row's summed run width, every row the same width,
+ *  and this type has no constructor that could let a stored pair disagree
+ *  with the runs it describes. That shape rule — and every other invariant
+ *  the type admits but the contract refuses (style indices in range, no
+ *  duplicate table entry, no zero-width run) — is the kernel wire layer's to
+ *  enforce (see `crate::protocol`'s module doc on the split between what a
+ *  type admits and what the strict decoder refuses), not this type's to
  *  self-validate: a wire type validates itself only when its value set is
  *  CLOSED, and a rectangular grid of arbitrary size is not.
  */
 export type PtyFrame_Serialize = {
-	cells: StyledCell_Serialize[][],
+	/**
+	 *  Every distinct style in the frame, exactly once, first-appearance
+	 *  order.
+	 */
+	styles: CellStyle_Serialize[],
+	/**  `rows[row]` = the row's runs, left to right. */
+	rows: PtyRun[][],
 };
+
+/**
+ *  One run of consecutive same-style cells inside a row.
+ * 
+ *  Two carriers, one meaning: `width()` cells sharing one interned style.
+ *  `Cells` holds per-cell glyphs, NOT a joined string — the wire deliberately
+ *  does not model column width, so a joined string could never be re-split
+ *  into cells (an empty glyph is a wide cluster's trailing half, and nothing
+ *  in the text itself says where it sits). `Fill` is the blank-screen
+ *  carrier: one glyph repeated `count` cells, which is what makes an
+ *  all-blank row O(1) bytes instead of O(cols).
+ */
+export type PtyRun = 
+/**  Consecutive same-style cells, one glyph per cell. */
+{ type: "cells"; style: number; glyphs: string[] } | 
+/**  One glyph repeated `count` cells. */
+{ type: "fill"; style: number; glyph: string; count: number };
 
 /**
  *  One lifetime of a hosted PTY session id. A reclaimed [`PtySessionId`]
@@ -2419,48 +2480,6 @@ capabilities: string[]; sealed: boolean; watermark?: string | null }) & { code?:
  *  [`PtyFrameSeq`] here).
  */
 ({ type: "pty_stream_closed"; request_id: RequestId; generation: PtySessionGeneration; code: KernelErrorCode; last_seq?: string | null }) & { capabilities?: never; cursor?: never; deltas?: never; events?: never; last_cursor?: never; message?: never; protocol_major?: never; protocol_minor?: never; result?: never; sealed?: never; seq?: never; session_id?: never; watermark?: never };
-
-/**
- *  One terminal cell: a displayed glyph plus the style it carries.
- * 
- *  `glyph` is a `String`, not a `char` — a cell can hold a full grapheme
- *  cluster (a combining mark, a ZWJ emoji sequence), which a single Rust
- *  `char` cannot represent. An empty string is a legal glyph: a blank cell,
- *  or the trailing half of a double-width character. Column width — a wide
- *  glyph occupies two grid cells — is deliberately NOT modeled here: deciding
- *  it is part of the engine-side conversion this task defers.
- */
-export type StyledCell = StyledCell_Serialize | StyledCell_Deserialize;
-
-/**
- *  One terminal cell: a displayed glyph plus the style it carries.
- * 
- *  `glyph` is a `String`, not a `char` — a cell can hold a full grapheme
- *  cluster (a combining mark, a ZWJ emoji sequence), which a single Rust
- *  `char` cannot represent. An empty string is a legal glyph: a blank cell,
- *  or the trailing half of a double-width character. Column width — a wide
- *  glyph occupies two grid cells — is deliberately NOT modeled here: deciding
- *  it is part of the engine-side conversion this task defers.
- */
-export type StyledCell_Deserialize = {
-	glyph: string,
-	style: CellStyle_Deserialize,
-};
-
-/**
- *  One terminal cell: a displayed glyph plus the style it carries.
- * 
- *  `glyph` is a `String`, not a `char` — a cell can hold a full grapheme
- *  cluster (a combining mark, a ZWJ emoji sequence), which a single Rust
- *  `char` cannot represent. An empty string is a legal glyph: a blank cell,
- *  or the trailing half of a double-width character. Column width — a wide
- *  glyph occupies two grid cells — is deliberately NOT modeled here: deciding
- *  it is part of the engine-side conversion this task defers.
- */
-export type StyledCell_Serialize = {
-	glyph: string,
-	style: CellStyle_Serialize,
-};
 
 /**  Tracker-visible work item. */
 export type Task = Task_Serialize | Task_Deserialize;

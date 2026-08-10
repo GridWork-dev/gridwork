@@ -1315,9 +1315,7 @@ fn pty_cell(glyph: &str) -> gwk_domain::frame::StyledCell {
 }
 
 fn pty_frame(rows: usize, cols: usize) -> gwk_domain::frame::PtyFrame {
-    gwk_domain::frame::PtyFrame {
-        cells: vec![vec![pty_cell(" "); cols]; rows],
-    }
+    gwk_domain::frame::PtyFrame::from_cells(&vec![vec![pty_cell(" "); cols]; rows])
 }
 
 #[tokio::test]
@@ -1366,8 +1364,9 @@ async fn a_published_pty_session_is_served_end_to_end_and_a_foreign_writer_is_re
         } => {
             assert_eq!(session_id.as_str(), "pty-console");
             assert_eq!(seq, gwk_domain::ids::PtyFrameSeq::new(0));
-            assert_eq!(frame.cells.len(), 2);
-            assert!(frame.cells.iter().all(|row| row.len() == 4));
+            let cells = frame.cells().expect("a served snapshot expands");
+            assert_eq!(cells.len(), 2);
+            assert!(cells.iter().all(|row| row.len() == 4));
             generation
         }
         other => panic!("{other:?}"),
@@ -1401,10 +1400,12 @@ async fn a_published_pty_session_is_served_end_to_end_and_a_foreign_writer_is_re
     // The host moves the screen; the viewer's live stream carries the batch,
     // tagged with the attach's own request id.
     let update = serde_json::to_string(&gwk_domain::frame::PtyDelta::CellsChanged {
+        styles: vec![pty_cell("x").style],
         updates: vec![gwk_domain::frame::PtyCellUpdate {
             row: 0,
             col: 0,
-            cell: pty_cell("x"),
+            glyph: "x".to_owned(),
+            style: 0,
         }],
     })
     .expect("serialize delta");
@@ -1438,10 +1439,12 @@ async fn a_published_pty_session_is_served_end_to_end_and_a_foreign_writer_is_re
             assert_eq!(seq, gwk_domain::ids::PtyFrameSeq::new(1));
             // The batch's CONTENT survives the trip, not just its count.
             match &deltas[..] {
-                [gwk_domain::frame::PtyDelta::CellsChanged { updates }] => {
+                [gwk_domain::frame::PtyDelta::CellsChanged { styles, updates }] => {
+                    assert_eq!(styles.len(), 1, "the batch table rides the wire whole");
                     assert_eq!(updates.len(), 1);
                     assert_eq!((updates[0].row, updates[0].col), (0, 0));
-                    assert_eq!(updates[0].cell.glyph, "x");
+                    assert_eq!(updates[0].glyph, "x");
+                    assert_eq!(updates[0].style, 0);
                 }
                 other => panic!("{other:?}"),
             }
