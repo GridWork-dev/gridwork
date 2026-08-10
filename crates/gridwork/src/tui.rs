@@ -451,7 +451,7 @@ pub async fn session_attach(session_id: PtySessionId) -> Result<(), Failure> {
             "PTY attach acknowledgement was unrelated",
         ));
     }
-    if state.frame().is_none() {
+    if state.cells().is_none() {
         refresh_session_snapshot(&mut data, &mut state).await?;
     }
 
@@ -602,7 +602,7 @@ async fn session_attach_loop(
                     return Ok(());
                 };
                 let disposition = state.ingest(&control);
-                if disposition != IngestDisposition::Unrelated && state.frame().is_none() {
+                if disposition != IngestDisposition::Unrelated && state.cells().is_none() {
                     refresh_session_snapshot(data, state).await?;
                 }
                 dirty = disposition != IngestDisposition::Unrelated;

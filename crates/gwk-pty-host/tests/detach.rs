@@ -62,7 +62,8 @@ fn sid() -> PtySessionId {
 fn rows_text(snapshot: &Snapshot) -> Vec<String> {
     snapshot
         .frame
-        .cells
+        .cells()
+        .expect("a snapshot expands")
         .iter()
         .map(|row| {
             row.iter()

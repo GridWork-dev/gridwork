@@ -328,17 +328,20 @@ mod tests {
     impl Model {
         fn from_frame(frame: &PtyFrame) -> Self {
             Self {
-                cells: frame.cells.clone(),
+                cells: frame.cells().expect("a served snapshot expands"),
             }
         }
 
         fn apply(&mut self, batch: &DeltaBatch) {
             for delta in batch.deltas.iter() {
                 match delta {
-                    PtyDelta::CellsChanged { updates } => {
+                    PtyDelta::CellsChanged { styles, updates } => {
                         for update in updates {
                             self.cells[usize::from(update.row)][usize::from(update.col)] =
-                                update.cell.clone();
+                                StyledCell {
+                                    glyph: update.glyph.clone(),
+                                    style: styles[update.style as usize].clone(),
+                                };
                         }
                     }
                     PtyDelta::Resized { .. } => {
@@ -360,7 +363,7 @@ mod tests {
     }
 
     fn frame_row_text(frame: &PtyFrame, y: usize) -> String {
-        frame.cells[y]
+        frame.cells().expect("a snapshot expands")[y]
             .iter()
             .map(|cell| cell.glyph.as_str())
             .collect::<String>()
@@ -478,7 +481,8 @@ mod tests {
             model.apply(batch);
         }
         assert_eq!(
-            model.cells, current.frame.cells,
+            model.cells,
+            current.frame.cells().expect("a snapshot expands"),
             "the replayed model diverged from the live screen"
         );
 
@@ -508,7 +512,7 @@ mod tests {
                 .await
                 .expect("input");
             await_snapshot(&registry, &id("s1"), |s| {
-                (0..s.frame.cells.len()).any(|y| frame_row_text(&s.frame, y).starts_with(marker))
+                (0..s.frame.rows.len()).any(|y| frame_row_text(&s.frame, y).starts_with(marker))
             })
             .await;
         }
@@ -634,8 +638,9 @@ mod tests {
         .expect("the resize never reached the consumer");
 
         let snapshot = registry.snapshot(&id("s1")).await.expect("snapshot");
-        assert_eq!(snapshot.frame.cells.len(), 30);
-        assert!(snapshot.frame.cells.iter().all(|row| row.len() == 100));
+        let cells = snapshot.frame.cells().expect("a snapshot expands");
+        assert_eq!(cells.len(), 30);
+        assert!(cells.iter().all(|row| row.len() == 100));
 
         registry.stop(&id("s1")).await.expect("stop");
     }

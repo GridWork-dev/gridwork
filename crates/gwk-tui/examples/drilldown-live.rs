@@ -147,7 +147,10 @@ mod tests {
                 session_id: PtySessionId::new("pty-1"),
                 generation: PtySessionGeneration::new("pty-life-1"),
                 seq: PtyFrameSeq::new(1),
-                frame: gwk_domain::frame::PtyFrame { cells: Vec::new() },
+                frame: gwk_domain::frame::PtyFrame {
+                    styles: Vec::new(),
+                    rows: Vec::new(),
+                },
             },
         }
     }

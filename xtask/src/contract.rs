@@ -20,7 +20,7 @@ use gwk_domain::entity::{
 };
 use gwk_domain::envelope::{Actor, CommandEnvelope, EventEnvelope, Origin, PayloadRef};
 use gwk_domain::frame::{
-    CellColor, CellStyle, CellUnderline, PtyAnsiSlot, PtyCellUpdate, PtyDelta, PtyFrame, StyledCell,
+    CellColor, CellStyle, CellUnderline, PtyAnsiSlot, PtyCellUpdate, PtyDelta, PtyFrame, PtyRun,
 };
 use gwk_domain::fsm::{AttemptState, CommandState, MessageState, Outcome, TaskState};
 use gwk_domain::ids::{
@@ -430,68 +430,72 @@ fn plain_style() -> CellStyle {
     }
 }
 
-fn plain_cell(glyph: &str) -> StyledCell {
-    StyledCell {
-        glyph: glyph.into(),
-        style: plain_style(),
-    }
-}
-
-/// A 2x2 frame exercising every color tier, every attribute in its
-/// non-default state across the four cells, an underline shape that a boolean
-/// could not have carried, an independently-colored underline, and the
-/// terminal-default (no `fg`/`bg`) cell.
+/// A 2x3 interned frame exercising every color tier, every attribute in its
+/// non-default state spread across the style table, both run kinds, an
+/// empty-glyph cell (a wide cluster's trailing half), a table index reused
+/// across rows, and the terminal-default (no `fg`/`bg`) style.
 ///
-/// Spreading the attributes rather than setting them all on one cell is
+/// Spreading the attributes rather than setting them all on one style is
 /// deliberate: a golden where every flag is `true` cannot catch two fields
 /// swapped in the generated bindings, because both sides read the same.
 fn golden_pty_frame() -> PtyFrame {
     PtyFrame {
-        cells: vec![
+        styles: vec![
+            plain_style(),
+            CellStyle {
+                bold: true,
+                blink: true,
+                fg: Some(CellColor::Ansi16 {
+                    slot: PtyAnsiSlot::BrightCyan,
+                }),
+                ..plain_style()
+            },
+            CellStyle {
+                dim: true,
+                italic: true,
+                // Curly, not Single: a `4:3` underline is the case the
+                // old `bool` reported as indistinguishable from `4`.
+                underline: Some(CellUnderline::Curly),
+                underline_color: Some(CellColor::Ansi16 {
+                    slot: PtyAnsiSlot::Red,
+                }),
+                fg: Some(CellColor::Truecolor {
+                    r: 0xff,
+                    g: 0x00,
+                    b: 0x80,
+                }),
+                bg: Some(CellColor::Xterm256 { index: 236 }),
+                ..plain_style()
+            },
+            CellStyle {
+                inverse: true,
+                invisible: true,
+                strikethrough: true,
+                overline: true,
+                ..plain_style()
+            },
+        ],
+        rows: vec![
             vec![
-                plain_cell("g"),
-                StyledCell {
-                    glyph: "w".into(),
-                    style: CellStyle {
-                        bold: true,
-                        blink: true,
-                        fg: Some(CellColor::Ansi16 {
-                            slot: PtyAnsiSlot::BrightCyan,
-                        }),
-                        ..plain_style()
-                    },
+                PtyRun::Cells {
+                    style: 0,
+                    glyphs: vec!["g".into(), "w".into()],
+                },
+                PtyRun::Fill {
+                    style: 1,
+                    glyph: " ".into(),
+                    count: 1,
                 },
             ],
             vec![
-                StyledCell {
-                    glyph: "k".into(),
-                    style: CellStyle {
-                        dim: true,
-                        italic: true,
-                        // Curly, not Single: a `4:3` underline is the case the
-                        // old `bool` reported as indistinguishable from `4`.
-                        underline: Some(CellUnderline::Curly),
-                        underline_color: Some(CellColor::Ansi16 {
-                            slot: PtyAnsiSlot::Red,
-                        }),
-                        fg: Some(CellColor::Truecolor {
-                            r: 0xff,
-                            g: 0x00,
-                            b: 0x80,
-                        }),
-                        bg: Some(CellColor::Xterm256 { index: 236 }),
-                        ..plain_style()
-                    },
+                PtyRun::Cells {
+                    style: 2,
+                    glyphs: vec!["k".into(), String::new()],
                 },
-                StyledCell {
-                    glyph: String::new(),
-                    style: CellStyle {
-                        inverse: true,
-                        invisible: true,
-                        strikethrough: true,
-                        overline: true,
-                        ..plain_style()
-                    },
+                PtyRun::Fill {
+                    style: 3,
+                    glyph: " ".into(),
+                    count: 1,
                 },
             ],
         ],
@@ -501,16 +505,19 @@ fn golden_pty_frame() -> PtyFrame {
 fn golden_pty_deltas() -> Vec<PtyDelta> {
     vec![
         PtyDelta::CellsChanged {
+            styles: vec![plain_style()],
             updates: vec![
                 PtyCellUpdate {
                     row: 0,
                     col: 0,
-                    cell: plain_cell("G"),
+                    glyph: "G".into(),
+                    style: 0,
                 },
                 PtyCellUpdate {
                     row: 0,
                     col: 1,
-                    cell: plain_cell("W"),
+                    glyph: "W".into(),
+                    style: 0,
                 },
             ],
         },

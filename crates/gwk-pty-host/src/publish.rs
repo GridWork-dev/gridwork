@@ -147,32 +147,40 @@ pub fn parse_sessions(value: &str) -> Result<Vec<SessionDecl>, String> {
 const PUBLISH_BYTE_BUDGET: u64 = (FRAME_BODY_MAX_BYTES as u64) / 2;
 
 /// The exact serialized size of an all-blank `rows`x`cols` frame, by the
-/// same arithmetic as the kernel hub's own `blank_grid_bytes`: one measured
-/// blank cell plus JSON punctuation.
+/// same arithmetic as the kernel hub's own `blank_grid_bytes` under the
+/// interned shape: one measured blank style, one measured `fill` run per
+/// row (its `count` is `cols`, so the digits are right by construction),
+/// plus JSON punctuation. O(rows), so every practical geometry declares
+/// fine and the refusal below keeps its job only at the far edge.
 fn blank_grid_bytes(rows: u16, cols: u16) -> u64 {
-    let blank = gwk_domain::frame::StyledCell {
-        glyph: " ".to_owned(),
-        style: gwk_domain::frame::CellStyle {
-            bold: false,
-            dim: false,
-            italic: false,
-            blink: false,
-            inverse: false,
-            invisible: false,
-            strikethrough: false,
-            overline: false,
-            underline: None,
-            fg: None,
-            bg: None,
-            underline_color: None,
-        },
+    let style = gwk_domain::frame::CellStyle {
+        bold: false,
+        dim: false,
+        italic: false,
+        blink: false,
+        inverse: false,
+        invisible: false,
+        strikethrough: false,
+        overline: false,
+        underline: None,
+        fg: None,
+        bg: None,
+        underline_color: None,
     };
-    let cell = serde_json::to_vec(&blank)
-        .expect("a blank cell serializes")
+    let style = serde_json::to_vec(&style)
+        .expect("a blank style serializes")
         .len() as u64;
-    let (rows, cols) = (u64::from(rows), u64::from(cols));
-    let row = 2 + cols * cell + (cols - 1);
-    (2 + rows * row + (rows - 1)).saturating_add(10)
+    let fill = serde_json::to_vec(&gwk_domain::frame::PtyRun::Fill {
+        style: 0,
+        glyph: " ".to_owned(),
+        count: u32::from(cols),
+    })
+    .expect("a fill run serializes")
+    .len() as u64;
+    // `{"styles":[` style `],"rows":[` rows x `[` fill `]` joined by commas
+    // `]}` — 22 punctuation bytes outside the per-row term. `parse_sessions`
+    // refused zero dimensions before this is ever asked.
+    (style + 22).saturating_add(u64::from(rows).saturating_mul(fill + 3))
 }
 
 /// Forward one session to the kernel until it ends, or `stop` says so.
@@ -336,10 +344,19 @@ mod tests {
 
         // A screen whose blank form cannot fit the kernel's publish budget
         // is refused at declaration — the alternative is a publisher refused
-        // identically on every reconnect, forever.
+        // identically on every reconnect, forever. Under the interned shape
+        // the blank form is O(rows), so the refusal now lives at the far
+        // edge: tens of thousands of rows, not a big-but-real screen.
         assert!(
-            parse_sessions("big=opencode:500x200").is_err(),
+            parse_sessions("big=opencode:100x50000").is_err(),
             "an unpublishable declared size should refuse"
+        );
+        // The spike's deciding geometry — 240x70 busted the budget alone
+        // under the per-cell shape — declares fine now. That flip is the
+        // element's whole point, pinned where the old refusal was.
+        assert!(
+            parse_sessions("wide=opencode:240x70").is_ok(),
+            "a 240x70 screen seeds under the interned shape"
         );
 
         for bad in [
@@ -354,6 +371,19 @@ mod tests {
         ] {
             assert!(parse_sessions(bad).is_err(), "{bad:?} should refuse");
         }
+    }
+
+    #[test]
+    fn the_b4_floor_of_sixteen_declared_sessions_all_seed_at_declaration() {
+        // B4's 12-16-session floor, every one at the spike's worst measured
+        // geometry: each declaration passes the blank-form budget check that
+        // refused even ONE such screen before the interning.
+        let value = (0..16)
+            .map(|n| format!("s{n}=opencode:240x70"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let declared = parse_sessions(&value).expect("all sixteen declare");
+        assert_eq!(declared.len(), 16);
     }
 
     #[test]

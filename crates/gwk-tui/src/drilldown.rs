@@ -3,7 +3,9 @@
 //! This module never interprets terminal bytes. The host owns the engine and
 //! converts its grid into [`PtyFrame`](gwk_domain::frame::PtyFrame) and
 //! [`PtyDelta`](gwk_domain::frame::PtyDelta); this lens validates those typed
-//! values, keeps a client-side mirror, and paints it into Ratatui's buffer.
+//! values, expands the wire's interned runs into a per-cell client-side
+//! mirror at the decode boundary, and paints it into Ratatui's buffer — the
+//! render path never sees a run or a style index.
 //!
 //! # Geometry
 //!
@@ -22,7 +24,7 @@
 //! overline modifier. Those two losses are counted in the frame instead of
 //! disappearing silently; every other carried style attribute paints directly.
 
-use gwk_domain::frame::{CellColor, CellStyle, PtyAnsiSlot, PtyDelta, PtyFrame};
+use gwk_domain::frame::{CellColor, CellStyle, PtyAnsiSlot, PtyDelta, PtyFrame, StyledCell};
 use gwk_domain::ids::{PtyFrameSeq, PtySessionGeneration, PtySessionId, RequestId};
 use gwk_domain::protocol::{KernelErrorCode, KernelResult, ServerControl};
 use gwk_theme::tier::ColorTier;
@@ -70,7 +72,10 @@ pub struct DrilldownState {
     session_id: PtySessionId,
     attach_request_id: Option<RequestId>,
     generation: Option<PtySessionGeneration>,
-    frame: Option<PtyFrame>,
+    /// The client-side mirror, expanded to the per-cell model at the decode
+    /// boundary: the wire's interned runs stop here, and everything below —
+    /// updates, cropping, painting — works on plain cells.
+    cells: Option<Vec<Vec<StyledCell>>>,
     frame_seq: Option<PtyFrameSeq>,
     last_seq: Option<PtyFrameSeq>,
     expected_size: Option<(u16, u16)>,
@@ -86,7 +91,7 @@ impl DrilldownState {
             session_id,
             attach_request_id: None,
             generation: None,
-            frame: None,
+            cells: None,
             frame_seq: None,
             last_seq: None,
             expected_size: None,
@@ -101,8 +106,10 @@ impl DrilldownState {
         &self.session_id
     }
 
-    pub fn frame(&self) -> Option<&PtyFrame> {
-        self.frame.as_ref()
+    /// The expanded mirror, when one is seeded — the per-cell grid every
+    /// wire frame decodes into.
+    pub fn cells(&self) -> Option<&Vec<Vec<StyledCell>>> {
+        self.cells.as_ref()
     }
 
     pub fn generation(&self) -> Option<&PtySessionGeneration> {
@@ -165,7 +172,7 @@ impl DrilldownState {
                 if !generation_changed
                     && cursor.is_some_and(|cursor| self.frame_seq.is_none_or(|seq| cursor > seq))
                 {
-                    self.frame = None;
+                    self.cells = None;
                     self.frame_seq = None;
                 }
                 self.last_seq = match (generation_changed, self.last_seq, *cursor) {
@@ -242,10 +249,21 @@ impl DrilldownState {
                 self.diagnostics.foreign_references.saturating_add(1);
             return IngestDisposition::Counted;
         }
-        let Some(size) = rectangular_size(frame) else {
+        // The one place the wire's interned shape is expanded: a frame no
+        // rectangular grid matches — a dangling style index, ragged rows, a
+        // dimension past u16 — is counted and never painted, exactly as the
+        // old ragged-grid check counted. Non-maximal runs expand fine (the
+        // tolerate ruling); the kernel's strict decoder is where refusals
+        // with an error vocabulary live.
+        let Some(cells) = frame.cells() else {
             self.diagnostics.invalid_frames = self.diagnostics.invalid_frames.saturating_add(1);
             return IngestDisposition::Counted;
         };
+        // Expansion bounded both dimensions to u16.
+        let size = (
+            cells.first().map_or(0, |row| row.len() as u16),
+            cells.len() as u16,
+        );
         // Only the correlated attach response may replace an established life.
         // A snapshot can seed an empty lens, but an untracked delayed response
         // must not roll an active stream backward to a retired generation.
@@ -263,7 +281,7 @@ impl DrilldownState {
             return IngestDisposition::Counted;
         }
         self.switch_generation(generation);
-        self.frame = Some(frame.clone());
+        self.cells = Some(cells);
         self.frame_seq = Some(seq);
         self.last_seq = Some(seq);
         self.expected_size = Some(size);
@@ -299,13 +317,13 @@ impl DrilldownState {
         for delta in deltas {
             match delta {
                 PtyDelta::Resized { rows, cols } => {
-                    self.frame = None;
+                    self.cells = None;
                     self.frame_seq = None;
                     self.expected_size = Some((*cols, *rows));
                     self.clamp_viewport();
                 }
-                PtyDelta::CellsChanged { updates } => {
-                    let Some(frame) = self.frame.as_mut() else {
+                PtyDelta::CellsChanged { styles, updates } => {
+                    let Some(cells) = self.cells.as_mut() else {
                         self.diagnostics.unseeded_updates = self
                             .diagnostics
                             .unseeded_updates
@@ -313,13 +331,26 @@ impl DrilldownState {
                         continue;
                     };
                     for update in updates {
-                        match frame
-                            .cells
+                        // Both lookups resolve against THIS batch: the cell
+                        // by coordinates, the style through the batch's own
+                        // table. Either failing is counted, not followed —
+                        // an index into a table the message did not carry is
+                        // the same class of orphan as a coordinate outside
+                        // the grid.
+                        let style = usize::try_from(update.style)
+                            .ok()
+                            .and_then(|index| styles.get(index));
+                        let slot = cells
                             .get_mut(usize::from(update.row))
-                            .and_then(|row| row.get_mut(usize::from(update.col)))
-                        {
-                            Some(cell) => *cell = update.cell.clone(),
-                            None => {
+                            .and_then(|row| row.get_mut(usize::from(update.col)));
+                        match (slot, style) {
+                            (Some(cell), Some(style)) => {
+                                *cell = StyledCell {
+                                    glyph: update.glyph.clone(),
+                                    style: style.clone(),
+                                };
+                            }
+                            _ => {
                                 self.diagnostics.invalid_updates =
                                     self.diagnostics.invalid_updates.saturating_add(1);
                             }
@@ -329,7 +360,7 @@ impl DrilldownState {
             }
         }
         self.last_seq = Some(seq);
-        if self.frame.is_some() {
+        if self.cells.is_some() {
             self.frame_seq = Some(seq);
         }
         if self.diagnostics == before {
@@ -344,7 +375,7 @@ impl DrilldownState {
             return false;
         }
         self.generation = Some(generation.clone());
-        self.frame = None;
+        self.cells = None;
         self.frame_seq = None;
         self.last_seq = None;
         true
@@ -355,15 +386,6 @@ impl DrilldownState {
         self.viewport_row = self.viewport_row.min(rows.saturating_sub(1));
         self.viewport_col = self.viewport_col.min(cols.saturating_sub(1));
     }
-}
-
-fn rectangular_size(frame: &PtyFrame) -> Option<(u16, u16)> {
-    let rows = u16::try_from(frame.cells.len()).ok()?;
-    let cols = frame.cells.first().map_or(0, Vec::len);
-    if frame.cells.iter().any(|row| row.len() != cols) {
-        return None;
-    }
-    Some((u16::try_from(cols).ok()?, rows))
 }
 
 fn ansi_color(slot: PtyAnsiSlot) -> Color {
@@ -462,12 +484,12 @@ pub fn render(
     let body_y = area.y + diagnostic_rows;
     let body_rows = area.height.saturating_sub(1 + diagnostic_rows);
     let mut style_approximations = 0usize;
-    match &state.frame {
-        Some(frame) => {
+    match &state.cells {
+        Some(cells) => {
             let source_row = usize::from(state.viewport_row);
             let source_col = usize::from(state.viewport_col);
             for output_row in 0..body_rows {
-                let Some(row) = frame.cells.get(source_row + usize::from(output_row)) else {
+                let Some(row) = cells.get(source_row + usize::from(output_row)) else {
                     break;
                 };
                 let mut x = area.x;
@@ -636,10 +658,28 @@ mod tests {
     }
 
     fn frame(rows: &[&[&str]]) -> PtyFrame {
-        PtyFrame {
-            cells: rows
+        // `from_cells` interns whatever grid it is handed, ragged included —
+        // producer-side it never validates — which is exactly what lets the
+        // ragged-frame tests below build their invalid wire values here too.
+        PtyFrame::from_cells(
+            &rows
                 .iter()
                 .map(|row| row.iter().map(|glyph| cell(glyph)).collect())
+                .collect::<Vec<Vec<StyledCell>>>(),
+        )
+    }
+
+    fn changed(updates: Vec<(u16, u16, &str)>) -> PtyDelta {
+        PtyDelta::CellsChanged {
+            styles: vec![style()],
+            updates: updates
+                .into_iter()
+                .map(|(row, col, glyph)| PtyCellUpdate {
+                    row,
+                    col,
+                    glyph: glyph.to_owned(),
+                    style: 0,
+                })
                 .collect(),
         }
     }
@@ -793,19 +833,13 @@ mod tests {
                 "attach-1",
                 "pty-1",
                 5,
-                vec![PtyDelta::CellsChanged {
-                    updates: vec![PtyCellUpdate {
-                        row: 1,
-                        col: 0,
-                        cell: cell("x"),
-                    }],
-                }]
+                vec![changed(vec![(1, 0, "x")])]
             )),
             IngestDisposition::Applied
         );
 
         assert_eq!(state.frame_seq(), Some(PtyFrameSeq::new(5)));
-        assert_eq!(state.frame().expect("frame").cells[1][0].glyph, "x");
+        assert_eq!(state.cells().expect("mirror")[1][0].glyph, "x");
     }
 
     #[test]
@@ -819,13 +853,7 @@ mod tests {
                 "attach-other",
                 "pty-1",
                 5,
-                vec![PtyDelta::CellsChanged {
-                    updates: vec![PtyCellUpdate {
-                        row: 0,
-                        col: 0,
-                        cell: cell("wrong request"),
-                    }],
-                }]
+                vec![changed(vec![(0, 0, "wrong request")])]
             )),
             IngestDisposition::Counted
         );
@@ -842,18 +870,12 @@ mod tests {
                 "attach-1",
                 "pty-1",
                 5,
-                vec![PtyDelta::CellsChanged {
-                    updates: vec![PtyCellUpdate {
-                        row: 9,
-                        col: 9,
-                        cell: cell("orphan"),
-                    }],
-                }]
+                vec![changed(vec![(9, 9, "orphan")])]
             )),
             IngestDisposition::Counted
         );
 
-        assert_eq!(state.frame().expect("frame").cells[0][0].glyph, "a");
+        assert_eq!(state.cells().expect("mirror")[0][0].glyph, "a");
         assert_eq!(
             state.diagnostics(),
             WireDiagnostics {
@@ -881,19 +903,13 @@ mod tests {
             2,
             vec![
                 PtyDelta::Resized { rows: 2, cols: 3 },
-                PtyDelta::CellsChanged {
-                    updates: vec![PtyCellUpdate {
-                        row: 0,
-                        col: 0,
-                        cell: cell("not followed"),
-                    }],
-                },
+                changed(vec![(0, 0, "not followed")]),
             ],
         ));
 
         assert_eq!(disposition, IngestDisposition::Counted);
         assert!(
-            state.frame().is_none(),
+            state.cells().is_none(),
             "a resize invalidates the held grid"
         );
         assert_eq!(state.diagnostics().unseeded_updates, 1);
@@ -909,7 +925,7 @@ mod tests {
         state.ingest(&attached_at("attach-1", "pty-1", 1, 1, Some(7)));
 
         assert!(
-            state.frame().is_none(),
+            state.cells().is_none(),
             "a cursor ahead of the mirror proves the mirror missed revisions"
         );
         let (dump, _, _) = dump(&state, 64, 4);
@@ -934,7 +950,7 @@ mod tests {
             4,
             frame(&[&["old"]]),
         ));
-        assert!(state.frame().is_some());
+        assert!(state.cells().is_some());
 
         state.begin_attach(RequestId::new("attach-2"));
         state.ingest(&attached_at_in_generation(
@@ -947,7 +963,7 @@ mod tests {
         ));
 
         assert!(
-            state.frame().is_none(),
+            state.cells().is_none(),
             "equal frame sequences from different lives cannot share a mirror"
         );
     }
@@ -1036,18 +1052,12 @@ mod tests {
                 "pty-1",
                 "life-1",
                 5,
-                vec![PtyDelta::CellsChanged {
-                    updates: vec![PtyCellUpdate {
-                        row: 0,
-                        col: 0,
-                        cell: cell("stale"),
-                    }],
-                }],
+                vec![changed(vec![(0, 0, "stale")])],
             )),
             IngestDisposition::Counted
         );
         assert_eq!(
-            state.frame().expect("current mirror").cells[0][0].glyph,
+            state.cells().expect("current mirror")[0][0].glyph,
             "current"
         );
         assert_eq!(
@@ -1140,8 +1150,51 @@ mod tests {
             state.ingest(&snapshot("snapshot-1", "pty-1", 1, ragged)),
             IngestDisposition::Counted
         );
-        assert!(state.frame().is_none());
+        assert!(state.cells().is_none());
         assert_eq!(state.diagnostics().invalid_frames, 1);
+    }
+
+    #[test]
+    fn drilldown_dangling_style_indices_are_counted_not_followed() {
+        // A frame whose run indexes past its table is counted as an invalid
+        // frame and never painted; an update indexing past its BATCH table
+        // is counted as an invalid cell and the mirror keeps its content.
+        let mut state = DrilldownState::new(PtySessionId::new("pty-1"));
+        let dangling = PtyFrame {
+            styles: Vec::new(),
+            rows: vec![vec![gwk_domain::frame::PtyRun::Cells {
+                style: 0,
+                glyphs: vec!["x".to_owned()],
+            }]],
+        };
+        assert_eq!(
+            state.ingest(&snapshot("snapshot-1", "pty-1", 1, dangling)),
+            IngestDisposition::Counted
+        );
+        assert!(state.cells().is_none());
+        assert_eq!(state.diagnostics().invalid_frames, 1);
+
+        state.ingest(&attached("attach-1", "pty-1", 1, 1));
+        state.ingest(&snapshot("snapshot-2", "pty-1", 2, frame(&[&["a"]])));
+        assert_eq!(
+            state.ingest(&batch(
+                "attach-1",
+                "pty-1",
+                3,
+                vec![PtyDelta::CellsChanged {
+                    styles: vec![style()],
+                    updates: vec![PtyCellUpdate {
+                        row: 0,
+                        col: 0,
+                        glyph: "x".to_owned(),
+                        style: 9,
+                    }],
+                }]
+            )),
+            IngestDisposition::Counted
+        );
+        assert_eq!(state.cells().expect("mirror")[0][0].glyph, "a");
+        assert_eq!(state.diagnostics().invalid_updates, 1);
     }
 
     #[test]
@@ -1168,9 +1221,7 @@ mod tests {
             "snapshot-1",
             "pty-1",
             1,
-            PtyFrame {
-                cells: vec![vec![styled]],
-            },
+            PtyFrame::from_cells(&[vec![styled]]),
         ));
 
         let (dump, buf, _) = dump(&state, 64, 3);
