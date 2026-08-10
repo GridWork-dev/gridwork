@@ -1712,3 +1712,149 @@ async fn a_published_pty_session_is_served_end_to_end_and_a_foreign_writer_is_re
     served.close().await;
     drop_database(&maintenance, &name).await;
 }
+
+/// The P17 receipts, proven across the real wire: one full lifecycle lands
+/// exactly its four ledger events, a hangup close carries its provenance in
+/// the idempotency key, and every receipt is kernel-authored.
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
+async fn pty_lifecycle_receipts_reach_the_ledger_with_their_provenance() {
+    use sqlx::Row;
+
+    let maintenance = maintenance_pool().await;
+    // Activated, not sealed: a sealed kernel admits no business command, so
+    // its receipts are refused-and-logged (that graceful degradation IS the
+    // log-and-continue design; the live estate serves activated).
+    let (name, store) = fresh_store(&maintenance, "wire_pty_receipts", 8).await;
+    let pool = store.pool().clone();
+    let served = Running::open(store, "ptyrcpt").await;
+
+    let mut host = served.client().await;
+    let mut viewer = served.client().await;
+    let frame = serde_json::to_string(&pty_frame(2, 4)).expect("serialize frame");
+
+    // Session 1: the typed lifecycle — publish, attach, typed retire.
+    match host
+        .ask(
+            "r1-seed",
+            &format!(
+                r#"{{"type":"pty_publish_snapshot","session_id":"pty-r1","seq":"0","frame":{frame}}}"#
+            ),
+        )
+        .await
+    {
+        KernelResult::PtyPublished { .. } => {}
+        other => panic!("{other:?}"),
+    }
+    match viewer
+        .ask("r1-att", r#"{"type":"pty_attach","session_id":"pty-r1"}"#)
+        .await
+    {
+        KernelResult::PtyAttached { .. } => {}
+        other => panic!("{other:?}"),
+    }
+    match host
+        .ask("r1-ret", r#"{"type":"pty_retire","session_id":"pty-r1"}"#)
+        .await
+    {
+        KernelResult::PtyRetired { .. } => {}
+        other => panic!("{other:?}"),
+    }
+
+    // Session 2: published, then the host connection goes away — the hangup
+    // sweep is the close author.
+    match host
+        .ask(
+            "r2-seed",
+            &format!(
+                r#"{{"type":"pty_publish_snapshot","session_id":"pty-r2","seq":"0","frame":{frame}}}"#
+            ),
+        )
+        .await
+    {
+        KernelResult::PtyPublished { .. } => {}
+        other => panic!("{other:?}"),
+    }
+    drop(host);
+
+    // The detach and the hangup close land asynchronously; poll to quiescence.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let r1 = sqlx::query(
+            "SELECT state, attach_count, detach_count FROM gwk.pty_session WHERE id = 'pty-r1'",
+        )
+        .fetch_optional(&pool)
+        .await
+        .expect("read r1");
+        let r2 = sqlx::query_scalar::<_, String>(
+            "SELECT state FROM gwk.pty_session WHERE id = 'pty-r2'",
+        )
+        .fetch_optional(&pool)
+        .await
+        .expect("read r2");
+        let settled = r1.as_ref().is_some_and(|row| {
+            row.get::<String, _>("state") == "closed"
+                && row.get::<i64, _>("attach_count") == 1
+                && row.get::<i64, _>("detach_count") == 1
+        }) && r2.as_deref() == Some("closed");
+        if settled {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "receipts did not settle: r1 {r1:?} r2 {r2:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    // Session 1's ledger trail: exactly the four lifecycle events.
+    let types: Vec<String> = sqlx::query_scalar(
+        "SELECT event_type FROM gwk.event \
+         WHERE aggregate_type = 'pty_session' AND aggregate_id = 'pty-r1' \
+         ORDER BY seq",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("r1 events");
+    // The open leads and the attach precedes its detach; the typed close and
+    // the detach RACE (the retire drops the broadcast, the viewer task emits
+    // on its own schedule) — either order is legal, so only the set and the
+    // causal edges are asserted.
+    assert_eq!(
+        types.first().map(String::as_str),
+        Some("pty_session_opened")
+    );
+    let mut sorted = types.clone();
+    sorted.sort();
+    assert_eq!(
+        sorted,
+        [
+            "pty_attach_recorded",
+            "pty_detach_recorded",
+            "pty_session_closed",
+            "pty_session_opened"
+        ],
+        "one full lifecycle is exactly these four events: {types:?}"
+    );
+    let position = |t: &str| types.iter().position(|x| x == t).expect(t);
+    assert!(position("pty_attach_recorded") < position("pty_detach_recorded"));
+
+    // Session 2's close carries the hangup provenance, and every receipt is
+    // kernel-authored.
+    let row = sqlx::query(
+        "SELECT idempotency_key, actor->>'kind' AS actor_kind FROM gwk.event \
+         WHERE aggregate_type = 'pty_session' AND aggregate_id = 'pty-r2' \
+           AND event_type = 'pty_session_closed'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("r2 close event");
+    let key: String = row.get("idempotency_key");
+    assert!(key.ends_with(":hangup"), "close key {key} lacks provenance");
+    assert_eq!(row.get::<String, _>("actor_kind"), "kernel");
+
+    drop(viewer);
+    served.close().await;
+    drop(pool);
+    drop_database(&maintenance, &name).await;
+}

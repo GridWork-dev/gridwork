@@ -301,13 +301,16 @@ impl PtyHub {
     /// Publish a full screen: claim (first publish), reseed (owner, at or
     /// past the head), and the dimensions every later bound is checked
     /// against.
+    /// `Ok(Some(generation))` exactly when this publish OPENED a new session
+    /// lifetime — the caller's cue to record the open in the ledger (P17);
+    /// an update to a live session answers `Ok(None)`.
     pub fn publish_snapshot(
         &self,
         conn: ConnectionId,
         id: &PtySessionId,
         seq: Option<u64>,
         frame: PtyFrame,
-    ) -> Result<(), PtyRefusal> {
+    ) -> Result<Option<PtySessionGeneration>, PtyRefusal> {
         let (rows, cols, cells) = strict_frame(&frame)?;
         let bytes = measured(&frame)?;
         let mut sessions = self.lock();
@@ -320,6 +323,7 @@ impl PtyHub {
                     ));
                 }
                 let generation = self.next_generation()?;
+                let opened = generation.clone();
                 let (live, _) = broadcast::channel(BROADCAST_CAPACITY);
                 let (raw_live, _) = broadcast::channel(RAW_BROADCAST_CAPACITY);
                 sessions.insert(
@@ -348,7 +352,7 @@ impl PtyHub {
                         raw_live,
                     },
                 );
-                Ok(())
+                Ok(Some(opened))
             }
             Some(session) => {
                 owned(session, conn, id)?;
@@ -407,7 +411,7 @@ impl PtyHub {
                     };
                     session.publish(batch, bytes);
                 }
-                Ok(())
+                Ok(None)
             }
         }
     }
@@ -681,17 +685,35 @@ impl PtyHub {
 
     /// Retire one session the connection claimed. Dropping the entry drops
     /// its broadcast sender, which is what closes every attached stream.
-    pub fn retire(&self, conn: ConnectionId, id: &PtySessionId) -> Result<(), PtyRefusal> {
+    /// Returns the generation that ended — the caller's cue to close the
+    /// ledger row (P17).
+    pub fn retire(
+        &self,
+        conn: ConnectionId,
+        id: &PtySessionId,
+    ) -> Result<PtySessionGeneration, PtyRefusal> {
         let mut sessions = self.lock();
         let session = sessions.get(id).ok_or_else(|| unknown_session(id))?;
         owned(session, conn, id)?;
-        sessions.remove(id);
-        Ok(())
+        let session = sessions.remove(id).expect("present under the same lock");
+        Ok(session.generation)
     }
 
-    /// Retire everything the connection claimed — the hangup path.
-    pub fn disconnect(&self, conn: ConnectionId) {
-        self.lock().retain(|_, session| session.owner != conn);
+    /// Retire everything the connection claimed — the hangup path. Returns
+    /// the lifetimes that ended so the caller can close their ledger rows;
+    /// the close event's hangup provenance is what tells a crash from a
+    /// typed retire in the cutover receipt.
+    pub fn disconnect(&self, conn: ConnectionId) -> Vec<(PtySessionId, PtySessionGeneration)> {
+        let mut sessions = self.lock();
+        let claimed: Vec<PtySessionId> = sessions
+            .iter()
+            .filter(|(_, session)| session.owner == conn)
+            .map(|(id, _)| id.clone())
+            .collect();
+        claimed
+            .into_iter()
+            .filter_map(|id| sessions.remove(&id).map(|session| (id, session.generation)))
+            .collect()
     }
 
     /// Attach a consumer. The subscription and the replay are taken under
@@ -888,6 +910,7 @@ pub(crate) async fn run_attach(
     batches: mpsc::Sender<Outgoing>,
     responses: mpsc::Sender<ServerControl>,
     delivered: Arc<AtomicU64>,
+    detach: Option<super::receipts::DetachReceipt>,
 ) {
     let Attached {
         generation,
@@ -960,6 +983,12 @@ pub(crate) async fn run_attach(
         }
     }
 
+    // The attach ended, whichever way it ended: the detach receipt fires
+    // on every path, including the peer simply going away. `None` means no
+    // ledger stands behind this attach (in-crate tests).
+    if let Some(detach) = detach {
+        detach.emit().await;
+    }
     let code = match ended {
         Some(Ended::Gone) | None => return,
         Some(Ended::SlowConsumer) => KernelErrorCode::SlowConsumer,
@@ -1028,6 +1057,7 @@ pub(crate) async fn run_raw_attach(
     responses: mpsc::Sender<ServerControl>,
     delivered: Arc<AtomicU64>,
     active: Arc<AtomicBool>,
+    detach: Option<super::receipts::DetachReceipt>,
 ) {
     let RawAttached {
         generation,
@@ -1094,6 +1124,12 @@ pub(crate) async fn run_raw_attach(
         }
     }
 
+    // The attach ended, whichever way it ended: the detach receipt fires
+    // on every path, including the peer simply going away. `None` means no
+    // ledger stands behind this attach (in-crate tests).
+    if let Some(detach) = detach {
+        detach.emit().await;
+    }
     let code = match ended {
         Some(Ended::Gone) | None => return,
         Some(Ended::SlowConsumer) => KernelErrorCode::SlowConsumer,
@@ -2285,6 +2321,7 @@ mod tests {
             batches,
             responses,
             delivered,
+            None,
         ));
         hub.retire(host, &id("s")).expect("retire");
         pump.await.expect("pump");
@@ -2324,6 +2361,7 @@ mod tests {
             batches,
             responses,
             Arc::new(AtomicU64::new(1)),
+            None,
         )
         .await;
 

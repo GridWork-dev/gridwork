@@ -49,7 +49,7 @@ use super::frame::{Budget, Frame, Incoming, read_frame, write_frame};
 use super::hello::{self, Readiness};
 use super::listen::Listener;
 use super::pty::{self, PtyHub};
-use super::{WireError, strict, subscribe};
+use super::{WireError, receipts, strict, subscribe};
 use crate::blob::store::PgBlobStore;
 use crate::epoch::{
     GENESIS_EVENT_TYPE, KERNEL_AGGREGATE, KERNEL_SINGLETON, epoch_of, is_public_revision,
@@ -509,24 +509,36 @@ impl Daemon {
                 session_id,
                 generation,
                 cursor,
-            } => subs.admit_pty(
-                &self.pty,
-                request_id,
-                session_id,
-                generation.as_ref(),
-                cursor.map(|seq| seq.value()),
-            ),
+            } => {
+                let result = subs.admit_pty(
+                    &self.pty,
+                    request_id,
+                    session_id,
+                    generation.as_ref(),
+                    cursor.map(|seq| seq.value()),
+                );
+                if let KernelResult::PtyAttached { generation, .. } = &result {
+                    receipts::attached(&self.store, session_id, generation, request_id).await;
+                }
+                result
+            }
             KernelRequest::PtyRawAttach {
                 session_id,
                 generation,
                 cursor,
-            } => subs.admit_raw(
-                &self.pty,
-                request_id,
-                session_id,
-                generation.as_ref(),
-                cursor.map(|seq| seq.value()),
-            ),
+            } => {
+                let result = subs.admit_raw(
+                    &self.pty,
+                    request_id,
+                    session_id,
+                    generation.as_ref(),
+                    cursor.map(|seq| seq.value()),
+                );
+                if let KernelResult::PtyRawAttached { generation, .. } = &result {
+                    receipts::attached(&self.store, session_id, generation, request_id).await;
+                }
+                result
+            }
             KernelRequest::PtySnapshot { session_id } => match self.pty.snapshot(session_id) {
                 Ok((generation, seq, frame)) => KernelResult::PtySnapshot {
                     session_id: session_id.clone(),
@@ -547,9 +559,14 @@ impl Daemon {
                     seq.map(|seq| seq.value()),
                     frame.clone(),
                 ) {
-                    Ok(()) => KernelResult::PtyPublished {
-                        session_id: session_id.clone(),
-                    },
+                    Ok(opened) => {
+                        if let Some(generation) = opened {
+                            receipts::opened(&self.store, session_id, &generation).await;
+                        }
+                        KernelResult::PtyPublished {
+                            session_id: session_id.clone(),
+                        }
+                    }
                     Err(refusal) => refusal.into_result(),
                 }
             }
@@ -597,9 +614,12 @@ impl Daemon {
             }
             KernelRequest::PtyRetire { session_id } => {
                 match self.pty.retire(connection, session_id) {
-                    Ok(()) => KernelResult::PtyRetired {
-                        session_id: session_id.clone(),
-                    },
+                    Ok(generation) => {
+                        receipts::closed(&self.store, session_id, &generation, false).await;
+                        KernelResult::PtyRetired {
+                            session_id: session_id.clone(),
+                        }
+                    }
                     Err(refusal) => refusal.into_result(),
                 }
             }
@@ -750,6 +770,7 @@ enum Admitted {
     },
     PtyRaw {
         request_id: RequestId,
+        session_id: PtySessionId,
         attached: pty::RawAttached,
     },
 }
@@ -876,6 +897,7 @@ impl<'a> Subscriptions<'a> {
         };
         self.admitted = Some(Admitted::PtyRaw {
             request_id: request_id.clone(),
+            session_id: session_id.clone(),
             attached,
         });
         result
@@ -933,6 +955,12 @@ impl<'a> Subscriptions<'a> {
                 let delivered = Arc::new(std::sync::atomic::AtomicU64::new(
                     attached.cursor.map_or(0, |seq| seq.saturating_add(1)),
                 ));
+                let detach = Some(receipts::DetachReceipt {
+                    store: Arc::clone(&self.daemon.store),
+                    session_id: session_id.clone(),
+                    generation: attached.generation.clone(),
+                    request_id: request_id.clone(),
+                });
                 self.live.spawn(pty::run_attach(
                     request_id,
                     session_id,
@@ -940,16 +968,24 @@ impl<'a> Subscriptions<'a> {
                     self.batches.clone(),
                     self.responses.clone(),
                     delivered,
+                    detach,
                 ));
             }
             Some(Admitted::PtyRaw {
                 request_id,
+                session_id,
                 attached,
             }) => {
                 let delivered = Arc::new(std::sync::atomic::AtomicU64::new(
                     attached.delivered.map_or(0, |seq| seq.saturating_add(1)),
                 ));
                 let active = Arc::new(std::sync::atomic::AtomicBool::new(true));
+                let detach = Some(receipts::DetachReceipt {
+                    store: Arc::clone(&self.daemon.store),
+                    session_id,
+                    generation: attached.generation.clone(),
+                    request_id: request_id.clone(),
+                });
                 self.live.spawn(pty::run_raw_attach(
                     request_id,
                     attached,
@@ -957,6 +993,7 @@ impl<'a> Subscriptions<'a> {
                     self.responses.clone(),
                     delivered,
                     active,
+                    detach,
                 ));
             }
         }
@@ -1039,7 +1076,11 @@ where
         read = read_requests(daemon, connection, reader, &mut ingress, &mut subs) => read,
         written = write_frames(writer, responses_rx, batches_rx, &mut egress) => written,
     };
-    daemon.pty.disconnect(connection);
+    for (id, generation) in daemon.pty.disconnect(connection) {
+        // The hangup sweep — the `:hangup` provenance is what tells a crash
+        // from a typed retire in the cutover receipt.
+        receipts::closed(&daemon.store, &id, &generation, true).await;
+    }
     served
 }
 
@@ -1606,6 +1647,7 @@ mod tests {
             responses_tx,
             Arc::clone(&delivered),
             Arc::clone(&active),
+            None,
         ));
 
         // Deliberately do not poll the batch receiver yet. This is the exact
