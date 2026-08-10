@@ -434,12 +434,17 @@ mod tests {
             .input(&id("s1"), b"one\n".to_vec())
             .await
             .expect("input");
+        // Quiescence before the next write, not first sight: `cat` echoes the
+        // line (row 0) AND writes its own copy (row 1). Sending "two" while
+        // the copy is still in flight lets the echo of "two" land above it —
+        // rows read one/two/one/two and the absolute positions asserted below
+        // never hold.
         let cursor = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 let batch = live.recv().await.expect("live stream");
                 let seq = batch.seq;
                 model.apply(&batch);
-                if model.row_text(0).starts_with("one") {
+                if model.row_text(0).starts_with("one") && model.row_text(1).starts_with("one") {
                     return seq;
                 }
             }
