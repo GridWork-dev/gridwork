@@ -37,11 +37,13 @@
 //! only stores, validates bounds, and fans out.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use gwk_domain::frame::{CellStyle, PtyDelta, PtyFrame, PtyRun, StyledCell};
-use gwk_domain::ids::{PtyFrameSeq, PtySessionGeneration, PtySessionId, RequestId, WriterEpoch};
+use gwk_domain::ids::{
+    ByteCount, PtyFrameSeq, PtySessionGeneration, PtySessionId, RequestId, WriterEpoch,
+};
 use gwk_domain::protocol::{
     FRAME_BODY_MAX_BYTES, KernelErrorCode, KernelResult, SLOW_CONSUMER_TIMEOUT_SECS, ServerControl,
 };
@@ -83,6 +85,16 @@ const MAX_GLYPH_BYTES: usize = 64;
 /// cursor — the recovery the wire contract already demands of one.
 const BROADCAST_CAPACITY: usize = 64;
 
+/// Raw events retained after the latest VT snapshot. The publishing host
+/// reconnects and reseeds when either bound fills, so a fresh raw attach never
+/// receives a snapshot with a hole after it.
+const RAW_RETAINED_EVENTS: usize = 1_024;
+const RAW_RETAINED_BYTES: usize = 8 * 1024 * 1024;
+
+/// Raw events waiting on each attached consumer. Falling behind this window
+/// closes only that attach; the session and its primary render stream continue.
+const RAW_BROADCAST_CAPACITY: usize = 64;
+
 /// Most sessions the hub holds at once, across every publisher. Each session
 /// carries a mirror and up to [`RETAINED_BYTES`] of window, so without a
 /// count the kernel's PTY memory is a function of a publisher's behaviour —
@@ -102,6 +114,43 @@ pub type ConnectionId = u64;
 pub struct PtyBatch {
     pub seq: u64,
     pub deltas: Arc<Vec<PtyDelta>>,
+}
+
+/// One item on the raw fallback stream. Snapshot/output bytes stay opaque;
+/// resize remains typed because no byte sequence performs that operation.
+#[derive(Debug, Clone)]
+pub(crate) enum PtyRawDelivery {
+    Snapshot {
+        seq: Option<u64>,
+        rows: u16,
+        cols: u16,
+        bytes: Arc<Vec<u8>>,
+    },
+    Output {
+        seq: u64,
+        bytes: Arc<Vec<u8>>,
+    },
+    Resized {
+        seq: u64,
+        rows: u16,
+        cols: u16,
+    },
+}
+
+impl PtyRawDelivery {
+    fn seq(&self) -> Option<u64> {
+        match self {
+            Self::Snapshot { seq, .. } => *seq,
+            Self::Output { seq, .. } | Self::Resized { seq, .. } => Some(*seq),
+        }
+    }
+
+    fn retained_bytes(&self) -> usize {
+        match self {
+            Self::Snapshot { bytes, .. } | Self::Output { bytes, .. } => bytes.len(),
+            Self::Resized { .. } => 0,
+        }
+    }
 }
 
 /// A refusal from a hub verb, in the contract's own error vocabulary.
@@ -149,6 +198,21 @@ pub struct Attached {
     pub live: broadcast::Receiver<PtyBatch>,
 }
 
+/// The catch-up and live receiver for one raw fallback attach.
+#[derive(Debug)]
+pub(crate) struct RawAttached {
+    pub generation: PtySessionGeneration,
+    pub rows: u16,
+    pub cols: u16,
+    /// The head this catch-up reaches.
+    pub cursor: Option<u64>,
+    /// What the client already held before replay starts. `None` means the
+    /// first delivery is a snapshot and nothing has reached the client yet.
+    pub delivered: Option<u64>,
+    pub replay: Vec<PtyRawDelivery>,
+    pub live: broadcast::Receiver<PtyRawDelivery>,
+}
+
 /// One hosted session's state, exactly what the host published.
 struct Session {
     owner: ConnectionId,
@@ -164,6 +228,11 @@ struct Session {
     /// cursor is checked against.
     evicted_through: Option<u64>,
     live: broadcast::Sender<PtyBatch>,
+    raw_snapshot: Option<PtyRawDelivery>,
+    raw_seq: Option<u64>,
+    raw_retained: VecDeque<PtyRawDelivery>,
+    raw_retained_bytes: usize,
+    raw_live: broadcast::Sender<PtyRawDelivery>,
 }
 
 impl Session {
@@ -252,6 +321,7 @@ impl PtyHub {
                 }
                 let generation = self.next_generation()?;
                 let (live, _) = broadcast::channel(BROADCAST_CAPACITY);
+                let (raw_live, _) = broadcast::channel(RAW_BROADCAST_CAPACITY);
                 sessions.insert(
                     id.clone(),
                     Session {
@@ -271,6 +341,11 @@ impl PtyHub {
                         // silent gap.
                         evicted_through: seq,
                         live,
+                        raw_snapshot: None,
+                        raw_seq: None,
+                        raw_retained: VecDeque::new(),
+                        raw_retained_bytes: 0,
+                        raw_live,
                     },
                 );
                 Ok(())
@@ -452,6 +527,158 @@ impl PtyHub {
         Ok(())
     }
 
+    /// Seed or reseed the raw fallback at the same revision and dimensions as
+    /// the authoritative render mirror. The bytes are model-produced VT state,
+    /// not decoded or normalized by the hub.
+    pub(crate) fn publish_raw_snapshot(
+        &self,
+        conn: ConnectionId,
+        id: &PtySessionId,
+        seq: Option<u64>,
+        rows: u16,
+        cols: u16,
+        bytes: Vec<u8>,
+    ) -> Result<(), PtyRefusal> {
+        if bytes.len().saturating_add(1) > FRAME_BODY_MAX_BYTES as usize {
+            return Err(PtyRefusal::new(
+                KernelErrorCode::FrameSize,
+                format!(
+                    "pty session {id}: a {}-byte raw snapshot exceeds the frame payload bound",
+                    bytes.len()
+                ),
+            ));
+        }
+        let mut sessions = self.lock();
+        let session = sessions.get_mut(id).ok_or_else(|| unknown_session(id))?;
+        owned(session, conn, id)?;
+        if session.raw_snapshot.is_some() {
+            return Err(PtyRefusal::new(
+                KernelErrorCode::Overloaded,
+                format!("pty session {id}: raw fallback is already seeded; reconnect to reseed"),
+            ));
+        }
+        let (current_cols, current_rows) = session.size();
+        if seq != session.seq {
+            return Err(raw_stale(
+                format!(
+                    "pty session {id}: raw snapshot at {seq:?} does not match render head {:?}",
+                    session.seq
+                ),
+                session.seq,
+            ));
+        }
+        if (rows, cols) != (current_rows, current_cols) {
+            return Err(PtyRefusal::new(
+                KernelErrorCode::Validation,
+                format!(
+                    "pty session {id}: raw snapshot is {rows}x{cols}; render state is \
+                     {current_rows}x{current_cols}"
+                ),
+            ));
+        }
+        let snapshot = PtyRawDelivery::Snapshot {
+            seq,
+            rows,
+            cols,
+            bytes: Arc::new(bytes),
+        };
+        session.raw_snapshot = Some(snapshot.clone());
+        session.raw_seq = seq;
+        session.raw_retained.clear();
+        session.raw_retained_bytes = 0;
+        Ok(())
+    }
+
+    /// Publish one child-output chunk without interpreting any byte.
+    pub(crate) fn publish_raw_output(
+        &self,
+        conn: ConnectionId,
+        id: &PtySessionId,
+        seq: u64,
+        bytes: Vec<u8>,
+    ) -> Result<(), PtyRefusal> {
+        if bytes.len().saturating_add(1) > FRAME_BODY_MAX_BYTES as usize {
+            return Err(PtyRefusal::new(
+                KernelErrorCode::FrameSize,
+                format!(
+                    "pty session {id}: a {}-byte raw output exceeds the frame payload bound",
+                    bytes.len()
+                ),
+            ));
+        }
+        self.publish_raw(
+            conn,
+            id,
+            PtyRawDelivery::Output {
+                seq,
+                bytes: Arc::new(bytes),
+            },
+        )
+    }
+
+    /// Publish one resize on the raw fallback's sequence axis.
+    pub(crate) fn publish_raw_resize(
+        &self,
+        conn: ConnectionId,
+        id: &PtySessionId,
+        seq: u64,
+        rows: u16,
+        cols: u16,
+    ) -> Result<(), PtyRefusal> {
+        self.publish_raw(conn, id, PtyRawDelivery::Resized { seq, rows, cols })
+    }
+
+    fn publish_raw(
+        &self,
+        conn: ConnectionId,
+        id: &PtySessionId,
+        delivery: PtyRawDelivery,
+    ) -> Result<(), PtyRefusal> {
+        let seq = delivery
+            .seq()
+            .ok_or_else(|| PtyRefusal::new(KernelErrorCode::Validation, "raw event has no seq"))?;
+        let mut sessions = self.lock();
+        let session = sessions.get_mut(id).ok_or_else(|| unknown_session(id))?;
+        owned(session, conn, id)?;
+        if session.raw_snapshot.is_none() {
+            return Err(PtyRefusal::new(
+                KernelErrorCode::Overloaded,
+                format!("pty session {id}: raw fallback has not been seeded"),
+            ));
+        }
+        let expected = match session.raw_seq {
+            Some(head) => head.checked_add(1).ok_or_else(|| {
+                PtyRefusal::new(
+                    KernelErrorCode::Overloaded,
+                    format!("pty session {id}: raw sequence space is exhausted"),
+                )
+            })?,
+            None => 0,
+        };
+        if seq != expected {
+            return Err(raw_stale(
+                format!("pty session {id}: raw sequence {seq} does not follow {expected}"),
+                session.raw_seq,
+            ));
+        }
+        let bytes = delivery.retained_bytes();
+        if session.raw_retained.len() >= RAW_RETAINED_EVENTS
+            || session.raw_retained_bytes.saturating_add(bytes) > RAW_RETAINED_BYTES
+        {
+            return Err(PtyRefusal::new(
+                KernelErrorCode::Overloaded,
+                format!(
+                    "pty session {id}: raw retention is full; reconnect and reseed the snapshot"
+                ),
+            ));
+        }
+        session.raw_seq = Some(seq);
+        session.raw_retained_bytes += bytes;
+        session.raw_retained.push_back(delivery.clone());
+        let _ = session.raw_live.send(delivery);
+        Ok(())
+    }
+
     /// Retire one session the connection claimed. Dropping the entry drops
     /// its broadcast sender, which is what closes every attached stream.
     pub fn retire(&self, conn: ConnectionId, id: &PtySessionId) -> Result<(), PtyRefusal> {
@@ -512,6 +739,63 @@ impl PtyHub {
             rows,
             cols,
             cursor: cursor_answer,
+            replay,
+            live,
+        })
+    }
+
+    /// Attach to the raw fallback. A serviceable cursor replays only its gap;
+    /// every other position gets the latest model-produced VT snapshot followed
+    /// by every retained event after it.
+    pub(crate) fn attach_raw(
+        &self,
+        id: &PtySessionId,
+        generation: Option<&PtySessionGeneration>,
+        cursor: Option<u64>,
+    ) -> Result<RawAttached, PtyRefusal> {
+        let sessions = self.lock();
+        let session = sessions.get(id).ok_or_else(|| unknown_session(id))?;
+        let snapshot = session.raw_snapshot.clone().ok_or_else(|| {
+            PtyRefusal::new(
+                KernelErrorCode::Overloaded,
+                format!("pty session {id}: raw fallback has not been seeded"),
+            )
+        })?;
+        let (cols, rows) = session.size();
+        let live = session.raw_live.subscribe();
+        let snapshot_seq = snapshot.seq();
+        let serviceable = match (generation, cursor) {
+            (Some(generation), Some(cursor)) if generation == &session.generation => {
+                let at_or_after_snapshot = snapshot_seq.is_none_or(|at| cursor >= at);
+                let at_or_before_head = session.raw_seq.is_some_and(|head| cursor <= head);
+                (at_or_after_snapshot && at_or_before_head).then_some(cursor)
+            }
+            _ => None,
+        };
+        let (cursor_answer, delivered, replay) = match serviceable {
+            Some(cursor) => (
+                Some(cursor),
+                Some(cursor),
+                session
+                    .raw_retained
+                    .iter()
+                    .filter(|delivery| delivery.seq().is_some_and(|seq| seq > cursor))
+                    .cloned()
+                    .collect(),
+            ),
+            None => {
+                let mut replay = Vec::with_capacity(session.raw_retained.len() + 1);
+                replay.push(snapshot);
+                replay.extend(session.raw_retained.iter().cloned());
+                (session.raw_seq, None, replay)
+            }
+        };
+        Ok(RawAttached {
+            generation: session.generation.clone(),
+            rows,
+            cols,
+            cursor: cursor_answer,
+            delivered,
             replay,
             live,
         })
@@ -715,11 +999,177 @@ async fn send(
             deltas: batch.deltas.as_ref().clone(),
             seq: PtyFrameSeq::new(batch.seq),
         },
+        raw: None,
         // `seq + 1`, so revision 0 — a real revision, the engine's first —
         // is distinguishable from "nothing delivered". Saturating: the wire
         // admits `u64::MAX` as a seq, and an overflow panic here would take
         // the connection down over a number.
         delivered: Some((Arc::clone(delivered), batch.seq.saturating_add(1))),
+        active: None,
+    };
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(SLOW_CONSUMER_TIMEOUT_SECS),
+        batches.send(outgoing),
+    )
+    .await
+    {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) => Err(true),
+        Err(_) => Err(false),
+    }
+}
+
+/// Deliver one raw fallback attach: snapshot/replay first, then live output,
+/// until the consumer falls behind, the connection goes, or the session ends.
+pub(crate) async fn run_raw_attach(
+    request_id: RequestId,
+    attached: RawAttached,
+    batches: mpsc::Sender<Outgoing>,
+    responses: mpsc::Sender<ServerControl>,
+    delivered: Arc<AtomicU64>,
+    active: Arc<AtomicBool>,
+) {
+    let RawAttached {
+        generation,
+        replay,
+        mut live,
+        ..
+    } = attached;
+
+    enum Ended {
+        SlowConsumer,
+        Retired,
+        Gone,
+    }
+
+    let mut ended = None;
+    for delivery in replay {
+        match send_raw(
+            &batches,
+            &request_id,
+            &generation,
+            delivery,
+            &delivered,
+            &active,
+        )
+        .await
+        {
+            Ok(()) => {}
+            Err(gone) => {
+                ended = Some(if gone {
+                    Ended::Gone
+                } else {
+                    Ended::SlowConsumer
+                });
+                break;
+            }
+        }
+    }
+    while ended.is_none() {
+        match live.recv().await {
+            Ok(delivery) => {
+                if let Err(gone) = send_raw(
+                    &batches,
+                    &request_id,
+                    &generation,
+                    delivery,
+                    &delivered,
+                    &active,
+                )
+                .await
+                {
+                    ended = Some(if gone {
+                        Ended::Gone
+                    } else {
+                        Ended::SlowConsumer
+                    });
+                }
+            }
+            Err(broadcast::error::RecvError::Lagged(_)) => {
+                ended = Some(Ended::SlowConsumer);
+            }
+            Err(broadcast::error::RecvError::Closed) => {
+                ended = Some(Ended::Retired);
+            }
+        }
+    }
+
+    let code = match ended {
+        Some(Ended::Gone) | None => return,
+        Some(Ended::SlowConsumer) => KernelErrorCode::SlowConsumer,
+        Some(Ended::Retired) => KernelErrorCode::NotFound,
+    };
+    active.store(false, Ordering::Release);
+    let last_seq = match delivered.load(Ordering::Acquire) {
+        0 => None,
+        stored => Some(PtyFrameSeq::new(stored - 1)),
+    };
+    let _ = responses
+        .send(ServerControl::PtyRawStreamClosed {
+            request_id,
+            generation,
+            code,
+            last_seq,
+        })
+        .await;
+}
+
+/// Queue one logical raw delivery. A snapshot/output writes its JSON header and
+/// kind `0x02` payload as one queue item, so no other stream can interleave
+/// between them.
+async fn send_raw(
+    batches: &mpsc::Sender<Outgoing>,
+    request_id: &RequestId,
+    generation: &PtySessionGeneration,
+    delivery: PtyRawDelivery,
+    delivered: &Arc<AtomicU64>,
+    active: &Arc<AtomicBool>,
+) -> Result<(), bool> {
+    let (control, raw, seq) = match delivery {
+        PtyRawDelivery::Snapshot {
+            seq,
+            rows,
+            cols,
+            bytes,
+        } => (
+            ServerControl::PtyRawSnapshot {
+                request_id: request_id.clone(),
+                generation: generation.clone(),
+                seq: seq.map(PtyFrameSeq::new),
+                rows,
+                cols,
+                byte_size: ByteCount::new(bytes.len() as u64),
+            },
+            Some(bytes),
+            seq,
+        ),
+        PtyRawDelivery::Output { seq, bytes } => (
+            ServerControl::PtyRawChunk {
+                request_id: request_id.clone(),
+                generation: generation.clone(),
+                seq: PtyFrameSeq::new(seq),
+                byte_size: ByteCount::new(bytes.len() as u64),
+            },
+            Some(bytes),
+            Some(seq),
+        ),
+        PtyRawDelivery::Resized { seq, rows, cols } => (
+            ServerControl::PtyRawResized {
+                request_id: request_id.clone(),
+                generation: generation.clone(),
+                seq: PtyFrameSeq::new(seq),
+                rows,
+                cols,
+            },
+            None,
+            Some(seq),
+        ),
+    };
+    let outgoing = Outgoing {
+        control,
+        raw,
+        delivered: seq.map(|seq| (Arc::clone(delivered), seq.saturating_add(1))),
+        active: Some(Arc::clone(active)),
     };
     match tokio::time::timeout(
         std::time::Duration::from_secs(SLOW_CONSUMER_TIMEOUT_SECS),
@@ -852,6 +1302,16 @@ fn backwards(id: &PtySessionId, seq: u64, head: u64) -> PtyRefusal {
         code: KernelErrorCode::StaleVersion,
         message: format!("pty session {id} is at revision {head}; {seq} does not advance it"),
         detail: Some(serde_json::json!({ "head": head.to_string() })),
+    }
+}
+
+fn raw_stale(message: impl Into<String>, head: Option<u64>) -> PtyRefusal {
+    PtyRefusal {
+        code: KernelErrorCode::StaleVersion,
+        message: message.into(),
+        detail: Some(serde_json::json!({
+            "head": head.map(|head| head.to_string())
+        })),
     }
 }
 
@@ -1052,6 +1512,126 @@ mod tests {
         let cells = expanded(&snapshot);
         assert_eq!(cells[0][0].glyph, "x");
         assert_eq!(cells[0][1].glyph, " ");
+    }
+
+    #[test]
+    fn raw_attach_reseeds_then_replays_byte_exact_output_and_resizes() {
+        let hub = PtyHub::default();
+        let host = hub.connection();
+        hub.publish_snapshot(host, &id("s"), Some(0), frame(2, 4))
+            .expect("seed render state");
+        let snapshot = vec![0x1b, b'[', b'2', b'J', 0xff, 0x00];
+        hub.publish_raw_snapshot(host, &id("s"), Some(0), 2, 4, snapshot.clone())
+            .expect("seed raw state");
+        let repeated = hub
+            .publish_raw_snapshot(host, &id("s"), Some(0), 2, 4, snapshot.clone())
+            .expect_err("one session generation accepts only one raw seed");
+        assert_eq!(repeated.code, KernelErrorCode::Overloaded);
+        let output = vec![0x00, 0xff, b'x', 0x1b];
+        hub.publish_raw_output(host, &id("s"), 1, output.clone())
+            .expect("publish raw output");
+        hub.publish_raw_resize(host, &id("s"), 2, 3, 5)
+            .expect("publish raw resize");
+
+        let attached = hub.attach_raw(&id("s"), None, None).expect("fresh attach");
+        assert_eq!(attached.cursor, Some(2));
+        assert_eq!(attached.delivered, None);
+        assert_eq!(attached.replay.len(), 3);
+        assert!(matches!(
+            &attached.replay[0],
+            PtyRawDelivery::Snapshot { seq: Some(0), bytes, .. } if bytes.as_slice() == snapshot
+        ));
+        assert!(matches!(
+            &attached.replay[1],
+            PtyRawDelivery::Output { seq: 1, bytes } if bytes.as_slice() == output
+        ));
+        assert!(matches!(
+            &attached.replay[2],
+            PtyRawDelivery::Resized {
+                seq: 2,
+                rows: 3,
+                cols: 5
+            }
+        ));
+
+        let generation = attached.generation.clone();
+        let resumed = hub
+            .attach_raw(&id("s"), Some(&generation), Some(1))
+            .expect("resume inside the retained raw window");
+        assert_eq!(resumed.cursor, Some(1));
+        assert_eq!(resumed.delivered, Some(1));
+        assert!(matches!(
+            resumed.replay.as_slice(),
+            [PtyRawDelivery::Resized {
+                seq: 2,
+                rows: 3,
+                cols: 5
+            }]
+        ));
+    }
+
+    #[test]
+    fn raw_snapshot_dimensions_and_sequence_refuse_as_distinct_classes() {
+        let hub = PtyHub::default();
+        let host = hub.connection();
+        hub.publish_snapshot(host, &id("s"), Some(0), frame(2, 4))
+            .expect("seed render state");
+
+        let stale = hub
+            .publish_raw_snapshot(host, &id("s"), Some(1), 2, 4, vec![])
+            .expect_err("the raw seed must name the render head");
+        assert_eq!(stale.code, KernelErrorCode::StaleVersion);
+        assert_eq!(stale.detail, Some(serde_json::json!({ "head": "0" })));
+
+        let malformed = hub
+            .publish_raw_snapshot(host, &id("s"), Some(0), 3, 4, vec![])
+            .expect_err("the raw seed must name the render dimensions");
+        assert_eq!(malformed.code, KernelErrorCode::Validation);
+
+        hub.publish_raw_snapshot(host, &id("s"), Some(0), 2, 4, vec![])
+            .expect("seed raw state");
+        let stale = hub
+            .publish_raw_output(host, &id("s"), 2, vec![b'x'])
+            .expect_err("raw output must follow the raw head");
+        assert_eq!(stale.code, KernelErrorCode::StaleVersion);
+        assert_eq!(stale.detail, Some(serde_json::json!({ "head": "0" })));
+    }
+
+    #[test]
+    fn raw_retention_refuses_before_crossing_either_memory_bound() {
+        let hub = PtyHub::default();
+        let host = hub.connection();
+        hub.publish_snapshot(host, &id("s"), Some(0), frame(1, 1))
+            .expect("seed render state");
+        hub.publish_raw_snapshot(host, &id("s"), Some(0), 1, 1, vec![])
+            .expect("seed raw state");
+
+        for seq in 1..=RAW_RETAINED_EVENTS as u64 {
+            hub.publish_raw_resize(host, &id("s"), seq, 1, 1)
+                .expect("retain through the event-count boundary");
+        }
+        let full = hub
+            .publish_raw_resize(host, &id("s"), RAW_RETAINED_EVENTS as u64 + 1, 1, 1)
+            .expect_err("one event past the count boundary must be refused");
+        assert_eq!(full.code, KernelErrorCode::Overloaded);
+
+        hub.disconnect(host);
+        let host = hub.connection();
+        hub.publish_snapshot(host, &id("s"), Some(0), frame(1, 1))
+            .expect("reclaim render state");
+        hub.publish_raw_snapshot(host, &id("s"), Some(0), 1, 1, vec![])
+            .expect("reseed raw state");
+        let max_payload = FRAME_BODY_MAX_BYTES as usize - 1;
+        hub.publish_raw_output(host, &id("s"), 1, vec![b'a'; max_payload])
+            .expect("retain first maximum payload");
+        hub.publish_raw_output(host, &id("s"), 2, vec![b'b'; max_payload])
+            .expect("retain second maximum payload");
+        hub.publish_raw_output(host, &id("s"), 3, vec![b'c'; 2])
+            .expect("retain exactly through the byte boundary");
+        let full = hub
+            .publish_raw_output(host, &id("s"), 4, vec![b'd'])
+            .expect_err("one byte past the byte boundary must be refused");
+        assert_eq!(full.code, KernelErrorCode::Overloaded);
     }
 
     #[test]

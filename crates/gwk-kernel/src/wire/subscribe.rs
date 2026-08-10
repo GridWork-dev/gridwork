@@ -176,7 +176,9 @@ pub(crate) async fn run(
                 events,
                 cursor: last,
             },
+            raw: None,
             delivered: Some((Arc::clone(&delivered), last.value())),
+            active: None,
         };
         match tokio::time::timeout(
             Duration::from_secs(SLOW_CONSUMER_TIMEOUT_SECS),

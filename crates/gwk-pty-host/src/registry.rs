@@ -104,6 +104,7 @@ impl SessionRegistry {
         }
         let (commands, receiver) = mpsc::channel(DELTA_CHANNEL_CAPACITY);
         let (deltas_tx, _) = broadcast::channel(DELTA_CHANNEL_CAPACITY);
+        let (raw_tx, _) = broadcast::channel(DELTA_CHANNEL_CAPACITY);
         let (ready_tx, ready_rx) = oneshot::channel::<Result<(), SpawnError>>();
 
         let task = std::thread::Builder::new()
@@ -135,7 +136,7 @@ impl SessionRegistry {
                             );
                         }
                     };
-                    run(session, spawn, config, receiver, deltas_tx).await
+                    run(session, spawn, config, receiver, deltas_tx, raw_tx).await
                 })
             })
             .map_err(|e| RegistryError::Thread(e.to_string()))?;
@@ -290,7 +291,7 @@ impl SessionRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::{CatchUp, DeltaBatch, RestartPolicy};
+    use crate::session::{CatchUp, DeltaBatch, RawEvent, RestartPolicy};
     use gwk_domain::frame::{PtyDelta, PtyFrame, StyledCell};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -399,6 +400,11 @@ mod tests {
             .spawn(id("s1"), cat(), config())
             .await
             .expect("spawn");
+        let mut raw_live = registry
+            .attach(&id("s1"), None)
+            .await
+            .expect("raw observer")
+            .raw_live;
 
         registry
             .input(&id("s1"), b"hello\n".to_vec())
@@ -409,6 +415,33 @@ mod tests {
         })
         .await;
         assert!(snapshot.seq.is_some(), "output must have produced frames");
+        let raw = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let batch = raw_live.recv().await.expect("raw live stream");
+                if let RawEvent::Output(bytes) = batch.event
+                    && bytes.windows(5).any(|window| window == b"hello")
+                {
+                    return bytes;
+                }
+            }
+        })
+        .await
+        .expect("the byte-exact output never arrived");
+        assert!(raw.windows(5).any(|window| window == b"hello"));
+
+        let raw_snapshot = registry
+            .attach(&id("s1"), None)
+            .await
+            .expect("fresh raw snapshot")
+            .raw_snapshot
+            .expect("the grid formats a VT snapshot");
+        assert!(
+            raw_snapshot
+                .bytes
+                .windows(5)
+                .any(|window| window == b"hello"),
+            "the raw seed did not reproduce the current screen"
+        );
 
         let exit = registry.stop(&id("s1")).await.expect("stop");
         assert!(matches!(exit, SessionExit::Stopped), "{exit:?}");

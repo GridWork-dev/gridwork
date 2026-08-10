@@ -13,18 +13,18 @@
 //! this crate's own hard floor, not a convention borrowed for this file —
 //! see the crate root doc.
 //!
-//! Derivation: none — this module calls the already-covered kernel wire
-//! codec (`gwk_kernel::wire::frame`); it does not re-derive framing or
-//! protocol behavior of its own.
+//! Derivation: none — original outbound glue over this repository's domain
+//! controls and already-covered kernel codec (`gwk_kernel::wire::frame`);
+//! it does not reproduce an external framing or terminal protocol.
 
 use std::path::Path;
 
 use gwk_domain::frame::{PtyDelta, PtyFrame};
-use gwk_domain::ids::{DispatchNodeId, PtyFrameSeq, PtySessionId, RequestId};
+use gwk_domain::ids::{ByteCount, DispatchNodeId, PtyFrameSeq, PtySessionId, RequestId};
 use gwk_domain::protocol::{
     CONNECTION_EGRESS_BYTES_PER_WINDOW, CONNECTION_INGRESS_BYTES_PER_WINDOW, ClientControl,
-    FRAME_BODY_MAX_BYTES, FrameKind, KernelRequest, ProjectionKind, ProjectionRecord,
-    ProtocolVersion, ServerControl,
+    FRAME_BODY_MAX_BYTES, FRAME_PAYLOAD_MAX_BYTES, FrameKind, KernelRequest, PTY_RAW_CAPABILITY,
+    ProjectionKind, ProjectionRecord, ProtocolVersion, ServerControl,
 };
 use gwk_domain::{CommandEnvelope, KernelErrorCode, KernelResult};
 use gwk_kernel::wire::frame::{Budget, Incoming, read_frame, write_frame};
@@ -79,6 +79,7 @@ pub struct KernelClient {
     /// counter is enough to tell a stray answer from the one this call is
     /// waiting on.
     issued: u64,
+    raw_enabled: bool,
 }
 
 impl KernelClient {
@@ -99,6 +100,7 @@ impl KernelClient {
                 CONNECTION_EGRESS_BYTES_PER_WINDOW,
             ),
             issued: 0,
+            raw_enabled: false,
         };
         client
             .send(&ClientControl::Hello {
@@ -107,12 +109,20 @@ impl KernelClient {
                 // Nothing asked for: this client uses only what v1 requires
                 // of every daemon, the same posture `gridwork`'s own client
                 // takes.
-                capabilities: Vec::new(),
+                capabilities: vec![
+                    gwk_domain::CapabilityName::new(PTY_RAW_CAPABILITY)
+                        .expect("the protocol's own capability name is valid"),
+                ],
                 client: Some(CLIENT_LABEL.to_owned()),
             })
             .await?;
         match client.receive().await? {
-            Some(ServerControl::HelloAck { .. }) => Ok(client),
+            Some(ServerControl::HelloAck { capabilities, .. }) => {
+                client.raw_enabled = capabilities
+                    .iter()
+                    .any(|capability| capability.as_str() == PTY_RAW_CAPABILITY);
+                Ok(client)
+            }
             Some(ServerControl::HelloRefusal { code, message }) => {
                 Err(KernelClientError::HelloRefused { code, message })
             }
@@ -217,6 +227,87 @@ impl KernelClient {
         }
     }
 
+    pub fn raw_enabled(&self) -> bool {
+        self.raw_enabled
+    }
+
+    /// Publish the raw fallback's model-produced VT seed. The JSON header and
+    /// kind `0x02` payload are one request; the acknowledgement arrives only
+    /// after both have landed.
+    pub async fn publish_raw_snapshot(
+        &mut self,
+        id: &PtySessionId,
+        snapshot: &crate::session::RawSnapshot,
+    ) -> Result<(), KernelClientError> {
+        let request_id = self.next_id();
+        self.publish_raw(
+            ClientControl::PtyRawPublishSnapshot {
+                request_id: request_id.clone(),
+                session_id: id.clone(),
+                seq: snapshot.seq.map(PtyFrameSeq::new),
+                rows: snapshot.rows,
+                cols: snapshot.cols,
+                byte_size: ByteCount::new(snapshot.bytes.len() as u64),
+            },
+            request_id,
+            &snapshot.bytes,
+            "a raw snapshot publish",
+        )
+        .await
+    }
+
+    /// Publish one child-output chunk with no UTF-8 conversion or re-encoding.
+    pub async fn publish_raw_output(
+        &mut self,
+        id: &PtySessionId,
+        seq: u64,
+        bytes: &[u8],
+    ) -> Result<(), KernelClientError> {
+        let request_id = self.next_id();
+        self.publish_raw(
+            ClientControl::PtyRawPublishOutput {
+                request_id: request_id.clone(),
+                session_id: id.clone(),
+                seq: PtyFrameSeq::new(seq),
+                byte_size: ByteCount::new(bytes.len() as u64),
+            },
+            request_id,
+            bytes,
+            "a raw output publish",
+        )
+        .await
+    }
+
+    /// Publish one resize on the raw fallback's sequence axis.
+    pub async fn publish_raw_resize(
+        &mut self,
+        id: &PtySessionId,
+        seq: u64,
+        rows: u16,
+        cols: u16,
+    ) -> Result<(), KernelClientError> {
+        match self
+            .ask(KernelRequest::PtyPublishRawResize {
+                session_id: id.clone(),
+                seq: PtyFrameSeq::new(seq),
+                rows,
+                cols,
+            })
+            .await?
+        {
+            KernelResult::PtyPublished { .. } => Ok(()),
+            KernelResult::Error { code, message, .. } => Err(KernelClientError::Refused {
+                refused: "a raw resize publish",
+                code,
+                message,
+            }),
+            other => Err(KernelClientError::Unexpected {
+                waited_on: "a raw resize acknowledgement",
+                found: format!("{other:?}"),
+            }),
+        }
+    }
+
     /// Retire a session this connection claimed — the explicit form of what
     /// hanging up does implicitly.
     pub async fn retire(&mut self, id: &PtySessionId) -> Result<(), KernelClientError> {
@@ -234,6 +325,69 @@ impl KernelClient {
                 waited_on: "a retire acknowledgement",
                 found: format!("{other:?}"),
             }),
+        }
+    }
+
+    async fn publish_raw(
+        &mut self,
+        header: ClientControl,
+        request_id: RequestId,
+        bytes: &[u8],
+        refused: &'static str,
+    ) -> Result<(), KernelClientError> {
+        if !self.raw_enabled {
+            return Err(KernelClientError::Refused {
+                refused,
+                code: KernelErrorCode::Capability,
+                message: format!("{PTY_RAW_CAPABILITY} was not negotiated"),
+            });
+        }
+        if bytes.len() > FRAME_PAYLOAD_MAX_BYTES {
+            return Err(gwk_kernel::WireError::new(
+                KernelErrorCode::FrameSize,
+                format!(
+                    "raw PTY payload is {} bytes; the frame maximum is {FRAME_PAYLOAD_MAX_BYTES}",
+                    bytes.len()
+                ),
+            )
+            .into());
+        }
+        self.send(&header).await?;
+        write_frame(&mut self.stream, FrameKind::PtyRaw, bytes, &mut self.budget).await?;
+        loop {
+            match self.receive().await? {
+                Some(ServerControl::Response {
+                    request_id: answered,
+                    result: KernelResult::PtyPublished { .. },
+                }) if answered == request_id => return Ok(()),
+                Some(ServerControl::Response {
+                    request_id: answered,
+                    result: KernelResult::Error { code, message, .. },
+                }) if answered == request_id => {
+                    return Err(KernelClientError::Refused {
+                        refused,
+                        code,
+                        message,
+                    });
+                }
+                Some(
+                    ServerControl::EventBatch { .. }
+                    | ServerControl::StreamClosed { .. }
+                    | ServerControl::PtyDeltaBatch { .. }
+                    | ServerControl::PtyStreamClosed { .. }
+                    | ServerControl::PtyRawSnapshot { .. }
+                    | ServerControl::PtyRawChunk { .. }
+                    | ServerControl::PtyRawResized { .. }
+                    | ServerControl::PtyRawStreamClosed { .. },
+                ) => {}
+                Some(other) => {
+                    return Err(KernelClientError::Unexpected {
+                        waited_on: "a raw publish acknowledgement",
+                        found: format!("{other:?}"),
+                    });
+                }
+                None => return Err(KernelClientError::ClosedDuring("the raw publish")),
+            }
         }
     }
 

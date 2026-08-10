@@ -30,7 +30,7 @@
     },
     {
       "destination": "content/docs/protocol.mdx",
-      "sha256": "88c85909716222f5652f681f494f436ca5f8f7067c2fb8c980a132fee235a8b8",
+      "sha256": "a44a5233e24ff361896c71b22b5799bf09bc01d3cd684770bc650e72f34a6b35",
       "sources": [
         {
           "path": "docs/protocol.md"
@@ -96,7 +96,7 @@
     },
     {
       "destination": "content/docs/derivation/reviews.mdx",
-      "sha256": "ea028b260be55605ed48e922833fbcc959ccf8900c9bc2b4c24bba6e07cd9770",
+      "sha256": "abc7ed05e1c4d291a106feccb9d675f3795f44266c4ead30c4b900b81941abcc",
       "sources": [
         {
           "path": "docs/derivation/reviews"

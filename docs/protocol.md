@@ -29,15 +29,42 @@ granted in the hello.
 
 Messages carry a big-endian unsigned 32-bit body length, a one-byte frame kind, and the
 body. The length includes the kind byte and excludes the prefix; it is
-`1..=4,194,304`. Kind `0x01` is strict UTF-8 JSON control; kind `0x02` is reserved and
-refused in v1. Empty, oversized, unknown-kind, invalid UTF-8, recursively duplicate-keyed,
-unknown-field, and trailing-byte inputs are refused. Bounds are part of the contract:
+`1..=4,194,304`, leaving at most 4,194,303 payload bytes after the kind. A zero or
+oversized `body_length`, and every unknown kind, is refused before body allocation.
+
+Kind `0x01` is strict UTF-8 JSON control; invalid UTF-8, recursively duplicate-keyed,
+unknown-field, and trailing-byte JSON inputs are refused. Capability-gated kind `0x02`
+is one opaque PTY payload and may contain any bytes, including an empty payload. Its strict
+JSON header immediately precedes it and pins the request, optional sequence, and exact byte
+count. Publish headers name the session directly; delivery headers carry the attach request
+and generation, with the session established by the preceding `pty_raw_attached` response.
+A connection that was not granted `pty_raw` refuses that path. A publisher has five seconds
+after a raw header to deliver its paired payload; expiry closes the connection and releases
+its hosted sessions. Bounds are part of the contract:
 
 - a frame has a hard maximum size (rejected, not truncated, when exceeded),
 - inline event payloads are bounded at 64 KiB serialized — larger content
   travels as content-addressed blob references (`payload_ref`),
 - every 64-bit counter is a canonical decimal **string** on the wire
   (`docs/contract/NAMING.md`), so no JSON consumer silently rounds it.
+
+## PTY attach modes and backpressure
+
+`pty_attach` is the primary render-state path: a styled snapshot plus bounded delta
+batches. `pty_raw_attach` is the fallback: a model-produced VT snapshot followed by the
+child's original output bytes in kind `0x02` frames; resizes remain typed JSON controls
+because they are not byte-stream events. Both paths use the same session generation and
+frame-revision cursor, so a reconnect either replays a retained gap or reseeds without
+claiming continuity across one.
+
+One raw seed is accepted per session generation. A session then retains at most 1,024 raw
+events and 8 MiB; reaching either bound refuses the publisher, whose reconnect creates a
+new generation and seed rather than growing the daemon. Each connection's outbound batch
+queue holds eight items. A reader that leaves that queue full for 30 seconds loses only its
+raw attach with `slow_consumer`; queued items for the closed stream are discarded, while
+the hosted child and the primary render stream continue. If the reader instead blocks the
+header/payload pair already being written for 30 seconds, the connection closes: a partial
+frame cannot be followed by a recoverable typed close.
 
 ## Authentication
 

@@ -17,7 +17,8 @@
 use gwk_domain::ids::Seq;
 use gwk_domain::protocol::{
     CapabilityName, ClientControl, FrameKind, HELLO_DEADLINE_SECS, HELLO_MAX_BYTES,
-    KernelErrorCode, MAX_CAPABILITIES, PROTOCOL_MINOR, ProtocolVersion, ServerControl,
+    KernelErrorCode, MAX_CAPABILITIES, PROTOCOL_MINOR, PTY_RAW_CAPABILITY, ProtocolVersion,
+    ServerControl,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -26,12 +27,10 @@ use super::{WireError, strict};
 
 /// What this kernel offers to negotiate.
 ///
-/// Empty, and that is the honest answer for v1: every request in the contract
-/// is served by every v1 daemon, so there is no optional surface to advertise.
-/// A name here would be something a client branches on, and once branched on it
-/// is owed forever — including by the terminal-engine daemon that would have to
-/// keep meaning the same thing by it.
-pub const OFFERED_CAPABILITIES: &[&str] = &[];
+/// The raw terminal fallback is additive to the required JSON control surface:
+/// older clients never receive kind `0x02`, and newer clients only use it after
+/// this name survives the hello intersection.
+pub const OFFERED_CAPABILITIES: &[&str] = &[PTY_RAW_CAPABILITY];
 
 /// What a completed handshake settled.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,7 +134,9 @@ where
         // A request before a hello is refused rather than served: the session
         // has not agreed on a grammar yet, so serving it would mean guessing
         // which one it was written against.
-        ClientControl::Request { .. } => {
+        ClientControl::Request { .. }
+        | ClientControl::PtyRawPublishSnapshot { .. }
+        | ClientControl::PtyRawPublishOutput { .. } => {
             return Err(WireError::new(
                 KernelErrorCode::Handshake,
                 "the first frame must be a hello, not a request",
@@ -331,15 +332,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capabilities_intersect_and_this_kernel_offers_none() {
-        // The machinery is live — a client may ask for anything and gets back
-        // what both sides have, which in v1 is nothing. Answering with what was
-        // asked would be a promise no code keeps.
+    async fn capabilities_intersect_and_only_the_raw_fallback_is_offered() {
+        // Unknown names disappear; the raw fallback survives exactly once even
+        // when the client repeats it.
         let (session, _) = handshake(
-            r#"{"type":"hello","protocol_major":1,"protocol_minor":0,"capabilities":["event_subscribe","blob_transfer"]}"#,
+            r#"{"type":"hello","protocol_major":1,"protocol_minor":0,"capabilities":["event_subscribe","pty_raw","pty_raw"]}"#,
         )
         .await;
-        assert!(session.expect("negotiate").capabilities.is_empty());
+        let capabilities = session.expect("negotiate").capabilities;
+        assert_eq!(capabilities.len(), 1);
+        assert_eq!(capabilities[0].as_str(), PTY_RAW_CAPABILITY);
     }
 
     #[tokio::test]

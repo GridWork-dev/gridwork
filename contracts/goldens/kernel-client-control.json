@@ -5,7 +5,8 @@
     "protocol_minor": 0,
     "capabilities": [
       "event_subscribe",
-      "blob"
+      "blob",
+      "pty_raw"
     ],
     "client": "gw"
   },
@@ -250,6 +251,42 @@
     "request": {
       "type": "pty_retire",
       "session_id": "pty-1"
+    }
+  },
+  {
+    "type": "request",
+    "request_id": "req-11",
+    "request": {
+      "type": "pty_raw_attach",
+      "session_id": "pty-1",
+      "generation": "pty-life-1",
+      "cursor": "44"
+    }
+  },
+  {
+    "type": "pty_raw_publish_snapshot",
+    "request_id": "req-12",
+    "session_id": "pty-1",
+    "rows": 24,
+    "cols": 80,
+    "byte_size": "1024"
+  },
+  {
+    "type": "pty_raw_publish_output",
+    "request_id": "req-13",
+    "session_id": "pty-1",
+    "seq": "0",
+    "byte_size": "7"
+  },
+  {
+    "type": "request",
+    "request_id": "req-14",
+    "request": {
+      "type": "pty_publish_raw_resize",
+      "session_id": "pty-1",
+      "seq": "1",
+      "rows": 30,
+      "cols": 100
     }
   }
 ]

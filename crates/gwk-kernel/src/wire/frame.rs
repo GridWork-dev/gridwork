@@ -1,4 +1,4 @@
-//! The v1 frame codec: `[u32 big-endian body_length][u8 frame_kind][body]`.
+//! The frame codec: `[u32 big-endian body_length][u8 frame_kind][body]`.
 //!
 //! `body_length` includes the kind byte and excludes the four-byte prefix, so
 //! the reader knows how much it is about to allocate before it allocates it.
@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use gwk_domain::protocol::{
     CONNECTION_BUDGET_WINDOW_SECS, FRAME_BODY_MAX_BYTES, FRAME_BODY_MIN_BYTES,
-    FRAME_KIND_RESERVED_STREAM, FRAME_LENGTH_PREFIX_BYTES, FrameKind, KernelErrorCode,
+    FRAME_LENGTH_PREFIX_BYTES, FrameKind, KernelErrorCode,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::Instant;
@@ -219,14 +219,9 @@ where
     // re-deriving that the body starts at offset one.
     let kind_byte = body.remove(0);
     let kind = FrameKind::from_u8(kind_byte).ok_or_else(|| {
-        let detail = if kind_byte == FRAME_KIND_RESERVED_STREAM {
-            " (reserved for the terminal engine and not accepted in v1)"
-        } else {
-            ""
-        };
         WireError::new(
             KernelErrorCode::Handshake,
-            format!("unknown frame kind 0x{kind_byte:02x}{detail}"),
+            format!("unknown frame kind 0x{kind_byte:02x}"),
         )
     })?;
     Ok(Incoming::Frame(Frame { kind, body }))
@@ -360,13 +355,13 @@ mod tests {
             }
         }
 
-        /// Every byte that is not the one legal kind is refused, including the
-        /// reserved engine stream kind. Enumerated rather than reasoned about: a
-        /// `match` arm that accidentally admits one byte is exactly the kind of
-        /// mistake that reads correctly.
+        /// Every byte outside the two legal kinds is refused. Enumerated rather
+        /// than reasoned about: a `match` arm that accidentally admits one byte
+        /// is exactly the kind of mistake that reads correctly.
         #[test]
         fn no_other_kind_byte_is_admitted(kind in proptest::num::u8::ANY) {
             proptest::prop_assume!(kind != FrameKind::Json.as_u8());
+            proptest::prop_assume!(kind != FrameKind::PtyRaw.as_u8());
             let mut wire = 2u32.to_be_bytes().to_vec();
             wire.push(kind);
             wire.push(b'x');
@@ -424,14 +419,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_reserved_engine_kind_is_refused_by_name() {
-        let mut raw = 1u32.to_be_bytes().to_vec();
-        raw.push(FRAME_KIND_RESERVED_STREAM);
-        let error = read_bytes(&raw, FRAME_BODY_MAX_BYTES)
+    async fn raw_pty_payloads_are_binary_and_round_trip_unchanged() {
+        let payload = [0x00, 0xff, 0x1b, b'[', 0xc3];
+        let mut wire = Vec::new();
+        write_frame(&mut wire, FrameKind::PtyRaw, &payload, &mut budget())
             .await
-            .expect_err("reserved kind accepted");
-        assert_eq!(error.code, KernelErrorCode::Handshake);
-        assert!(error.message.contains("terminal engine"), "{error}");
+            .expect("write raw frame");
+        match read_bytes(&wire, FRAME_BODY_MAX_BYTES)
+            .await
+            .expect("read raw frame")
+        {
+            Incoming::Frame(frame) => {
+                assert_eq!(frame.kind, FrameKind::PtyRaw);
+                assert_eq!(frame.body, payload);
+            }
+            Incoming::Closed => panic!("closed on a complete raw frame"),
+        }
     }
 
     #[tokio::test]

@@ -36,15 +36,16 @@ use gwk_domain::ids::{
 use gwk_domain::port::{BlobError, BlobStore, EventStore, MAX_READ_LIMIT};
 use gwk_domain::protocol::{
     CONNECTION_EGRESS_BYTES_PER_WINDOW, CONNECTION_INGRESS_BYTES_PER_WINDOW, CONTRACT_VERSION,
-    FRAME_BODY_MAX_BYTES, FrameKind, KernelErrorCode, KernelRequest, KernelResult,
-    MAX_SUBSCRIPTIONS_PER_CONNECTION, ProjectionKind, ProjectionRecord, ServerControl,
+    FRAME_BODY_MAX_BYTES, FRAME_PAYLOAD_MAX_BYTES, FrameKind, KernelErrorCode, KernelRequest,
+    KernelResult, MAX_SUBSCRIPTIONS_PER_CONNECTION, PTY_RAW_CAPABILITY,
+    PTY_RAW_PAYLOAD_DEADLINE_SECS, ProjectionKind, ProjectionRecord, ServerControl,
 };
 use sqlx::Row;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, watch};
 
-use super::frame::{Budget, Incoming, read_frame, write_frame};
+use super::frame::{Budget, Frame, Incoming, read_frame, write_frame};
 use super::hello::{self, Readiness};
 use super::listen::Listener;
 use super::pty::{self, PtyHub};
@@ -96,7 +97,13 @@ const RESPONSE_QUEUE_DEPTH: usize = 1;
 /// difference between a gap-free resume and a silently skipped page.
 pub(crate) struct Outgoing {
     pub(crate) control: ServerControl,
+    /// A kind `0x02` payload whose `control` is its immediately preceding
+    /// header. Kept in one queue item so another stream cannot split the pair.
+    pub(crate) raw: Option<Arc<Vec<u8>>>,
     pub(crate) delivered: Option<(Arc<std::sync::atomic::AtomicU64>, u64)>,
+    /// A closed stream invalidates anything it left queued. The item already
+    /// being written may finish; every later one is skipped before its header.
+    pub(crate) active: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// Cut a page down to what one frame can carry, and say whether it was cut.
@@ -509,6 +516,17 @@ impl Daemon {
                 generation.as_ref(),
                 cursor.map(|seq| seq.value()),
             ),
+            KernelRequest::PtyRawAttach {
+                session_id,
+                generation,
+                cursor,
+            } => subs.admit_raw(
+                &self.pty,
+                request_id,
+                session_id,
+                generation.as_ref(),
+                cursor.map(|seq| seq.value()),
+            ),
             KernelRequest::PtySnapshot { session_id } => match self.pty.snapshot(session_id) {
                 Ok((generation, seq, frame)) => KernelResult::PtySnapshot {
                     session_id: session_id.clone(),
@@ -548,6 +566,33 @@ impl Daemon {
                         session_id: session_id.clone(),
                     },
                     Err(refusal) => refusal.into_result(),
+                }
+            }
+            KernelRequest::PtyPublishRawResize {
+                session_id,
+                seq,
+                rows,
+                cols,
+            } => {
+                if !subs.raw_enabled {
+                    KernelResult::Error {
+                        code: KernelErrorCode::Capability,
+                        message: format!("{PTY_RAW_CAPABILITY} was not negotiated"),
+                        detail: None,
+                    }
+                } else {
+                    match self.pty.publish_raw_resize(
+                        connection,
+                        session_id,
+                        seq.value(),
+                        *rows,
+                        *cols,
+                    ) {
+                        Ok(()) => KernelResult::PtyPublished {
+                            session_id: session_id.clone(),
+                        },
+                        Err(refusal) => refusal.into_result(),
+                    }
                 }
             }
             KernelRequest::PtyRetire { session_id } => {
@@ -703,6 +748,10 @@ enum Admitted {
         session_id: PtySessionId,
         attached: pty::Attached,
     },
+    PtyRaw {
+        request_id: RequestId,
+        attached: pty::RawAttached,
+    },
 }
 
 /// The live streams of one connection, and the queues they write through.
@@ -723,6 +772,7 @@ struct Subscriptions<'a> {
     responses: mpsc::Sender<ServerControl>,
     /// An admitted stream waiting to be started. See [`Self::admit`].
     admitted: Option<Admitted>,
+    raw_enabled: bool,
 }
 
 impl<'a> Subscriptions<'a> {
@@ -730,6 +780,7 @@ impl<'a> Subscriptions<'a> {
         daemon: &'a Daemon,
         responses: mpsc::Sender<ServerControl>,
         batches: mpsc::Sender<Outgoing>,
+        raw_enabled: bool,
     ) -> Self {
         Self {
             daemon,
@@ -737,6 +788,7 @@ impl<'a> Subscriptions<'a> {
             batches,
             responses,
             admitted: None,
+            raw_enabled,
         }
     }
 
@@ -788,6 +840,42 @@ impl<'a> Subscriptions<'a> {
         self.admitted = Some(Admitted::Pty {
             request_id: request_id.clone(),
             session_id: session_id.clone(),
+            attached,
+        });
+        result
+    }
+
+    fn admit_raw(
+        &mut self,
+        hub: &PtyHub,
+        request_id: &RequestId,
+        session_id: &PtySessionId,
+        generation: Option<&PtySessionGeneration>,
+        cursor: Option<u64>,
+    ) -> KernelResult {
+        if !self.raw_enabled {
+            return KernelResult::Error {
+                code: KernelErrorCode::Capability,
+                message: format!("{PTY_RAW_CAPABILITY} was not negotiated"),
+                detail: None,
+            };
+        }
+        if let Some(refusal) = self.full() {
+            return refusal;
+        }
+        let attached = match hub.attach_raw(session_id, generation, cursor) {
+            Ok(attached) => attached,
+            Err(refusal) => return refusal.into_result(),
+        };
+        let result = KernelResult::PtyRawAttached {
+            session_id: session_id.clone(),
+            generation: attached.generation.clone(),
+            rows: attached.rows,
+            cols: attached.cols,
+            cursor: attached.cursor.map(PtyFrameSeq::new),
+        };
+        self.admitted = Some(Admitted::PtyRaw {
+            request_id: request_id.clone(),
             attached,
         });
         result
@@ -854,6 +942,23 @@ impl<'a> Subscriptions<'a> {
                     delivered,
                 ));
             }
+            Some(Admitted::PtyRaw {
+                request_id,
+                attached,
+            }) => {
+                let delivered = Arc::new(std::sync::atomic::AtomicU64::new(
+                    attached.delivered.map_or(0, |seq| seq.saturating_add(1)),
+                ));
+                let active = Arc::new(std::sync::atomic::AtomicBool::new(true));
+                self.live.spawn(pty::run_raw_attach(
+                    request_id,
+                    attached,
+                    self.batches.clone(),
+                    self.responses.clone(),
+                    delivered,
+                    active,
+                ));
+            }
         }
     }
 }
@@ -909,7 +1014,11 @@ where
         .readiness()
         .await
         .map_err(|e| WireError::new(KernelErrorCode::Storage, format!("readiness: {e}")))?;
-    hello::negotiate(reader, writer, &mut ingress, readiness).await?;
+    let negotiated = hello::negotiate(reader, writer, &mut ingress, readiness).await?;
+    let raw_enabled = negotiated
+        .capabilities
+        .iter()
+        .any(|capability| capability.as_str() == PTY_RAW_CAPABILITY);
 
     // One allowance per direction, now that a direction is a loop. They were
     // never coupled — a `spend` only ever touches the counter for the direction
@@ -920,7 +1029,7 @@ where
     );
     let (responses_tx, responses_rx) = mpsc::channel(RESPONSE_QUEUE_DEPTH);
     let (batches_tx, batches_rx) = mpsc::channel(BATCH_QUEUE_DEPTH);
-    let mut subs = Subscriptions::new(daemon, responses_tx, batches_tx);
+    let mut subs = Subscriptions::new(daemon, responses_tx, batches_tx, raw_enabled);
 
     // The identity PTY publish ownership binds to. Minted per connection and
     // released below whichever way the connection ends, so a host's sessions
@@ -934,6 +1043,106 @@ where
     served
 }
 
+/// A validated JSON header waiting for its immediately following kind `0x02`
+/// payload. The request receives exactly one response after the bytes land.
+#[derive(Debug)]
+enum PendingRawPublish {
+    Snapshot {
+        request_id: RequestId,
+        session_id: PtySessionId,
+        seq: Option<u64>,
+        rows: u16,
+        cols: u16,
+        byte_size: usize,
+    },
+    Output {
+        request_id: RequestId,
+        session_id: PtySessionId,
+        seq: u64,
+        byte_size: usize,
+    },
+}
+
+impl PendingRawPublish {
+    fn byte_size(&self) -> usize {
+        match self {
+            Self::Snapshot { byte_size, .. } | Self::Output { byte_size, .. } => *byte_size,
+        }
+    }
+
+    fn publish(self, hub: &PtyHub, connection: pty::ConnectionId, bytes: Vec<u8>) -> ServerControl {
+        let (request_id, result) = match self {
+            Self::Snapshot {
+                request_id,
+                session_id,
+                seq,
+                rows,
+                cols,
+                ..
+            } => {
+                let result =
+                    match hub.publish_raw_snapshot(connection, &session_id, seq, rows, cols, bytes)
+                    {
+                        Ok(()) => KernelResult::PtyPublished { session_id },
+                        Err(refusal) => refusal.into_result(),
+                    };
+                (request_id, result)
+            }
+            Self::Output {
+                request_id,
+                session_id,
+                seq,
+                ..
+            } => {
+                let result = match hub.publish_raw_output(connection, &session_id, seq, bytes) {
+                    Ok(()) => KernelResult::PtyPublished { session_id },
+                    Err(refusal) => refusal.into_result(),
+                };
+                (request_id, result)
+            }
+        };
+        ServerControl::Response { request_id, result }
+    }
+
+    fn accept(self, frame: Frame) -> std::result::Result<(Self, Vec<u8>), WireError> {
+        if frame.kind != FrameKind::PtyRaw {
+            return Err(WireError::new(
+                KernelErrorCode::Handshake,
+                "a raw PTY publish header must be followed by kind 0x02",
+            ));
+        }
+        if frame.body.len() != self.byte_size() {
+            return Err(WireError::new(
+                KernelErrorCode::FrameSize,
+                format!(
+                    "raw PTY header announced {} bytes but the payload carried {}",
+                    self.byte_size(),
+                    frame.body.len()
+                ),
+            ));
+        }
+        Ok((self, frame.body))
+    }
+}
+
+fn raw_payload_size(byte_size: ByteCount) -> std::result::Result<usize, WireError> {
+    let byte_size = usize::try_from(byte_size.value()).map_err(|_| {
+        WireError::new(
+            KernelErrorCode::FrameSize,
+            "raw PTY byte_size does not fit this host",
+        )
+    })?;
+    if byte_size > FRAME_PAYLOAD_MAX_BYTES {
+        return Err(WireError::new(
+            KernelErrorCode::FrameSize,
+            format!(
+                "raw PTY byte_size {byte_size} exceeds the {FRAME_PAYLOAD_MAX_BYTES}-byte payload maximum"
+            ),
+        ));
+    }
+    Ok(byte_size)
+}
+
 /// Read requests and queue their answers, until the peer hangs up.
 async fn read_requests<R>(
     daemon: &Daemon,
@@ -945,15 +1154,30 @@ async fn read_requests<R>(
 where
     R: AsyncRead + Unpin,
 {
+    let mut pending_raw: Option<PendingRawPublish> = None;
     loop {
-        let frame = match read_frame(reader, FRAME_BODY_MAX_BYTES, budget).await? {
+        let frame = match read_request_frame(reader, budget, pending_raw.is_some()).await? {
             Incoming::Frame(frame) => frame,
+            Incoming::Closed if pending_raw.is_some() => {
+                return Err(WireError::new(
+                    KernelErrorCode::FrameSize,
+                    "the connection closed before its announced raw PTY payload",
+                ));
+            }
             Incoming::Closed => return Ok(()),
         };
+        if let Some(pending) = pending_raw.take() {
+            let (pending, bytes) = pending.accept(frame)?;
+            let response = pending.publish(&daemon.pty, connection, bytes);
+            if subs.responses.send(response).await.is_err() {
+                return Ok(());
+            }
+            continue;
+        }
         if frame.kind != FrameKind::Json {
             return Err(WireError::new(
                 KernelErrorCode::Handshake,
-                format!("kind {:?} carries no control value", frame.kind),
+                "kind 0x02 arrived without a raw PTY publish header",
             ));
         }
         let control: gwk_domain::protocol::ClientControl = strict::decode(&frame.body)?;
@@ -962,6 +1186,68 @@ where
                 request_id,
                 request,
             } => (request_id, request),
+            gwk_domain::protocol::ClientControl::PtyRawPublishSnapshot {
+                request_id,
+                session_id,
+                seq,
+                rows,
+                cols,
+                byte_size,
+            } => {
+                if !subs.raw_enabled {
+                    let response = ServerControl::Response {
+                        request_id,
+                        result: KernelResult::Error {
+                            code: KernelErrorCode::Capability,
+                            message: format!("{PTY_RAW_CAPABILITY} was not negotiated"),
+                            detail: None,
+                        },
+                    };
+                    if subs.responses.send(response).await.is_err() {
+                        return Ok(());
+                    }
+                    continue;
+                }
+                let byte_size = raw_payload_size(byte_size)?;
+                pending_raw = Some(PendingRawPublish::Snapshot {
+                    request_id,
+                    session_id,
+                    seq: seq.map(|seq| seq.value()),
+                    rows,
+                    cols,
+                    byte_size,
+                });
+                continue;
+            }
+            gwk_domain::protocol::ClientControl::PtyRawPublishOutput {
+                request_id,
+                session_id,
+                seq,
+                byte_size,
+            } => {
+                if !subs.raw_enabled {
+                    let response = ServerControl::Response {
+                        request_id,
+                        result: KernelResult::Error {
+                            code: KernelErrorCode::Capability,
+                            message: format!("{PTY_RAW_CAPABILITY} was not negotiated"),
+                            detail: None,
+                        },
+                    };
+                    if subs.responses.send(response).await.is_err() {
+                        return Ok(());
+                    }
+                    continue;
+                }
+                let byte_size = raw_payload_size(byte_size)?;
+                pending_raw = Some(PendingRawPublish::Output {
+                    request_id,
+                    session_id,
+                    seq: seq.value(),
+                    byte_size,
+                });
+                continue;
+            }
             // A second hello is a client that lost track of its own session.
             // Refused rather than re-negotiated: re-running the handshake
             // mid-connection would let the settled minor and capability set
@@ -985,6 +1271,33 @@ where
     }
 }
 
+async fn read_request_frame<R>(
+    reader: &mut R,
+    budget: &mut Budget,
+    awaiting_raw_payload: bool,
+) -> std::result::Result<Incoming, WireError>
+where
+    R: AsyncRead + Unpin,
+{
+    if !awaiting_raw_payload {
+        return read_frame(reader, FRAME_BODY_MAX_BYTES, budget).await;
+    }
+    tokio::time::timeout(
+        std::time::Duration::from_secs(PTY_RAW_PAYLOAD_DEADLINE_SECS),
+        read_frame(reader, FRAME_BODY_MAX_BYTES, budget),
+    )
+    .await
+    .map_err(|_| {
+        WireError::new(
+            KernelErrorCode::Handshake,
+            format!(
+                "a raw PTY publish payload did not follow its header within \
+                 {PTY_RAW_PAYLOAD_DEADLINE_SECS}s"
+            ),
+        )
+    })?
+}
+
 /// Own the write half, and take work from the two queues that feed it.
 ///
 /// Responses first, always. A `StreamClosed` travels on the response queue for
@@ -1003,22 +1316,70 @@ where
     loop {
         let outgoing = tokio::select! {
             biased;
-            Some(control) = responses.recv() => Outgoing { control, delivered: None },
+            Some(control) = responses.recv() => Outgoing {
+                control,
+                raw: None,
+                delivered: None,
+                active: None,
+            },
             Some(outgoing) = batches.recv() => outgoing,
             // Both queues closed: the reader is done and no subscription is
             // left to produce anything.
             else => return Ok(()),
         };
-        let body = serde_json::to_vec(&outgoing.control).map_err(|e| {
-            WireError::new(KernelErrorCode::Storage, format!("serialize a frame: {e}"))
-        })?;
-        write_frame(writer, FrameKind::Json, &body, budget).await?;
+        if outgoing
+            .active
+            .as_ref()
+            .is_some_and(|active| !active.load(std::sync::atomic::Ordering::Acquire))
+        {
+            continue;
+        }
+        let written = if outgoing.active.is_some() {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(gwk_domain::protocol::SLOW_CONSUMER_TIMEOUT_SECS),
+                write_outgoing(writer, &outgoing.control, outgoing.raw.as_deref(), budget),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => {
+                    if let Some(active) = &outgoing.active {
+                        active.store(false, std::sync::atomic::Ordering::Release);
+                    }
+                    return Err(WireError::new(
+                        KernelErrorCode::SlowConsumer,
+                        "a raw PTY delivery blocked on the client beyond the slow-consumer timeout",
+                    ));
+                }
+            }
+        } else {
+            write_outgoing(writer, &outgoing.control, outgoing.raw.as_deref(), budget).await
+        };
+        written?;
         // AFTER the write, and only on success — the whole value of this number
         // is that nothing is claimed delivered before it left.
         if let Some((cell, seq)) = outgoing.delivered {
             cell.store(seq, std::sync::atomic::Ordering::Release);
         }
     }
+}
+
+async fn write_outgoing<W>(
+    writer: &mut W,
+    control: &ServerControl,
+    raw: Option<&Vec<u8>>,
+    budget: &mut Budget,
+) -> std::result::Result<(), WireError>
+where
+    W: AsyncWrite + Unpin,
+{
+    let body = serde_json::to_vec(control)
+        .map_err(|e| WireError::new(KernelErrorCode::Storage, format!("serialize a frame: {e}")))?;
+    write_frame(writer, FrameKind::Json, &body, budget).await?;
+    if let Some(raw) = raw {
+        write_frame(writer, FrameKind::PtyRaw, raw, budget).await?;
+    }
+    Ok(())
 }
 
 /// What a clean stop managed to do, for the caller to report.
@@ -1116,6 +1477,7 @@ pub async fn serve_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
 
     #[test]
     fn a_page_is_cut_by_bytes_and_never_to_nothing() {
@@ -1141,5 +1503,232 @@ mod tests {
             !cut,
             "one item is not a cut page — there is nothing behind it"
         );
+    }
+
+    #[test]
+    fn raw_publish_refuses_an_impossible_size_from_the_header() {
+        let error = raw_payload_size(ByteCount::new(FRAME_BODY_MAX_BYTES as u64))
+            .expect_err("the kind byte leaves less than the full frame maximum for payload");
+        assert_eq!(error.code, KernelErrorCode::FrameSize);
+        assert!(error.message.contains("payload maximum"));
+    }
+
+    #[test]
+    fn raw_publish_header_accepts_exactly_one_matching_binary_frame() {
+        let pending = || PendingRawPublish::Output {
+            request_id: RequestId::new("raw-pair"),
+            session_id: PtySessionId::new("pty-1"),
+            seq: 1,
+            byte_size: 2,
+        };
+        let (_, bytes) = pending()
+            .accept(Frame {
+                kind: FrameKind::PtyRaw,
+                body: vec![0x00, 0xff],
+            })
+            .expect("matching raw payload");
+        assert_eq!(bytes, [0x00, 0xff]);
+
+        let wrong_kind = pending()
+            .accept(Frame {
+                kind: FrameKind::Json,
+                body: vec![0x00, 0xff],
+            })
+            .expect_err("JSON cannot stand in for a raw payload");
+        assert_eq!(wrong_kind.code, KernelErrorCode::Handshake);
+
+        let wrong_size = pending()
+            .accept(Frame {
+                kind: FrameKind::PtyRaw,
+                body: vec![0x00],
+            })
+            .expect_err("the payload must match its header's byte count");
+        assert_eq!(wrong_size.code, KernelErrorCode::FrameSize);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn raw_publish_payload_has_a_deadline_after_its_header() {
+        let (_writer, mut reader) = tokio::io::duplex(64);
+        let mut budget = Budget::new(1 << 20, 1 << 20);
+        let error = read_request_frame(&mut reader, &mut budget, true)
+            .await
+            .expect_err("an open peer cannot leave a raw header pending forever");
+        assert_eq!(error.code, KernelErrorCode::Handshake);
+        assert!(error.message.contains("did not follow"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn raw_attach_backpressure_bounds_a_deliberately_slow_reader() {
+        let hub = PtyHub::default();
+        let host = hub.connection();
+        let session_id = PtySessionId::new("raw-slow");
+        hub.publish_snapshot(
+            host,
+            &session_id,
+            Some(0),
+            gwk_domain::frame::PtyFrame::from_cells(&[vec![
+                gwk_domain::frame::StyledCell {
+                    glyph: " ".to_owned(),
+                    style: gwk_domain::frame::CellStyle {
+                        bold: false,
+                        dim: false,
+                        italic: false,
+                        blink: false,
+                        inverse: false,
+                        invisible: false,
+                        strikethrough: false,
+                        overline: false,
+                        underline: None,
+                        fg: None,
+                        bg: None,
+                        underline_color: None,
+                    },
+                };
+                1
+            ]]),
+        )
+        .expect("seed render state");
+        hub.publish_raw_snapshot(host, &session_id, Some(0), 1, 1, vec![b's'; 4_096])
+            .expect("seed raw state");
+        let attached = hub
+            .attach_raw(&session_id, None, None)
+            .expect("attach raw stream");
+
+        let (responses_tx, responses_rx) = mpsc::channel(1);
+        let (batches_tx, batches_rx) = mpsc::channel(BATCH_QUEUE_DEPTH);
+        let queue_probe = batches_tx.clone();
+        let active = Arc::new(AtomicBool::new(true));
+        let delivered = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let pump = tokio::spawn(pty::run_raw_attach(
+            RequestId::new("raw-view"),
+            attached,
+            batches_tx,
+            responses_tx,
+            Arc::clone(&delivered),
+            Arc::clone(&active),
+        ));
+
+        // Deliberately do not poll the batch receiver yet. This is the exact
+        // queue-facing shape of a reader that has stopped making progress.
+        let offered = BATCH_QUEUE_DEPTH as u64 + 2;
+        for seq in 1..=offered {
+            hub.publish_raw_output(host, &session_id, seq, vec![b'x'; 1_024])
+                .expect("offer output to the raw viewer");
+        }
+        for _ in 0..100 {
+            if queue_probe.capacity() == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            queue_probe.capacity(),
+            0,
+            "the stalled reader must fill exactly the bounded batch queue"
+        );
+
+        tokio::time::advance(std::time::Duration::from_secs(
+            gwk_domain::protocol::SLOW_CONSUMER_TIMEOUT_SECS + 1,
+        ))
+        .await;
+        pump.await.expect("the raw pump stops at the timeout");
+        assert!(!active.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(delivered.load(std::sync::atomic::Ordering::Acquire), 0);
+
+        hub.attach(&session_id, None, None)
+            .expect("raw backpressure must not retire the primary render stream");
+        hub.publish_raw_output(host, &session_id, offered + 1, vec![b'y'])
+            .expect("raw backpressure must not retire the hosted publisher");
+
+        // Once writing resumes, the priority response gets through and every
+        // queued item from the invalidated stream is discarded before its
+        // header. The close therefore cannot sit behind the full queue it
+        // exists to explain.
+        drop(queue_probe);
+        let mut written = Vec::new();
+        let mut budget = Budget::new(1 << 20, 1 << 20);
+        write_frames(&mut written, responses_rx, batches_rx, &mut budget)
+            .await
+            .expect("drain the close and discard invalidated items");
+
+        let mut written = std::io::Cursor::new(written);
+        let closed = read_frame(&mut written, FRAME_BODY_MAX_BYTES, &mut budget)
+            .await
+            .expect("read typed close");
+        let Incoming::Frame(closed) = closed else {
+            panic!("the close was not written");
+        };
+        assert!(matches!(
+            serde_json::from_slice::<ServerControl>(&closed.body).expect("decode close"),
+            ServerControl::PtyRawStreamClosed {
+                code: KernelErrorCode::SlowConsumer,
+                last_seq: None,
+                ..
+            }
+        ));
+        assert!(matches!(
+            read_frame(&mut written, FRAME_BODY_MAX_BYTES, &mut budget)
+                .await
+                .expect("read end of drained stream"),
+            Incoming::Closed
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn one_raw_delivery_times_out_when_the_socket_write_stalls() {
+        let (_responses_tx, responses_rx) = mpsc::channel(1);
+        let (batches_tx, batches_rx) = mpsc::channel(BATCH_QUEUE_DEPTH);
+        let active = Arc::new(AtomicBool::new(true));
+        let delivered = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        batches_tx
+            .send(Outgoing {
+                control: ServerControl::PtyRawSnapshot {
+                    request_id: RequestId::new("raw-stalled"),
+                    generation: PtySessionGeneration::new("life-1"),
+                    seq: Some(PtyFrameSeq::new(0)),
+                    rows: 24,
+                    cols: 80,
+                    byte_size: ByteCount::new(4_096),
+                },
+                raw: Some(Arc::new(vec![b'x'; 4_096])),
+                delivered: Some((Arc::clone(&delivered), 1)),
+                active: Some(Arc::clone(&active)),
+            })
+            .await
+            .expect("queue raw snapshot");
+        drop(batches_tx);
+
+        // Neither half reads. Sixty-four bytes cannot hold the JSON header and
+        // payload pair, so the writer itself must enforce the slow-reader bound.
+        let (_slow_reader, mut server_writer) = tokio::io::duplex(64);
+        let writer = tokio::spawn(async move {
+            let mut budget = Budget::new(1 << 20, 1 << 20);
+            write_frames(&mut server_writer, responses_rx, batches_rx, &mut budget).await
+        });
+        let guard = tokio::spawn(async move {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(
+                    gwk_domain::protocol::SLOW_CONSUMER_TIMEOUT_SECS + 2,
+                ),
+                writer,
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(
+            gwk_domain::protocol::SLOW_CONSUMER_TIMEOUT_SECS + 1,
+        ))
+        .await;
+        tokio::task::yield_now().await;
+
+        let error = guard
+            .await
+            .expect("join guard")
+            .expect("the raw writer must stop before the outer guard")
+            .expect("join writer")
+            .expect_err("a stalled raw write must close the connection");
+        assert_eq!(error.code, KernelErrorCode::SlowConsumer);
+        assert!(!active.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(delivered.load(std::sync::atomic::Ordering::Acquire), 0);
     }
 }

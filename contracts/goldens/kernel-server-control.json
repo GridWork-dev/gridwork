@@ -4,7 +4,7 @@
     "protocol_major": 1,
     "protocol_minor": 0,
     "capabilities": [
-      "event_subscribe"
+      "pty_raw"
     ],
     "sealed": true,
     "watermark": "9007199254740993"
@@ -270,6 +270,55 @@
     "request_id": "req-10",
     "result": {
       "type": "pty_retired",
+      "session_id": "pty-1"
+    }
+  },
+  {
+    "type": "response",
+    "request_id": "req-11",
+    "result": {
+      "type": "pty_raw_attached",
+      "session_id": "pty-1",
+      "generation": "pty-life-1",
+      "rows": 24,
+      "cols": 80
+    }
+  },
+  {
+    "type": "pty_raw_snapshot",
+    "request_id": "req-11",
+    "generation": "pty-life-1",
+    "rows": 24,
+    "cols": 80,
+    "byte_size": "1024"
+  },
+  {
+    "type": "pty_raw_chunk",
+    "request_id": "req-11",
+    "generation": "pty-life-1",
+    "seq": "0",
+    "byte_size": "7"
+  },
+  {
+    "type": "pty_raw_resized",
+    "request_id": "req-11",
+    "generation": "pty-life-1",
+    "seq": "1",
+    "rows": 30,
+    "cols": 100
+  },
+  {
+    "type": "pty_raw_stream_closed",
+    "request_id": "req-11",
+    "generation": "pty-life-1",
+    "code": "slow_consumer",
+    "last_seq": "1"
+  },
+  {
+    "type": "response",
+    "request_id": "req-13",
+    "result": {
+      "type": "pty_published",
       "session_id": "pty-1"
     }
   }
