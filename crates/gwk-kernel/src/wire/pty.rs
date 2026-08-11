@@ -910,7 +910,7 @@ pub(crate) async fn run_attach(
     batches: mpsc::Sender<Outgoing>,
     responses: mpsc::Sender<ServerControl>,
     delivered: Arc<AtomicU64>,
-    detach: Option<super::receipts::DetachReceipt>,
+    detach: Option<super::receipts::DetachOnDrop>,
 ) {
     let Attached {
         generation,
@@ -987,7 +987,7 @@ pub(crate) async fn run_attach(
     // on every path, including the peer simply going away. `None` means no
     // ledger stands behind this attach (in-crate tests).
     if let Some(detach) = detach {
-        detach.emit().await;
+        detach.disarm().emit().await;
     }
     let code = match ended {
         Some(Ended::Gone) | None => return,
@@ -1057,7 +1057,7 @@ pub(crate) async fn run_raw_attach(
     responses: mpsc::Sender<ServerControl>,
     delivered: Arc<AtomicU64>,
     active: Arc<AtomicBool>,
-    detach: Option<super::receipts::DetachReceipt>,
+    detach: Option<super::receipts::DetachOnDrop>,
 ) {
     let RawAttached {
         generation,
@@ -1128,7 +1128,7 @@ pub(crate) async fn run_raw_attach(
     // on every path, including the peer simply going away. `None` means no
     // ledger stands behind this attach (in-crate tests).
     if let Some(detach) = detach {
-        detach.emit().await;
+        detach.disarm().emit().await;
     }
     let code = match ended {
         Some(Ended::Gone) | None => return,

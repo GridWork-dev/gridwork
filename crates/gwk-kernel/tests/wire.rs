@@ -1858,3 +1858,101 @@ async fn pty_lifecycle_receipts_reach_the_ledger_with_their_provenance() {
     drop(pool);
     drop_database(&maintenance, &name).await;
 }
+
+/// The two 2026-08-11 sitting findings, pinned. Two connections number their
+/// requests independently, so both attaches here arrive as `gw-1`: with a
+/// request-only idempotency key the second refused as a conflict, and a client
+/// that hung up without detaching lost its detach receipt to the stream task's
+/// abort. The key now embeds the connection and the abort itself emits.
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
+async fn concurrent_and_hung_up_attaches_all_reach_the_counters() {
+    use sqlx::Row;
+
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "wire_pty_concurrent", 8).await;
+    let pool = store.pool().clone();
+    let served = Running::open(store, "ptyconc").await;
+
+    let mut host = served.client().await;
+    let mut viewer_a = served.client().await;
+    let mut viewer_b = served.client().await;
+    let frame = serde_json::to_string(&pty_frame(2, 4)).expect("serialize frame");
+
+    match host
+        .ask(
+            "seed",
+            &format!(
+                r#"{{"type":"pty_publish_snapshot","session_id":"pty-c1","seq":"0","frame":{frame}}}"#
+            ),
+        )
+        .await
+    {
+        KernelResult::PtyPublished { .. } => {}
+        other => panic!("{other:?}"),
+    }
+
+    // The SAME request id from two connections — each client's first request.
+    for viewer in [&mut viewer_a, &mut viewer_b] {
+        match viewer
+            .ask("gw-1", r#"{"type":"pty_attach","session_id":"pty-c1"}"#)
+            .await
+        {
+            KernelResult::PtyAttached { .. } => {}
+            other => panic!("{other:?}"),
+        }
+    }
+
+    let counters = |pool: sqlx::PgPool| async move {
+        let row = sqlx::query(
+            "SELECT state, attach_count, detach_count \
+             FROM gwk.pty_session WHERE id = 'pty-c1'",
+        )
+        .fetch_optional(&pool)
+        .await
+        .expect("read pty-c1");
+        row.map(|row| {
+            (
+                row.get::<String, _>("state"),
+                row.get::<i64, _>("attach_count"),
+                row.get::<i64, _>("detach_count"),
+            )
+        })
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let state = counters(pool.clone()).await;
+        if state.as_ref().is_some_and(|s| s.1 == 2) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "both attaches must count despite the shared request id: {state:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    // Client hangup, no clean detach: the streams are aborted with their
+    // connections, and the abort guard is what carries the receipts out.
+    drop(viewer_a);
+    drop(viewer_b);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let state = counters(pool.clone()).await;
+        if state.as_ref().is_some_and(|s| s.2 == 2) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "hung-up attaches must still land their detaches: {state:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let (state, attaches, detaches) = counters(pool.clone()).await.expect("settled row");
+    assert_eq!((state.as_str(), attaches, detaches), ("running", 2, 2));
+
+    drop(host);
+    served.close().await;
+    drop(pool);
+    drop_database(&maintenance, &name).await;
+}

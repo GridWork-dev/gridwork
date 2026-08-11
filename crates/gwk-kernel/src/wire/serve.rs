@@ -518,7 +518,8 @@ impl Daemon {
                     cursor.map(|seq| seq.value()),
                 );
                 if let KernelResult::PtyAttached { generation, .. } = &result {
-                    receipts::attached(&self.store, session_id, generation, request_id).await;
+                    receipts::attached(&self.store, session_id, generation, connection, request_id)
+                        .await;
                 }
                 result
             }
@@ -535,7 +536,8 @@ impl Daemon {
                     cursor.map(|seq| seq.value()),
                 );
                 if let KernelResult::PtyRawAttached { generation, .. } = &result {
-                    receipts::attached(&self.store, session_id, generation, request_id).await;
+                    receipts::attached(&self.store, session_id, generation, connection, request_id)
+                        .await;
                 }
                 result
             }
@@ -785,9 +787,14 @@ enum Admitted {
 /// client double its buffered footprint by asking in two vocabularies.
 struct Subscriptions<'a> {
     daemon: &'a Daemon,
+    /// The connection these streams belong to — receipt keys embed it so two
+    /// clients' identically numbered requests stay distinct in the ledger.
+    connection: pty::ConnectionId,
     /// Dropping this aborts every stream on it, which is what makes a
     /// closed connection stop reading the database — a stream parked between
-    /// polls has nothing to notice a hangup by.
+    /// polls has nothing to notice a hangup by. Each PTY stream carries a
+    /// [`receipts::DetachOnDrop`] guard, so the abort itself is what emits
+    /// the detach receipt for a stream that never ended cleanly.
     live: tokio::task::JoinSet<()>,
     batches: mpsc::Sender<Outgoing>,
     responses: mpsc::Sender<ServerControl>,
@@ -799,12 +806,14 @@ struct Subscriptions<'a> {
 impl<'a> Subscriptions<'a> {
     fn new(
         daemon: &'a Daemon,
+        connection: pty::ConnectionId,
         responses: mpsc::Sender<ServerControl>,
         batches: mpsc::Sender<Outgoing>,
         raw_enabled: bool,
     ) -> Self {
         Self {
             daemon,
+            connection,
             live: tokio::task::JoinSet::new(),
             batches,
             responses,
@@ -955,12 +964,13 @@ impl<'a> Subscriptions<'a> {
                 let delivered = Arc::new(std::sync::atomic::AtomicU64::new(
                     attached.cursor.map_or(0, |seq| seq.saturating_add(1)),
                 ));
-                let detach = Some(receipts::DetachReceipt {
+                let detach = Some(receipts::DetachOnDrop::new(receipts::DetachReceipt {
                     store: Arc::clone(&self.daemon.store),
                     session_id: session_id.clone(),
                     generation: attached.generation.clone(),
+                    connection: self.connection,
                     request_id: request_id.clone(),
-                });
+                }));
                 self.live.spawn(pty::run_attach(
                     request_id,
                     session_id,
@@ -980,12 +990,13 @@ impl<'a> Subscriptions<'a> {
                     attached.delivered.map_or(0, |seq| seq.saturating_add(1)),
                 ));
                 let active = Arc::new(std::sync::atomic::AtomicBool::new(true));
-                let detach = Some(receipts::DetachReceipt {
+                let detach = Some(receipts::DetachOnDrop::new(receipts::DetachReceipt {
                     store: Arc::clone(&self.daemon.store),
                     session_id,
                     generation: attached.generation.clone(),
+                    connection: self.connection,
                     request_id: request_id.clone(),
-                });
+                }));
                 self.live.spawn(pty::run_raw_attach(
                     request_id,
                     attached,
@@ -1066,12 +1077,12 @@ where
     );
     let (responses_tx, responses_rx) = mpsc::channel(RESPONSE_QUEUE_DEPTH);
     let (batches_tx, batches_rx) = mpsc::channel(BATCH_QUEUE_DEPTH);
-    let mut subs = Subscriptions::new(daemon, responses_tx, batches_tx, raw_enabled);
 
     // The identity PTY publish ownership binds to. Minted per connection and
     // released below whichever way the connection ends, so a host's sessions
     // never outlive the socket that was publishing them.
     let connection = daemon.pty.connection();
+    let mut subs = Subscriptions::new(daemon, connection, responses_tx, batches_tx, raw_enabled);
     let served = tokio::select! {
         read = read_requests(daemon, connection, reader, &mut ingress, &mut subs) => read,
         written = write_frames(writer, responses_rx, batches_rx, &mut egress) => written,
