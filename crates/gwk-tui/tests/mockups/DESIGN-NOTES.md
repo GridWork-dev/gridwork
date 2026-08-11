@@ -90,6 +90,31 @@ one-receipt-per-send, F5 receipt-row-plus-echo):
   fixed regions (attention digest + vitals) vs status quo minimalism.
 - **G6 — Queue/Config wire-or-shelve.** Recommendation argued in §4.
 
+### Rulings (operator pickers, 2026-08-11)
+
+- **G1 — Curated five-lens grouping.** HALL (the estate, home) · WORK (queue ·
+  tasks/dag · runs · config) · FLEET (agents · leases · cost) · FLOW (events ·
+  messages · audit) · TERM (terminal lifetimes · attach). The Board dissolves into
+  these; the quick-wins view-switch wiring is absorbed as sub-tab plumbing. `:` still
+  addresses everything one level deep (`:cost` jumps to FLEET›cost).
+- **G2 — Estate rail + pty main.** Attach renders a ~30-col estate rail beside the
+  pty region; rail auto-collapses to full-screen at ≤100 cols and toggles with a key.
+- **G3 — `:` navigation + context keys.** Typed input navigates and filters only;
+  every mutation is a single keybar-taught context key with a confirm step.
+- **G4 — Auto-table on TTY.** Human table when stdout is a tty, identical JSON when
+  piped; `--json` forces the wire shape anywhere.
+- **F4 — Both send surfaces from day one.** Modal INPUT (persistent badge; leader
+  `ctrl-]` leaves, since Esc is a byte the agent owns) AND a `:send <term> <bytes>`
+  one-shot verb from any lens; shared receipt pipeline. This closes the input-path
+  SPEC's last open fork.
+- **G5 — Enriched ambient Hall.** The calm full-width glyph field stays the identity;
+  richness = real elapsed times, painted focus/selection, and a single vitals header
+  (running/attention counts, cost tick, tier·glyph state, clock). No composite rails.
+- **G6 — Wire both Queue and Config.** Queue mounts as WORK›queue with
+  ack/mute/unmute/resolve keys plus a new gate-decide affordance; Config mounts as
+  WORK›config, accepting the obligation to add its first golden suite and design the
+  schema-form screen this round.
+
 Designer-decided defaults (taken, vetoable): the 120×40/80×24 grid contract with an
 explicit too-small card; keybar elision over wholesale dropping; urgency ordering
 applied at every density rung (not only at Paging); real elapsed times replacing the
