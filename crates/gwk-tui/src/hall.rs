@@ -1276,6 +1276,22 @@ pub fn district_region(area: Rect, input: &FrameInput, district_id: &DistrictId)
     None
 }
 
+/// The style a district heading paints with. The focused district carries
+/// the ratified `focus` SIGNAL token patched over the bold base — accent
+/// color at the color tiers, reverse video at Ansi16/Mono, the one attribute
+/// every tier can express — so j/k has visible feedback at every density
+/// rung instead of only steering which district survives a collapse.
+fn heading_style(is_focused: bool, tier: ColorTier) -> Style {
+    let base = Style::default().add_modifier(Modifier::BOLD);
+    if !is_focused {
+        return base;
+    }
+    gwk_theme::SIGNAL
+        .iter()
+        .find(|token| token.name == "focus")
+        .map_or(base, |token| base.patch(theme::token_style(token, tier)))
+}
+
 fn render_paging_frame(
     area: Rect,
     buf: &mut Buffer,
@@ -1318,7 +1334,13 @@ fn render_paging_frame(
             x: 0,
             y,
             text: district_heading(district, input, area.width),
-            style: Style::default().add_modifier(Modifier::BOLD),
+            style: heading_style(
+                input
+                    .focus
+                    .as_ref()
+                    .is_some_and(|focus| focus.district == district.id),
+                context.tier,
+            ),
             agent_pair: false,
         });
         let page = agent_page(district, area.width, context.pages.agent_page(&district.id));
@@ -1382,15 +1404,33 @@ fn render_paging_frame(
 }
 
 fn identity_glyph(role: Option<&str>, glyphs: GlyphSet) -> char {
-    let role_mark = role.and_then(gwk_theme::marks::mark);
-    if let Some(mark) = role_mark {
-        return theme::glyph(mark, 0, glyphs);
-    }
-    if role.is_none() {
+    let Some(name) = role else {
         let mark = gwk_theme::marks::mark("role_absent").expect("role_absent mark is pinned");
         return theme::glyph(mark, 0, glyphs);
+    };
+    // The wire's role vocabulary is open, and the real roster names are
+    // fleet-prefixed families — `gw-code-reviewer`, `gw-security-auditor` —
+    // while the ratified identity marks carry the bare family words. Strip
+    // the fleet prefix, then try the whole name and its trailing family word
+    // against the identity marks, so a roster role lands on its family's
+    // mark instead of collapsing to a first-letter 'G' with the rest of the
+    // fleet. Only identity marks qualify: a role that happens to share an
+    // expression or graph-tier name is not that thing.
+    let family = name.strip_prefix("gw-").unwrap_or(name);
+    let identity = |candidate: &str| {
+        gwk_theme::marks::mark(candidate)
+            .filter(|mark| mark.kind == gwk_theme::marks::MarkKind::Identity)
+    };
+    let family_mark = identity(family).or_else(|| family.rsplit('-').next().and_then(identity));
+    if let Some(mark) = family_mark {
+        return theme::glyph(mark, 0, glyphs);
     }
-    role.and_then(|name| name.bytes().find(u8::is_ascii_alphabetic))
+    // Unrecognized names stay deterministic without collapsing: the letter
+    // comes from the name AFTER the fleet prefix, so `gw-rust-pro` reads 'R'
+    // where every `gw-*` role once read 'G'.
+    family
+        .bytes()
+        .find(u8::is_ascii_alphabetic)
         .map(char::from)
         .map(|character| character.to_ascii_uppercase())
         .unwrap_or('?')
@@ -1579,7 +1619,13 @@ fn render_frame(
             x: 0,
             y,
             text: district_heading(district, input, area.width),
-            style: Style::default().add_modifier(Modifier::BOLD),
+            style: heading_style(
+                input
+                    .focus
+                    .as_ref()
+                    .is_some_and(|focus| focus.district == district.id),
+                context.tier,
+            ),
             agent_pair: false,
         });
         let mut station_x = 0u16;
@@ -1641,4 +1687,55 @@ fn render_frame(
         y = y.saturating_add(EXPANDED_DISTRICT_HEIGHT);
     }
     paint_frame(area, buf, hits, &text, &regions, context.transforms)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn roster_roles_resolve_family_marks_instead_of_collapsing() {
+        // Fleet-prefixed roster names land on their family's identity mark at
+        // both tiers, exactly as the bare family words always have.
+        assert_eq!(identity_glyph(Some("reviewer"), GlyphSet::Ascii), 'R');
+        assert_eq!(
+            identity_glyph(Some("gw-code-reviewer"), GlyphSet::Ascii),
+            'R'
+        );
+        assert_eq!(
+            identity_glyph(Some("gw-code-reviewer"), GlyphSet::Unicode),
+            '◃'
+        );
+        assert_eq!(
+            identity_glyph(Some("gw-security-auditor"), GlyphSet::Ascii),
+            'U'
+        );
+        assert_eq!(
+            identity_glyph(Some("gw-phase-researcher"), GlyphSet::Ascii),
+            'S'
+        );
+        assert_eq!(identity_glyph(Some("gw-architect"), GlyphSet::Ascii), 'A');
+        assert_eq!(
+            identity_glyph(Some("gw-orchestrator"), GlyphSet::Ascii),
+            'O'
+        );
+        // Unmapped roles stay deterministic without collapsing: the letter
+        // follows the name after the fleet prefix, so the fleet no longer
+        // reads as a column of 'G'.
+        assert_eq!(identity_glyph(Some("gw-rust-pro"), GlyphSet::Ascii), 'R');
+        assert_eq!(
+            identity_glyph(Some("gw-typescript-pro"), GlyphSet::Ascii),
+            'T'
+        );
+        assert_eq!(
+            identity_glyph(Some("general-purpose"), GlyphSet::Ascii),
+            'G'
+        );
+        // A role sharing a non-identity mark's name is not that thing: no
+        // graph-tier or expression glyph ever poses as a WHO cell.
+        assert_eq!(identity_glyph(Some("task"), GlyphSet::Ascii), 'T');
+        // Absent stays the pinned role_absent mark.
+        assert_eq!(identity_glyph(None, GlyphSet::Ascii), '.');
+        assert_eq!(identity_glyph(None, GlyphSet::Unicode), '∙');
+    }
 }
