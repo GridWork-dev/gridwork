@@ -1,0 +1,40 @@
+ ✓ in sync -- latest config commit has evidence
+ ⠄ identity/authority-policy.toml                                                                 $EDITOR + typed commit
+ ⠄ identity/capabilities.toml                                                                             validated form
+ ⠄ identity/namespace-scopes.toml                                                                         validated form
+ ⠄ identity/orchestration.toml                                                                            validated form
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+CONFIG  4 files  commit a1b2c3d4  evidence blob://s

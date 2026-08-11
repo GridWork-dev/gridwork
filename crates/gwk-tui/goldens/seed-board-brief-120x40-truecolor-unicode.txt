@@ -1,0 +1,40 @@
+ what happened
+   attempt  claude  running                                                                                        17:20
+   task  build the seeded-estate snapshot harness  working                                                         17:20
+   lease  worktree:pty  held                                                                                       17:00
+   lease  worktree:release  expired                                                                                17:00
+   lease  worktree:tui  held                                                                                       17:00
+ what is owed  9 facts
+   attempt at-pty-review  blocked
+   attention_item att-disk  disk pressure on the build host
+   attention_item att-flaky  t-flaky-ci attempt is stuck canceling
+   attention_item att-flap  kernel-facade MCP flapping
+   attention_item att-kek  KEK rotation window closes in 2 hours
+ cost  12 entries  10 priced  2 unpriced  5300000 micros
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+BOARD estate [brief] run dag flow events replay fleet cost audit  r2@221

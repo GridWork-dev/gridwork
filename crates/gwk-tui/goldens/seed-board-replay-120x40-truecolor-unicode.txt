@@ -1,0 +1,40 @@
+ 4 replay frames  1180ms span
+ 0ms  output  47 bytes  $ cargo test -p gwk-tui --test seed_snapshots\u{D}\u{A}                                    seq 1
+ 60ms  resize  100x32                                                                                              seq 2
+ 420ms  output  19 bytes  running 21 checks\u{D}\u{A}                                                              seq 3
+ 1180ms  output  53 bytes  test hall_estate_at_120x40_truecolor_unicode ... ok\u{D}\u{A}                           seq 4
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+BOARD estate brief run dag flow events [replay] fleet cost audit  r2@221
