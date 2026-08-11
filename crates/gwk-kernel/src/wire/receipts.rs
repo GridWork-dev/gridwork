@@ -23,6 +23,7 @@ use gwk_domain::ids::{
 };
 use gwk_domain::protocol::{KernelErrorCode, KernelResult};
 
+use super::pty::ConnectionId;
 use crate::SYSTEM_PROJECT;
 use crate::store::PgEventStore;
 
@@ -70,13 +71,21 @@ pub(crate) async fn closed(
 }
 
 /// Record one admitted attach (styled or raw — both drive the counter).
+///
+/// The key embeds the CONNECTION as well as the request: request ids are
+/// numbered per connection, so two concurrent clients both send `gw-1` and a
+/// request-only key would refuse the second attach as an idempotency conflict
+/// (observed live at the 2026-08-11 sitting). The connection id is unique for
+/// the daemon's lifetime and the generation embeds the writer epoch, so the
+/// triple never collides across restarts either.
 pub(crate) async fn attached(
     store: &Arc<PgEventStore>,
     id: &PtySessionId,
     generation: &PtySessionGeneration,
+    connection: ConnectionId,
     request_id: &RequestId,
 ) {
-    let key = format!("pty-attach:{id}:{generation}:{request_id}");
+    let key = format!("pty-attach:{id}:{generation}:{connection}:{request_id}");
     versioned(store, id, &key, |expected_version| {
         KernelCommand::RecordPtyAttach {
             pty_session_id: id.clone(),
@@ -92,6 +101,7 @@ pub(crate) struct DetachReceipt {
     pub store: Arc<PgEventStore>,
     pub session_id: PtySessionId,
     pub generation: PtySessionGeneration,
+    pub connection: ConnectionId,
     pub request_id: RequestId,
 }
 
@@ -99,8 +109,8 @@ impl DetachReceipt {
     /// Record that the attach ended, whichever way it ended.
     pub(crate) async fn emit(self) {
         let key = format!(
-            "pty-detach:{}:{}:{}",
-            self.session_id, self.generation, self.request_id
+            "pty-detach:{}:{}:{}:{}",
+            self.session_id, self.generation, self.connection, self.request_id
         );
         let id = self.session_id.clone();
         versioned(&self.store, &self.session_id, &key, |expected_version| {
@@ -110,6 +120,47 @@ impl DetachReceipt {
             }
         })
         .await;
+    }
+}
+
+/// Carries a [`DetachReceipt`] through an attach task that can be ABORTED —
+/// a closed connection drops its stream `JoinSet`, and a dropped future never
+/// reaches its clean emit. Observed live at the 2026-08-11 sitting: client
+/// hangup lost the detach silently. The clean path disarms the guard and
+/// emits inline as before; a drop with the receipt still armed hands the emit
+/// to a task of its own, so connection teardown cannot swallow it.
+pub(crate) struct DetachOnDrop(Option<DetachReceipt>);
+
+impl DetachOnDrop {
+    pub(crate) fn new(receipt: DetachReceipt) -> Self {
+        Self(Some(receipt))
+    }
+
+    /// The clean path: take the receipt to emit inline, disarming the drop arm.
+    pub(crate) fn disarm(mut self) -> DetachReceipt {
+        self.0
+            .take()
+            .expect("disarm consumes the guard exactly once")
+    }
+}
+
+impl Drop for DetachOnDrop {
+    fn drop(&mut self) {
+        let Some(receipt) = self.0.take() else {
+            return;
+        };
+        // Never blocks or fails the teardown path (the decoupling invariant):
+        // outside a runtime the receipt is dropped loudly, matching every
+        // other failure in this module.
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(receipt.emit());
+            }
+            Err(_) => eprintln!(
+                "gwk-kernel: pty receipt pty-detach:{}:{}:{}:{}: dropped outside a runtime",
+                receipt.session_id, receipt.generation, receipt.connection, receipt.request_id
+            ),
+        }
     }
 }
 
