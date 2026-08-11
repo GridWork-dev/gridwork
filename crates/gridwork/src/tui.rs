@@ -20,10 +20,10 @@ use gwk_tui::board::{self, BoardState, BoardTarget, BoardView, EventTail};
 use gwk_tui::drilldown::{self, DrilldownState, DrilldownTarget, IngestDisposition};
 use gwk_tui::estate::{EstateSnapshot, EventIndex, ProjectionSnapshot, Stamped};
 use gwk_tui::hall::{
-    Agent, AgentId, AgentState, DECAY_DURATION, DistrictId, Focus, FrameInput, HallTarget,
-    MotionDriver, MotionEntity, MotionFrame, MotionInput, MotionKey, MotionMode, MotionVerb,
-    PULSE_DURATION, PagedMotionFrame, PagingState, district_region, district_stack_order,
-    render_with_motion_and_pages,
+    Agent, AgentId, AgentState, DECAY_DURATION, DensityRung, DistrictId, Focus, FrameInput,
+    HallTarget, MotionDriver, MotionEntity, MotionFrame, MotionInput, MotionKey, MotionMode,
+    MotionVerb, PULSE_DURATION, PagedMotionFrame, PagingState, district_region,
+    district_stack_order, render_with_motion_and_pages, solve_density,
 };
 use gwk_tui::input::{self, HitMap};
 use gwk_tui::replay::ReplayTimeline;
@@ -1089,7 +1089,14 @@ fn draw(
                     glyph_name(glyphs),
                     attach_elapsed.as_millis(),
                 );
-                let full = format!(" q quit  m motion  j/k project  [/] page  {state}");
+                // The paging keys only reach a reader at the Paging rung, so
+                // the hint says whether they do anything right now instead of
+                // advertising them unconditionally.
+                let rung = solve_density(body, input).rung;
+                let full = format!(
+                    " q quit  m motion  j/k project  {}  {state}",
+                    paging_hint(rung)
+                );
                 // Hints yield before state: at narrow widths the whole hint
                 // block drops rather than clipping the state text mid-word.
                 let status = if full.chars().count() <= usize::from(area.width) {
@@ -1143,6 +1150,16 @@ fn glyph_name(glyphs: GlyphSet) -> &'static str {
     match glyphs {
         GlyphSet::Unicode => "unicode",
         GlyphSet::Ascii => "ascii",
+    }
+}
+
+/// The status-bar paging hint. Ascii on purpose: this line renders even when
+/// the glyph inventory has degraded.
+fn paging_hint(rung: DensityRung) -> &'static str {
+    if rung == DensityRung::Paging {
+        "[/] page"
+    } else {
+        "pg -"
     }
 }
 
@@ -1861,6 +1878,20 @@ mod tests {
         ] {
             let failure = filtered.expect_err("a dropped filter must refuse");
             assert_eq!(failure.exit, crate::exit::USAGE, "{failure:?}");
+        }
+    }
+
+    #[test]
+    fn paging_hint_reads_disabled_outside_the_paging_rung() {
+        assert_eq!(paging_hint(DensityRung::Paging), "[/] page");
+        for parked in [
+            DensityRung::Empty,
+            DensityRung::Baseline,
+            DensityRung::GutterShrink,
+            DensityRung::DistrictCollapse,
+            DensityRung::PairShrink,
+        ] {
+            assert_eq!(paging_hint(parked), "pg -", "{parked:?}");
         }
     }
 
