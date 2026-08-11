@@ -1,0 +1,40 @@
+ 4 flows  6 messages
+ flow c-pty-1
+   ⋄ orchestrator -> researcher  brief  delivered                                                                  09:31
+     ⋄ researcher -> orchestrator  findings  applied                                                               09:58
+ ⋄ orchestrator -> reviewer  review-request  accepted                                                              10:20
+   ⋄ reviewer -> orchestrator  ack  acknowledged                                                                   10:24
+ ⋄ watchdog -> orchestrator  alert  dead letter -- nobody listening                                                16:45
+ ⋄ implementer -> orchestrator  status  rejected                                                                   17:06
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+BOARD estate brief run dag [flow] events replay fleet cost audit  r2@221

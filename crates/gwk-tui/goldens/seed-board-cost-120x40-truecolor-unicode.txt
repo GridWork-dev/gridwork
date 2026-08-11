@@ -1,0 +1,40 @@
+ unknown -- 1 fact not in the log
+   currency: tokens only on 2 of 12 entries -- the ledger never converts
+ cost  12 entries  5.300000 USD total over 10 of 12 priced  5 estimated
+ by engine
+   claude  opus  3 entries                                                                                  2.640000 USD
+   claude  sonnet  4 entries                                                                                2.220000 USD
+   codex  gpt-5-codex  5 entries                                                                            0.440000 USD
+ tokens
+   input 38500 total over 12 of 12 entries
+   output 8490 total over 12 of 12 entries
+   cached input 1200 total over 1 of 12 entries
+   cache write not reported
+   reasoning 2100 total over 1 of 12 entries
+ entries
+   17:20  claude  0.905000 USD estimated                                                                           ce-12
+   16:45  codex  0.071000 USD                                                                                      ce-11
+   16:20  claude  0.190000 USD estimated                                                                           ce-10
+   16:00  claude  0.410000 USD                                                                                     ce-09
+   15:35  codex  0.021000 USD estimated                                                                            ce-08
+   15:20  claude  no cost reported                                                                                 ce-07
+   15:10  claude  2.450000 USD                                                                                     ce-06
+   10:17  codex  0.008000 USD                                                                                      ce-05
+   10:16  claude  0.780000 USD estimated                                                                           ce-04
+   09:52  claude  0.125000 USD estimated                                                                           ce-03
+   09:41  codex  no cost reported                                                                                  ce-02
+   09:00  codex  0.340000 USD                                                                                      ce-01
+ ingestion
+   health 1 record
+   session 1 record  newest 2026-08-11T16:00:00Z
+     2026-08-11T16:00:00Z  seq 209                                                               ingest:system:session-1
+
+
+
+
+
+
+
+
+
+BOARD estate brief run dag flow events replay fleet [cost] audit  r2@221

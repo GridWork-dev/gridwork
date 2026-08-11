@@ -1,0 +1,31 @@
+gw@kernel:~/gridwork$ cargo test -p gwk-tui --test seed_snapshots -- --nocapture
+
+   Compiling gwk-theme v0.0.2
+   Compiling gwk-domain v0.0.2
+   Compiling gwk-tui v0.0.2 (crates/gwk-tui)
+
+    Finished test [unoptimized + debuginfo] target(s) in 6.14s
+     Running tests/seed_snapshots.rs (target/debug/deps/seed_snapshots-9f2a1b3c)
+
+running 21 checks
+test board_views_over_the_estate ... ok
+test hall_estate_at_120x40_truecolor_unicode ... ok
+test hall_estate_at_80x24 ... FAILED
+test queue_estate_default ... ok
+test config_estate_default ... ok
+
+failures:
+
+---- hall_estate_at_80x24 stdout ----
+crates/gwk-tui/goldens/seed-hall-estate-80x24-truecolor-unicode.txt drifted at line 3.
+
+test result: FAILED. 20 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+
+
+
+
+
+
+
+gw@kernel:~/gridwork$ _
+ live  SESSION pty-1  seq 42  100x30  view 0,0
