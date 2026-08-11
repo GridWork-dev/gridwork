@@ -475,6 +475,41 @@ exclusive lock is held and a concurrent edit is refused rather than merged.
   ruled screen here marks focus with a `>` character: it is the only selection signal a
   golden can prove, and it is also the only one that survives Mono.
 
+### Round 5 — CLI human output · blessed
+
+Plain-text transcripts, not `TestBackend` frames: the subject is stdout, so rendering it
+through a terminal buffer would misrepresent the medium. Every table is folded from the
+SAME seeded estate the lens rounds render, which is what makes "one design system"
+checkable rather than asserted — `gw attempt list` prints the FLEET lens's ruled columns,
+`gw term list` prints the TERM lens's.
+
+**The rule this round adds — one drop order, two surfaces.** Every column carries a
+priority; when the width will not take them all, the lowest-priority column goes first, on
+both surfaces, ties breaking rightmost-first. Columns drop WHOLE — nothing is ever
+truncated mid-value, and no right-aligned tail silently vanishes the way the shipped
+Board's does.
+
+**Refinement the round forced.** Each surface applies that one order to its OWN cell
+budget, and the budgets differ: the lens spends two cells per row on a state glyph the CLI
+has no equivalent for. At 80 columns `gw attempt list` therefore keeps TASK while the
+FLEET lens cannot. Same order, different budget — recorded rather than forced into false
+agreement.
+
+**Other rulings shown:**
+- The trailer states rows, watermark, and how to page: `11 rows · watermark 221`, or
+  `at least 5 rows · watermark 221 · more: --cursor c2VxOjIyMQ` when the read is a floor.
+  The "at least" wording exists in the summary structs today and no shipped verb can
+  reach it.
+- `gw cost rollup` prints BY LANE (what the shipped rollup groups) AND BY HOUR (the axis
+  it has never had), with the same min-one-mark rule as the lens chart so an hour that
+  spent anything is visible.
+- `gw term list` renders the impossible ATTEMPT column as an explicit `?` on every row
+  rather than omitting it — a missing column hides the gap, a `?` states it — with the
+  domain ask spelled out beneath the table.
+- The piping transcript pins the G4 contract: a pipe gets today's wire shape byte for
+  byte (counters as canonical decimal strings, absent fields omitted rather than null),
+  `--json` forces that shape on a terminal too, and only the tty default changed.
+
 ### Standing asks for the domain (not view changes)
 
 - `EngineSession` ↔ `PtySession` have no join field in either direction, so the ruled
