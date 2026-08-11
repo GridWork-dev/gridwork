@@ -35,6 +35,6 @@
                             |
                             |
                             |
-                            |  live  SESSION pty-1  seq 42  100x30  view 0,0          REFUSED  stale gen-2  nothing sent
+                            |  live  SESSION pty-1  seq 42  100x30  view 0,0                     sent 14B  rcpt 01J9F2C4
  ----------------------------------------------------------------------------------------------------------------------
-  INPUT   ctrl-] leave input   the refusal above clears on the next send or on leaving
+  INPUT   ctrl-] leave input   every key (Esc, ^C, arrows) goes to the agent

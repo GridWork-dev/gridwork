@@ -394,7 +394,7 @@ The seeded day is 10 priced / 2 unpriced / 0 unattributed, stated in the chart c
   than it reads — Hall's districts are a separate hand-built set rather than a projection
   of the same attempts.
 
-### Round 3 — TERM/attach + the F4 send surfaces · blessed, sub-forks pending
+### Round 3 — TERM/attach + the F4 send surfaces · RULED (picker, 2026-08-11)
 
 F4 was already ruled BOTH, so this round designs both surfaces rather than choosing
 between them. Four scenarios, with the hosted-session region painted by the REAL
@@ -413,6 +413,26 @@ a password or a control sequence, so the receipt proves delivery without transcr
 was sent. `ctrl-]` leaves INPUT (telnet's escape; Esc, `^C` and arrows all belong to the
 agent under the ruled raw passthrough). The rail collapses entirely below 100 columns
 rather than squeezing.
+
+**Ruled (picker):**
+- **`ctrl-]` leaves INPUT.** Under raw passthrough Esc, `^C` and the arrows are all bytes
+  the agent owns, so the escape must be a chord no TUI wants — telnet's `^]`, the same
+  choice `docker attach --detach-keys` makes. Double-Esc was rejected as timing-dependent
+  (a vim user leaving insert twice would be ejected mid-edit).
+- **The receipt is a transient toast**, not a permanent row.
+
+**Consequence of the toast ruling — no reserved row.** A row that appeared and vanished
+with each send would change the session region's height, and the console must resize the
+hosted pty to that region: one resize per keystroke batch, a resize storm. The toast
+therefore rides the RIGHT END OF THE SESSION'S OWN STATUS ROW, painted after
+`drilldown::render` and measured against where that render actually left off (the status
+text carries a variable close code — 21 of them exist). It shortens through a fixed
+ladder rather than shearing the session identity:
+`sent 14B  rcpt 01J9F2C4  operator  17:29:58` → `sent 14B  rcpt 01J9F2C4` → `sent 14B`.
+
+**Refusals are a state, not an event**, so they do not expire on a timer: a refusal holds
+the same slot in `fail` styling until the next send or until INPUT is left, and the mode
+bar says so.
 
 **Finding — the rail costs the session columns.** The fixture's session is 100 cols; a
 28-column rail leaves 90 and a pty cannot reflow, so the frames crop. The console must

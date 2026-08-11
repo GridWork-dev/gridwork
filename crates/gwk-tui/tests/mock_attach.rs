@@ -61,8 +61,15 @@ const RAIL_FLOOR: u16 = 100;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
+    /// Read-only attach.
     View,
+    /// INPUT at rest: the toast from the last send has expired and the row
+    /// carries nothing but the session's own status.
     Input,
+    /// INPUT with a send receipt riding the status row. Clears after ~3s.
+    Sent,
+    /// A refused send. Unlike a receipt this is a STATE, not an event, so it
+    /// persists until the next send or until INPUT is left.
     Refused,
 }
 
@@ -170,39 +177,59 @@ fn paint_divider(buf: &mut Buffer, area: Rect, tier: ColorTier, top: u16, bottom
     }
 }
 
-/// The row that answers "did my keystrokes land". F5 ruled both this and
-/// the pty's own echo, because a frame can lag or suppress echo entirely.
-fn paint_receipt(buf: &mut Buffer, area: Rect, y: u16, tier: ColorTier, mode: Mode) {
-    let x = if area.width >= RAIL_FLOOR {
-        RAIL + 2
-    } else {
-        1
-    };
-    match mode {
-        Mode::View => {}
-        Mode::Input => {
-            put(buf, area, x, y, "sent 14B", style("ok", tier));
-            put(
-                buf,
-                area,
-                x + 10,
-                y,
-                "rcpt 01J9F2C4  operator  17:29:58",
-                style("muted", tier),
-            );
-        }
-        Mode::Refused => {
-            put(buf, area, x, y, "REFUSED", bold("fail", tier));
-            put(
-                buf,
-                area,
-                x + 9,
-                y,
-                "stale generation gen-2 -- session is gen-3, nothing was sent",
-                style("fail", tier),
-            );
+/// The answer to "did my keystrokes land" (F5 ruled this AND the pty's own
+/// echo, because a frame can lag or suppress echo entirely).
+///
+/// It is painted OVER the right end of the session's own status row, after
+/// `drilldown::render` has drawn it, rather than onto a row of its own. A
+/// row that appeared and vanished with each send would change the session
+/// region's height — and the console must resize the hosted pty to that
+/// region, so a transient row means a resize storm, one per keystroke
+/// batch. Riding the status row costs the session nothing and puts the
+/// receipt beside the session identity it refers to.
+///
+/// The receipt states a BYTE COUNT, never the bytes: under ruled raw
+/// passthrough a send may carry a password or a control sequence, so it
+/// proves delivery without transcribing what was sent.
+fn paint_toast(buf: &mut Buffer, area: Rect, session: Rect, tier: ColorTier, mode: Mode) {
+    let y = session.y + session.height - 1;
+    // Measure where `drilldown::render` actually left off on the status row
+    // rather than assuming its width — the status text carries a variable
+    // close code, and 21 of them exist.
+    let mut end = session.x;
+    for x in session.x..session.x + session.width {
+        if buf[(x, y)].symbol() != " " {
+            end = x + 1;
         }
     }
+
+    // Longest variant that still leaves a two-column gap after the status
+    // text. A receipt that shears the session identity is worse than a
+    // terse receipt.
+    let variants: [&str; 3] = match mode {
+        Mode::View | Mode::Input => return,
+        Mode::Sent => [
+            "sent 14B  rcpt 01J9F2C4  operator  17:29:58",
+            "sent 14B  rcpt 01J9F2C4",
+            "sent 14B",
+        ],
+        Mode::Refused => [
+            "REFUSED  stale generation gen-2 -- nothing was sent",
+            "REFUSED  stale gen-2  nothing sent",
+            "REFUSED",
+        ],
+    };
+    let right = session.x + session.width;
+    let Some(text) = variants.into_iter().find(|text| {
+        let width = text.chars().count() as u16;
+        right.saturating_sub(width) >= end + 2
+    }) else {
+        return;
+    };
+
+    let token = if mode == Mode::Refused { "fail" } else { "ok" };
+    let x = right - text.chars().count() as u16 - area.x;
+    put(buf, area, x, y - area.y, text, bold(token, tier));
 }
 
 /// Mode badge plus the keys legal in that mode. In INPUT every key is a
@@ -220,7 +247,16 @@ fn paint_mode_bar(buf: &mut Buffer, area: Rect, y: u16, tier: ColorTier, mode: M
                 "i input   j/k scroll   / filter   : go   q back"
             },
         ),
-        Mode::Input | Mode::Refused => (
+        Mode::Refused => (
+            " INPUT ",
+            "fail",
+            if compact {
+                "ctrl-] leave   refusal clears on the next send"
+            } else {
+                "ctrl-] leave input   the refusal above clears on the next send or on leaving"
+            },
+        ),
+        Mode::Sent | Mode::Input => (
             " INPUT ",
             "warn",
             if compact {
@@ -262,9 +298,10 @@ fn paint_attach(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet,
     let rail = area.width >= RAIL_FLOOR;
     paint_header(buf, area, tier, glyphs, &subject(&state.drill), state.title);
 
-    // Reserve: header (1) + blank (1) at the top; mode bar (1), receipt (1)
-    // and a rule (1) at the bottom.
-    let bottom = area.height - 3;
+    // Reserve: header (1) + blank (1) at the top; a rule (1) and the mode
+    // bar (1) at the bottom. The receipt claims no row of its own — see
+    // `paint_toast` for why that matters to a hosted pty.
+    let bottom = area.height - 2;
     let session = Rect {
         x: area.x + if rail { RAIL + 2 } else { 0 },
         y: area.y + 2,
@@ -280,8 +317,8 @@ fn paint_attach(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet,
     let mut hits = HitMap::default();
     drilldown::render(session, buf, &state.drill, None, tier, &mut hits);
 
+    paint_toast(buf, area, session, tier, mode);
     put_rule(buf, area, bottom, tier);
-    paint_receipt(buf, area, bottom + 1, tier, mode);
     paint_mode_bar(buf, area, area.height - 1, tier, mode);
 }
 
@@ -423,6 +460,10 @@ fn paint_input(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) 
     paint_attach(area, buf, tier, glyphs, Mode::Input);
 }
 
+fn paint_sent(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) {
+    paint_attach(area, buf, tier, glyphs, Mode::Sent);
+}
+
 fn paint_refused(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) {
     paint_attach(area, buf, tier, glyphs, Mode::Refused);
 }
@@ -433,6 +474,7 @@ fn check(scenario: &str, width: u16, height: u16, tier: ColorTier, glyphs: Glyph
     let painter: Painter = match scenario {
         "view" => paint_view,
         "input" => paint_input,
+        "sent" => paint_sent,
         "refused" => paint_refused,
         "send" => paint_send,
         other => panic!("unknown scenario {other}"),
@@ -466,6 +508,16 @@ fn input_at_120x40() {
 #[test]
 fn input_degraded_mono_ascii() {
     check("input", 120, 40, ColorTier::Mono, GlyphSet::Ascii);
+}
+
+#[test]
+fn sent_at_120x40() {
+    check("sent", 120, 40, ColorTier::Truecolor, GlyphSet::Unicode);
+}
+
+#[test]
+fn sent_at_80x24() {
+    check("sent", 80, 24, ColorTier::Truecolor, GlyphSet::Unicode);
 }
 
 #[test]

@@ -34,7 +34,7 @@
                             |
                             |
                             |
+                            |
                             |  live  SESSION pty-1  seq 42  100x30  view 0,0
  ----------------------------------------------------------------------------------------------------------------------
-                              sent 14B  rcpt 01J9F2C4  operator  17:29:58
   INPUT   ctrl-] leave input   every key (Esc, ^C, arrows) goes to the agent

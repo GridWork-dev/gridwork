@@ -19,6 +19,6 @@ test config_estate_default ... ok
 failures:
 
 ---- hall_estate_at_80x24 stdout ----
- live  SESSION pty-1  seq 42  100x30  view 0,0
+ live  SESSION pty-1  seq 42  100x30  view 0,0           sent 14B  rcpt 01J9F2C4
  ------------------------------------------------------------------------------
-  VIEW   i input   j/k scroll   q back
+  INPUT   ctrl-] leave   keys -> pty
