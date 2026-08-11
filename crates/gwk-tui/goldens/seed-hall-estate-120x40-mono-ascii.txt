@@ -1,12 +1,12 @@
 Kernel !1
 pty    blob
-I- R!  A# G.
+I- R!  A# R.
 Ops !1 +3 done
 ci     audit
-Go S.  Uv G!
+To S.  Uv U!
 Site +2 done
 docs   deploy
-.? Gv  AX
+.? Dv  AX
 TUI
 lens   harness
 U^ I-  R~ G:

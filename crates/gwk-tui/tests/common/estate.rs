@@ -96,9 +96,11 @@ fn district(id: &str, label: &str, stations: Vec<Station>, aged_done: usize, seq
 /// variants, and a role mix spanning the six glyph-whitelisted bare names
 /// (`orchestrator`/`researcher`/`architect`/`implementer`/`reviewer`/
 /// `auditor`), five free-form GridWork role strings, and two agents with no
-/// role at all. The free-form roles fall back to the identity glyph's
-/// first-alpha-byte escape — a known presentation gap this fixture
-/// deliberately exercises rather than hides.
+/// role at all. Four of the free-form roles carry the `gw-` prefix and now
+/// resolve past it — `gw-security-auditor` to the `auditor` family mark, the
+/// rest to a letter taken after the prefix rather than from it. Only
+/// `general-purpose`, which names no family, still falls back to its own
+/// first letter; the fixture keeps it so the escape stays covered.
 pub fn estate_frame_input() -> FrameInput {
     FrameInput {
         districts: vec![
