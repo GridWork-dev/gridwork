@@ -1,0 +1,40 @@
+ 6 tasks  4 active  11 attempts  2 running
+ 5 unresolved attention items  2 worktrees held  2 leases held
+ attention head
+   KEK rotation window closes in 2 hours                                                                         att-kek
+ recent activity
+   attempt  claude  running                                                                                        17:20
+   task  build the seeded-estate snapshot harness  working                                                         17:20
+   lease  worktree:pty  held                                                                                       17:00
+   lease  worktree:release  expired                                                                                17:00
+   lease  worktree:tui  held                                                                                       17:00
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+BOARD [estate] brief run dag flow events replay fleet cost audit  r2@221
