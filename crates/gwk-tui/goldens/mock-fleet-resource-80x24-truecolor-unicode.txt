@@ -1,0 +1,24 @@
+ FLEET   11 attempts  4 live  $5.30 today                         tc+uni  17:30
+
+ AGENTS   live attempts and the sessions under them
+> at-pty-impl        ⠋ running    codex   impl                             7h50
+  at-pty-review      ⊘ blocked    claude  rev                              7h42
+  at-pty-start       ⠉ starting   claude  rsrch                            6h55
+  at-tui-impl        ⠋ running    claude  impl                             7h30
+  at-tui-queue       ⠒ queued     codex   rust-pro                         7h23
+  at-release-lease   ⠒ leased     codex   devrel                           8h15
+  at-flaky-cancel    ⠆ canceling  claude  test-auto                        5h30
+  at-audit-unknown   ? unknown    codex   -                                5h20
+
+ LEASES   holder, expiry, and the worktree each one pins
+  ls-pty      held       gw-implementer   du  til 21:00
+    wt-pty      feat/pty-lifecycle
+  ls-tui      held       gw-rust-pro      u   til 21:00
+    wt-tui      feat/7p-tui-snapshot-harness
+  ls-release  expired    gw-devrel-writer     til 10:00
+    wt-release  docs/release-notes                        released
+
+ COST     top attempts   at-audit-fail $2.45   at-tui-impl $2.10   at-ship-done
+  + spend chart -- frame too short
+
+ : go   / filter   enter open   s stop   q quit

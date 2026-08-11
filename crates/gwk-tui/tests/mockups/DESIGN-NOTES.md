@@ -307,3 +307,93 @@ Load-bearing facts for every mockup:
   reporter).
 - `assert_matches_golden` exists as 4 divergent copies; the mock- suite imports/copies
   the board.rs/queue.rs variant and should not mint a fifth shape.
+
+---
+
+## 6. Mockup rounds
+
+Artifacts of record: `mock-*` goldens in `crates/gwk-tui/goldens/`, painted by
+`crates/gwk-tui/tests/mock_*.rs` over the harness's seeded workday. Shared chrome lives
+in `tests/mockups/shared.rs` (not `tests/common/`, which the harness lane owns). Every
+round blesses 120×40, 80×24, and at least one degraded tier.
+
+### Round 1 — Hall at-rest · RULED `inline` (picker, 2026-08-11)
+
+Two candidates over the seeded estate: `inline` (2-row districts, identity as role TEXT
+beside the state glyph, elapsed inline) vs `stacked` (compact glyph field + a hot-callout
+line naming only needs-attention/blocked/failed/unknown agents). **`inline` won.** The
+losing frames are in branch history at `f1a858e`; its goldens are retired so the suite
+carries no dead maintenance.
+
+**Build spec.** Districts are two rows: heading (`> LABEL  !N  +N done`), then stations
+each followed by their agents as `<state-glyph> <role> <elapsed>`. Row 0 is a vitals
+header (`GRIDWORK  run N  !N  $X today` … `tier <badge>  as-of <seq>  <clock>`); the last
+row is the keybar. Both shorten rather than vanishing. Focus is a `>` prefix, never
+colour alone, so it survives Mono. Elapsed drops first under width pressure.
+
+**Ruled details.** Identity is role text, not a WHO glyph — the ratified identity
+inventory is closed at 7 marks and cannot name the real `gw-*` taxonomy; `short_role`
+strips the `gw-` prefix and shortens the canonical names, passing unknown roles through
+unchanged (the vocabulary is open). A roleless agent falls back to its own id with the
+namespace stripped.
+
+**Defects the degraded goldens exposed, fixed in-round:** the first pass rendered a
+roleless agent as `? -`, and at Ascii that placeholder dash collided with `running`'s own
+`-` mark — two different meanings, one character.
+
+**Build requirements this round hands to EXECUTE:** `FrameInput` must carry real start
+timestamps (the live path hardcodes the literal string `"live"`, so elapsed here is
+hand-assigned); `estate.rs` must populate `Focus` (it hardcodes `focus: None`); and the
+resolved `ColorTier`/`GlyphSet` must reach the header.
+
+### Round 2 — FLEET · candidates blessed, picker pending
+
+Two candidates for `FLEET = agents · leases · cost`, both rendering the joins the audit
+flagged as never joined and giving cost its time axis:
+
+- **`work`** — one row per attempt with every join folded on: task, engine, role, state,
+  dispatch-subtree size, live sessions, lease + flags, rolled tokens, rolled spend, age;
+  spend-per-hour chart beneath.
+- **`resource`** — three stacked sections (agents / leases + worktrees / cost) keeping
+  today's separate resource classes, each with its own columns plus cross-references.
+
+**Attribution precedence — ruled by default-and-surface.** A `CostEntry` is counted
+exactly ONCE, resolved `attempt_id` → `engine_session_id` → `dispatch_node_id`. The DB
+CHECK requires ≥1 FK but permits several; double-counting across two groupings is
+forbidden. An entry resolving to no attempt lands in an explicit `unattributed` tally,
+never dropped.
+
+**What the join is worth, measured on the seeded day:** two of twelve entries reach an
+attempt only through a join — `ce-08` via `d-pty-recon`, `ce-09` via `es-tui-impl`.
+Without it $0.43 is invisible at the unit of work and `at-tui-impl` reads as $1.69
+instead of its true $2.10 (second-costliest attempt of the day).
+
+**Honesty rules ruled here.** Spend has three distinct readings that must never collapse:
+`-` (no cost entry at all), `+Nu` (entries exist but none priced — unknown, not zero),
+and `$X +Nu` (priced total carrying an unpriced floor marker). Same for token columns.
+The seeded day is 10 priced / 2 unpriced / 0 unattributed, stated in the chart caption.
+
+**Findings from this round:**
+- **The ratified mark inventory has no bar or sparkline glyph**, and Unicode block
+  elements are East-Asian-Width Ambiguous — inadmissible under the theme's own rule. A
+  cost time axis therefore needs ASCII bars (what these mockups use) or a new admissible
+  mark. Open ask for the theme.
+- **A proportional bar scale hides real spend.** Scaled purely against the peak, four of
+  the day's five spending hours render blank behind the 15:00 spike. Ruled: any bucket
+  with spend gets at least one row; the axis labels the peak and `> $0`.
+- **Rounded rows do not sum to the rounded total** (±1–2¢). Totals fold unrounded micros
+  and are the authority; rows round half-up. Recorded rather than papered over.
+- **`AttemptState` (10) and `AgentState` (11) are different vocabularies.** The mapping
+  is explicit: `Leased`→`queued` (no Hall equivalent), `Succeeded`→`done`.
+- **Fixture coherence gap (harness lane):** only three of Hall's fifteen seeded agents
+  share an id suffix with a seeded attempt, so "one estate viewed five ways" is looser
+  than it reads — Hall's districts are a separate hand-built set rather than a projection
+  of the same attempts.
+
+### Standing asks for the domain (not view changes)
+
+- `EngineSession` ↔ `PtySession` have no join field in either direction, so the ruled
+  `gw term` noun cannot be correlated to `gw session` even in principle.
+- `Gate` carries no actor, so "who decided this" cannot be rendered.
+- No cursor row/col exists in the frame contract (the wire `cursor` is a resume seq), so
+  INPUT mode has nothing to point at.

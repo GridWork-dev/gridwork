@@ -1,4 +1,4 @@
- GRIDWORK  run 4  !2  $5.30 today                                                         tier tc+uni  as-of 221  17:30
+ GRIDWORK  run 4  !2  $5.30 today                                                        tier a16+uni  as-of 221  17:30
 
   KERNEL  !1
   pty  ⠋ impl 7h50   ! rev 7h42     blob  ⊘ arch 6h05   ⠄ rust-pro

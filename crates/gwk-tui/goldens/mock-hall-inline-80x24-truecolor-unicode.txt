@@ -7,7 +7,7 @@
   lens  ⠋ impl   ⠉ audit     harness  ⠒ general   ⠆ rev
 
   SITE  +2 done
-  docs  ✓ devrel   ? -     deploy  ✗ arch
+  docs  ✓ devrel   ? docs-none     deploy  ✗ arch
 
   OPS  !1  +3 done
   ci  ⊖ test-auto   ⠄ rsrch     audit  ! sec-audit   ✓ audit
