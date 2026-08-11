@@ -1,0 +1,40 @@
+ unknown -- 1 fact not in the log
+   liveness: no end stamp on 3 of 5 sessions -- unended is not alive
+ 5 sessions  2 attempts running  2 worktrees held  2 leases held  5 spawns
+ engine sessions
+   codex  ended  started 09:40  attempt at-ship-done                                                        es-ship-done
+   claude  ended  started 09:40  attempt at-audit-fail                                                     es-audit-fail
+   codex  no end recorded  started 09:40  attempt at-pty-impl                                                es-pty-impl
+   claude  no end recorded  started 09:40  attempt at-tui-impl                                               es-tui-impl
+   claude  no end recorded  started 09:40  attempt at-flaky-cancel                                       es-flaky-cancel
+ worktrees
+   gridwork  feat/pty-lifecycle  held  dirty  unpushed                                                            wt-pty
+   gridwork  feat/7p-tui-snapshot-harness  held  unpushed                                                         wt-tui
+   gridwork  docs/release-notes  released                                                                     wt-release
+ leases
+   exclusive  held  holder gw-implementer  scope worktree:pty                                                     ls-pty
+   exclusive  held  holder gw-rust-pro  scope worktree:tui                                                        ls-tui
+   exclusive  expired  holder gw-devrel-writer  scope worktree:release                                        ls-release
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+BOARD estate brief run dag flow events replay [fleet] cost audit  r2@221

@@ -1,0 +1,40 @@
+ unknown -- 1 fact not in the log
+   basis: no observed basis on 3 of 4 receipts
+ 4 receipts  total across 3 actions
+ 10:24  issue_command  command c-1                                                                                kernel
+ 10:24  issue_command  command c-1                                                                                kernel
+ 10:23  auto_answer  gate g-lint                                                                                  kernel
+ 09:40  state_flip  attempt at-pty-impl  queued -> running                                                        kernel
+ by action
+   auto_answer                                                                                                 1 receipt
+   issue_command                                                                                              2 receipts
+   state_flip                                                                                                  1 receipt
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+BOARD estate brief run dag flow events replay fleet cost [audit]  r2@221
