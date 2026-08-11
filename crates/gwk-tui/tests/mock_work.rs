@@ -47,6 +47,7 @@ mod common;
 mod shared;
 
 use common::{assert_matches_golden, dump_frame};
+use gwk_domain::fsm::MessageState;
 use gwk_theme::marks::GlyphSet;
 use gwk_theme::tier::ColorTier;
 use gwk_tui::config::{self, ConfigTarget};
@@ -232,6 +233,149 @@ fn paint_gate(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) {
     );
 }
 
+/// The ruled mail change (round 4c), as a before/after band.
+///
+/// `queue.rs` admits only `Delivered|Acknowledged|Applied` into its mail
+/// section, so the real renderer CANNOT draw the ruled row — the seeded
+/// day's dead-lettered alert is filtered out upstream of paint. This frame
+/// therefore mocks both sections side by side so the EXECUTE lane has the
+/// exact delta: one added row kind, carrying `dead_letter_reason` and
+/// `delivery_attempts`, both of which the message already holds.
+fn paint_mail(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) {
+    let state = common::estate::estate_queue_state();
+    paint_header(
+        buf,
+        area,
+        tier,
+        glyphs,
+        "queue",
+        "ruled: delivery failure is owed work",
+    );
+
+    let arrived: Vec<_> = state
+        .messages
+        .iter()
+        .filter(|message| {
+            matches!(
+                message.state,
+                MessageState::Delivered | MessageState::Acknowledged | MessageState::Applied
+            )
+        })
+        .collect();
+    let failed: Vec<_> = state
+        .messages
+        .iter()
+        .filter(|message| {
+            matches!(
+                message.state,
+                MessageState::DeadLetter | MessageState::Rejected
+            )
+        })
+        .collect();
+
+    let row = |buf: &mut Buffer, y: u16, message: &gwk_domain::entity::Message| {
+        put(
+            buf,
+            area,
+            2,
+            y,
+            &format!(
+                "msg {}  {} to {}  ({})",
+                &message.updated_at.as_str()[11..16],
+                message.sender.as_deref().unwrap_or("-"),
+                message.recipient.as_deref().unwrap_or("-"),
+                message.kind.as_deref().unwrap_or("-"),
+            ),
+            style("fg", tier),
+        );
+    };
+
+    let mut y = 2;
+    put(buf, area, 1, y, "MAIL", bold("fg", tier));
+    put(
+        buf,
+        area,
+        8,
+        y,
+        "as shipped -- arrival only",
+        style("muted", tier),
+    );
+    y += 1;
+    for message in &arrived {
+        row(buf, y, message);
+        y += 1;
+    }
+    y += 1;
+
+    put(buf, area, 1, y, "MAIL", bold("fg", tier));
+    put(
+        buf,
+        area,
+        8,
+        y,
+        "ruled -- a message nobody received is owed work",
+        style("muted", tier),
+    );
+    y += 1;
+    for message in &arrived {
+        row(buf, y, message);
+        y += 1;
+    }
+    for message in &failed {
+        let word = match message.state {
+            MessageState::DeadLetter => "dead",
+            _ => "rejected",
+        };
+        put(
+            buf,
+            area,
+            1,
+            y,
+            &format!(
+                "! {word} {}  {} to {}  ({})",
+                &message.updated_at.as_str()[11..16],
+                message.sender.as_deref().unwrap_or("-"),
+                message.recipient.as_deref().unwrap_or("-"),
+                message.kind.as_deref().unwrap_or("-"),
+            ),
+            style("warn", tier),
+        );
+        y += 1;
+        // The reason and the attempt count are the whole point: both are on
+        // the message already and neither reaches any shipped surface.
+        put(
+            buf,
+            area,
+            5,
+            y,
+            &format!(
+                "{} {} -- {}",
+                message.delivery_attempts,
+                if message.delivery_attempts == 1 {
+                    "attempt"
+                } else {
+                    "attempts"
+                },
+                message
+                    .dead_letter_reason
+                    .as_deref()
+                    .unwrap_or("no reason recorded"),
+            ),
+            style("muted", tier),
+        );
+        y += 1;
+    }
+
+    put_rule(buf, area, area.height - 2, tier);
+    put_keybar(
+        buf,
+        area,
+        tier,
+        " enter open   a ack   m mute   r resolve   d decide gate   / filter   : go   q back",
+        " enter open   a ack   m mute   r resolve   d decide   q back",
+    );
+}
+
 // ---------------------------------------------------------------------------
 // WORK > config, over the real config lens
 // ---------------------------------------------------------------------------
@@ -410,6 +554,7 @@ type Painter = fn(Rect, &mut Buffer, ColorTier, GlyphSet);
 fn check(scenario: &str, width: u16, height: u16, tier: ColorTier, glyphs: GlyphSet) {
     let painter: Painter = match scenario {
         "queue" => paint_queue,
+        "mail" => paint_mail,
         "gate" => paint_gate,
         "config" => paint_config,
         "form" => paint_form,
@@ -439,6 +584,11 @@ fn queue_at_80x24() {
 #[test]
 fn queue_degraded_mono_ascii() {
     check("queue", 120, 40, ColorTier::Mono, GlyphSet::Ascii);
+}
+
+#[test]
+fn mail_at_120x40() {
+    check("mail", 120, 40, ColorTier::Truecolor, GlyphSet::Unicode);
 }
 
 #[test]

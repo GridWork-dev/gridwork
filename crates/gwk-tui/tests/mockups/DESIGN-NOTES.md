@@ -439,7 +439,20 @@ bar says so.
 RESIZE the hosted session to the region on attach. The crop is left visible in the goldens
 deliberately, as the argument for that requirement.
 
-### Round 4 — WORK (queue · gates · config) · blessed
+### Round 4 — WORK (queue · gates · config) · RULED (picker, 2026-08-11)
+
+**Ruled:** the gate decision is a **modal confirm** (4a); config editing is a **generated
+form for form-routed files with an $EDITOR fallback** (4b); dead-lettered and rejected
+mail get **their own row carrying the reason and attempt count** (4c).
+
+4c is the only ruling that needs a change to `queue.rs` itself: its mail filter admits
+only `Delivered|Acknowledged|Applied`, so the real renderer cannot draw the ruled row —
+the seeded day's dead-lettered alert is filtered out upstream of paint. The `mail` golden
+therefore mocks both sections as a before/after so the EXECUTE lane has the exact delta:
+one added row kind, carrying `dead_letter_reason` and `delivery_attempts`, both of which
+the message already holds. It surfaces a second row the shipped filter also swallows — a
+`Rejected` status message, which has no reason field at all and says so.
+
 
 G6 ruled both lenses get wired, so this round is their first appearance inside a frame:
 the bodies are painted by the REAL `queue::render` and `config::render` over the seeded
