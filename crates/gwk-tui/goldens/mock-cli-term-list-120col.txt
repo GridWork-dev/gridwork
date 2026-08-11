@@ -1,0 +1,9 @@
+$ gw term list
+SESSION  GEN    STATE    ATT/DET  ATTEMPT  TITLE                  OPENED
+pty-1    gen-3  running  2/1      ?        kernel worktree shell  10:21
+pty-2    gen-1  closed   1/1      ?        release notes editor   09:16
+2 rows · watermark 221
+
+ATTEMPT is ? for every row: pty_session carries no attempt or engine-session
+reference, and engine_session carries no pty reference. Correlating `gw term`
+with `gw session` needs a domain field, not a view change.

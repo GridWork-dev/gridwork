@@ -1,0 +1,24 @@
+ GRIDWORK  run 4  !2  $5.30 today                                 tc+uni  17:30
+
+  KERNEL  !1
+  pty  ⠋ impl   ! rev     blob  ⊘ arch   ⠄ rust-pro
+
+> TUI
+  lens  ⠋ impl   ⠉ audit     harness  ⠒ general   ⠆ rev
+
+  SITE  +2 done
+  docs  ✓ devrel   ? docs-none     deploy  ✗ arch
+
+  OPS  !1  +3 done
+  ci  ⊖ test-auto   ⠄ rsrch     audit  ! sec-audit   ✓ audit
+
+
+
+
+
+
+
+
+
+
+ : go   / filter   enter open   j/k   q quit

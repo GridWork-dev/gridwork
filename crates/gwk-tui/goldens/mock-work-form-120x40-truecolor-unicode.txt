@@ -1,0 +1,40 @@
+ WORK    queue   tasks   runs  [config]   editing identity/capabilities.toml              tier tc+uni  as-of 221  17:30
+
+ FORM   identity/capabilities.toml   shape is fixed by the incumbent file
+
+  FIELD                           TYPE      VALUE
+  code_write.default_agent        string    gw-rust-pro
+> code_write.lane                 string    sonnet_                       changed
+  code_review.default_agent       string    gw-code-reviewer
+  recon.default_agent             string    gw-phase-researcher
+
+  no field can be added or removed here -- the validator rejects any shape
+  change against the incumbent file, so the form offers none
+
+  COMMIT
+  routing: sonnet lane for bounded code_write_
+  one file, one commit, one config_change evidence record
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ ----------------------------------------------------------------------------------------------------------------------
+ tab field   enter commit   esc cancel      an exclusive lock is held; a concurrent edit is refused, never merged

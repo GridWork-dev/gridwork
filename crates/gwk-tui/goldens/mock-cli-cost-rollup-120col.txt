@@ -1,0 +1,16 @@
+$ gw cost rollup
+BY LANE
+ENGINE  MODEL        ENTRIES  TOKENS      SPEND
+claude  opus         3        12.7k/2.6k  $2.64 +1u
+claude  sonnet       4        16.8k/3.9k  $2.22
+codex   gpt-5-codex  5        9.0k/1.9k   $0.44 +1u
+
+BY HOUR
+HOUR   SPEND  SHARE
+09:00  $0.47  #####
+10:00  $0.79  ########
+15:00  $2.47  ########################
+16:00  $0.67  #######
+17:00  $0.91  #########
+
+$5.30 today · 10 priced · 2 unpriced · watermark 221

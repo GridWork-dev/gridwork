@@ -1,0 +1,40 @@
+ TERM   2 sessions  1 running   3 attaches   2 detaches today                             tier tc+uni  as-of 221  17:30
+
+ TERMINALS
+  SESSION         GEN    STATE     ATT/DET   TITLE                      OPENED
+> pty-1           gen-3  running   2/1       kernel worktree shell      10:21
+  pty-2           gen-1  closed    1/1       release notes editor       09:16
+
+
+ COMMAND
+  :send pty-1 y\n_
+  14 bytes to pty-1:gen-3 as operator -- one receipt, refused if the generation moves
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ ----------------------------------------------------------------------------------------------------------------------
+ enter send   ctrl-c cancel
+  COMMAND   a one-shot needs no attach; the target is named, never inferred

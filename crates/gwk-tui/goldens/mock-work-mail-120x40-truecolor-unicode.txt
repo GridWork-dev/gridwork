@@ -1,0 +1,40 @@
+ WORK   [queue]  tasks   runs   config    ruled: delivery failure is owed work            tier tc+uni  as-of 221  17:30
+
+ MAIL   as shipped -- arrival only
+  msg 09:31  orchestrator to researcher  (brief)
+  msg 09:58  researcher to orchestrator  (findings)
+  msg 10:24  reviewer to orchestrator  (ack)
+
+ MAIL   ruled -- a message nobody received is owed work
+  msg 09:31  orchestrator to researcher  (brief)
+  msg 09:58  researcher to orchestrator  (findings)
+  msg 10:24  reviewer to orchestrator  (ack)
+ ! dead 16:45  watchdog to orchestrator  (alert)
+     3 attempts -- nobody listening
+ ! rejected 17:06  implementer to orchestrator  (status)
+     1 attempt -- no reason recorded
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ ----------------------------------------------------------------------------------------------------------------------
+ enter open   a ack   m mute   r resolve   d decide gate   / filter   : go   q back
