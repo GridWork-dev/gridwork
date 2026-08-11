@@ -1421,8 +1421,7 @@ fn identity_glyph(role: Option<&str>, glyphs: GlyphSet) -> char {
         gwk_theme::marks::mark(candidate)
             .filter(|mark| mark.kind == gwk_theme::marks::MarkKind::Identity)
     };
-    let family_mark =
-        identity(family).or_else(|| family.rsplit('-').next().and_then(identity));
+    let family_mark = identity(family).or_else(|| family.rsplit('-').next().and_then(identity));
     if let Some(mark) = family_mark {
         return theme::glyph(mark, 0, glyphs);
     }
@@ -1699,7 +1698,10 @@ mod tests {
         // Fleet-prefixed roster names land on their family's identity mark at
         // both tiers, exactly as the bare family words always have.
         assert_eq!(identity_glyph(Some("reviewer"), GlyphSet::Ascii), 'R');
-        assert_eq!(identity_glyph(Some("gw-code-reviewer"), GlyphSet::Ascii), 'R');
+        assert_eq!(
+            identity_glyph(Some("gw-code-reviewer"), GlyphSet::Ascii),
+            'R'
+        );
         assert_eq!(
             identity_glyph(Some("gw-code-reviewer"), GlyphSet::Unicode),
             '◃'
@@ -1713,13 +1715,22 @@ mod tests {
             'S'
         );
         assert_eq!(identity_glyph(Some("gw-architect"), GlyphSet::Ascii), 'A');
-        assert_eq!(identity_glyph(Some("gw-orchestrator"), GlyphSet::Ascii), 'O');
+        assert_eq!(
+            identity_glyph(Some("gw-orchestrator"), GlyphSet::Ascii),
+            'O'
+        );
         // Unmapped roles stay deterministic without collapsing: the letter
         // follows the name after the fleet prefix, so the fleet no longer
         // reads as a column of 'G'.
         assert_eq!(identity_glyph(Some("gw-rust-pro"), GlyphSet::Ascii), 'R');
-        assert_eq!(identity_glyph(Some("gw-typescript-pro"), GlyphSet::Ascii), 'T');
-        assert_eq!(identity_glyph(Some("general-purpose"), GlyphSet::Ascii), 'G');
+        assert_eq!(
+            identity_glyph(Some("gw-typescript-pro"), GlyphSet::Ascii),
+            'T'
+        );
+        assert_eq!(
+            identity_glyph(Some("general-purpose"), GlyphSet::Ascii),
+            'G'
+        );
         // A role sharing a non-identity mark's name is not that thing: no
         // graph-tier or expression glyph ever poses as a WHO cell.
         assert_eq!(identity_glyph(Some("task"), GlyphSet::Ascii), 'T');
