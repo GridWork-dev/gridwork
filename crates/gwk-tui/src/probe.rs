@@ -41,6 +41,11 @@ use std::os::fd::AsFd as _;
 const REPLY_BUDGET: usize = 32;
 #[cfg(target_os = "linux")]
 const REPLY_TIMEOUT: Duration = Duration::from_millis(250);
+/// How long a straggling reply gets once a retry has already answered. Short
+/// on purpose: the reply we did not read was in flight before the retry, so it
+/// either lands at once or was never coming.
+#[cfg(target_os = "linux")]
+const STRAGGLER_WINDOW: Duration = Duration::from_millis(50);
 
 /// Ask the terminal how wide one glyph is.
 ///
@@ -104,8 +109,9 @@ pub fn probe<W: Write, R: Read>(out: &mut W, inp: &mut R) -> ProbeOutcome {
 }
 
 /// Probe the active terminal through a bounded cursor-position query. Linux
-/// waits at most 250ms through `poll`; other targets use crossterm's bounded
-/// position query. The first unanswered glyph degrades the whole inventory.
+/// waits at most 250ms through `poll` and asks a silent glyph a second time
+/// before concluding anything; other targets use crossterm's bounded position
+/// query. A glyph that stays silent twice degrades the rest of the inventory.
 pub fn probe_terminal<W: Write>(out: &mut W) -> ProbeOutcome {
     #[cfg(target_os = "linux")]
     {
@@ -125,7 +131,28 @@ where
 {
     let mut reports = Vec::new();
     for glyph in inventory_codepoints() {
-        if let Some(cells) = measure_one_timed(out, input, glyph) {
+        // One retry per glyph: under a multiplexer the first reply routinely
+        // lands just past the 250ms window, and treating that one late reply
+        // as terminal silence used to degrade every glyph after it. A glyph
+        // that stays silent twice still ends the probe — a terminal that
+        // answers nothing would otherwise cost the full inventory in
+        // timeouts.
+        let measured = match measure_one_timed(out, input, glyph) {
+            Some(cells) => Some(cells),
+            None => {
+                let retried = measure_one_timed(out, input, glyph);
+                if retried.is_some() {
+                    // Two asks were in flight. Both printed the same glyph at
+                    // column one, so the reply just parsed is a true
+                    // measurement whichever ask it answers — but the other
+                    // answer may still be coming, and the next glyph would
+                    // read it as its own.
+                    discard_reply(input, STRAGGLER_WINDOW);
+                }
+                retried
+            }
+        };
+        if let Some(cells) = measured {
             reports.push(CellReport { glyph, cells });
         } else {
             break;
@@ -146,7 +173,7 @@ where
     out.flush().ok()?;
     let deadline = Instant::now() + REPLY_TIMEOUT;
     let mut buf = Vec::with_capacity(REPLY_BUDGET);
-    let mut byte = [0u8; 1];
+    let mut chunk = [0u8; REPLY_BUDGET];
     while buf.len() < REPLY_BUDGET {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -157,11 +184,18 @@ where
         if poll(&mut ready, Some(&timeout)).ok()? == 0 {
             break;
         }
-        match input.read(&mut byte) {
+        // Take the whole reply in one read rather than a byte at a time. The
+        // wait watches the descriptor while the read goes through whatever
+        // the reader is — and a buffering reader (`io::stdin().lock()` is
+        // one) empties the descriptor into userspace on the first read, so a
+        // byte-at-a-time loop would then wait on a queue that is already
+        // drained and call an answered terminal silent.
+        let room = REPLY_BUDGET - buf.len();
+        match input.read(&mut chunk[..room]) {
             Ok(0) => break,
-            Ok(_) => {
-                buf.push(byte[0]);
-                if byte[0] == b'R' {
+            Ok(read) => {
+                buf.extend_from_slice(&chunk[..read]);
+                if buf.contains(&b'R') {
                     break;
                 }
             }
@@ -170,6 +204,38 @@ where
         }
     }
     parse_cpr(&buf).map(|column| column.saturating_sub(1))
+}
+
+/// Swallow one straggling reply, waiting up to `window` for it.
+#[cfg(target_os = "linux")]
+fn discard_reply<R>(input: &mut R, window: Duration)
+where
+    R: Read + std::os::fd::AsFd,
+{
+    let deadline = Instant::now() + window;
+    let mut chunk = [0u8; REPLY_BUDGET];
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return;
+        }
+        let Ok(timeout) = Timespec::try_from(remaining) else {
+            return;
+        };
+        let mut ready = [PollFd::from_borrowed_fd(input.as_fd(), PollFlags::IN)];
+        match poll(&mut ready, Some(&timeout)) {
+            Ok(count) if count > 0 => {}
+            _ => return,
+        }
+        match input.read(&mut chunk) {
+            Ok(read) if read > 0 => {
+                if chunk[..read].contains(&b'R') {
+                    return;
+                }
+            }
+            _ => return,
+        }
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -291,6 +357,96 @@ mod tests {
         });
         assert_eq!(calls, 1);
         assert_eq!(outcome.glyph_set(), GlyphSet::Ascii);
+    }
+
+    /// A terminal on the other end of a socket: answers every `ESC [ 6 n`
+    /// with column 2, after staying silent for the first `silent` asks.
+    #[cfg(target_os = "linux")]
+    fn spawn_responder(
+        mut stream: std::os::unix::net::UnixStream,
+        silent: usize,
+    ) -> std::thread::JoinHandle<()> {
+        use std::io::Write as _;
+        std::thread::spawn(move || {
+            let mut pending = Vec::new();
+            let mut chunk = [0u8; 64];
+            let mut asked = 0usize;
+            loop {
+                let read = match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => return,
+                    Ok(read) => read,
+                };
+                pending.extend_from_slice(&chunk[..read]);
+                while let Some(at) = pending.windows(4).position(|w| w == b"\x1b[6n") {
+                    pending.drain(..at + 4);
+                    asked += 1;
+                    if asked <= silent {
+                        continue;
+                    }
+                    if stream.write_all(b"\x1b[1;2R").is_err() {
+                        return;
+                    }
+                }
+            }
+        })
+    }
+
+    /// The production Linux path: a terminal whose FIRST reply misses the
+    /// 250ms window entirely. Without the retry, that one silence ended the
+    /// loop and every remaining codepoint landed in Inconclusive; with it,
+    /// the probe asks again and the inventory survives.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn timed_probe_retries_a_silent_glyph_before_degrading_the_inventory() {
+        use std::os::unix::net::UnixStream;
+
+        let (probe_side, responder_side) = UnixStream::pair().expect("socketpair");
+        let mut out = probe_side.try_clone().expect("clone probe side");
+        let mut input = probe_side;
+        let responder = spawn_responder(responder_side, 1);
+
+        let outcome = probe_timed(&mut out, &mut input);
+        drop(out);
+        drop(input);
+        responder.join().expect("responder thread");
+        assert_eq!(outcome, ProbeOutcome::UnicodeSafe);
+    }
+
+    /// Production hands the probe `io::stdin().lock()`, which buffers: the
+    /// first read empties the descriptor into userspace, so waiting on the
+    /// descriptor for the rest of the reply waits on a queue that is already
+    /// drained. Read a byte at a time and this answers-instantly terminal
+    /// reads as mute — and since the degradation now speaks, it says so out
+    /// loud and wrongly.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn timed_probe_reads_a_whole_reply_through_a_buffering_reader() {
+        use std::io::BufReader;
+        use std::os::fd::{AsFd, BorrowedFd};
+        use std::os::unix::net::UnixStream;
+
+        struct Buffered(BufReader<UnixStream>);
+        impl Read for Buffered {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                self.0.read(buf)
+            }
+        }
+        impl AsFd for Buffered {
+            fn as_fd(&self) -> BorrowedFd<'_> {
+                self.0.get_ref().as_fd()
+            }
+        }
+
+        let (probe_side, responder_side) = UnixStream::pair().expect("socketpair");
+        let mut out = probe_side.try_clone().expect("clone probe side");
+        let mut input = Buffered(BufReader::new(probe_side));
+        let responder = spawn_responder(responder_side, 0);
+
+        let outcome = probe_timed(&mut out, &mut input);
+        drop(out);
+        drop(input);
+        responder.join().expect("responder thread");
+        assert_eq!(outcome, ProbeOutcome::UnicodeSafe);
     }
 
     #[test]

@@ -90,6 +90,59 @@ enum InputEvent {
     Fault(String),
 }
 
+/// Set (non-empty) to silence the startup degradation notices.
+const DEGRADE_NOTICE_ENV: &str = "GWK_NO_DEGRADE_NOTICE";
+
+/// One stderr line, printed before the alternate screen opens, naming a
+/// capability this terminal lost and why — instead of leaving a short
+/// status-bar tag as the only witness. Raw mode may already be active, so the
+/// line carries its own carriage return.
+fn degrade_notice(message: &str) {
+    let quiet = std::env::var_os(DEGRADE_NOTICE_ENV).is_some_and(|value| !value.is_empty());
+    if !quiet {
+        eprint!("gw: {message} ({DEGRADE_NOTICE_ENV}=1 hides this)\r\n");
+    }
+}
+
+/// [`ColorTier::resolve`], saying out loud when the answer was the
+/// unrecognized-TERM fallthrough — the one degradation the resolution stack
+/// would otherwise apply silently. Deliberate monochrome (a flag, NO_COLOR,
+/// a dumb terminal, a pipe) stays quiet.
+fn resolve_tier(terminal_env: &TerminalEnv) -> ColorTier {
+    let (tier, unrecognized_term) = ColorTier::resolve_loud(terminal_env);
+    if unrecognized_term {
+        degrade_notice(&format!(
+            "TERM {:?} is not in the color ladder; rendering monochrome",
+            terminal_env.term.as_deref().unwrap_or_default()
+        ));
+    }
+    tier
+}
+
+/// Resolve the glyph tier, naming what a degradation costs and why. Runs
+/// under raw mode but before the alternate screen, so the notice lands on
+/// the primary screen where it survives the session.
+fn probe_glyphs(stdout: &mut std::io::Stdout, terminal_env: &TerminalEnv) -> GlyphSet {
+    use gwk_theme::probe::ProbeOutcome;
+    if terminal_env.term.as_deref() == Some("dumb") {
+        return GlyphSet::Ascii;
+    }
+    let outcome = gwk_tui::probe::probe_terminal(stdout);
+    let inventory = gwk_theme::probe::inventory_codepoints().len();
+    match &outcome {
+        ProbeOutcome::UnicodeSafe => {}
+        ProbeOutcome::Sheared(glyphs) => degrade_notice(&format!(
+            "{} of {inventory} probed glyphs render at the wrong width here; drawing ascii marks",
+            glyphs.len()
+        )),
+        ProbeOutcome::Inconclusive(glyphs) => degrade_notice(&format!(
+            "the terminal left {} of {inventory} glyph probes unanswered; drawing ascii marks",
+            glyphs.len()
+        )),
+    }
+    outcome.glyph_set()
+}
+
 /// Run until the operator quits or the event subscription closes.
 pub async fn run(requested_motion: MotionMode) -> Result<(), Failure> {
     let attach_started = Instant::now();
@@ -97,7 +150,7 @@ pub async fn run(requested_motion: MotionMode) -> Result<(), Failure> {
     let mut events = EventIndex::default();
     let mut estate = refresh_estate(&mut data, &mut events).await?;
     let terminal_env = TerminalEnv::from_process(ColorChoice::Auto);
-    let tier = ColorTier::resolve(&terminal_env);
+    let tier = resolve_tier(&terminal_env);
     let resolved_motion = resolve_motion(
         requested_motion,
         terminal_env.term.as_deref(),
@@ -116,13 +169,12 @@ pub async fn run(requested_motion: MotionMode) -> Result<(), Failure> {
     let restore = TerminalRestore::install();
     enable_raw_mode().map_err(|why| Failure::unreachable(format!("enable raw mode: {why}")))?;
     let mut stdout = std::io::stdout();
+    // The probe needs raw mode, not the alternate screen — and a degradation
+    // notice needs the primary screen, where the line survives instead of
+    // being painted over by the first frame.
+    let glyphs = probe_glyphs(&mut stdout, &terminal_env);
     input::enter(&mut stdout)
         .map_err(|why| Failure::unreachable(format!("enter terminal screen: {why}")))?;
-    let glyphs = if terminal_env.term.as_deref() == Some("dumb") {
-        GlyphSet::Ascii
-    } else {
-        gwk_tui::probe::probe_terminal(&mut stdout).glyph_set()
-    };
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout))
         .map_err(|why| Failure::unreachable(format!("open terminal: {why}")))?;
 
@@ -164,7 +216,7 @@ pub async fn event_tail(
     view: BoardView,
 ) -> Result<(), Failure> {
     let terminal_env = TerminalEnv::from_process(ColorChoice::Auto);
-    let tier = ColorTier::resolve(&terminal_env);
+    let tier = resolve_tier(&terminal_env);
     if !terminal_env.stdout_is_tty {
         check_snapshot_filters(
             view,
@@ -186,13 +238,12 @@ pub async fn event_tail(
     let restore = TerminalRestore::install();
     enable_raw_mode().map_err(|why| Failure::unreachable(format!("enable raw mode: {why}")))?;
     let mut stdout = std::io::stdout();
+    // The probe needs raw mode, not the alternate screen — and a degradation
+    // notice needs the primary screen, where the line survives instead of
+    // being painted over by the first frame.
+    let glyphs = probe_glyphs(&mut stdout, &terminal_env);
     input::enter(&mut stdout)
         .map_err(|why| Failure::unreachable(format!("enter terminal screen: {why}")))?;
-    let glyphs = if terminal_env.term.as_deref() == Some("dumb") {
-        GlyphSet::Ascii
-    } else {
-        gwk_tui::probe::probe_terminal(&mut stdout).glyph_set()
-    };
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout))
         .map_err(|why| Failure::unreachable(format!("open terminal: {why}")))?;
     let stop_input = Arc::new(AtomicBool::new(false));
@@ -619,7 +670,7 @@ fn handle_event_tail_input(
 /// separate, and callers use `session list/inspect` for the former.
 pub async fn session_attach(session_id: PtySessionId) -> Result<(), Failure> {
     let terminal_env = TerminalEnv::from_process(ColorChoice::Auto);
-    let tier = ColorTier::resolve(&terminal_env);
+    let tier = resolve_tier(&terminal_env);
     let mut data = connect().await?;
     let mut state = DrilldownState::new(session_id.clone());
     refresh_session_snapshot(&mut data, &mut state).await?;
