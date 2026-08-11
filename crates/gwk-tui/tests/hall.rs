@@ -13,6 +13,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::Modifier;
 use std::time::Duration;
 
 fn district_id(value: &str) -> DistrictId {
@@ -812,6 +813,96 @@ fn hall_representative_estate_matches_its_golden() {
     let input = representative_input();
     let (estate, _, _) = dump_frame(72, 8, &input);
     assert_matches_golden("hall-estate", &estate);
+}
+
+#[test]
+fn hall_focused_heading_is_visibly_marked_at_every_tier_and_rung() {
+    // Mono (the helpers' hardcoded tier): reverse video is the one attribute
+    // the tier can express, and the focus token carries it. Build (row 0) is
+    // the focused district in the representative estate; Research (row 3) is
+    // not.
+    let input = representative_input();
+    let (_, _, buffer) = dump_frame(72, 8, &input);
+    assert!(
+        buffer[(0, 0)]
+            .style()
+            .add_modifier
+            .contains(Modifier::REVERSED),
+        "focused Build heading carries no reverse-video mark"
+    );
+    assert!(
+        !buffer[(0, 3)]
+            .style()
+            .add_modifier
+            .contains(Modifier::REVERSED),
+        "unfocused Research heading borrowed the focus mark"
+    );
+
+    // Truecolor: the same headings resolve the ratified focus token's accent.
+    let mut terminal = Terminal::new(TestBackend::new(72, 8)).expect("terminal");
+    let mut hits = HitMap::new();
+    terminal
+        .draw(|frame| {
+            render(
+                frame.area(),
+                frame.buffer_mut(),
+                &input,
+                ColorTier::Truecolor,
+                GlyphSet::Unicode,
+                &mut hits,
+            );
+        })
+        .expect("draw");
+    let color = terminal.backend().buffer().clone();
+    let focus_token = gwk_theme::SIGNAL
+        .iter()
+        .find(|token| token.name == "focus")
+        .expect("the focus token is pinned");
+    let expected = match focus_token.paint(ColorTier::Truecolor) {
+        gwk_theme::tier::Paint::Rgb(r, g, b) => ratatui::style::Color::Rgb(r, g, b),
+        other => panic!("the focus token paints {other:?} at truecolor"),
+    };
+    assert_eq!(
+        color[(0, 0)].style().fg,
+        Some(expected),
+        "focused heading lost the accent"
+    );
+    assert_ne!(
+        color[(0, 3)].style().fg,
+        Some(expected),
+        "unfocused heading gained the accent"
+    );
+
+    // The Paging rung renders headings through its own function; the mark
+    // must survive there too.
+    let agents = (0..8)
+        .map(|i| agent(&format!("agent-{i}"), None, AgentState::Running, i + 1))
+        .collect();
+    let paging_input = FrameInput {
+        districts: vec![district(
+            "district-a",
+            "A",
+            vec![station("station-a", 1, "s", agents, 8)],
+            8,
+        )],
+        focus: Some(Focus {
+            district: district_id("district-a"),
+            changed_seq: Seq::new(8),
+        }),
+        ..empty_input()
+    };
+    assert_eq!(
+        solve_density(Rect::new(0, 0, 6, 3), &paging_input).rung,
+        DensityRung::Paging
+    );
+    let (_, _, paged) = dump_pages(6, 3, &paging_input, &PagingState::default());
+    assert!(
+        paged[(0, 0)]
+            .style()
+            .add_modifier
+            .contains(Modifier::REVERSED),
+        "focus mark absent at the Paging rung"
+    );
 }
 
 #[test]

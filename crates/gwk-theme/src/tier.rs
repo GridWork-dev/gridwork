@@ -64,24 +64,34 @@ impl ColorTier {
     /// load-bearing: **no distinction this surface relies on may be finer than
     /// the 6×6×6 cube.**
     pub fn resolve(env: &TerminalEnv) -> ColorTier {
+        Self::resolve_loud(env).0
+    }
+
+    /// [`Self::resolve`], plus whether the answer was the unrecognized-TERM
+    /// fallthrough: Mono chosen not because anyone asked for it — no flag, no
+    /// `NO_COLOR`, no dumb terminal, no pipe — but because the terminal named
+    /// itself something the ladder does not know. That is the stack's one
+    /// silent degradation, and a caller that talks to an operator says it out
+    /// loud instead of letting an exotic TERM look like a broken palette.
+    pub fn resolve_loud(env: &TerminalEnv) -> (ColorTier, bool) {
         // 1. The explicit choice wins, always.
         match env.color {
-            ColorChoice::Never => return ColorTier::Mono,
-            ColorChoice::Ansi16 => return ColorTier::Ansi16,
-            ColorChoice::Xterm256 => return ColorTier::Xterm256,
-            ColorChoice::Truecolor => return ColorTier::Truecolor,
+            ColorChoice::Never => return (ColorTier::Mono, false),
+            ColorChoice::Ansi16 => return (ColorTier::Ansi16, false),
+            ColorChoice::Xterm256 => return (ColorTier::Xterm256, false),
+            ColorChoice::Truecolor => return (ColorTier::Truecolor, false),
             ColorChoice::Auto => {}
         }
         // 2. NO_COLOR is absolute. Rendering a palette under it is a bug, not a
         //    branding decision — which is why it sits above the force variables
         //    rather than racing them.
         if env.no_color.as_deref().is_some_and(|v| !v.is_empty()) {
-            return ColorTier::Mono;
+            return (ColorTier::Mono, false);
         }
         let term = env.term.as_deref().unwrap_or_default();
         // 3. A terminal that says it is dumb is believed.
         if term == "dumb" {
-            return ColorTier::Mono;
+            return (ColorTier::Mono, false);
         }
         // 4. The force variables, and this is the one placement the published
         //    stack leaves open: they sit HERE, above the tty check, because
@@ -90,12 +100,12 @@ impl ColorTier {
         //    CLICOLOR_FORCE is read first for no better reason than that it is
         //    the older of the two; they never disagree in practice.
         match force(env.clicolor_force.as_deref()).or_else(|| force(env.force_color.as_deref())) {
-            Some(Force::Off) => return ColorTier::Mono,
-            Some(Force::Depth(tier)) => return tier,
+            Some(Force::Off) => return (ColorTier::Mono, false),
+            Some(Force::Depth(tier)) => return (tier, false),
             // Forced on without naming a depth: skip the tty check, keep detecting.
             Some(Force::Unspecified) => {}
             // 5. Not a terminal, and nobody forced it.
-            None if !env.stdout_is_tty => return ColorTier::Mono,
+            None if !env.stdout_is_tty => return (ColorTier::Mono, false),
             None => {}
         }
         let colorterm = env.colorterm.as_deref().unwrap_or_default();
@@ -105,16 +115,16 @@ impl ColorTier {
         //      conditions because they are two independent claims and either
         //      alone is sufficient.
         if colorterm == "truecolor" || colorterm == "24bit" || term.ends_with("-direct") {
-            ColorTier::Truecolor
+            (ColorTier::Truecolor, false)
         } else if term.ends_with("-256color") {
-            ColorTier::Xterm256
+            (ColorTier::Xterm256, false)
         } else if ["xterm", "screen", "tmux", "rxvt"]
             .iter()
             .any(|family| term.contains(family))
         {
-            ColorTier::Ansi16
+            (ColorTier::Ansi16, false)
         } else {
-            ColorTier::Mono
+            (ColorTier::Mono, true)
         }
     }
 }
@@ -656,6 +666,46 @@ mod tests {
             ColorTier::resolve(&env("vt100", "", true)),
             ColorTier::Mono,
             "an unrecognised terminal gets monochrome, not a guess"
+        );
+    }
+
+    #[test]
+    fn tier_only_the_unrecognized_term_fallthrough_is_loud() {
+        // The one silent degradation in the stack announces itself…
+        assert_eq!(
+            ColorTier::resolve_loud(&env("vt100", "", true)),
+            (ColorTier::Mono, true)
+        );
+        // …while every deliberate road to Mono stays quiet: an answer the
+        // operator asked for is not a degradation.
+        let mut chosen = env("vt100", "", true);
+        chosen.color = ColorChoice::Never;
+        assert_eq!(
+            ColorTier::resolve_loud(&chosen),
+            (ColorTier::Mono, false),
+            "--color=never"
+        );
+        let mut muted = env("vt100", "", true);
+        muted.no_color = Some("1".to_owned());
+        assert_eq!(
+            ColorTier::resolve_loud(&muted),
+            (ColorTier::Mono, false),
+            "NO_COLOR"
+        );
+        assert_eq!(
+            ColorTier::resolve_loud(&env("dumb", "", true)),
+            (ColorTier::Mono, false),
+            "TERM=dumb"
+        );
+        assert_eq!(
+            ColorTier::resolve_loud(&env("vt100", "", false)),
+            (ColorTier::Mono, false),
+            "a pipe is not a degraded terminal"
+        );
+        assert_eq!(
+            ColorTier::resolve_loud(&env("xterm-256color", "", true)),
+            (ColorTier::Xterm256, false),
+            "a recognized terminal is never loud"
         );
     }
 
