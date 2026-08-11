@@ -883,11 +883,26 @@ impl Client<UnixStream> {
     pub async fn connect(path: &std::path::Path) -> (Self, ServerControl) {
         Self::greet(UnixStream::connect(path).await.expect("connect")).await
     }
+
+    pub async fn connect_with_capabilities(
+        path: &std::path::Path,
+        capabilities: &[&str],
+    ) -> (Self, ServerControl) {
+        Self::greet_with(
+            UnixStream::connect(path).await.expect("connect"),
+            capabilities,
+        )
+        .await
+    }
 }
 
 impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Client<S> {
     /// Take an open transport through the handshake.
     pub async fn greet(stream: S) -> (Self, ServerControl) {
+        Self::greet_with(stream, &[]).await
+    }
+
+    pub async fn greet_with(stream: S, capabilities: &[&str]) -> (Self, ServerControl) {
         let mut client = Self {
             stream,
             budget: Budget::new(
@@ -895,8 +910,11 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Client<S> {
                 CONNECTION_EGRESS_BYTES_PER_WINDOW,
             ),
         };
+        let capabilities = serde_json::to_string(capabilities).expect("serialize capabilities");
         client
-            .send(r#"{"type":"hello","protocol_major":1,"protocol_minor":0,"capabilities":[]}"#)
+            .send(&format!(
+                r#"{{"type":"hello","protocol_major":1,"protocol_minor":0,"capabilities":{capabilities}}}"#
+            ))
             .await;
         let ack = client.recv().await.expect("the daemon acked");
         (client, ack)
@@ -1020,6 +1038,12 @@ impl Running {
 
     pub async fn client(&self) -> Client {
         Client::connect(&self.path).await.0
+    }
+
+    pub async fn client_with_capabilities(&self, capabilities: &[&str]) -> Client {
+        Client::connect_with_capabilities(&self.path, capabilities)
+            .await
+            .0
     }
 
     /// Stop accepting and drain. Every client must be dropped first — a live one

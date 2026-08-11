@@ -596,8 +596,9 @@ pub struct PtySession {
     /// `running` until closed; a close writes `closed`.
     pub state: String,
     /// The host lifetime this session belongs to. A reclaimed id under a new
-    /// generation is a NEW aggregate lifetime on the wire, but ledger ids are
-    /// unique per open — the generation is recorded, never re-keyed.
+    /// generation is a NEW aggregate lifetime. Ledger ids are keyed as
+    /// `{wire_id}:{generation}` and this field preserves the generation as a
+    /// first-class value for projections and guards.
     pub generation: PtySessionGeneration,
     /// Live attaches opened against this session over its lifetime.
     pub attach_count: u32,

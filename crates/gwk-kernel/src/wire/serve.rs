@@ -4,7 +4,9 @@
 //! the one mutation path, and the reads — a projection by id, a projection page,
 //! and a page of the log. Every one of them is a question with an answer, which
 //! is what makes them one layer: a request goes out, a response comes back on
-//! the same `request_id`, and nothing arrives that was not asked for.
+//! the same `request_id`. The one deliberate reverse control is PTY input: after
+//! a send command commits, the kernel routes a typed batch to the connection
+//! that owns that hosted session.
 //!
 //! Subscriptions are the other half, and they are why a connection is two loops
 //! instead of one. A batch is a frame the client did not individually request,
@@ -29,6 +31,7 @@ use std::sync::Arc;
 
 use base64::prelude::{BASE64_STANDARD, Engine as _};
 use gwk_domain::blob::BLOB_CHUNK_BYTES;
+use gwk_domain::command::KernelCommand;
 use gwk_domain::ids::{
     ByteCount, EventCount, EventId, PtyFrameSeq, PtySessionGeneration, PtySessionId, RequestId,
     Seq, WriterEpoch,
@@ -37,8 +40,9 @@ use gwk_domain::port::{BlobError, BlobStore, EventStore, MAX_READ_LIMIT};
 use gwk_domain::protocol::{
     CONNECTION_EGRESS_BYTES_PER_WINDOW, CONNECTION_INGRESS_BYTES_PER_WINDOW, CONTRACT_VERSION,
     FRAME_BODY_MAX_BYTES, FRAME_PAYLOAD_MAX_BYTES, FrameKind, KernelErrorCode, KernelRequest,
-    KernelResult, MAX_SUBSCRIPTIONS_PER_CONNECTION, PTY_RAW_CAPABILITY,
-    PTY_RAW_PAYLOAD_DEADLINE_SECS, ProjectionKind, ProjectionRecord, ServerControl,
+    KernelResult, MAX_SUBSCRIPTIONS_PER_CONNECTION, PTY_INPUT_CAPABILITY,
+    PTY_INPUT_MAX_BASE64_BYTES, PTY_RAW_CAPABILITY, PTY_RAW_PAYLOAD_DEADLINE_SECS, ProjectionKind,
+    ProjectionRecord, PtyInputData, ServerControl,
 };
 use sqlx::Row;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -56,6 +60,7 @@ use crate::epoch::{
 };
 use crate::error::{KernelError, Result};
 use crate::store::PgEventStore;
+use crate::submit::PtyInputCarrier;
 
 /// How long shutdown waits for connections that are mid-request.
 pub const DRAIN_TIMEOUT_SECS: u64 = 30;
@@ -344,6 +349,20 @@ impl Daemon {
             // command the transaction would have allowed, or wave one through
             // that it then refuses anyway.
             KernelRequest::SubmitCommand { envelope } => self.store.submit(envelope).await,
+            KernelRequest::SendPtyInput {
+                envelope,
+                data_base64,
+            } => {
+                if !subs.input_enabled {
+                    KernelResult::Error {
+                        code: KernelErrorCode::Capability,
+                        message: format!("{PTY_INPUT_CAPABILITY} was not negotiated"),
+                        detail: None,
+                    }
+                } else {
+                    self.send_pty_input(envelope, data_base64).await
+                }
+            }
 
             KernelRequest::GetProjection { projection, id } => {
                 // One row is a one-row page: the same query, asked for an exact
@@ -628,6 +647,100 @@ impl Daemon {
         })
     }
 
+    /// Commit one metadata-only input command, then enqueue its bytes on the
+    /// owning host's existing connection. Replays return the original command
+    /// result without delivering twice.
+    async fn send_pty_input(
+        &self,
+        envelope: &gwk_domain::CommandEnvelope,
+        data_base64: &PtyInputData,
+    ) -> KernelResult {
+        let (session_id, generation, byte_count) = match KernelCommand::from_envelope(envelope) {
+            Ok(KernelCommand::SendPtyInput {
+                pty_session_id,
+                generation,
+                byte_count,
+            }) => (pty_session_id, generation, byte_count),
+            Ok(other) => {
+                return KernelResult::Error {
+                    code: KernelErrorCode::Validation,
+                    message: format!(
+                        "the send_pty_input request carries a {} command",
+                        other.command_type()
+                    ),
+                    detail: None,
+                };
+            }
+            Err(error) => {
+                return KernelResult::Error {
+                    code: KernelErrorCode::Validation,
+                    message: error.to_string(),
+                    detail: None,
+                };
+            }
+        };
+        let decoded = if data_base64.as_str().len() > PTY_INPUT_MAX_BASE64_BYTES {
+            Err(format!(
+                "PTY input base64 carrier is {} bytes, over the {PTY_INPUT_MAX_BASE64_BYTES}-byte encoded bound",
+                data_base64.as_str().len()
+            ))
+        } else {
+            BASE64_STANDARD
+                .decode(data_base64.as_str())
+                .map_err(|error| format!("PTY input is not valid base64: {error}"))
+        };
+        let carrier = match &decoded {
+            Ok(bytes) => PtyInputCarrier::Bytes(bytes),
+            Err(message) => PtyInputCarrier::Invalid(message.clone()),
+        };
+        let submission = self
+            .store
+            .submit_pty_input_for_delivery(envelope, carrier)
+            .await;
+        if !submission.newly_applied {
+            return submission.result;
+        }
+        if !matches!(&submission.result, KernelResult::CommandApplied { .. }) {
+            return submission.result;
+        }
+        let Ok(bytes) = decoded else {
+            return KernelResult::Error {
+                code: KernelErrorCode::Storage,
+                message: "an invalid PTY input carrier was committed".to_owned(),
+                detail: Some(serde_json::json!({ "command_committed": true })),
+            };
+        };
+
+        let canonical = BASE64_STANDARD.encode(&bytes);
+        match self
+            .pty
+            .deliver_input(
+                &session_id,
+                &generation,
+                envelope.command_id.clone(),
+                byte_count,
+                PtyInputData::new(canonical),
+            )
+            .await
+        {
+            Ok(()) => submission.result,
+            Err(refusal) => KernelResult::Error {
+                code: refusal.code,
+                message: format!(
+                    "input command {} committed, but host delivery failed: {}",
+                    envelope.command_id, refusal.message
+                ),
+                detail: Some(serde_json::json!({
+                    "command_committed": true,
+                    "command_id": envelope.command_id.as_str(),
+                    "session_id": session_id.as_str(),
+                    "generation": generation.as_str(),
+                    "delivery_detail": refusal.detail,
+                })),
+            },
+        }
+    }
+
     /// One staged chunk, decoded off the wire.
     async fn blob_chunk(
         &self,
@@ -801,6 +914,7 @@ struct Subscriptions<'a> {
     /// An admitted stream waiting to be started. See [`Self::admit`].
     admitted: Option<Admitted>,
     raw_enabled: bool,
+    input_enabled: bool,
 }
 
 impl<'a> Subscriptions<'a> {
@@ -810,6 +924,7 @@ impl<'a> Subscriptions<'a> {
         responses: mpsc::Sender<ServerControl>,
         batches: mpsc::Sender<Outgoing>,
         raw_enabled: bool,
+        input_enabled: bool,
     ) -> Self {
         Self {
             daemon,
@@ -819,6 +934,7 @@ impl<'a> Subscriptions<'a> {
             responses,
             admitted: None,
             raw_enabled,
+            input_enabled,
         }
     }
 
@@ -1067,6 +1183,10 @@ where
         .capabilities
         .iter()
         .any(|capability| capability.as_str() == PTY_RAW_CAPABILITY);
+    let input_enabled = negotiated
+        .capabilities
+        .iter()
+        .any(|capability| capability.as_str() == PTY_INPUT_CAPABILITY);
 
     // One allowance per direction, now that a direction is a loop. They were
     // never coupled — a `spend` only ever touches the counter for the direction
@@ -1076,13 +1196,24 @@ where
         CONNECTION_EGRESS_BYTES_PER_WINDOW,
     );
     let (responses_tx, responses_rx) = mpsc::channel(RESPONSE_QUEUE_DEPTH);
+    let (inputs_tx, inputs_rx) = mpsc::channel(RESPONSE_QUEUE_DEPTH);
     let (batches_tx, batches_rx) = mpsc::channel(BATCH_QUEUE_DEPTH);
 
     // The identity PTY publish ownership binds to. Minted per connection and
     // released below whichever way the connection ends, so a host's sessions
     // never outlive the socket that was publishing them.
     let connection = daemon.pty.connection();
-    let mut subs = Subscriptions::new(daemon, connection, responses_tx, batches_tx, raw_enabled);
+    daemon
+        .pty
+        .register_connection(connection, inputs_tx, input_enabled);
+    let mut subs = Subscriptions::new(
+        daemon,
+        connection,
+        responses_tx,
+        batches_tx,
+        raw_enabled,
+        input_enabled,
+    );
     // Armed BEFORE the request loops: daemon shutdown aborts this whole task,
     // and an aborted future never reaches the inline sweep below — which is
     // how the estate lost a resident session's hangup close at the first
@@ -1094,7 +1225,7 @@ where
     };
     let served = tokio::select! {
         read = read_requests(daemon, connection, reader, &mut ingress, &mut subs) => read,
-        written = write_frames(writer, responses_rx, batches_rx, &mut egress) => written,
+        written = write_frames(writer, responses_rx, inputs_rx, batches_rx, &mut egress) => written,
     };
     sweep.armed = false;
     for (id, generation) in daemon.pty.disconnect(connection) {
@@ -1411,6 +1542,7 @@ where
 async fn write_frames<W>(
     writer: &mut W,
     mut responses: mpsc::Receiver<ServerControl>,
+    mut inputs: mpsc::Receiver<pty::InputControl>,
     mut batches: mpsc::Receiver<Outgoing>,
     budget: &mut Budget,
 ) -> std::result::Result<(), WireError>
@@ -1418,15 +1550,21 @@ where
     W: AsyncWrite + Unpin,
 {
     loop {
-        let outgoing = tokio::select! {
+        let (outgoing, mut input_written) = tokio::select! {
             biased;
-            Some(control) = responses.recv() => Outgoing {
-                control,
-                raw: None,
-                delivered: None,
-                active: None,
-            },
-            Some(outgoing) = batches.recv() => outgoing,
+            Some(control) = responses.recv() => (Outgoing {
+                    control,
+                    raw: None,
+                    delivered: None,
+                    active: None,
+                }, None),
+            Some(input) = inputs.recv() => (Outgoing {
+                    control: input.control,
+                    raw: None,
+                    delivered: None,
+                    active: None,
+                }, Some(input.written)),
+            Some(outgoing) = batches.recv() => (outgoing, None),
             // Both queues closed: the reader is done and no subscription is
             // left to produce anything.
             else => return Ok(()),
@@ -1438,28 +1576,44 @@ where
         {
             continue;
         }
-        let written = if outgoing.active.is_some() {
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(gwk_domain::protocol::SLOW_CONSUMER_TIMEOUT_SECS),
-                write_outgoing(writer, &outgoing.control, outgoing.raw.as_deref(), budget),
-            )
-            .await
-            {
-                Ok(result) => result,
-                Err(_) => {
-                    if let Some(active) = &outgoing.active {
-                        active.store(false, std::sync::atomic::Ordering::Release);
-                    }
-                    return Err(WireError::new(
-                        KernelErrorCode::SlowConsumer,
-                        "a raw PTY delivery blocked on the client beyond the slow-consumer timeout",
-                    ));
+        let written = match tokio::time::timeout(
+            std::time::Duration::from_secs(gwk_domain::protocol::SLOW_CONSUMER_TIMEOUT_SECS),
+            write_outgoing(writer, &outgoing.control, outgoing.raw.as_deref(), budget),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                if let Some(active) = &outgoing.active {
+                    active.store(false, std::sync::atomic::Ordering::Release);
                 }
+                let error = WireError::new(
+                    KernelErrorCode::SlowConsumer,
+                    "a control delivery blocked on the client beyond the slow-consumer timeout",
+                );
+                if let Some(written) = input_written.take() {
+                    let _ = written.send(Err(pty::PtyRefusal {
+                        code: error.code,
+                        message: error.message.clone(),
+                        detail: None,
+                    }));
+                }
+                return Err(error);
             }
-        } else {
-            write_outgoing(writer, &outgoing.control, outgoing.raw.as_deref(), budget).await
         };
-        written?;
+        if let Err(error) = written {
+            if let Some(written) = input_written.take() {
+                let _ = written.send(Err(pty::PtyRefusal {
+                    code: error.code,
+                    message: error.message.clone(),
+                    detail: None,
+                }));
+            }
+            return Err(error);
+        }
+        if let Some(written) = input_written {
+            let _ = written.send(Ok(()));
+        }
         // AFTER the write, and only on success — the whole value of this number
         // is that nothing is claimed delivered before it left.
         if let Some((cell, seq)) = outgoing.delivered {
@@ -1750,11 +1904,19 @@ mod tests {
         // header. The close therefore cannot sit behind the full queue it
         // exists to explain.
         drop(queue_probe);
+        let (inputs_tx, inputs_rx) = mpsc::channel(1);
+        drop(inputs_tx);
         let mut written = Vec::new();
         let mut budget = Budget::new(1 << 20, 1 << 20);
-        write_frames(&mut written, responses_rx, batches_rx, &mut budget)
-            .await
-            .expect("drain the close and discard invalidated items");
+        write_frames(
+            &mut written,
+            responses_rx,
+            inputs_rx,
+            batches_rx,
+            &mut budget,
+        )
+        .await
+        .expect("drain the close and discard invalidated items");
 
         let mut written = std::io::Cursor::new(written);
         let closed = read_frame(&mut written, FRAME_BODY_MAX_BYTES, &mut budget)
@@ -1782,6 +1944,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn one_raw_delivery_times_out_when_the_socket_write_stalls() {
         let (_responses_tx, responses_rx) = mpsc::channel(1);
+        let (_inputs_tx, inputs_rx) = mpsc::channel(1);
         let (batches_tx, batches_rx) = mpsc::channel(BATCH_QUEUE_DEPTH);
         let active = Arc::new(AtomicBool::new(true));
         let delivered = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -1808,7 +1971,14 @@ mod tests {
         let (_slow_reader, mut server_writer) = tokio::io::duplex(64);
         let writer = tokio::spawn(async move {
             let mut budget = Budget::new(1 << 20, 1 << 20);
-            write_frames(&mut server_writer, responses_rx, batches_rx, &mut budget).await
+            write_frames(
+                &mut server_writer,
+                responses_rx,
+                inputs_rx,
+                batches_rx,
+                &mut budget,
+            )
+            .await
         });
         let guard = tokio::spawn(async move {
             tokio::time::timeout(

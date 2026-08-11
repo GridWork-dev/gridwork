@@ -44,7 +44,7 @@ const RETRY_DELAY_MS: u64 = 25;
 /// the receipt design makes — closed rows are history, peak concurrency
 /// reads row open/close intervals, restarts count distinct generations.
 fn lifetime(id: &PtySessionId, generation: &PtySessionGeneration) -> PtySessionId {
-    PtySessionId::new(format!("{id}:{generation}"))
+    gwk_domain::ids::pty_session_lifetime_id(id, generation)
 }
 
 /// Record that a publish opened a new session lifetime.

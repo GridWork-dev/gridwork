@@ -18,6 +18,7 @@ name = "gwk-pty-host"
 path = "src/main.rs"
 
 [dependencies]
+base64.workspace = true
 # The engine and the three adapters. Depending on them ends this crate's
 # no-Zig build property deliberately: PR #43 kept the crate engine-free only
 # because that change's execution environment carried no Zig toolchain, and

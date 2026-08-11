@@ -17,8 +17,8 @@
 use gwk_domain::ids::Seq;
 use gwk_domain::protocol::{
     CapabilityName, ClientControl, FrameKind, HELLO_DEADLINE_SECS, HELLO_MAX_BYTES,
-    KernelErrorCode, MAX_CAPABILITIES, PROTOCOL_MINOR, PTY_RAW_CAPABILITY, ProtocolVersion,
-    ServerControl,
+    KernelErrorCode, MAX_CAPABILITIES, PROTOCOL_MINOR, PTY_INPUT_CAPABILITY, PTY_RAW_CAPABILITY,
+    ProtocolVersion, ServerControl,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -30,7 +30,7 @@ use super::{WireError, strict};
 /// The raw terminal fallback is additive to the required JSON control surface:
 /// older clients never receive kind `0x02`, and newer clients only use it after
 /// this name survives the hello intersection.
-pub const OFFERED_CAPABILITIES: &[&str] = &[PTY_RAW_CAPABILITY];
+pub const OFFERED_CAPABILITIES: &[&str] = &[PTY_RAW_CAPABILITY, PTY_INPUT_CAPABILITY];
 
 /// What a completed handshake settled.
 #[derive(Debug, Clone, PartialEq, Eq)]
