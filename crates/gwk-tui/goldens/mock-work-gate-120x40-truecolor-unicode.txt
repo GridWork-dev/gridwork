@@ -1,0 +1,40 @@
+ WORK   [queue]  tasks   runs   config    deciding gate g-deploy                          tier tc+uni  as-of 221  17:30
+
+ 4 need attention                                                                                           oldest 10:19
+ ! gate deploy  restart the kernel service after the pty_session receipt fix?
+    options: allow / deny
+ ! KEK rotation window closes in 2 hours  (operator)
+ ! deploy blocked on grant for command c-1  2x since 10:24  (authority)
+ ! t-flaky-ci attempt is stuck canceling  (watchdog)
+ ⠄ kernel-facade MCP flapping  muted until 18:00  (watchdog)
+ ⠄ disk pressure on the build host  acked  (watchdog)
+ msg 09:31  orchestrator to researcher  (brief)
+ msg 09:58  researcher to orchestrator  (findings)
+ msg 10:24  reviewer to orchestrator  (ack)
+ recent -- resolve is re-arm: a recurring problem raises anew
+ ✓ decided: allow (pass)
+ ✓ decided: deny (fail)
+ ✓ decided: hold (partial)
+ ✓ runner pool exhausted  -- pool widened
+
+
+
+
+
+
+
+
+
+
+
+QUEUE  !4  as-of 221
+ ----------------------------------------------------------------------------------------------------------------------
+  DECIDE   gate g-deploy   kind deploy    raised 17:00
+  restart the kernel service after the pty_session receipt fix?
+
+  > 1  allow      restarts gridwork-kernel on gw-ms-a2
+    2  deny       leaves the fix unshipped until the next window
+
+  decides as operator -- receipted; the gate aggregate records no actor
+
+ 1/2 choose   enter decide   esc cancel   the chosen option is submitted as a kernel command

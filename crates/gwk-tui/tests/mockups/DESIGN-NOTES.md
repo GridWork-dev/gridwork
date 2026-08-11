@@ -439,6 +439,42 @@ bar says so.
 RESIZE the hosted session to the region on attach. The crop is left visible in the goldens
 deliberately, as the argument for that requirement.
 
+### Round 4 — WORK (queue · gates · config) · blessed
+
+G6 ruled both lenses get wired, so this round is their first appearance inside a frame:
+the bodies are painted by the REAL `queue::render` and `config::render` over the seeded
+state, with a mocked lens header, sub-tab strip (`[queue] tasks runs config`), and keybar
+around them. Two screens had to be invented outright.
+
+**Gate decision (new).** `queue.rs` refuses ack/mute/resolve on a gate by design — a gate
+is DECIDED, never acknowledged — and no decide verb exists anywhere in the crate. It is
+drawn as a modal confirm rather than a bare keypress because a gate is the one queue row
+whose verb has an irreversible outside effect (the seeded gate restarts the kernel).
+Options are rendered from the gate's own open `Vec<String>`, never a hardcoded allow/deny
+pair, and the selected option carries a `>` prefix so the choice survives Mono. The frame
+states plainly that the decision is receipted but that **the gate aggregate records no
+actor** — a domain gap, not a view one.
+
+**Config form (new).** `ConfigFormSchema` validates a submission but nothing has ever
+drawn one, and `ConfigState.contents` is loaded for all four files and never painted. The
+form's shape follows its validator: every field the incumbent file carries, its type, and
+its value — no add, no remove, because `validate_shape` rejects any shape change. A form
+offering a field the validator will reject is a form that lies. The keybar states that an
+exclusive lock is held and a concurrent edit is refused rather than merged.
+
+**Findings:**
+- The queue's mail section admits only `Delivered|Acknowledged|Applied`. The seeded day's
+  dead-lettered alert (three delivery attempts, reason "nobody listening") is absent from
+  the lens whose whole job is stating what is owed.
+- **A header must not restate a count its body owns.** The first pass had the header say
+  "2 need attention" while the queue's own verdict line said 4 — the lens counts audible
+  attention plus open gates. Header notes now describe, never tally.
+- **Goldens cannot verify selection or focus at any tier.** The format keeps symbols and
+  drops style, and selection is colour at Truecolor/Xterm256 and reverse-video at
+  Ansi16/Mono — both invisible in a symbol dump. This is the mechanical reason every
+  ruled screen here marks focus with a `>` character: it is the only selection signal a
+  golden can prove, and it is also the only one that survives Mono.
+
 ### Standing asks for the domain (not view changes)
 
 - `EngineSession` ↔ `PtySession` have no join field in either direction, so the ruled
