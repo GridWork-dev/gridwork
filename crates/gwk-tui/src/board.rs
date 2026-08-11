@@ -3189,7 +3189,8 @@ pub fn render(
     // Recorded ceiling: at a body this short the ordinary rows go unstated —
     // pinned rows keep first claim (the corruption invariant), and there is
     // genuinely no row left for a count. Real frames clear it at one row past
-    // the pinned block; the Board is not wired into `gw tui` at any height yet.
+    // the pinned block; `gw board` and `gw event tail` drive live frames well
+    // above it.
     if overflow > 0 && ordinary_body_rows > 0 {
         let y = area.y + pinned as u16 + ordinary_body_rows.saturating_sub(1);
         buf.set_stringn(

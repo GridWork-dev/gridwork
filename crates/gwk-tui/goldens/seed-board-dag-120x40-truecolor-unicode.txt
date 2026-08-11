@@ -1,0 +1,40 @@
+ 6 tasks  2 running
+ ⊞ backfill the audit receipt ledger  failed                                                                       16:20
+   ⊚ claude  failed  (auditor)                                                                                     15:10
+   ⊚ codex  unknown                                                                                                16:20
+ ⊞ stabilize the flaky CI leg  input required                                                                      12:00
+   ⊚ claude  canceling  (gw-test-automator)                                                                        12:02
+   ⊚ claude  canceled                                                                                              11:05
+ ⊞ cut the pty_session lifecycle over to receipts  working                                                         11:41
+   ⊚ codex  running  (implementer)                                                                                 11:41
+     ∘ implementer  running  (subagent)
+       ∘ recon  completed  (subagent)
+         ∘ lint  registered  (subagent)
+   ⊚ claude  blocked  (reviewer)                                                                                   10:30
+   ⊚ claude  starting  (researcher)                                                                                10:36
+ ⊞ write the 0.0.3 release notes  submitted                                                                        09:05
+   ⊚ codex  leased  (gw-devrel-writer)                                                                             09:16
+ ⊞ ship 0.0.3  completed                                                                                           09:14
+   ⊚ codex  succeeded  (implementer)                                                                               09:10
+ ⊞ build the seeded-estate snapshot harness  working                                                               17:20
+   ⊚ claude  running  (implementer)                                                                                17:20
+     ∘ implementer  running  (subagent)
+       ∘ gw-code-reviewer  registered  (subagent)
+   ⊚ codex  queued  (gw-rust-pro)                                                                                  10:07
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+BOARD estate brief run [dag] flow events replay fleet cost audit  r2@221

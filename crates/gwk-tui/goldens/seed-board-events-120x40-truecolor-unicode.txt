@@ -1,0 +1,40 @@
+ 21 events  live after 200  filter aggregate=* event=*
+   #221  17:28  record_pty_detach  pty_session/pty_session-221                                                    ev-221
+   #220  10:24  issue_command  command/command-220                                                                ev-220
+   #219  14:35  advance_workflow_run  workflow_run/workflow_run-219                                               ev-219
+   #218  14:30  open_workflow_run  workflow_run/workflow_run-218                                                  ev-218
+   #217  10:35  ack_attention  attention_item/attention_item-217                                                  ev-217
+   #216  10:23  decide_gate  gate/gate-216                                                                        ev-216
+   #215  10:22  record_pty_attach  pty_session/pty_session-215                                                    ev-215
+   #214  10:21  open_pty_session  pty_session/pty_session-214                                                     ev-214
+   #213  10:19  raise_attention  attention_item/attention_item-213                                                ev-213
+   #212  09:52  record_cost_entry  cost_entry/cost_entry-212                                                      ev-212
+   #211  09:51  ingest_record  ingested_record/ingested_record-211                                                ev-211
+   #210  09:45  register_dispatch_node  dispatch_node/dispatch_node-210                                           ev-210
+   #209  09:40  acquire_lease  lease/lease-209                                                                    ev-209
+   #208  09:30  send_message  message/message-208                                                                 ev-208
+   #207  09:20  register_worktree  worktree/worktree-207                                                          ev-207
+   #206  09:14  close_engine_session  engine_session/engine_session-206                                           ev-206
+   #205  09:10  transition_attempt  attempt/attempt-205                                                           ev-205
+   #204  09:00  record_cost_entry  cost_entry/cost_entry-204                                                      ev-204
+   #203  08:50  open_engine_session  engine_session/engine_session-203                                            ev-203
+   #202  08:45  create_attempt  attempt/attempt-202                                                               ev-202
+   #201  08:39  create_task  task/task-201                                                                        ev-201
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+BOARD estate brief run dag flow [events] replay fleet cost audit  r2@221

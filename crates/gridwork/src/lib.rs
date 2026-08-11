@@ -175,7 +175,8 @@ async fn execute(verb: Verb, pretty: bool) -> Result<(), Failure> {
             cursor,
             aggregate_type,
             event_type,
-        } => tui::event_tail(cursor, aggregate_type, event_type).await,
+            view,
+        } => tui::event_tail(cursor, aggregate_type, event_type, view).await,
         Verb::EstateOverview => {
             let state = load_summary_state(false).await?;
             emit_serialized(&estate_overview(&state), pretty)
@@ -536,6 +537,18 @@ fn push_board_record(
         (ProjectionKind::Lease, ProjectionRecord::Lease { lease }) => state.leases.push(lease),
         (ProjectionKind::CostEntry, ProjectionRecord::CostEntry { cost_entry }) => {
             state.costs.push(cost_entry);
+        }
+        (ProjectionKind::WorkflowRun, ProjectionRecord::WorkflowRun { workflow_run }) => {
+            state.runs.push(workflow_run);
+        }
+        (ProjectionKind::Message, ProjectionRecord::Message { message }) => {
+            state.messages.push(message);
+        }
+        (ProjectionKind::Receipt, ProjectionRecord::Receipt { receipt }) => {
+            state.receipts.push(receipt);
+        }
+        (ProjectionKind::IngestedRecord, ProjectionRecord::IngestedRecord { ingested_record }) => {
+            state.ingested.push(ingested_record);
         }
         (_, record) => {
             return Err(Failure::new(

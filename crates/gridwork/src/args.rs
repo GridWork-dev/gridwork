@@ -20,6 +20,7 @@ use gwk_domain::entity::Budget;
 use gwk_domain::ids::{CostMicros, Seq};
 use gwk_domain::ingestion::IngestionKind;
 use gwk_domain::protocol::ProjectionKind;
+use gwk_tui::board::BoardView;
 use gwk_tui::hall::MotionMode;
 
 use crate::admin::Retention;
@@ -56,6 +57,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--strategy",
     "--title",
     "--until",
+    "--view",
 ];
 
 /// Every flag that is its own answer.
@@ -137,6 +139,9 @@ pub enum Verb {
         cursor: Option<Seq>,
         aggregate_type: Option<String>,
         event_type: Option<String>,
+        /// Which Board panel opens first. Every panel remains one keystroke
+        /// away once the loop is up; this only names the opening one.
+        view: BoardView,
     },
 
     /// A coherent fold over the projections that describe current work.
@@ -245,7 +250,8 @@ gw — the GridWork kernel's command line
   gw projection list <type> [--cursor <key>] [--limit <n>]
   gw event read [--cursor <seq>] [--limit <n>]
   gw event follow [--cursor <seq>]
-  gw event tail [--cursor <seq>] [--aggregate-type <type>] [--event-type <type>]
+  gw event tail [--cursor <seq>] [--aggregate-type <type>] [--event-type <type>] [--view <name>]
+  gw board [--view <name>]
   gw estate overview
   gw activity brief
   gw cost rollup
@@ -282,7 +288,7 @@ gw — the GridWork kernel's command line
   --version  same answer as `build-info`, under the name every CLI is asked by
   --help     this
 
-Every command answer is JSON on standard output; `tui`, `event tail`, and `session attach` are interactive. Exits: 0 success, 2 usage or input,
+Every command answer is JSON on standard output; `tui`, `board`, `event tail`, and `session attach` are interactive. Exits: 0 success, 2 usage or input,
 3 refused, 4 not found, 5 unavailable, 6 does not verify, 10 a fault in gw.
 
 `pr` is the one verb that speaks to `gh` instead of the socket — always an
@@ -351,6 +357,19 @@ fn verb(rest: &mut Rest) -> Result<Verb, Failure> {
         },
         "projection" => projection(rest),
         "event" => event(rest),
+        // The Board under its own name. The same interactive loop `event tail`
+        // runs — one verb underneath, so the two spellings can never disagree —
+        // opening on the estate panel instead of the event tail.
+        "board" => Ok(Verb::EventTail {
+            cursor: None,
+            aggregate_type: None,
+            event_type: None,
+            view: rest
+                .flag("--view")
+                .map(|value| board_view(&value))
+                .transpose()?
+                .unwrap_or(BoardView::Estate),
+        }),
         "estate" => match rest.word("estate")?.as_str() {
             "overview" => Ok(Verb::EstateOverview),
             other => Err(unknown("estate", other)),
@@ -524,6 +543,11 @@ fn event(rest: &mut Rest) -> Result<Verb, Failure> {
             cursor,
             aggregate_type: rest.flag("--aggregate-type"),
             event_type: rest.flag("--event-type"),
+            view: rest
+                .flag("--view")
+                .map(|value| board_view(&value))
+                .transpose()?
+                .unwrap_or(BoardView::Events),
         }),
         other => Err(unknown("event", other)),
     }
@@ -688,6 +712,21 @@ fn sequence(value: String) -> Result<Seq, Failure> {
         .parse::<u64>()
         .map(Seq::new)
         .map_err(|_| Failure::usage(format!("a cursor is a decimal sequence, not {value:?}")))
+}
+
+/// A Board view, resolved against the tab strip's own names.
+fn board_view(name: &str) -> Result<BoardView, Failure> {
+    BoardView::ALL
+        .iter()
+        .find(|view| view.as_str() == name)
+        .copied()
+        .ok_or_else(|| {
+            let known: Vec<&str> = BoardView::ALL.iter().map(|view| view.as_str()).collect();
+            Failure::usage(format!(
+                "no board view {name:?}; one of: {}",
+                known.join(", ")
+            ))
+        })
 }
 
 /// A projection name, resolved against the closed set the contract defines.
@@ -1038,8 +1077,37 @@ mod tests {
                 cursor: Some(Seq::new(40)),
                 aggregate_type: Some("attempt".into()),
                 event_type: Some("attempt_started".into()),
+                view: BoardView::Events,
             }
         );
+        assert_eq!(
+            parsed("event tail --view fleet").expect("parse").verb,
+            Verb::EventTail {
+                cursor: None,
+                aggregate_type: None,
+                event_type: None,
+                view: BoardView::Fleet,
+            }
+        );
+        assert_eq!(
+            parsed("board").expect("parse").verb,
+            Verb::EventTail {
+                cursor: None,
+                aggregate_type: None,
+                event_type: None,
+                view: BoardView::Estate,
+            }
+        );
+        assert_eq!(
+            parsed("board --view cost").expect("parse").verb,
+            Verb::EventTail {
+                cursor: None,
+                aggregate_type: None,
+                event_type: None,
+                view: BoardView::CostHealth,
+            }
+        );
+        assert!(parsed("board --view bogus").is_err());
     }
 
     #[test]

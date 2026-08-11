@@ -1,0 +1,40 @@
+ WORK    queue   tasks   runs  [config]   the four governed files                         tier tc+uni  as-of 221  17:30
+
+ ✓ in sync -- latest config commit has evidence
+ ⠄ identity/authority-policy.toml                                                                 $EDITOR + typed commit
+ ⠄ identity/capabilities.toml                                                                             validated form
+ ⠄ identity/namespace-scopes.toml                                                                         validated form
+ ⠄ identity/orchestration.toml                                                                            validated form
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+CONFIG  4 files  commit a1b2c3d4  evidence blob://s
+ ----------------------------------------------------------------------------------------------------------------------
+ enter edit   j/k file   d diff   : go   q back      form-routed files open a validated form; $EDITOR otherwise

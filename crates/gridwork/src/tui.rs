@@ -20,10 +20,10 @@ use gwk_tui::board::{self, BoardState, BoardTarget, BoardView, EventTail};
 use gwk_tui::drilldown::{self, DrilldownState, DrilldownTarget, IngestDisposition};
 use gwk_tui::estate::{EstateSnapshot, EventIndex, ProjectionSnapshot, Stamped};
 use gwk_tui::hall::{
-    Agent, AgentId, AgentState, DECAY_DURATION, DistrictId, Focus, FrameInput, HallTarget,
-    MotionDriver, MotionEntity, MotionFrame, MotionInput, MotionKey, MotionMode, MotionVerb,
-    PULSE_DURATION, PagedMotionFrame, PagingState, district_region, district_stack_order,
-    render_with_motion_and_pages,
+    Agent, AgentId, AgentState, DECAY_DURATION, DensityRung, DistrictId, Focus, FrameInput,
+    HallTarget, MotionDriver, MotionEntity, MotionFrame, MotionInput, MotionKey, MotionMode,
+    MotionVerb, PULSE_DURATION, PagedMotionFrame, PagingState, district_region,
+    district_stack_order, render_with_motion_and_pages, solve_density,
 };
 use gwk_tui::input::{self, HitMap};
 use gwk_tui::replay::ReplayTimeline;
@@ -90,6 +90,59 @@ enum InputEvent {
     Fault(String),
 }
 
+/// Set (non-empty) to silence the startup degradation notices.
+const DEGRADE_NOTICE_ENV: &str = "GWK_NO_DEGRADE_NOTICE";
+
+/// One stderr line, printed before the alternate screen opens, naming a
+/// capability this terminal lost and why — instead of leaving a short
+/// status-bar tag as the only witness. Raw mode may already be active, so the
+/// line carries its own carriage return.
+fn degrade_notice(message: &str) {
+    let quiet = std::env::var_os(DEGRADE_NOTICE_ENV).is_some_and(|value| !value.is_empty());
+    if !quiet {
+        eprint!("gw: {message} ({DEGRADE_NOTICE_ENV}=1 hides this)\r\n");
+    }
+}
+
+/// [`ColorTier::resolve`], saying out loud when the answer was the
+/// unrecognized-TERM fallthrough — the one degradation the resolution stack
+/// would otherwise apply silently. Deliberate monochrome (a flag, NO_COLOR,
+/// a dumb terminal, a pipe) stays quiet.
+fn resolve_tier(terminal_env: &TerminalEnv) -> ColorTier {
+    let (tier, unrecognized_term) = ColorTier::resolve_loud(terminal_env);
+    if unrecognized_term {
+        degrade_notice(&format!(
+            "TERM {:?} is not in the color ladder; rendering monochrome",
+            terminal_env.term.as_deref().unwrap_or_default()
+        ));
+    }
+    tier
+}
+
+/// Resolve the glyph tier, naming what a degradation costs and why. Runs
+/// under raw mode but before the alternate screen, so the notice lands on
+/// the primary screen where it survives the session.
+fn probe_glyphs(stdout: &mut std::io::Stdout, terminal_env: &TerminalEnv) -> GlyphSet {
+    use gwk_theme::probe::ProbeOutcome;
+    if terminal_env.term.as_deref() == Some("dumb") {
+        return GlyphSet::Ascii;
+    }
+    let outcome = gwk_tui::probe::probe_terminal(stdout);
+    let inventory = gwk_theme::probe::inventory_codepoints().len();
+    match &outcome {
+        ProbeOutcome::UnicodeSafe => {}
+        ProbeOutcome::Sheared(glyphs) => degrade_notice(&format!(
+            "{} of {inventory} probed glyphs render at the wrong width here; drawing ascii marks",
+            glyphs.len()
+        )),
+        ProbeOutcome::Inconclusive(glyphs) => degrade_notice(&format!(
+            "the terminal left {} of {inventory} glyph probes unanswered; drawing ascii marks",
+            glyphs.len()
+        )),
+    }
+    outcome.glyph_set()
+}
+
 /// Run until the operator quits or the event subscription closes.
 pub async fn run(requested_motion: MotionMode) -> Result<(), Failure> {
     let attach_started = Instant::now();
@@ -97,7 +150,7 @@ pub async fn run(requested_motion: MotionMode) -> Result<(), Failure> {
     let mut events = EventIndex::default();
     let mut estate = refresh_estate(&mut data, &mut events).await?;
     let terminal_env = TerminalEnv::from_process(ColorChoice::Auto);
-    let tier = ColorTier::resolve(&terminal_env);
+    let tier = resolve_tier(&terminal_env);
     let resolved_motion = resolve_motion(
         requested_motion,
         terminal_env.term.as_deref(),
@@ -116,13 +169,12 @@ pub async fn run(requested_motion: MotionMode) -> Result<(), Failure> {
     let restore = TerminalRestore::install();
     enable_raw_mode().map_err(|why| Failure::unreachable(format!("enable raw mode: {why}")))?;
     let mut stdout = std::io::stdout();
+    // The probe needs raw mode, not the alternate screen — and a degradation
+    // notice needs the primary screen, where the line survives instead of
+    // being painted over by the first frame.
+    let glyphs = probe_glyphs(&mut stdout, &terminal_env);
     input::enter(&mut stdout)
         .map_err(|why| Failure::unreachable(format!("enter terminal screen: {why}")))?;
-    let glyphs = if terminal_env.term.as_deref() == Some("dumb") {
-        GlyphSet::Ascii
-    } else {
-        gwk_tui::probe::probe_terminal(&mut stdout).glyph_set()
-    };
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout))
         .map_err(|why| Failure::unreachable(format!("open terminal: {why}")))?;
 
@@ -155,31 +207,43 @@ pub async fn run(requested_motion: MotionMode) -> Result<(), Failure> {
 
 /// Follow the durable event log in a bounded Board tail. Filters are exact
 /// contract strings and never alter the subscription cursor, so reconnecting
-/// from the last visible sequence remains gap-free.
+/// from the last visible sequence remains gap-free. `view` names the panel
+/// the Board opens on; every other panel stays one keystroke away.
 pub async fn event_tail(
     cursor: Option<Seq>,
     aggregate_type: Option<String>,
     event_type: Option<String>,
+    view: BoardView,
 ) -> Result<(), Failure> {
     let terminal_env = TerminalEnv::from_process(ColorChoice::Auto);
-    let tier = ColorTier::resolve(&terminal_env);
+    let tier = resolve_tier(&terminal_env);
     if !terminal_env.stdout_is_tty {
-        return event_tail_snapshot(cursor, aggregate_type, event_type, tier).await;
+        check_snapshot_filters(
+            view,
+            cursor.as_ref(),
+            aggregate_type.as_ref(),
+            event_type.as_ref(),
+        )?;
+        return if view == BoardView::Events {
+            event_tail_snapshot(cursor, aggregate_type, event_type, tier).await
+        } else {
+            board_view_snapshot(view, tier).await
+        };
     }
 
+    let mut data = connect().await?;
     let mut stream = connect().await?;
     let stream_id = stream.subscribe(cursor).await?;
-    let mut state = event_board(cursor, aggregate_type, event_type, true);
+    let mut state = event_board(view, cursor, aggregate_type, event_type, true);
     let restore = TerminalRestore::install();
     enable_raw_mode().map_err(|why| Failure::unreachable(format!("enable raw mode: {why}")))?;
     let mut stdout = std::io::stdout();
+    // The probe needs raw mode, not the alternate screen — and a degradation
+    // notice needs the primary screen, where the line survives instead of
+    // being painted over by the first frame.
+    let glyphs = probe_glyphs(&mut stdout, &terminal_env);
     input::enter(&mut stdout)
         .map_err(|why| Failure::unreachable(format!("enter terminal screen: {why}")))?;
-    let glyphs = if terminal_env.term.as_deref() == Some("dumb") {
-        GlyphSet::Ascii
-    } else {
-        gwk_tui::probe::probe_terminal(&mut stdout).glyph_set()
-    };
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout))
         .map_err(|why| Failure::unreachable(format!("open terminal: {why}")))?;
     let stop_input = Arc::new(AtomicBool::new(false));
@@ -187,6 +251,7 @@ pub async fn event_tail(
     let input_thread = spawn_input(input_tx, Arc::clone(&stop_input));
     let result = event_tail_loop(
         &mut terminal,
+        &mut data,
         &mut stream,
         &stream_id,
         &mut state,
@@ -206,13 +271,14 @@ pub async fn event_tail(
 }
 
 fn event_board(
+    view: BoardView,
     cursor: Option<Seq>,
     aggregate_type: Option<String>,
     event_type: Option<String>,
     live: bool,
 ) -> BoardState {
     BoardState {
-        view: BoardView::Events,
+        view,
         tasks: Vec::new(),
         runs: Vec::new(),
         attempts: Vec::new(),
@@ -270,23 +336,66 @@ async fn event_tail_snapshot(
     else {
         return result_failure(result, "read event tail");
     };
-    let mut state = event_board(cursor, aggregate_type, event_type, false);
+    let mut state = event_board(BoardView::Events, cursor, aggregate_type, event_type, false);
     append_event_batch(&mut state, events, delivered);
     state.watermark = watermark;
+    render_board_snapshot(&state, tier)
+}
+
+/// The tail filters only reach the events panel. Interactively that is fine —
+/// the panel is one keystroke away and the filters are waiting when it opens —
+/// but a snapshot renders one panel and stops, so there they would be absorbed
+/// and never applied. Refuse instead: the parser's own rule is that a flag it
+/// cannot honor is an error, not a shrug.
+fn check_snapshot_filters(
+    view: BoardView,
+    cursor: Option<&Seq>,
+    aggregate_type: Option<&String>,
+    event_type: Option<&String>,
+) -> Result<(), Failure> {
+    if view == BoardView::Events {
+        return Ok(());
+    }
+    let named: Vec<&str> = [
+        cursor.map(|_| "--cursor"),
+        aggregate_type.map(|_| "--aggregate-type"),
+        event_type.map(|_| "--event-type"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if named.is_empty() {
+        return Ok(());
+    }
+    Err(Failure::usage(format!(
+        "{} filter the event tail, which --view {} does not render",
+        named.join(" and "),
+        view.as_str()
+    )))
+}
+
+/// The non-interactive twin for every panel that folds projections instead of
+/// the event log: one coherent read, one frame, done.
+async fn board_view_snapshot(view: BoardView, tier: ColorTier) -> Result<(), Failure> {
+    let state = crate::load_board_state(view_projections(view), view).await?;
+    render_board_snapshot(&state, tier)
+}
+
+fn render_board_snapshot(state: &BoardState, tier: ColorTier) -> Result<(), Failure> {
     let mut terminal = Terminal::with_options(
         CrosstermBackend::new(std::io::stdout()),
         TerminalOptions {
             viewport: Viewport::Fixed(Rect::new(0, 0, 100, 30)),
         },
     )
-    .map_err(|why| Failure::unreachable(format!("open event snapshot terminal: {why}")))?;
+    .map_err(|why| Failure::unreachable(format!("open board snapshot terminal: {why}")))?;
     let mut hits = HitMap::new();
     terminal
         .draw(|frame| {
             board::render(
                 frame.area(),
                 frame.buffer_mut(),
-                &state,
+                state,
                 None,
                 tier,
                 GlyphSet::Ascii,
@@ -294,12 +403,110 @@ async fn event_tail_snapshot(
             );
         })
         .map(|_| ())
-        .map_err(|why| Failure::unreachable(format!("paint event snapshot: {why}")))
+        .map_err(|why| Failure::unreachable(format!("paint board snapshot: {why}")))
+}
+
+/// The projections a Board panel folds — the kinds the live loop must page
+/// before that panel has anything true to say. Events reads the tail the
+/// subscription already delivers, and Replay wants a persisted recording
+/// selected by id, which no Board code path fetches yet, so both map to
+/// nothing here and render their own honest empties.
+fn view_projections(view: BoardView) -> &'static [ProjectionKind] {
+    match view {
+        BoardView::Events | BoardView::Replay => &[],
+        BoardView::Estate => crate::ESTATE_PROJECTIONS,
+        BoardView::Activity => crate::ACTIVITY_PROJECTIONS,
+        BoardView::Runs => &[ProjectionKind::WorkflowRun],
+        BoardView::Dag => &[
+            ProjectionKind::Task,
+            ProjectionKind::Attempt,
+            ProjectionKind::DispatchNode,
+        ],
+        BoardView::Flow => &[ProjectionKind::Message],
+        BoardView::Fleet => crate::FLEET_PROJECTIONS,
+        // Wider than the one-shot `cost rollup` list: the health half of the
+        // panel folds ingested records, so the live view pages them too.
+        BoardView::CostHealth => &[ProjectionKind::CostEntry, ProjectionKind::IngestedRecord],
+        BoardView::Audit => &[ProjectionKind::Receipt],
+    }
+}
+
+/// Re-page the active panel's projections into the live Board state. The
+/// event subscription owns `watermark` and the coherence story here is the
+/// stream itself — every batch triggers a re-read, so a torn join heals on
+/// the next event rather than demanding the one-shot loader's retry fold.
+async fn refresh_board_projections(
+    client: &mut Client,
+    state: &mut BoardState,
+) -> Result<(), Failure> {
+    for &kind in view_projections(state.view) {
+        clear_board_projection(state, kind);
+        let mut cursor = None;
+        let mut seen = BTreeSet::new();
+        loop {
+            let result = client
+                .ask(KernelRequest::ListProjection {
+                    projection: kind,
+                    cursor: cursor.clone(),
+                    limit: Some(PAGE_LIMIT),
+                })
+                .await?;
+            let (records, next_cursor) = match result {
+                KernelResult::ProjectionPage {
+                    records,
+                    next_cursor,
+                    ..
+                } => (records, next_cursor),
+                KernelResult::Error { code, message, .. } => {
+                    return Err(Failure::new(code, message));
+                }
+                other => {
+                    return Err(Failure::internal(format!(
+                        "refresh board projections: kernel answered with {other:?}"
+                    )));
+                }
+            };
+            for record in records {
+                crate::push_board_record(state, kind, record)?;
+            }
+            let Some(next) = next_cursor else {
+                break;
+            };
+            if !seen.insert(next.clone()) {
+                return Err(Failure::internal(format!(
+                    "{} projection cursor repeated {next:?}",
+                    kind.as_str()
+                )));
+            }
+            cursor = Some(next);
+        }
+    }
+    Ok(())
+}
+
+fn clear_board_projection(state: &mut BoardState, kind: ProjectionKind) {
+    match kind {
+        ProjectionKind::Task => state.tasks.clear(),
+        ProjectionKind::Attempt => state.attempts.clear(),
+        ProjectionKind::AttentionItem => state.attention.clear(),
+        ProjectionKind::Worktree => state.worktrees.clear(),
+        ProjectionKind::Lease => state.leases.clear(),
+        ProjectionKind::CostEntry => state.costs.clear(),
+        ProjectionKind::EngineSession => state.sessions.clear(),
+        ProjectionKind::DispatchNode => state.nodes.clear(),
+        ProjectionKind::WorkflowRun => state.runs.clear(),
+        ProjectionKind::Message => state.messages.clear(),
+        ProjectionKind::Receipt => state.receipts.clear(),
+        ProjectionKind::IngestedRecord => state.ingested.clear(),
+        // Kinds no Board panel folds; `view_projections` never asks for them.
+        _ => {}
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn event_tail_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    data: &mut Client,
     stream: &mut Client,
     stream_id: &RequestId,
     state: &mut BoardState,
@@ -315,6 +522,7 @@ async fn event_tail_loop(
     let mut terminate =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .map_err(|why| Failure::unreachable(format!("listen for SIGTERM: {why}")))?;
+    refresh_board_projections(data, state).await?;
     loop {
         if dirty {
             let order = board::target_order(state);
@@ -347,8 +555,12 @@ async fn event_tail_loop(
             _ = terminate.recv() => return Ok(()),
             input = input_rx.recv() => match input {
                 Some(InputEvent::Terminal(event)) => {
+                    let view = state.view;
                     if handle_event_tail_input(event, state, &hits, &mut selected) {
                         return Ok(());
+                    }
+                    if state.view != view {
+                        refresh_board_projections(data, state).await?;
                     }
                     dirty = true;
                 }
@@ -366,6 +578,10 @@ async fn event_tail_loop(
                         if request_id == *stream_id =>
                     {
                         append_event_batch(state, events, Some(cursor));
+                        // The same refresh-on-batch discipline the Hall loop
+                        // runs: an event is the kernel saying a projection
+                        // moved, so the visible panel re-reads its pages.
+                        refresh_board_projections(data, state).await?;
                         dirty = true;
                     }
                     ServerControl::StreamClosed { request_id, code, last_cursor }
@@ -385,7 +601,7 @@ async fn event_tail_loop(
 
 fn handle_event_tail_input(
     event: Event,
-    state: &BoardState,
+    state: &mut BoardState,
     hits: &HitMap<BoardTarget>,
     selected: &mut Option<BoardTarget>,
 ) -> bool {
@@ -394,26 +610,47 @@ fn handle_event_tail_input(
             if quit_key(key) {
                 return true;
             }
-            let delta = match key.code {
-                KeyCode::Char('j') | KeyCode::Down | KeyCode::Tab => Some(1),
-                KeyCode::Char('k') | KeyCode::Up | KeyCode::BackTab => Some(-1),
-                _ => None,
-            };
-            if let Some(delta) = delta {
-                let order = board::target_order(state);
-                if order.is_empty() {
-                    *selected = None;
-                } else {
-                    let current = selected
-                        .as_ref()
-                        .and_then(|selected| order.iter().position(|target| target == selected))
-                        .unwrap_or_else(|| if delta < 0 { 0 } else { order.len() - 1 });
-                    let next = if delta < 0 {
-                        current.checked_sub(1).unwrap_or(order.len() - 1)
+            match key.code {
+                // View navigation, mirroring the tab strip's stable order:
+                // `[`/`]` walk it, a digit jumps straight to a panel — `1`
+                // through `9` for the first nine, `0` for the tenth, the same
+                // order the strip prints. Tab stays row-select; it was taken
+                // before the strip had keys at all.
+                KeyCode::Char('[') => state.view = state.view.previous(),
+                KeyCode::Char(']') => state.view = state.view.next(),
+                KeyCode::Char(digit @ '0'..='9') => {
+                    let index = if digit == '0' {
+                        BoardView::ALL.len() - 1
                     } else {
-                        (current + 1) % order.len()
+                        digit as usize - '1' as usize
                     };
-                    *selected = Some(order[next].clone());
+                    state.view = BoardView::ALL[index];
+                }
+                _ => {
+                    let delta = match key.code {
+                        KeyCode::Char('j') | KeyCode::Down | KeyCode::Tab => Some(1),
+                        KeyCode::Char('k') | KeyCode::Up | KeyCode::BackTab => Some(-1),
+                        _ => None,
+                    };
+                    if let Some(delta) = delta {
+                        let order = board::target_order(state);
+                        if order.is_empty() {
+                            *selected = None;
+                        } else {
+                            let current = selected
+                                .as_ref()
+                                .and_then(|selected| {
+                                    order.iter().position(|target| target == selected)
+                                })
+                                .unwrap_or_else(|| if delta < 0 { 0 } else { order.len() - 1 });
+                            let next = if delta < 0 {
+                                current.checked_sub(1).unwrap_or(order.len() - 1)
+                            } else {
+                                (current + 1) % order.len()
+                            };
+                            *selected = Some(order[next].clone());
+                        }
+                    }
                 }
             }
         }
@@ -433,7 +670,7 @@ fn handle_event_tail_input(
 /// separate, and callers use `session list/inspect` for the former.
 pub async fn session_attach(session_id: PtySessionId) -> Result<(), Failure> {
     let terminal_env = TerminalEnv::from_process(ColorChoice::Auto);
-    let tier = ColorTier::resolve(&terminal_env);
+    let tier = resolve_tier(&terminal_env);
     let mut data = connect().await?;
     let mut state = DrilldownState::new(session_id.clone());
     refresh_session_snapshot(&mut data, &mut state).await?;
@@ -852,7 +1089,14 @@ fn draw(
                     glyph_name(glyphs),
                     attach_elapsed.as_millis(),
                 );
-                let full = format!(" q quit  m motion  j/k project  [/] page  {state}");
+                // The paging keys only reach a reader at the Paging rung, so
+                // the hint says whether they do anything right now instead of
+                // advertising them unconditionally.
+                let rung = solve_density(body, input).rung;
+                let full = format!(
+                    " q quit  m motion  j/k project  {}  {state}",
+                    paging_hint(rung)
+                );
                 // Hints yield before state: at narrow widths the whole hint
                 // block drops rather than clipping the state text mid-word.
                 let status = if full.chars().count() <= usize::from(area.width) {
@@ -906,6 +1150,16 @@ fn glyph_name(glyphs: GlyphSet) -> &'static str {
     match glyphs {
         GlyphSet::Unicode => "unicode",
         GlyphSet::Ascii => "ascii",
+    }
+}
+
+/// The status-bar paging hint. Ascii on purpose: this line renders even when
+/// the glyph inventory has degraded.
+fn paging_hint(rung: DensityRung) -> &'static str {
+    if rung == DensityRung::Paging {
+        "[/] page"
+    } else {
+        "pg -"
     }
 }
 
@@ -1569,7 +1823,7 @@ mod tests {
 
     #[test]
     fn event_tail_bounds_memory_and_keeps_the_resume_sequence() {
-        let mut state = event_board(None, None, None, true);
+        let mut state = event_board(BoardView::Events, None, None, None, true);
         let events = (1..=(EVENT_TAIL_ROWS as u64 + 2)).map(event).collect();
         append_event_batch(
             &mut state,
@@ -1580,5 +1834,78 @@ mod tests {
         assert_eq!(state.event_tail.dropped, 2);
         assert_eq!(state.events[0].global_sequence, Seq::new(3));
         assert_eq!(state.watermark, Some(Seq::new(EVENT_TAIL_ROWS as u64 + 2)));
+    }
+
+    #[test]
+    fn view_keys_walk_the_tab_strip_and_digits_jump() {
+        let mut state = event_board(BoardView::Events, None, None, None, true);
+        let hits = HitMap::new();
+        let mut selected = None;
+        let mut press = |code, state: &mut BoardState| {
+            let event = Event::Key(KeyEvent::new(code, KeyModifiers::NONE));
+            assert!(!handle_event_tail_input(event, state, &hits, &mut selected));
+        };
+        press(KeyCode::Char(']'), &mut state);
+        assert_eq!(state.view, BoardView::Replay);
+        press(KeyCode::Char('['), &mut state);
+        assert_eq!(state.view, BoardView::Events);
+        press(KeyCode::Char('1'), &mut state);
+        assert_eq!(state.view, BoardView::Estate);
+        press(KeyCode::Char('0'), &mut state);
+        assert_eq!(state.view, BoardView::Audit);
+        // Wrap in both directions: the strip is a ring, not a line.
+        press(KeyCode::Char(']'), &mut state);
+        assert_eq!(state.view, BoardView::Estate);
+        press(KeyCode::Char('['), &mut state);
+        assert_eq!(state.view, BoardView::Audit);
+    }
+
+    #[test]
+    fn snapshot_refuses_tail_filters_it_would_never_apply() {
+        let cursor = Seq::new(7);
+        let kind = "attempt".to_owned();
+        // The events snapshot is the one that reads them.
+        assert!(
+            check_snapshot_filters(BoardView::Events, Some(&cursor), Some(&kind), Some(&kind))
+                .is_ok()
+        );
+        // Any other panel without filters is an ordinary snapshot.
+        assert!(check_snapshot_filters(BoardView::Runs, None, None, None).is_ok());
+        for filtered in [
+            check_snapshot_filters(BoardView::Runs, Some(&cursor), None, None),
+            check_snapshot_filters(BoardView::Fleet, None, Some(&kind), None),
+            check_snapshot_filters(BoardView::Audit, None, None, Some(&kind)),
+        ] {
+            let failure = filtered.expect_err("a dropped filter must refuse");
+            assert_eq!(failure.exit, crate::exit::USAGE, "{failure:?}");
+        }
+    }
+
+    #[test]
+    fn paging_hint_reads_disabled_outside_the_paging_rung() {
+        assert_eq!(paging_hint(DensityRung::Paging), "[/] page");
+        for parked in [
+            DensityRung::Empty,
+            DensityRung::Baseline,
+            DensityRung::GutterShrink,
+            DensityRung::DistrictCollapse,
+            DensityRung::PairShrink,
+        ] {
+            assert_eq!(paging_hint(parked), "pg -", "{parked:?}");
+        }
+    }
+
+    #[test]
+    fn every_view_names_its_projections() {
+        // Events reads the subscription and Replay wants a selected recording;
+        // every other panel must page at least one projection kind or it can
+        // only ever render its empty state.
+        for view in BoardView::ALL {
+            let kinds = view_projections(view);
+            match view {
+                BoardView::Events | BoardView::Replay => assert!(kinds.is_empty(), "{view:?}"),
+                _ => assert!(!kinds.is_empty(), "{view:?} pages nothing"),
+            }
+        }
     }
 }

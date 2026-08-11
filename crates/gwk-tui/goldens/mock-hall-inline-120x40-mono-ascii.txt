@@ -1,0 +1,40 @@
+ GRIDWORK  run 4  !2  $5.30 today                                                       tier mono+asc  as-of 221  17:30
+
+  KERNEL  !1
+  pty  - impl 7h50   ! rev 7h42     blob  # arch 6h05   . rust-pro
+
+> TUI
+  lens  - impl 7h30   ^ audit 54s     harness  : general   ~ rev 5h28
+
+  SITE  +2 done
+  docs  v devrel   ? docs-none     deploy  X arch 2h10
+
+  OPS  !1  +3 done
+  ci  o test-auto   . rsrch     audit  ! sec-audit 1h10   v audit
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ : go   / filter   enter open   j/k district   [ ] page   m motion   q quit                      4 districts  15 agents
