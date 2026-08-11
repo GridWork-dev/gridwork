@@ -346,16 +346,20 @@ timestamps (the live path hardcodes the literal string `"live"`, so elapsed here
 hand-assigned); `estate.rs` must populate `Focus` (it hardcodes `focus: None`); and the
 resolved `ColorTier`/`GlyphSet` must reach the header.
 
-### Round 2 — FLEET · candidates blessed, picker pending
+### Round 2 — FLEET · RULED `work` (picker, 2026-08-11)
 
 Two candidates for `FLEET = agents · leases · cost`, both rendering the joins the audit
-flagged as never joined and giving cost its time axis:
+flagged as never joined and giving cost its time axis. **`work` won** — one row per
+attempt with every join folded on (task, engine, role, state, dispatch-subtree size, live
+sessions, lease + flags, rolled tokens, rolled spend, age) and the spend-per-hour chart
+beneath. One grain, one comparable column set, and it keeps every load-bearing column at
+80×24. The losing `resource` candidate (three stacked resource sections, cross-referenced)
+is retired at `8d4cd30`; at 80×24 it lost its chart entirely and its per-agent spend.
 
-- **`work`** — one row per attempt with every join folded on: task, engine, role, state,
-  dispatch-subtree size, live sessions, lease + flags, rolled tokens, rolled spend, age;
-  spend-per-hour chart beneath.
-- **`resource`** — three stacked sections (agents / leases + worktrees / cost) keeping
-  today's separate resource classes, each with its own columns plus cross-references.
+**Open follow-up from the losing candidate:** `work` gives no row to a resource no attempt
+claims — the expired `ls-release` lease and its released worktree vanish. An "unclaimed"
+footer (leases/worktrees with no live attempt, plus any unattributed cost) closes that gap
+without giving up the single grain.
 
 **Attribution precedence — ruled by default-and-surface.** A `CostEntry` is counted
 exactly ONCE, resolved `attempt_id` → `engine_session_id` → `dispatch_node_id`. The DB
@@ -389,6 +393,31 @@ The seeded day is 10 priced / 2 unpriced / 0 unattributed, stated in the chart c
   share an id suffix with a seeded attempt, so "one estate viewed five ways" is looser
   than it reads — Hall's districts are a separate hand-built set rather than a projection
   of the same attempts.
+
+### Round 3 — TERM/attach + the F4 send surfaces · blessed, sub-forks pending
+
+F4 was already ruled BOTH, so this round designs both surfaces rather than choosing
+between them. Four scenarios, with the hosted-session region painted by the REAL
+`drilldown::render` over the harness's attached fixture so the pty content is genuine:
+
+- `view` — VIEW mode, live, 28-column estate rail beside the session.
+- `input` — INPUT mode: badge, raw-passthrough warning, and a send receipt row.
+- `refused` — a send refused for a stale generation, rendered loudly.
+- `send` — the `:send` one-shot composed from the TERM list, no attach.
+
+**Ruled by default-and-surface here.** `{id}:{generation}` is the subject line of every
+attach frame and every send — a send names the generation it is addressed to, so a
+generation flip refuses rather than lands in the wrong life. The receipt row states
+`sent <N>B  rcpt <id>  <actor>  <clock>` — **byte count, never content**: raw bytes may be
+a password or a control sequence, so the receipt proves delivery without transcribing what
+was sent. `ctrl-]` leaves INPUT (telnet's escape; Esc, `^C` and arrows all belong to the
+agent under the ruled raw passthrough). The rail collapses entirely below 100 columns
+rather than squeezing.
+
+**Finding — the rail costs the session columns.** The fixture's session is 100 cols; a
+28-column rail leaves 90 and a pty cannot reflow, so the frames crop. The console must
+RESIZE the hosted session to the region on attach. The crop is left visible in the goldens
+deliberately, as the argument for that requirement.
 
 ### Standing asks for the domain (not view changes)
 

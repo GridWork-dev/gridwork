@@ -1,0 +1,40 @@
+ TERM   pty-1:gen-3  kernel worktree shell                                                tier tc+uni  as-of 221  17:30
+
+ ESTATE                     | gw@kernel:~/gridwork$ cargo test -p gwk-tui --test seed_snapshots -- --nocapture
+                            |
+ running      4             |    Compiling gwk-theme v0.0.2
+ attention    2             |    Compiling gwk-domain v0.0.2
+ blocked      1             |    Compiling gwk-tui v0.0.2 (crates/gwk-tui)
+ today        $5.30         |
+                            |     Finished test [unoptimized + debuginfo] target(s) in 6.14s
+ TERMS                      |      Running tests/seed_snapshots.rs (target/debug/deps/seed_snapshots-9f2a1b3c)
+> pty-1:gen-3  attached     |
+  pty-2:gen-1  closed       | running 21 checks
+                            | test board_views_over_the_estate ... ok
+ QUEUE                      | test hall_estate_at_120x40_truecolor_unicode ... ok
+ ! gate deploy              | test hall_estate_at_80x24 ... FAILED
+ ! kek rotation             | test queue_estate_default ... ok
+                            | test config_estate_default ... ok
+                            |
+                            | failures:
+                            |
+                            | ---- hall_estate_at_80x24 stdout ----
+                            | crates/gwk-tui/goldens/seed-hall-estate-80x24-truecolor-unicode.txt drifted at line 3.
+                            |
+                            | test result: FAILED. 20 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+                            |
+                            |
+                            |
+                            |
+                            |
+                            |
+                            |
+                            | gw@kernel:~/gridwork$ _
+                            |
+                            |
+                            |
+                            |
+                            |  live  SESSION pty-1  seq 42  100x30  view 0,0
+ ----------------------------------------------------------------------------------------------------------------------
+                              REFUSED  stale generation gen-2 -- session is gen-3, nothing was sent
+  INPUT   ctrl-] leave input   every key (Esc, ^C, arrows) goes to the agent

@@ -1,16 +1,18 @@
 //! Round 2 — the FLEET lens (grill G1: `FLEET = agents · leases · cost`).
 //!
-//! MOCKUP PAINTERS ONLY — no production lens code. Two candidates for the
-//! picker, both rendering what the audit flagged as never rendered:
+//! MOCKUP PAINTER ONLY — no production lens code. It renders what the audit
+//! flagged as never rendered:
 //! **the DispatchNode <-> Attempt <-> EngineSession <-> CostEntry joins**,
 //! and **a time axis on cost**.
 //!
-//! - `work` — one row per attempt, every join folded onto it (sessions,
-//!   dispatch subtree size, lease + worktree, rolled-up spend and tokens),
-//!   with the spend-per-hour chart beneath.
-//! - `resource` — three stacked sections keeping today's separate resource
-//!   classes (agents / leases + worktrees / cost), each with its own column
-//!   set plus cross-reference columns so a reader can walk between them.
+//! **RULED `work` (picker, 2026-08-11):** one row per attempt, every join
+//! folded onto it — sessions, dispatch subtree size, lease + flags, rolled
+//! spend and tokens — with the spend-per-hour chart beneath. One grain, one
+//! comparable column set. The losing `resource` candidate (three stacked
+//! resource sections, cross-referenced) is retired; its frames are in this
+//! branch's history at `8d4cd30`. Its one real advantage — a resource with
+//! no attempt, like the expired `ls-release` lease, gets no row here — is
+//! carried as an open follow-up (an "unclaimed" footer).
 //!
 //! ## What the join is worth
 //!
@@ -51,7 +53,7 @@ mod common;
 mod shared;
 
 use common::{assert_matches_golden, dump_frame};
-use gwk_domain::entity::{Attempt, CostEntry, DispatchNode, EngineSession, Lease, Worktree};
+use gwk_domain::entity::{Attempt, CostEntry, DispatchNode, EngineSession, Lease};
 use gwk_domain::fsm::{AttemptState, LeaseState};
 use gwk_domain::ids::AttemptId;
 use gwk_theme::marks::GlyphSet;
@@ -89,10 +91,6 @@ fn age(stamp: &str) -> String {
     } else {
         format!("{}h{:02}", elapsed / 60, elapsed % 60)
     }
-}
-
-fn clock(stamp: &str) -> String {
-    stamp[11..16].to_owned()
 }
 
 /// `AttemptState` (ten variants) onto the eleven-variant `AgentState` the
@@ -225,13 +223,6 @@ fn lease_for<'a>(state: &'a BoardState, attempt: &Attempt) -> Option<&'a Lease> 
     state.leases.iter().find(|lease| &lease.id == id)
 }
 
-fn worktree_for<'a>(state: &'a BoardState, lease: &Lease) -> Option<&'a Worktree> {
-    state
-        .worktrees
-        .iter()
-        .find(|worktree| worktree.lease_id.as_ref() == Some(&lease.id))
-}
-
 /// `d` = dirty, `u` = unpushed — the two facts that decide whether a
 /// worktree can be reclaimed. Both are booleans the shipped fleet summary
 /// carries and no view renders.
@@ -244,14 +235,6 @@ fn lease_flags(lease: &Lease) -> String {
         flags.push('u');
     }
     flags
-}
-
-fn lease_state_word(state: LeaseState) -> &'static str {
-    match state {
-        LeaseState::Held => "held",
-        LeaseState::Released => "released",
-        LeaseState::Expired => "expired",
-    }
 }
 
 fn subtree_size(state: &BoardState, attempt: &AttemptId) -> usize {
@@ -595,224 +578,10 @@ fn paint_work(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) {
 }
 
 // ---------------------------------------------------------------------------
-// Candidate B — resource grain: three sections, cross-referenced
-// ---------------------------------------------------------------------------
-
-fn paint_resource(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) {
-    let state = common::estate::estate_board_state(BoardView::Fleet);
-    let wide = area.width >= 100;
-    paint_header(buf, area, tier, glyphs, &state);
-
-    // --- AGENTS ---------------------------------------------------------
-    let mut y = 2;
-    put(buf, area, 1, y, "AGENTS", bold("fg", tier));
-    put(
-        buf,
-        area,
-        10,
-        y,
-        "live attempts and the sessions under them",
-        style("muted", tier),
-    );
-    y += 1;
-
-    let live: Vec<&Attempt> = state
-        .attempts
-        .iter()
-        .filter(|attempt| {
-            !matches!(
-                attempt.state,
-                AttemptState::Succeeded | AttemptState::Canceled | AttemptState::Failed
-            )
-        })
-        .collect();
-    for (index, attempt) in live.iter().enumerate() {
-        let paint = state_style(binding(attempt_glyph_state(attempt.state)), tier);
-        let mark = state_glyph(attempt_glyph_state(attempt.state), glyphs);
-        put(
-            buf,
-            area,
-            0,
-            y,
-            if index == 0 { ">" } else { " " },
-            bold("focus", tier),
-        );
-        put(buf, area, 2, y, attempt.id.as_str(), paint);
-        put(
-            buf,
-            area,
-            21,
-            y,
-            &format!("{mark} {}", attempt_state_word(attempt.state)),
-            paint,
-        );
-        put(
-            buf,
-            area,
-            34,
-            y,
-            attempt.engine.as_str(),
-            style("muted", tier),
-        );
-        put(buf, area, 42, y, role_label(attempt), style("fg", tier));
-        if wide {
-            let sessions = live_sessions(&state, &attempt.id);
-            let subtree = subtree_size(&state, &attempt.id);
-            let shape = match (sessions, subtree) {
-                (0, 0) => "-".to_owned(),
-                (sessions, 0) => format!("{sessions} session"),
-                (0, subtree) => format!("{subtree} sub"),
-                (sessions, subtree) => format!("{sessions} session  {subtree} sub"),
-            };
-            put(buf, area, 53, y, &shape, style("muted", tier));
-            put(
-                buf,
-                area,
-                75,
-                y,
-                &spend_for(&state, &attempt.id).text(),
-                style("fg", tier),
-            );
-        }
-        put_right(
-            buf,
-            area,
-            y,
-            &age(attempt.created_at.as_str()),
-            style("muted", tier),
-        );
-        y += 1;
-    }
-    y += 1;
-
-    // --- LEASES + WORKTREES ---------------------------------------------
-    put(buf, area, 1, y, "LEASES", bold("fg", tier));
-    put(
-        buf,
-        area,
-        10,
-        y,
-        "holder, expiry, and the worktree each one pins",
-        style("muted", tier),
-    );
-    y += 1;
-    for lease in &state.leases {
-        let expired = lease.state == LeaseState::Expired;
-        let paint = if expired {
-            style("warn", tier)
-        } else {
-            style("fg", tier)
-        };
-        put(buf, area, 2, y, lease.id.as_str(), paint);
-        put(
-            buf,
-            area,
-            14,
-            y,
-            lease_state_word(lease.state),
-            style("muted", tier),
-        );
-        put(
-            buf,
-            area,
-            25,
-            y,
-            lease.holder.as_deref().unwrap_or("-"),
-            style("fg", tier),
-        );
-        let flags = lease_flags(lease);
-        if !flags.is_empty() {
-            put(buf, area, 42, y, &flags, style("warn", tier));
-        }
-        if let Some(expires) = &lease.expires_at {
-            put(
-                buf,
-                area,
-                46,
-                y,
-                &format!("til {}", clock(expires.as_str())),
-                style("muted", tier),
-            );
-        }
-        if wide && let Some(heartbeat) = &lease.heartbeat_at {
-            put(
-                buf,
-                area,
-                58,
-                y,
-                &format!("beat {}", clock(heartbeat.as_str())),
-                style("muted", tier),
-            );
-        }
-        y += 1;
-        if let Some(worktree) = worktree_for(&state, lease) {
-            put(buf, area, 4, y, worktree.id.as_str(), style("muted", tier));
-            put(buf, area, 16, y, &worktree.branch, style("muted", tier));
-            if worktree.released_at.is_some() {
-                put(buf, area, 58, y, "released", style("muted", tier));
-            }
-            y += 1;
-        }
-    }
-    y += 1;
-
-    // --- COST ------------------------------------------------------------
-    put(buf, area, 1, y, "COST", bold("fg", tier));
-    let mut by_attempt: Vec<(String, Spend)> = state
-        .attempts
-        .iter()
-        .map(|attempt| {
-            (
-                attempt.id.as_str().to_owned(),
-                spend_for(&state, &attempt.id),
-            )
-        })
-        .filter(|(_, spend)| spend.micros > 0 || spend.unpriced > 0)
-        .collect();
-    by_attempt.sort_by_key(|(_, spend)| std::cmp::Reverse(spend.micros));
-    let top: Vec<String> = by_attempt
-        .iter()
-        .take(3)
-        .map(|(id, spend)| format!("{id} {}", spend.text()))
-        .collect();
-    put(
-        buf,
-        area,
-        10,
-        y,
-        &format!("top attempts   {}", top.join("   ")),
-        style("muted", tier),
-    );
-    y += 1;
-
-    if y + 5 < area.height {
-        paint_spend_chart(buf, area, y, tier, &state);
-    } else {
-        put(
-            buf,
-            area,
-            2,
-            y,
-            "+ spend chart -- frame too short",
-            style("warn", tier),
-        );
-    }
-
-    paint_keybar(buf, area, tier);
-}
-
-// ---------------------------------------------------------------------------
 // The golden matrix
 // ---------------------------------------------------------------------------
 
-type Painter = fn(Rect, &mut Buffer, ColorTier, GlyphSet);
-
 fn check(candidate: &str, width: u16, height: u16, tier: ColorTier, glyphs: GlyphSet) {
-    let painter: Painter = match candidate {
-        "work" => paint_work,
-        "resource" => paint_resource,
-        other => panic!("unknown candidate {other}"),
-    };
     let glyph_name = match glyphs {
         GlyphSet::Unicode => "unicode",
         GlyphSet::Ascii => "ascii",
@@ -821,7 +590,7 @@ fn check(candidate: &str, width: u16, height: u16, tier: ColorTier, glyphs: Glyp
         "mock-fleet-{candidate}-{width}x{height}-{}-{glyph_name}",
         tier.as_str()
     );
-    assert_matches_golden(&name, &dump_frame(width, height, tier, glyphs, painter));
+    assert_matches_golden(&name, &dump_frame(width, height, tier, glyphs, paint_work));
 }
 
 #[test]
@@ -837,19 +606,4 @@ fn work_at_80x24() {
 #[test]
 fn work_degraded_mono_ascii() {
     check("work", 120, 40, ColorTier::Mono, GlyphSet::Ascii);
-}
-
-#[test]
-fn resource_at_120x40() {
-    check("resource", 120, 40, ColorTier::Truecolor, GlyphSet::Unicode);
-}
-
-#[test]
-fn resource_at_80x24() {
-    check("resource", 80, 24, ColorTier::Truecolor, GlyphSet::Unicode);
-}
-
-#[test]
-fn resource_degraded_mono_ascii() {
-    check("resource", 120, 40, ColorTier::Mono, GlyphSet::Ascii);
 }
