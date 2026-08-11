@@ -1083,16 +1083,68 @@ where
     // never outlive the socket that was publishing them.
     let connection = daemon.pty.connection();
     let mut subs = Subscriptions::new(daemon, connection, responses_tx, batches_tx, raw_enabled);
+    // Armed BEFORE the request loops: daemon shutdown aborts this whole task,
+    // and an aborted future never reaches the inline sweep below — which is
+    // how the estate lost a resident session's hangup close at the first
+    // kernel restart. The guard makes cancellation itself run the sweep.
+    let mut sweep = DisconnectSweep {
+        daemon,
+        connection,
+        armed: true,
+    };
     let served = tokio::select! {
         read = read_requests(daemon, connection, reader, &mut ingress, &mut subs) => read,
         written = write_frames(writer, responses_rx, batches_rx, &mut egress) => written,
     };
+    sweep.armed = false;
     for (id, generation) in daemon.pty.disconnect(connection) {
         // The hangup sweep — the `:hangup` provenance is what tells a crash
         // from a typed retire in the cutover receipt.
         receipts::closed(&daemon.store, &id, &generation, true).await;
     }
     served
+}
+
+/// The hangup sweep as a drop guard: releases this connection's hosted
+/// sessions and hands their close receipts to a task of their own when the
+/// connection task is CANCELLED rather than run to its inline sweep. Best
+/// effort at full daemon shutdown — a spawned emit can still lose the race
+/// against runtime teardown, and the un-closed lifetime row is then the
+/// honest crash signature the cutover receipt reads.
+struct DisconnectSweep<'a> {
+    daemon: &'a Daemon,
+    connection: pty::ConnectionId,
+    armed: bool,
+}
+
+impl Drop for DisconnectSweep<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let swept = self.daemon.pty.disconnect(self.connection);
+        if swept.is_empty() {
+            return;
+        }
+        let store = Arc::clone(&self.daemon.store);
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    for (id, generation) in swept {
+                        receipts::closed(&store, &id, &generation, true).await;
+                    }
+                });
+            }
+            Err(_) => {
+                for (id, generation) in swept {
+                    eprintln!(
+                        "gwk-kernel: pty receipt pty-close:{id}:{generation}:hangup: \
+                         dropped outside a runtime"
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// A validated JSON header waiting for its immediately following kind `0x02`

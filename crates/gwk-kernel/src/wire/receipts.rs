@@ -33,6 +33,20 @@ use crate::store::PgEventStore;
 const RETRIES: u32 = 3;
 const RETRY_DELAY_MS: u64 = 25;
 
+/// The ledger aggregate for one session LIFETIME: `{id}:{generation}`.
+///
+/// The mux reuses session ids — the estate's resident session is always
+/// `console` — but the aggregate models one open and one terminal close per
+/// row. Keying rows by id alone wedged the mirror on the first kernel restart
+/// (observed live 2026-08-11): the surviving row made the next lifetime's
+/// open a version-0 create against a version-2 aggregate, refused as
+/// StaleVersion and silently dropped. Per-lifetime rows keep every promise
+/// the receipt design makes — closed rows are history, peak concurrency
+/// reads row open/close intervals, restarts count distinct generations.
+fn lifetime(id: &PtySessionId, generation: &PtySessionGeneration) -> PtySessionId {
+    PtySessionId::new(format!("{id}:{generation}"))
+}
+
 /// Record that a publish opened a new session lifetime.
 pub(crate) async fn opened(
     store: &Arc<PgEventStore>,
@@ -41,11 +55,18 @@ pub(crate) async fn opened(
 ) {
     let key = format!("pty-open:{id}:{generation}");
     let command = KernelCommand::OpenPtySession {
-        pty_session_id: id.clone(),
+        pty_session_id: lifetime(id, generation),
         generation: generation.clone(),
         title: None,
     };
-    submit(store, &key, &command).await;
+    // A stale answer here means a row for this exact lifetime already exists
+    // — impossible unless the mirror double-opens. Loud either way: the id-
+    // keyed wedge stayed invisible precisely because this return was dropped.
+    if !submit(store, &key, &command).await {
+        eprintln!(
+            "gwk-kernel: pty receipt {key}: refused as stale — the lifetime row already exists"
+        );
+    }
 }
 
 /// Record that a session lifetime ended. `hangup` marks the sweep path — the
@@ -61,9 +82,10 @@ pub(crate) async fn closed(
     } else {
         format!("pty-close:{id}:{generation}")
     };
-    versioned(store, id, &key, |expected_version| {
+    let row = lifetime(id, generation);
+    versioned(store, &row, &key, |expected_version| {
         KernelCommand::ClosePtySession {
-            pty_session_id: id.clone(),
+            pty_session_id: row.clone(),
             expected_version,
         }
     })
@@ -86,9 +108,10 @@ pub(crate) async fn attached(
     request_id: &RequestId,
 ) {
     let key = format!("pty-attach:{id}:{generation}:{connection}:{request_id}");
-    versioned(store, id, &key, |expected_version| {
+    let row = lifetime(id, generation);
+    versioned(store, &row, &key, |expected_version| {
         KernelCommand::RecordPtyAttach {
-            pty_session_id: id.clone(),
+            pty_session_id: row.clone(),
             expected_version,
         }
     })
@@ -112,10 +135,10 @@ impl DetachReceipt {
             "pty-detach:{}:{}:{}:{}",
             self.session_id, self.generation, self.connection, self.request_id
         );
-        let id = self.session_id.clone();
-        versioned(&self.store, &self.session_id, &key, |expected_version| {
+        let row = lifetime(&self.session_id, &self.generation);
+        versioned(&self.store, &row, &key, |expected_version| {
             KernelCommand::RecordPtyDetach {
-                pty_session_id: id.clone(),
+                pty_session_id: row.clone(),
                 expected_version,
             }
         })

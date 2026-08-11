@@ -1781,13 +1781,13 @@ async fn pty_lifecycle_receipts_reach_the_ledger_with_their_provenance() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         let r1 = sqlx::query(
-            "SELECT state, attach_count, detach_count FROM gwk.pty_session WHERE id = 'pty-r1'",
+            "SELECT state, attach_count, detach_count FROM gwk.pty_session WHERE id LIKE 'pty-r1:%'",
         )
         .fetch_optional(&pool)
         .await
         .expect("read r1");
         let r2 = sqlx::query_scalar::<_, String>(
-            "SELECT state FROM gwk.pty_session WHERE id = 'pty-r2'",
+            "SELECT state FROM gwk.pty_session WHERE id LIKE 'pty-r2:%'",
         )
         .fetch_optional(&pool)
         .await
@@ -1810,7 +1810,7 @@ async fn pty_lifecycle_receipts_reach_the_ledger_with_their_provenance() {
     // Session 1's ledger trail: exactly the four lifecycle events.
     let types: Vec<String> = sqlx::query_scalar(
         "SELECT event_type FROM gwk.event \
-         WHERE aggregate_type = 'pty_session' AND aggregate_id = 'pty-r1' \
+         WHERE aggregate_type = 'pty_session' AND aggregate_id LIKE 'pty-r1:%' \
          ORDER BY seq",
     )
     .fetch_all(&pool)
@@ -1843,7 +1843,7 @@ async fn pty_lifecycle_receipts_reach_the_ledger_with_their_provenance() {
     // kernel-authored.
     let row = sqlx::query(
         "SELECT idempotency_key, actor->>'kind' AS actor_kind FROM gwk.event \
-         WHERE aggregate_type = 'pty_session' AND aggregate_id = 'pty-r2' \
+         WHERE aggregate_type = 'pty_session' AND aggregate_id LIKE 'pty-r2:%' \
            AND event_type = 'pty_session_closed'",
     )
     .fetch_one(&pool)
@@ -1906,7 +1906,7 @@ async fn concurrent_and_hung_up_attaches_all_reach_the_counters() {
     let counters = |pool: sqlx::PgPool| async move {
         let row = sqlx::query(
             "SELECT state, attach_count, detach_count \
-             FROM gwk.pty_session WHERE id = 'pty-c1'",
+             FROM gwk.pty_session WHERE id LIKE 'pty-c1:%'",
         )
         .fetch_optional(&pool)
         .await
@@ -1950,6 +1950,91 @@ async fn concurrent_and_hung_up_attaches_all_reach_the_counters() {
     }
     let (state, attaches, detaches) = counters(pool.clone()).await.expect("settled row");
     assert_eq!((state.as_str(), attaches, detaches), ("running", 2, 2));
+
+    drop(host);
+    served.close().await;
+    drop(pool);
+    drop_database(&maintenance, &name).await;
+}
+
+/// The wedge that took a kernel restart to find, pinned: session ids are
+/// REUSED — the estate's resident session is always `console` — and each
+/// lifetime must land its own ledger row. Before per-lifetime aggregate ids,
+/// the second open was a version-0 create against the first lifetime's
+/// surviving row: refused as StaleVersion, dropped silently, mirror wedged.
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
+async fn a_reused_session_id_gets_a_row_per_lifetime() {
+    use sqlx::Row;
+
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "wire_pty_lifetimes", 8).await;
+    let pool = store.pool().clone();
+    let served = Running::open(store, "ptylife").await;
+    let frame = serde_json::to_string(&pty_frame(2, 4)).expect("serialize frame");
+    let publish = format!(
+        r#"{{"type":"pty_publish_snapshot","session_id":"pty-l1","seq":"0","frame":{frame}}}"#
+    );
+
+    // Lifetime 1: published, then the host hangs up — the sweep closes it.
+    let mut host = served.client().await;
+    match host.ask("l1-seed", &publish).await {
+        KernelResult::PtyPublished { .. } => {}
+        other => panic!("{other:?}"),
+    }
+    drop(host);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let closed: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM gwk.pty_session \
+             WHERE id LIKE 'pty-l1:%' AND state = 'closed'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count closed");
+        if closed == 1 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "lifetime 1 must close on hangup"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    // Lifetime 2: the SAME session id from a fresh host. Its open must land
+    // as its own row beside the closed one, not wedge against it.
+    let mut host = served.client().await;
+    match host.ask("l2-seed", &publish).await {
+        KernelResult::PtyPublished { .. } => {}
+        other => panic!("{other:?}"),
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let rows = sqlx::query(
+            "SELECT id, state, generation FROM gwk.pty_session \
+             WHERE id LIKE 'pty-l1:%' ORDER BY opened_at",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("lifetime rows");
+        if rows.len() == 2 {
+            assert_eq!(rows[0].get::<String, _>("state"), "closed");
+            assert_eq!(rows[1].get::<String, _>("state"), "running");
+            let g1 = rows[0].get::<String, _>("generation");
+            let g2 = rows[1].get::<String, _>("generation");
+            assert_ne!(g1, g2, "each lifetime carries its own generation");
+            assert_eq!(rows[0].get::<String, _>("id"), format!("pty-l1:{g1}"));
+            assert_eq!(rows[1].get::<String, _>("id"), format!("pty-l1:{g2}"));
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the reused id must open a second row: {} rows",
+            rows.len()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
 
     drop(host);
     served.close().await;
