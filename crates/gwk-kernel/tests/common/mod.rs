@@ -136,7 +136,19 @@ pub async fn refuse(
     key: &str,
     command: KernelCommand,
 ) -> (KernelErrorCode, String) {
-    match store.submit(&envelope(key, &command)).await {
+    refuse_as(store, key, actor("kernel"), command).await
+}
+
+/// Submit as a specific envelope actor and require a refusal. The actor is the
+/// subject of some refusals rather than a detail of them — authority
+/// administration is refused on actor kind alone.
+pub async fn refuse_as(
+    store: &PgEventStore,
+    key: &str,
+    actor: Actor,
+    command: KernelCommand,
+) -> (KernelErrorCode, String) {
+    match store.submit(&envelope_as(key, actor, &command)).await {
         KernelResult::Error { code, message, .. } => (code, message),
         other => panic!("{key}: expected a refusal, got {other:?}"),
     }
