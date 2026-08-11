@@ -1276,6 +1276,22 @@ pub fn district_region(area: Rect, input: &FrameInput, district_id: &DistrictId)
     None
 }
 
+/// The style a district heading paints with. The focused district carries
+/// the ratified `focus` SIGNAL token patched over the bold base — accent
+/// color at the color tiers, reverse video at Ansi16/Mono, the one attribute
+/// every tier can express — so j/k has visible feedback at every density
+/// rung instead of only steering which district survives a collapse.
+fn heading_style(is_focused: bool, tier: ColorTier) -> Style {
+    let base = Style::default().add_modifier(Modifier::BOLD);
+    if !is_focused {
+        return base;
+    }
+    gwk_theme::SIGNAL
+        .iter()
+        .find(|token| token.name == "focus")
+        .map_or(base, |token| base.patch(theme::token_style(token, tier)))
+}
+
 fn render_paging_frame(
     area: Rect,
     buf: &mut Buffer,
@@ -1318,7 +1334,13 @@ fn render_paging_frame(
             x: 0,
             y,
             text: district_heading(district, input, area.width),
-            style: Style::default().add_modifier(Modifier::BOLD),
+            style: heading_style(
+                input
+                    .focus
+                    .as_ref()
+                    .is_some_and(|focus| focus.district == district.id),
+                context.tier,
+            ),
             agent_pair: false,
         });
         let page = agent_page(district, area.width, context.pages.agent_page(&district.id));
@@ -1598,7 +1620,13 @@ fn render_frame(
             x: 0,
             y,
             text: district_heading(district, input, area.width),
-            style: Style::default().add_modifier(Modifier::BOLD),
+            style: heading_style(
+                input
+                    .focus
+                    .as_ref()
+                    .is_some_and(|focus| focus.district == district.id),
+                context.tier,
+            ),
             agent_pair: false,
         });
         let mut station_x = 0u16;
