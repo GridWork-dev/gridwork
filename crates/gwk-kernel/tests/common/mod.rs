@@ -114,7 +114,17 @@ pub fn envelope(key: &str, command: &KernelCommand) -> CommandEnvelope {
 /// Submit and require success. The key is the caller's, so every case names its
 /// own — reusing one is exactly what this kernel is supposed to refuse.
 pub async fn apply(store: &PgEventStore, key: &str, command: KernelCommand) -> Vec<EventEnvelope> {
-    match store.submit(&envelope(key, &command)).await {
+    apply_as(store, key, actor("kernel"), command).await
+}
+
+/// Submit as a specific envelope actor and require success.
+pub async fn apply_as(
+    store: &PgEventStore,
+    key: &str,
+    actor: Actor,
+    command: KernelCommand,
+) -> Vec<EventEnvelope> {
+    match store.submit(&envelope_as(key, actor, &command)).await {
         KernelResult::CommandApplied { events, .. } => events,
         other => panic!("{key}: expected CommandApplied, got {other:?}"),
     }
@@ -810,6 +820,7 @@ pub async fn populate(store: &PgEventStore) {
         KernelCommand::OpenPtySession {
             pty_session_id: PtySessionId::new("pty-1"),
             generation: PtySessionGeneration::new("gen-1"),
+            engine_session_id: Some(EngineSessionId::new("s-1")),
             title: Some("the parity fixture session".to_owned()),
         },
     )

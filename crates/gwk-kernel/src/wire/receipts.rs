@@ -57,6 +57,7 @@ pub(crate) async fn opened(
     let command = KernelCommand::OpenPtySession {
         pty_session_id: lifetime(id, generation),
         generation: generation.clone(),
+        engine_session_id: None,
         title: None,
     };
     // A stale answer here means a row for this exact lifetime already exists

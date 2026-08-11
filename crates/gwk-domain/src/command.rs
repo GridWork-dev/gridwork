@@ -540,6 +540,12 @@ pub enum KernelCommand {
     OpenPtySession {
         pty_session_id: PtySessionId,
         generation: PtySessionGeneration,
+        /// Optional parent execution. The PTY lifetime owns the join because
+        /// engine sessions may be headless and may outlive several PTY
+        /// generations; opening a new terminal must not rewrite its parent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[specta(optional)]
+        engine_session_id: Option<EngineSessionId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[specta(optional)]
         title: Option<String>,

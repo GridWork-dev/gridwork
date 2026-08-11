@@ -22,14 +22,15 @@ use gwk_domain::entity::{
 };
 use gwk_domain::envelope::{Actor, CommandEnvelope, EventEnvelope, Origin, PayloadRef};
 use gwk_domain::frame::{
-    CellColor, CellStyle, CellUnderline, PtyAnsiSlot, PtyCellUpdate, PtyDelta, PtyFrame, PtyRun,
+    CellColor, CellStyle, CellUnderline, PtyAnsiSlot, PtyCellUpdate, PtyCursor, PtyDelta, PtyFrame,
+    PtyRun,
 };
 use gwk_domain::fsm::{AttemptState, CommandState, MessageState, Outcome, TaskState};
 use gwk_domain::ids::{
     AggregateId, AttemptId, BlobUploadId, ByteCount, CommandId, CorrelationId, CostMicros,
-    EngineId, EventCount, EventId, IdempotencyKey, LeaseId, MessageId, ProjectId, PtyFrameSeq,
-    PtySessionGeneration, PtySessionId, RequestId, Seq, TaskId, Timestamp, WorkflowRunId,
-    WorkspaceNodeId,
+    EngineId, EngineSessionId, EventCount, EventId, IdempotencyKey, LeaseId, MessageId, ProjectId,
+    PtyFrameSeq, PtySessionGeneration, PtySessionId, RequestId, Seq, TaskId, Timestamp,
+    WorkflowRunId, WorkspaceNodeId,
 };
 use gwk_domain::inherited::{BudgetCursor, OrchestratorCheckpoint, PendingApproval};
 use gwk_domain::protocol::{
@@ -334,6 +335,7 @@ fn golden_pty_session() -> PtySession {
         version: 5,
         state: "closed".to_owned(),
         generation: PtySessionGeneration::new("gen-0001"),
+        engine_session_id: Some(EngineSessionId::new("session-0001")),
         attach_count: 3,
         detach_count: 3,
         title: Some("the daily driver".to_owned()),
@@ -551,6 +553,7 @@ fn golden_pty_frame() -> PtyFrame {
                 },
             ],
         ],
+        cursor: Some(PtyCursor { row: 1, col: 1 }),
     }
 }
 

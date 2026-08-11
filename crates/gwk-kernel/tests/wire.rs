@@ -1315,7 +1315,7 @@ fn pty_cell(glyph: &str) -> gwk_domain::frame::StyledCell {
 }
 
 fn pty_frame(rows: usize, cols: usize) -> gwk_domain::frame::PtyFrame {
-    gwk_domain::frame::PtyFrame::from_cells(&vec![vec![pty_cell(" "); cols]; rows])
+    gwk_domain::frame::PtyFrame::from_cells(&vec![vec![pty_cell(" "); cols]; rows], None)
 }
 
 async fn submit_kernel_command(

@@ -499,9 +499,16 @@ CREATE TABLE gwk.gate (
   verdict       text NOT NULL DEFAULT 'pending'
                   CHECK (verdict IN ('pending', 'pass', 'fail', 'partial')),
   chosen_option text,
+  -- The envelope actor that made the current decision. NULL while pending;
+  -- replaced atomically with verdict/chosen_option on every re-decision.
+  decided_by    jsonb,
   evidence_ref  text,
   created_at    timestamptz NOT NULL DEFAULT now(),
-  updated_at    timestamptz NOT NULL DEFAULT now()
+  updated_at    timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT gate_decision_actor_matches_verdict CHECK (
+    (verdict = 'pending' AND decided_by IS NULL)
+    OR (verdict <> 'pending' AND decided_by IS NOT NULL)
+  )
 );
 
 CREATE TABLE gwk.authority_grant (
@@ -812,6 +819,9 @@ CREATE TABLE gwk.pty_session (
   version      bigint NOT NULL DEFAULT 1 CHECK (version BETWEEN 1 AND 4294967295),
   state        text NOT NULL DEFAULT 'running' CHECK (state IN ('running', 'closed')),
   generation   text NOT NULL,
+  -- Child-side join: an engine session may be headless or own successive PTY
+  -- generations, so opening a terminal never rewrites the parent row.
+  engine_session_id text REFERENCES gwk.engine_session(id),
   attach_count bigint NOT NULL DEFAULT 0 CHECK (attach_count >= 0),
   detach_count bigint NOT NULL DEFAULT 0 CHECK (detach_count >= 0),
   title        text,
@@ -1001,4 +1011,4 @@ COMMIT;
 // unwrapped 64-hex line lands past 100 columns — the generator and
 // rustfmt would then fight, showing up as permanent contract drift.
 pub const CONTRACT_SQL_SHA256: &str =
-    "aba2f647bc7bb447e7b53307196f63df0bc718d479ec4693f6dd34ec9bf7b545";
+    "7d80f97c8021eb52015f7effce2746912a3e313e80476f561defd797a1e57d55";

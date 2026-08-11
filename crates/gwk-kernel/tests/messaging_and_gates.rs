@@ -12,8 +12,8 @@
 mod common;
 
 use common::{
-    actor, apply, drop_database, envelope, event_count, fresh_store, maintenance_pool, refuse,
-    state_row,
+    actor, apply, apply_as, drop_database, envelope, event_count, fresh_store, maintenance_pool,
+    refuse, state_row,
 };
 use gwk_domain::command::KernelCommand;
 use gwk_domain::fsm::{CommandState, GateVerdict, MessageState, Outcome};
@@ -319,12 +319,15 @@ async fn a_gate_is_decided_by_verdict_under_a_version_cas() {
         .await,
         ("pending".to_owned(), 1)
     );
-    let (question, options): (Option<String>, Option<serde_json::Value>) =
-        sqlx::query_as("SELECT question, options FROM gwk.gate WHERE id = $1")
-            .bind("g-1")
-            .fetch_one(store.pool())
-            .await
-            .expect("gate prompt columns");
+    let (question, options, decided_by): (
+        Option<String>,
+        Option<serde_json::Value>,
+        Option<serde_json::Value>,
+    ) = sqlx::query_as("SELECT question, options, decided_by FROM gwk.gate WHERE id = $1")
+        .bind("g-1")
+        .fetch_one(store.pool())
+        .await
+        .expect("gate prompt columns");
     assert_eq!(
         question.as_deref(),
         Some("Run `cargo test` in the worktree?")
@@ -333,6 +336,7 @@ async fn a_gate_is_decided_by_verdict_under_a_version_cas() {
         options,
         Some(serde_json::json!(["allow", "allow-always", "deny"]))
     );
+    assert_eq!(decided_by, None, "a pending gate has no deciding actor");
 
     // A stale CAS is refused with the number a retrier needs.
     let (code, text) = refuse(
@@ -349,9 +353,10 @@ async fn a_gate_is_decided_by_verdict_under_a_version_cas() {
     .await;
     assert_eq!(code, KernelErrorCode::StaleVersion, "{text}");
 
-    apply(
+    apply_as(
         &store,
         "fail",
+        actor("operator"),
         KernelCommand::DecideGate {
             gate_id: GateId::new("g-1"),
             expected_version: 1,
@@ -366,9 +371,10 @@ async fn a_gate_is_decided_by_verdict_under_a_version_cas() {
     // reference coalesces — a second decision naming none does not erase it —
     // but the chosen option REPLACES, like the verdict beside it: a stale
     // choice under a fresh verdict would misreport what the relay answered.
-    apply(
+    apply_as(
         &store,
         "pass",
+        actor("orchestrator"),
         KernelCommand::DecideGate {
             gate_id: GateId::new("g-1"),
             expected_version: 2,
@@ -379,7 +385,8 @@ async fn a_gate_is_decided_by_verdict_under_a_version_cas() {
     )
     .await;
     let row = sqlx::query(
-        "SELECT verdict, chosen_option, evidence_ref, version FROM gwk.gate WHERE id = $1",
+        "SELECT verdict, chosen_option, decided_by, evidence_ref, version \
+         FROM gwk.gate WHERE id = $1",
     )
     .bind("g-1")
     .fetch_one(store.pool())
@@ -389,16 +396,50 @@ async fn a_gate_is_decided_by_verdict_under_a_version_cas() {
         (
             row.get::<String, _>("verdict"),
             row.get::<Option<String>, _>("chosen_option"),
+            row.get::<Option<serde_json::Value>, _>("decided_by"),
             row.get::<Option<String>, _>("evidence_ref"),
             row.get::<i64, _>("version"),
         ),
         (
             "pass".to_owned(),
             Some("allow".to_owned()),
+            Some(serde_json::json!({ "kind": "orchestrator" })),
             Some("ev-1".to_owned()),
             3
         )
     );
+
+    apply_as(
+        &store,
+        "pending-again",
+        actor("operator"),
+        KernelCommand::DecideGate {
+            gate_id: GateId::new("g-1"),
+            expected_version: 3,
+            verdict: GateVerdict::Pending,
+            chosen_option: None,
+            evidence_ref: None,
+        },
+    )
+    .await;
+    let row = sqlx::query(
+        "SELECT verdict, decided_by, evidence_ref, version FROM gwk.gate WHERE id = $1",
+    )
+    .bind("g-1")
+    .fetch_one(store.pool())
+    .await
+    .expect("pending gate row");
+    assert_eq!(row.get::<String, _>("verdict"), "pending");
+    assert_eq!(
+        row.get::<Option<serde_json::Value>, _>("decided_by"),
+        None,
+        "a gate returned to pending has no current deciding actor"
+    );
+    assert_eq!(
+        row.get::<Option<String>, _>("evidence_ref").as_deref(),
+        Some("ev-1")
+    );
+    assert_eq!(row.get::<i64, _>("version"), 4);
 
     drop_database(&maintenance, &name).await;
 }

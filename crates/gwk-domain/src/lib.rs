@@ -43,8 +43,8 @@ pub use envelope::{
     Origin, PayloadRef, UnknownSchemaVersion, accept_schema_version,
 };
 pub use frame::{
-    CellColor, CellStyle, CellUnderline, PtyAnsiSlot, PtyCellUpdate, PtyDelta, PtyFrame, PtyRun,
-    StyleInterner, StyledCell,
+    CellColor, CellStyle, CellUnderline, PtyAnsiSlot, PtyCellUpdate, PtyCursor, PtyDelta, PtyFrame,
+    PtyRun, StyleInterner, StyledCell,
 };
 pub use fsm::{
     AttemptState, CommandState, GateVerdict, LeaseMode, LeaseState, MessageState, Outcome,

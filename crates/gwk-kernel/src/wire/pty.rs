@@ -242,6 +242,9 @@ struct Session {
     /// The mirror snapshots are answered from. Rectangular by construction:
     /// a publish that would break that is refused before anything changes.
     cells: Vec<Vec<StyledCell>>,
+    /// Last cursor carried by a full snapshot. Resizes clear it because the
+    /// current delta contract carries no cursor-only movement.
+    cursor: Option<gwk_domain::frame::PtyCursor>,
     retained: VecDeque<(PtyBatch, usize)>,
     retained_bytes: usize,
     /// The highest seq ever evicted from `retained` — the horizon a reattach
@@ -462,6 +465,7 @@ impl PtyHub {
         frame: PtyFrame,
     ) -> Result<Option<PtySessionGeneration>, PtyRefusal> {
         let (rows, cols, cells) = strict_frame(&frame)?;
+        let cursor = frame.cursor;
         let bytes = measured(&frame)?;
         let mut sessions = self.lock();
         match sessions.get_mut(id) {
@@ -483,6 +487,7 @@ impl PtyHub {
                         generation,
                         seq,
                         cells,
+                        cursor,
                         retained: VecDeque::new(),
                         retained_bytes: 0,
                         // The claim's whole history is evicted by definition:
@@ -548,6 +553,7 @@ impl PtyHub {
                     }
                 }
                 session.cells = cells;
+                session.cursor = cursor;
                 session.seq = seq;
                 if advanced {
                     // The head moved without deltas covering the distance.
@@ -655,6 +661,7 @@ impl PtyHub {
             match delta {
                 PtyDelta::Resized { rows, cols } => {
                     session.cells = vec![vec![blank(); usize::from(*cols)]; usize::from(*rows)];
+                    session.cursor = None;
                 }
                 PtyDelta::CellsChanged { styles, updates } => {
                     // Resolve each update through the batch's own table and
@@ -997,7 +1004,7 @@ impl PtyHub {
         })?;
         // A fresh first-appearance-order table per answer: the mirror holds
         // no persistent index space, so serving is where interning happens.
-        let frame = PtyFrame::from_cells(&session.cells);
+        let frame = PtyFrame::from_cells(&session.cells, session.cursor);
         let bytes = serde_json::to_vec(&frame)
             .map_err(|e| {
                 PtyRefusal::new(KernelErrorCode::Storage, format!("measure a snapshot: {e}"))
@@ -1420,6 +1427,17 @@ fn strict_frame(frame: &PtyFrame) -> Result<(u16, u16, Vec<Vec<StyledCell>>), Pt
         }
     }
     let cols = width.unwrap_or(0) as u16;
+    if let Some(cursor) = frame.cursor
+        && (cursor.row >= rows || cursor.col >= cols)
+    {
+        return Err(PtyRefusal::new(
+            KernelErrorCode::Validation,
+            format!(
+                "a pty cursor at ({}, {}) is outside the {rows}x{cols} grid",
+                cursor.row, cursor.col
+            ),
+        ));
+    }
     // Everything the expansion checks was just refused typed, so this arm is
     // a defensive impossibility, not a second decoder.
     let cells = frame.cells().ok_or_else(|| {
@@ -1588,7 +1606,10 @@ mod tests {
     }
 
     fn frame(rows: u16, cols: u16) -> PtyFrame {
-        PtyFrame::from_cells(&vec![vec![blank(); usize::from(cols)]; usize::from(rows)])
+        PtyFrame::from_cells(
+            &vec![vec![blank(); usize::from(cols)]; usize::from(rows)],
+            None,
+        )
     }
 
     fn update(row: u16, col: u16, glyph: &str) -> PtyCellUpdate {
@@ -1955,6 +1976,7 @@ mod tests {
         let tall = PtyFrame {
             styles: Vec::new(),
             rows: vec![Vec::new(); usize::from(u16::MAX) + 1],
+            cursor: None,
         };
         assert_eq!(
             hub.publish_snapshot(host, &id("s"), None, tall)
@@ -1972,10 +1994,49 @@ mod tests {
                 glyph: " ".to_owned(),
                 count: u32::MAX,
             }]],
+            cursor: None,
         };
         assert_eq!(
             hub.publish_snapshot(host, &id("s"), None, wide)
                 .expect_err("a row past u16")
+                .code,
+            KernelErrorCode::Validation
+        );
+    }
+
+    #[test]
+    fn snapshots_preserve_valid_cursors_refuse_invalid_ones_and_resize_clears_them() {
+        let hub = PtyHub::default();
+        let host = hub.connection();
+        let mut seeded = frame(2, 4);
+        seeded.cursor = Some(gwk_domain::frame::PtyCursor { row: 1, col: 3 });
+        hub.publish_snapshot(host, &id("s"), Some(0), seeded)
+            .expect("valid cursor");
+        let (_, _, snapshot) = hub.snapshot(&id("s")).expect("snapshot");
+        assert_eq!(
+            snapshot.cursor,
+            Some(gwk_domain::frame::PtyCursor { row: 1, col: 3 })
+        );
+
+        hub.publish_deltas(
+            host,
+            &id("s"),
+            1,
+            vec![PtyDelta::Resized { rows: 3, cols: 5 }],
+        )
+        .expect("resize");
+        let (_, _, resized) = hub.snapshot(&id("s")).expect("resized snapshot");
+        assert_eq!(
+            resized.cursor, None,
+            "a resize invalidates the snapshot cursor"
+        );
+
+        let other = hub.connection();
+        let mut invalid = frame(2, 4);
+        invalid.cursor = Some(gwk_domain::frame::PtyCursor { row: 2, col: 0 });
+        assert_eq!(
+            hub.publish_snapshot(other, &id("bad"), None, invalid)
+                .expect_err("cursor outside the grid")
                 .code,
             KernelErrorCode::Validation
         );
@@ -1991,6 +2052,7 @@ mod tests {
                 style: 1,
                 glyphs: vec!["x".to_owned()],
             }]],
+            cursor: None,
         };
         assert_eq!(
             hub.publish_snapshot(host, &id("s"), None, dangling)
@@ -2022,6 +2084,7 @@ mod tests {
                 glyph: " ".to_owned(),
                 count: 2,
             }]],
+            cursor: None,
         };
         assert_eq!(
             hub.publish_snapshot(host, &id("s"), None, twice)
@@ -2071,6 +2134,7 @@ mod tests {
                         count: 2,
                     },
                 ]],
+                cursor: None,
             };
             assert_eq!(
                 hub.publish_snapshot(host, &id("s"), None, zero)
@@ -2097,6 +2161,7 @@ mod tests {
                     count: 1,
                 },
             ]],
+            cursor: None,
         };
         hub.publish_snapshot(host, &id("s"), None, non_maximal)
             .expect("non-maximal runs are tolerated");
@@ -2612,6 +2677,7 @@ mod tests {
                 style: 0,
                 glyphs: vec!["x".repeat(PUBLISH_BYTE_BUDGET + 1)],
             }]],
+            cursor: None,
         };
         assert_eq!(
             hub.publish_snapshot(host, &id("s"), None, big)

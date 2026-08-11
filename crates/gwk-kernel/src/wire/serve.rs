@@ -1824,26 +1824,29 @@ mod tests {
             host,
             &session_id,
             Some(0),
-            gwk_domain::frame::PtyFrame::from_cells(&[vec![
-                gwk_domain::frame::StyledCell {
-                    glyph: " ".to_owned(),
-                    style: gwk_domain::frame::CellStyle {
-                        bold: false,
-                        dim: false,
-                        italic: false,
-                        blink: false,
-                        inverse: false,
-                        invisible: false,
-                        strikethrough: false,
-                        overline: false,
-                        underline: None,
-                        fg: None,
-                        bg: None,
-                        underline_color: None,
-                    },
-                };
-                1
-            ]]),
+            gwk_domain::frame::PtyFrame::from_cells(
+                &[vec![
+                    gwk_domain::frame::StyledCell {
+                        glyph: " ".to_owned(),
+                        style: gwk_domain::frame::CellStyle {
+                            bold: false,
+                            dim: false,
+                            italic: false,
+                            blink: false,
+                            inverse: false,
+                            invisible: false,
+                            strikethrough: false,
+                            overline: false,
+                            underline: None,
+                            fg: None,
+                            bg: None,
+                            underline_color: None,
+                        },
+                    };
+                    1
+                ]],
+                None,
+            ),
         )
         .expect("seed render state");
         hub.publish_raw_snapshot(host, &session_id, Some(0), 1, 1, vec![b's'; 4_096])

@@ -97,6 +97,15 @@ const _helloShape: B.ClientControl_Serialize = {
 const _batchShape: Pick<Extract<B.ServerControl_Serialize, { type: "event_batch" }>, "cursor"> = {
   cursor: "9007199254740993",
 };
+const _gateActorShape: Pick<B.Gate_Serialize, "decided_by"> = {
+  decided_by: { kind: "operator" },
+};
+const _openPtyShape: Extract<B.KernelCommand_Serialize, { type: "open_pty_session" }> = {
+  type: "open_pty_session",
+  pty_session_id: "pty-1",
+  generation: "gen-1",
+  engine_session_id: "session-1",
+};
 
 test("event-envelope-full: decimal-string counters, ref key, typed use", async () => {
   const raw = await golden("event-envelope-full.json");
@@ -214,6 +223,7 @@ test("pty session: lifecycle counters and a terminal close that keeps the row", 
   // The generation names one host lifetime — distinct generations are how
   // the S8 receipt counts host restarts.
   expect(session.generation).toBe("gen-0001");
+  expect(session.engine_session_id).toBe("session-0001");
   expect(session.attach_count).toBe(3);
   expect(session.detach_count).toBe(3);
   expect(session.closed_at).toBe("2026-08-09T18:00:00Z");
@@ -589,9 +599,13 @@ test("server control: refusals are values, cursors survive a disconnect", async 
   if (!isRecord(frame)) throw new Error("pty frame missing");
   const styles = frame["styles"];
   const rows = frame["rows"];
+  const cursor = frame["cursor"];
   if (!Array.isArray(styles) || !Array.isArray(rows)) {
     throw new Error("interned frame halves missing");
   }
+  if (!isRecord(cursor)) throw new Error("pty cursor missing");
+  expect(cursor["row"]).toBe(1);
+  expect(cursor["col"]).toBe(1);
   // Every run names its style by index into the frame's own table — no index
   // space outlives the message.
   for (const row of rows) {
