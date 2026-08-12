@@ -59,10 +59,13 @@ fn gw_args(args: &[&str], env: &[(&str, &str)]) -> Output {
 
 #[cfg(target_os = "linux")]
 fn gw_tty(socket: &Path, args: &[&str]) -> Output {
+    // script's `-- <command> <args>` form needs util-linux 2.41+, and even
+    // there the argv is re-joined through `sh -c`; `-c` before the typescript
+    // file is the one spelling every version since 2.39 parses identically.
+    // The args here are fixed test literals — only the binary path is quoted.
+    let command = format!("'{}' {}", env!("CARGO_BIN_EXE_gw"), args.join(" "));
     Command::new("script")
-        .args(["-q", "-e", "-E", "never", "/dev/null", "--"])
-        .arg(env!("CARGO_BIN_EXE_gw"))
-        .args(args)
+        .args(["-q", "-e", "-c", &command, "/dev/null"])
         .env("GWK_SOCKET_PATH", socket)
         .output()
         .expect("run gw under a pseudo-terminal")
