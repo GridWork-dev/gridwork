@@ -1,6 +1,6 @@
  3 tasks  2 running
  ⊞ harden the auth path  working                                                           10:12
-   ⊚ codex  running  (implementer)                                                         10:12
+>  ⊚ codex  running  (implementer)                                                         10:12
      ∘ recon  completed  (subagent)
        ∘ lint  registered  (subagent)
    ⊚ claude  failed                                                                        09:48

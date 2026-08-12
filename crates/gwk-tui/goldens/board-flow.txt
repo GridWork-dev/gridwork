@@ -2,7 +2,7 @@
  flow c-42
    ⋄ orchestrator -> researcher  brief  delivered                  09:31
      ⋄ researcher -> orchestrator  findings  applied               09:58
- ⋄ watchdog -> orchestrator  alert  dead letter -- nobody listening
+ ⋄ watchdog -> orchestrator  alert  dead letter -- nobody listening    +
  ⋄ orchestrator -> reviewer  review-request  accepted              10:07
 
 

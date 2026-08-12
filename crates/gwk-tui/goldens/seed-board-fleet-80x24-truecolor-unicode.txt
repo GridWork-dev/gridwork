@@ -6,7 +6,7 @@
    claude  ended  started 09:40  attempt at-audit-fail             es-audit-fail
    codex  no end recorded  started 09:40  attempt at-pty-impl        es-pty-impl
    claude  no end recorded  started 09:40  attempt at-tui-impl       es-tui-impl
-   claude  no end recorded  started 09:40  attempt at-flaky-cancel
+   claude  no end recorded  started 09:40  attempt at-flaky-cancel             +
  worktrees
    gridwork  feat/pty-lifecycle  held  dirty  unpushed                    wt-pty
    gridwork  feat/7p-tui-snapshot-harness  held  unpushed                 wt-tui
@@ -14,7 +14,7 @@
  leases
    exclusive  held  holder gw-implementer  scope worktree:pty             ls-pty
    exclusive  held  holder gw-rust-pro  scope worktree:tui                ls-tui
-   exclusive  expired  holder gw-devrel-writer  scope worktree:release
+   exclusive  expired  holder gw-devrel-writer  scope worktree:release         +
 
 
 

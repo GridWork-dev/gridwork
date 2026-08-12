@@ -8,7 +8,7 @@ use gwk_theme::marks::GlyphSet;
 use gwk_theme::tier::ColorTier;
 use gwk_tui::config::{
     ConfigError, ConfigPath, ConfigRepository, ConfigTarget, EditRoute, ValidatedForm, render,
-    target_order,
+    render_form, target_order,
 };
 use gwk_tui::input::HitMap;
 use ratatui::buffer::Buffer;
@@ -219,6 +219,94 @@ fn config_form_schema_refuses_unknown_and_wrong_typed_fields() {
 }
 
 #[test]
+fn config_generated_form_holds_the_lock_and_commits_only_incumbent_fields() {
+    let temp = fixture();
+    let path = ConfigPath::Capabilities;
+    std::fs::write(
+        temp.path().join(path.as_str()),
+        "# routing policy\n[code_write]\n# keep this explanation\ndefault_agent = \"gw-rust-pro\"\nlane = \"haiku\" # bounded lane\n",
+    )
+    .expect("seed nested form config");
+    git(temp.path(), &["add", "--", path.as_str()]);
+    git(
+        temp.path(),
+        &[
+            "commit",
+            "-q",
+            "-m",
+            "seed form config",
+            "--",
+            path.as_str(),
+        ],
+    );
+    let repository = ConfigRepository::open(temp.path()).expect("open config repository");
+    let mut form = repository
+        .generated_form(path)
+        .expect("open generated form");
+
+    assert_eq!(form.fields().len(), 2);
+    assert_eq!(form.fields()[0].path(), "code_write.default_agent");
+    assert_eq!(form.fields()[0].kind(), "string");
+    assert!(matches!(
+        repository.form_schema(path),
+        Err(ConfigError::EditInProgress)
+    ));
+
+    form.select(1);
+    form.replace_selected("sonnet");
+    form.set_commit_message("config: route bounded writes to sonnet");
+    let area = Rect::new(0, 0, 120, 30);
+    let mut buffer = Buffer::empty(area);
+    render_form(area, &mut buffer, &form, ColorTier::Mono);
+    let rendered = buffer
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(rendered.contains("code_write.lane"), "{rendered}");
+    assert!(rendered.contains("changed"), "{rendered}");
+    assert!(rendered.contains("exclusive lock is held"), "{rendered}");
+
+    let (validated, message) = form.finish().expect("validate generated form");
+    repository
+        .commit_form(validated, &message, EvidenceId::new("ev-generated-form"))
+        .expect("commit generated form");
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join(path.as_str())).expect("read committed form"),
+        "# routing policy\n[code_write]\n# keep this explanation\ndefault_agent = \"gw-rust-pro\"\nlane = \"sonnet\" # bounded lane\n"
+    );
+}
+
+#[test]
+fn config_generated_form_refuses_a_value_that_changes_the_incumbent_type() {
+    let temp = fixture();
+    let path = ConfigPath::Capabilities;
+    std::fs::write(temp.path().join(path.as_str()), "count = 1\n")
+        .expect("seed numeric form config");
+    git(temp.path(), &["add", "--", path.as_str()]);
+    git(
+        temp.path(),
+        &[
+            "commit",
+            "-q",
+            "-m",
+            "seed numeric config",
+            "--",
+            path.as_str(),
+        ],
+    );
+    let repository = ConfigRepository::open(temp.path()).expect("open config repository");
+    let mut form = repository
+        .generated_form(path)
+        .expect("open generated form");
+    form.replace_selected("true");
+    form.set_commit_message("config: invalid type change");
+
+    let error = form.finish().expect_err("string field must stay a string");
+    assert!(matches!(error, ConfigError::InvalidFormValue { .. }));
+}
+
+#[test]
 fn config_empty_array_schema_does_not_admit_an_untyped_first_item() {
     let temp = fixture();
     let path = ConfigPath::Capabilities;
@@ -243,6 +331,57 @@ fn config_empty_array_schema_does_not_admit_an_untyped_first_item() {
         .validate("items = [1]\n")
         .expect_err("an empty array carries no element schema");
     assert!(matches!(error, ConfigError::SchemaMismatch { .. }));
+}
+
+#[test]
+fn config_nonempty_array_schema_keeps_its_exact_length() {
+    let temp = fixture();
+    let path = ConfigPath::Capabilities;
+    std::fs::write(temp.path().join(path.as_str()), "items = [1]\n").expect("seed array config");
+    git(temp.path(), &["add", "--", path.as_str()]);
+    git(
+        temp.path(),
+        &["commit", "-q", "-m", "seed array", "--", path.as_str()],
+    );
+    let repository = ConfigRepository::open(temp.path()).expect("open config repository");
+    let schema = repository.form_schema(path).expect("build form schema");
+
+    let error = schema
+        .validate("items = [1, 2]\n")
+        .expect_err("a form cannot add array elements");
+    assert!(matches!(error, ConfigError::SchemaMismatch { .. }));
+}
+
+#[test]
+fn config_generated_form_refuses_a_noop_commit() {
+    let temp = fixture();
+    let repository = ConfigRepository::open(temp.path()).expect("open config repository");
+    let mut form = repository
+        .generated_form(ConfigPath::Capabilities)
+        .expect("open generated form");
+    form.set_commit_message("config: no value change");
+
+    let error = form
+        .finish()
+        .expect_err("a no-op form must not create a commit");
+    assert!(matches!(error, ConfigError::NoFormChanges { .. }));
+}
+
+#[test]
+fn config_array_of_tables_routes_to_editor_instead_of_rewriting_comments() {
+    let temp = fixture();
+    let path = ConfigPath::NamespaceScopes;
+    std::fs::write(
+        temp.path().join(path.as_str()),
+        "# retained\n[[rules]]\nname = \"one\"\n",
+    )
+    .expect("seed array-of-tables config");
+    let repository = ConfigRepository::open(temp.path()).expect("open config repository");
+
+    assert_eq!(
+        repository.edit_route(path).expect("inspect edit route"),
+        EditRoute::Editor
+    );
 }
 
 #[test]

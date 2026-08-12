@@ -15,9 +15,11 @@
 //! and lets `git commit` collect an operator-typed message. Neither process is
 //! reached through a shell.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions, TryLockError};
 use std::io::{self, Write as _};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
@@ -29,7 +31,6 @@ use gwk_theme::tier::ColorTier;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
-use unicode_width::UnicodeWidthStr;
 
 use crate::input::HitMap;
 use crate::theme;
@@ -97,6 +98,17 @@ pub enum EditRoute {
     Editor,
 }
 
+impl EditRoute {
+    /// The exact words the lens paints for this route; `/` filters match
+    /// against the same text the operator reads.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Form => "validated form",
+            Self::Editor => "$EDITOR + typed commit",
+        }
+    }
+}
+
 /// The exact TOML shape a generated form owns for one allowlisted file.
 ///
 /// The template carries every accepted key and its value kind. Validation
@@ -124,6 +136,200 @@ impl ConfigFormSchema {
             baseline_contents: self.baseline_contents.clone(),
             lock: self.lock,
         })
+    }
+}
+
+/// One editable leaf from the incumbent TOML document.
+///
+/// Paths and kinds are derived from the locked schema. The form never accepts
+/// a caller-provided field name, so it cannot offer an add/remove operation the
+/// validator would later reject.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigFormField {
+    segments: Vec<String>,
+    path: String,
+    kind: &'static str,
+    original: String,
+    value: String,
+}
+
+impl ConfigFormField {
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub const fn kind(&self) -> &'static str {
+        self.kind
+    }
+
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    pub fn changed(&self) -> bool {
+        self.value != self.original
+    }
+}
+
+/// A live generated-form session. Owning this value owns the repository's
+/// exclusive config-operation lock until cancel or commit.
+#[derive(Debug)]
+pub struct ConfigForm {
+    schema: ConfigFormSchema,
+    fields: Vec<ConfigFormField>,
+    selected: usize,
+    commit_message: String,
+    replace_on_type: bool,
+}
+
+impl ConfigForm {
+    fn new(schema: ConfigFormSchema) -> Result<Self, ConfigError> {
+        let mut fields = Vec::new();
+        collect_form_fields(&schema.template, &mut Vec::new(), &mut fields);
+        let spans = assignment_value_spans(schema.path, &schema.baseline_contents)?;
+        if let Some(field) = fields
+            .iter()
+            .find(|field| !spans.contains_key(&field.segments))
+        {
+            return Err(ConfigError::FormSourceMismatch {
+                path: schema.path,
+                field: field.path.clone(),
+            });
+        }
+        Ok(Self {
+            schema,
+            fields,
+            selected: 0,
+            commit_message: String::new(),
+            replace_on_type: true,
+        })
+    }
+
+    pub fn path(&self) -> ConfigPath {
+        self.schema.path
+    }
+
+    pub fn fields(&self) -> &[ConfigFormField] {
+        &self.fields
+    }
+
+    pub fn selected(&self) -> usize {
+        self.selected
+    }
+
+    pub fn commit_selected(&self) -> bool {
+        self.selected == self.fields.len()
+    }
+
+    pub fn commit_message(&self) -> &str {
+        &self.commit_message
+    }
+
+    pub fn select(&mut self, index: usize) {
+        self.selected = index.min(self.fields.len());
+        self.replace_on_type = true;
+    }
+
+    pub fn move_selection(&mut self, delta: i8) {
+        let count = self.fields.len() + 1;
+        self.selected = if delta < 0 {
+            self.selected.checked_sub(1).unwrap_or(count - 1)
+        } else {
+            (self.selected + 1) % count
+        };
+        self.replace_on_type = true;
+    }
+
+    pub fn replace_selected(&mut self, value: impl Into<String>) {
+        let value = value.into();
+        if let Some(field) = self.fields.get_mut(self.selected) {
+            field.value = value;
+        } else {
+            self.commit_message = value;
+        }
+        self.replace_on_type = false;
+    }
+
+    pub fn set_commit_message(&mut self, message: impl Into<String>) {
+        self.commit_message = message.into();
+    }
+
+    pub fn insert(&mut self, character: char) {
+        if self.replace_on_type {
+            self.replace_selected(String::new());
+        }
+        if let Some(field) = self.fields.get_mut(self.selected) {
+            field.value.push(character);
+        } else {
+            self.commit_message.push(character);
+        }
+    }
+
+    pub fn backspace(&mut self) {
+        if let Some(field) = self.fields.get_mut(self.selected) {
+            field.value.pop();
+        } else {
+            self.commit_message.pop();
+        }
+        self.replace_on_type = false;
+    }
+
+    pub fn toggle_boolean(&mut self) -> bool {
+        let Some(field) = self.fields.get_mut(self.selected) else {
+            return false;
+        };
+        if field.kind != "boolean" {
+            return false;
+        }
+        field.value = if field.value == "true" {
+            "false".to_owned()
+        } else {
+            "true".to_owned()
+        };
+        self.replace_on_type = false;
+        true
+    }
+
+    pub fn validate_current(&self) -> Result<(), ConfigError> {
+        validate_commit_message(&self.commit_message)?;
+        let serialized = self.serialized()?;
+        let value = parse_toml(self.schema.path, &serialized)?;
+        validate_shape(self.schema.path, "", &self.schema.template, &value)
+    }
+
+    pub fn finish(self) -> Result<(ValidatedForm, String), ConfigError> {
+        if !self.fields.iter().any(ConfigFormField::changed) {
+            return Err(ConfigError::NoFormChanges {
+                path: self.schema.path,
+            });
+        }
+        self.validate_current()?;
+        let serialized = self.serialized()?;
+        let message = self.commit_message;
+        self.schema
+            .validate(&serialized)
+            .map(|form| (form, message))
+    }
+
+    fn serialized(&self) -> Result<String, ConfigError> {
+        let spans = assignment_value_spans(self.schema.path, &self.schema.baseline_contents)?;
+        let mut replacements = Vec::new();
+        for field in self.fields.iter().filter(|field| field.changed()) {
+            let value = parse_form_value(self.schema.path, field)?;
+            let span = spans.get(&field.segments).cloned().ok_or_else(|| {
+                ConfigError::FormSourceMismatch {
+                    path: self.schema.path,
+                    field: field.path.clone(),
+                }
+            })?;
+            replacements.push((span, value.to_string()));
+        }
+        replacements.sort_by_key(|replacement| std::cmp::Reverse(replacement.0.start));
+        let mut serialized = self.schema.baseline_contents.clone();
+        for (span, value) in replacements {
+            serialized.replace_range(span, &value);
+        }
+        Ok(serialized)
     }
 }
 
@@ -204,6 +410,22 @@ pub enum ConfigError {
         expected: &'static str,
         actual: &'static str,
     },
+    #[error("config form value for {path} at {field} is not a valid {expected}")]
+    InvalidFormValue {
+        path: ConfigPath,
+        field: String,
+        expected: &'static str,
+    },
+    #[error("config form cannot safely address {path} at {field}; use $EDITOR")]
+    FormSourceMismatch { path: ConfigPath, field: String },
+    #[error("config form for {path} has no value changes")]
+    NoFormChanges { path: ConfigPath },
+    #[error("could not serialize config form for {path}: {source}")]
+    SerializeForm {
+        path: ConfigPath,
+        #[source]
+        source: toml::ser::Error,
+    },
     #[error("commit message must be 1..={limit} printable ASCII bytes")]
     InvalidCommitMessage { limit: usize },
     #[error("config path has uncommitted changes: {path}")]
@@ -266,10 +488,16 @@ impl ConfigRepository {
         let root = canonicalize("canonicalize git toplevel", Path::new(output.trim()))?;
         let git_dir = git_output_at(
             &root,
-            "discover git directory",
-            &["rev-parse", "--absolute-git-dir"],
+            "discover shared git directory",
+            &["rev-parse", "--git-common-dir"],
         )?;
-        let git_dir = canonicalize("canonicalize git directory", Path::new(git_dir.trim()))?;
+        let git_dir = Path::new(git_dir.trim());
+        let git_dir = if git_dir.is_absolute() {
+            git_dir.to_owned()
+        } else {
+            root.join(git_dir)
+        };
+        let git_dir = canonicalize("canonicalize shared git directory", &git_dir)?;
         Ok(Self { root, git_dir })
     }
 
@@ -308,6 +536,11 @@ impl ConfigRepository {
             baseline_contents,
             lock,
         })
+    }
+
+    /// Open the lock-backed generated form for one form-routed file.
+    pub fn generated_form(&self, path: ConfigPath) -> Result<ConfigForm, ConfigError> {
+        self.form_schema(path).and_then(ConfigForm::new)
     }
 
     /// Build the pure frame value from git, the files, and projected evidence.
@@ -618,7 +851,20 @@ fn route_for(path: ConfigPath, contents: &str) -> EditRoute {
         // An invalid incumbent needs the free-form repair path, not a form
         // whose schema assumes it can first decode the document.
         Err(_) => EditRoute::Editor,
-        Ok(_) => EditRoute::Form,
+        Ok(value) => {
+            let mut fields = Vec::new();
+            collect_form_fields(&value, &mut Vec::new(), &mut fields);
+            match assignment_value_spans(path, contents) {
+                Ok(spans)
+                    if fields
+                        .iter()
+                        .all(|field| spans.contains_key(&field.segments)) =>
+                {
+                    EditRoute::Form
+                }
+                Ok(_) | Err(_) => EditRoute::Editor,
+            }
+        }
     }
 }
 
@@ -708,23 +954,21 @@ fn validate_shape(
             Ok(())
         }
         (toml::Value::Array(expected), toml::Value::Array(actual)) => {
-            if expected.is_empty() && !actual.is_empty() {
+            if expected.len() != actual.len() {
                 return Err(ConfigError::SchemaMismatch {
                     path,
                     field: display_field(field).to_owned(),
-                    expected: "empty array",
-                    actual: "non-empty array",
+                    expected: "same-length array",
+                    actual: "different-length array",
                 });
             }
-            if let Some(item_schema) = expected.first() {
-                for (index, value) in actual.iter().enumerate() {
-                    validate_shape(
-                        path,
-                        &format!("{}[{index}]", display_field(field)),
-                        item_schema,
-                        value,
-                    )?;
-                }
+            for (index, (item_schema, value)) in expected.iter().zip(actual).enumerate() {
+                validate_shape(
+                    path,
+                    &format!("{}[{index}]", display_field(field)),
+                    item_schema,
+                    value,
+                )?;
             }
             Ok(())
         }
@@ -748,6 +992,310 @@ fn nested_field(parent: &str, name: &str) -> String {
 
 fn display_field(field: &str) -> &str {
     if field.is_empty() { "<root>" } else { field }
+}
+
+fn collect_form_fields(
+    value: &toml::Value,
+    path: &mut Vec<String>,
+    fields: &mut Vec<ConfigFormField>,
+) {
+    if let toml::Value::Table(table) = value {
+        for (name, value) in table {
+            path.push(name.clone());
+            collect_form_fields(value, path, fields);
+            path.pop();
+        }
+        return;
+    }
+
+    let rendered = match value {
+        toml::Value::String(value) => value.clone(),
+        _ => value.to_string(),
+    };
+    fields.push(ConfigFormField {
+        segments: path.clone(),
+        path: path.join("."),
+        kind: value_kind(value),
+        original: rendered.clone(),
+        value: rendered,
+    });
+}
+
+fn parse_form_value(path: ConfigPath, field: &ConfigFormField) -> Result<toml::Value, ConfigError> {
+    let invalid = || ConfigError::InvalidFormValue {
+        path,
+        field: field.path.clone(),
+        expected: field.kind,
+    };
+    match field.kind {
+        "string" => Ok(toml::Value::String(field.value.clone())),
+        "integer" => field
+            .value
+            .parse::<i64>()
+            .map(toml::Value::Integer)
+            .map_err(|_| invalid()),
+        "float" => field
+            .value
+            .parse::<f64>()
+            .map(toml::Value::Float)
+            .map_err(|_| invalid()),
+        "boolean" => field
+            .value
+            .parse::<bool>()
+            .map(toml::Value::Boolean)
+            .map_err(|_| invalid()),
+        "datetime" | "array" => {
+            let document = format!("value = {}\n", field.value);
+            parse_toml(path, &document)
+                .ok()
+                .and_then(|value| value.get("value").cloned())
+                .filter(|value| value_kind(value) == field.kind)
+                .ok_or_else(invalid)
+        }
+        _ => Err(invalid()),
+    }
+}
+
+fn assignment_value_spans(
+    path: ConfigPath,
+    contents: &str,
+) -> Result<BTreeMap<Vec<String>, Range<usize>>, ConfigError> {
+    let bytes = contents.as_bytes();
+    let mut spans = BTreeMap::new();
+    let mut table = Vec::new();
+    let mut index = 0usize;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            b' ' | b'\t' | b'\r' | b'\n' => {
+                index += 1;
+            }
+            b'#' => index = next_line(bytes, index),
+            b'[' => {
+                let array_table = bytes.get(index + 1) == Some(&b'[');
+                let open = if array_table { 2 } else { 1 };
+                let close = find_header_close(bytes, index + open, array_table)
+                    .ok_or_else(|| unsupported_form_source(path))?;
+                table = parse_key_path(path, contents[index + open..close].trim())?;
+                index = next_line(bytes, close + open);
+            }
+            _ => {
+                let equals = find_assignment_equals(bytes, index)
+                    .ok_or_else(|| unsupported_form_source(path))?;
+                let mut logical = table.clone();
+                logical.extend(parse_key_path(path, contents[index..equals].trim())?);
+                let mut value_start = equals + 1;
+                while matches!(bytes.get(value_start), Some(b' ' | b'\t')) {
+                    value_start += 1;
+                }
+                let (value_end, next) = find_value_end(bytes, value_start);
+                spans.insert(logical, value_start..value_end);
+                index = next;
+            }
+        }
+    }
+
+    Ok(spans)
+}
+
+fn unsupported_form_source(path: ConfigPath) -> ConfigError {
+    ConfigError::FormSourceMismatch {
+        path,
+        field: "<document>".to_owned(),
+    }
+}
+
+fn next_line(bytes: &[u8], index: usize) -> usize {
+    bytes[index..]
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .map_or(bytes.len(), |offset| index + offset + 1)
+}
+
+fn find_header_close(bytes: &[u8], mut index: usize, array_table: bool) -> Option<usize> {
+    let mut quote = None;
+    let mut escaped = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(delimiter) = quote {
+            if delimiter == b'"' && byte == b'\\' && !escaped {
+                escaped = true;
+            } else {
+                if byte == delimiter && !escaped {
+                    quote = None;
+                }
+                escaped = false;
+            }
+        } else {
+            match byte {
+                b'"' | b'\'' => quote = Some(byte),
+                b']' if !array_table || bytes.get(index + 1).is_some_and(|next| *next == b']') => {
+                    return Some(index);
+                }
+                b'\n' => return None,
+                _ => {}
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+fn find_assignment_equals(bytes: &[u8], mut index: usize) -> Option<usize> {
+    let mut quote = None;
+    let mut escaped = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(delimiter) = quote {
+            if delimiter == b'"' && byte == b'\\' && !escaped {
+                escaped = true;
+            } else {
+                if byte == delimiter && !escaped {
+                    quote = None;
+                }
+                escaped = false;
+            }
+        } else {
+            match byte {
+                b'"' | b'\'' => quote = Some(byte),
+                b'=' => return Some(index),
+                b'\n' | b'#' => return None,
+                _ => {}
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ValueQuote {
+    Basic,
+    Literal,
+    MultilineBasic,
+    MultilineLiteral,
+}
+
+fn find_value_end(bytes: &[u8], start: usize) -> (usize, usize) {
+    let mut index = start;
+    let mut square = 0usize;
+    let mut curly = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(mode) = quote {
+            match mode {
+                ValueQuote::Basic => {
+                    if byte == b'\\' && !escaped {
+                        escaped = true;
+                    } else {
+                        if byte == b'"' && !escaped {
+                            quote = None;
+                        }
+                        escaped = false;
+                    }
+                }
+                ValueQuote::Literal => {
+                    if byte == b'\'' {
+                        quote = None;
+                    }
+                }
+                ValueQuote::MultilineBasic => {
+                    if bytes.get(index..index + 3) == Some(b"\"\"\"") && !escaped {
+                        // TOML: up to two quotes adjacent to the closing
+                        // delimiter are content — the delimiter is the last
+                        // three of the run, so shift past the content quotes.
+                        let mut extra = 0;
+                        while extra < 2 && bytes.get(index + 3 + extra) == Some(&b'"') {
+                            extra += 1;
+                        }
+                        quote = None;
+                        index += 2 + extra;
+                    } else {
+                        escaped = byte == b'\\' && !escaped;
+                    }
+                }
+                ValueQuote::MultilineLiteral => {
+                    if bytes.get(index..index + 3) == Some(b"'''") {
+                        let mut extra = 0;
+                        while extra < 2 && bytes.get(index + 3 + extra) == Some(&b'\'') {
+                            extra += 1;
+                        }
+                        quote = None;
+                        index += 2 + extra;
+                    }
+                }
+            }
+            index += 1;
+            continue;
+        }
+
+        match byte {
+            b'"' if bytes.get(index..index + 3) == Some(b"\"\"\"") => {
+                quote = Some(ValueQuote::MultilineBasic);
+                index += 3;
+            }
+            b'\'' if bytes.get(index..index + 3) == Some(b"'''") => {
+                quote = Some(ValueQuote::MultilineLiteral);
+                index += 3;
+            }
+            b'"' => {
+                quote = Some(ValueQuote::Basic);
+                index += 1;
+            }
+            b'\'' => {
+                quote = Some(ValueQuote::Literal);
+                index += 1;
+            }
+            b'[' => {
+                square += 1;
+                index += 1;
+            }
+            b']' => {
+                square = square.saturating_sub(1);
+                index += 1;
+            }
+            b'{' => {
+                curly += 1;
+                index += 1;
+            }
+            b'}' => {
+                curly = curly.saturating_sub(1);
+                index += 1;
+            }
+            b'#' if square == 0 && curly == 0 => {
+                return (trim_value_end(bytes, start, index), next_line(bytes, index));
+            }
+            b'#' => index = next_line(bytes, index),
+            b'\n' if square == 0 && curly == 0 => {
+                return (trim_value_end(bytes, start, index), index + 1);
+            }
+            _ => index += 1,
+        }
+    }
+    (trim_value_end(bytes, start, bytes.len()), bytes.len())
+}
+
+fn trim_value_end(bytes: &[u8], start: usize, mut end: usize) -> usize {
+    while end > start && matches!(bytes[end - 1], b' ' | b'\t' | b'\r') {
+        end -= 1;
+    }
+    end
+}
+
+fn parse_key_path(path: ConfigPath, key: &str) -> Result<Vec<String>, ConfigError> {
+    let parsed = parse_toml(path, &format!("{key} = 0\n"))?;
+    let mut segments = Vec::new();
+    let mut value = &parsed;
+    while let toml::Value::Table(table) = value {
+        let Some((name, nested)) = table.iter().next() else {
+            break;
+        };
+        segments.push(name.clone());
+        value = nested;
+    }
+    Ok(segments)
 }
 
 fn value_kind(value: &toml::Value) -> &'static str {
@@ -1007,6 +1555,173 @@ fn is_revision(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+/// Paint the generated editor for one locked form session.
+pub fn render_form(area: Rect, buffer: &mut Buffer, form: &ConfigForm, tier: ColorTier) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let field_style = config_style("fg", tier);
+    let muted = config_style("muted", tier);
+    let focus = config_style("focus", tier).add_modifier(Modifier::BOLD);
+    let warning = config_style("warn", tier);
+
+    form_put(
+        buffer,
+        area,
+        1,
+        0,
+        "FORM",
+        field_style.add_modifier(Modifier::BOLD),
+    );
+    form_put(
+        buffer,
+        area,
+        8,
+        0,
+        &format!("{}   shape is fixed by the incumbent file", form.path()),
+        muted,
+    );
+    form_put(buffer, area, 2, 2, "FIELD", muted);
+    form_put(buffer, area, 34, 2, "TYPE", muted);
+    form_put(buffer, area, 44, 2, "VALUE", muted);
+
+    let capacity = usize::from(area.height.saturating_sub(12)).max(1);
+    let field_selected = form.selected().min(form.fields().len().saturating_sub(1));
+    let start = field_selected
+        .saturating_sub(capacity.saturating_sub(1))
+        .min(form.fields().len().saturating_sub(capacity));
+    let end = (start + capacity).min(form.fields().len());
+    let mut y = 3u16;
+    for (index, field) in form.fields()[start..end].iter().enumerate() {
+        let absolute = start + index;
+        let selected = !form.commit_selected() && form.selected() == absolute;
+        form_put(buffer, area, 0, y, if selected { ">" } else { " " }, focus);
+        form_put(buffer, area, 2, y, field.path(), field_style);
+        form_put(buffer, area, 34, y, field.kind(), muted);
+        form_put(
+            buffer,
+            area,
+            44,
+            y,
+            field.value(),
+            if selected { focus } else { field_style },
+        );
+        if selected {
+            // The painted value goes through safe_text, which expands
+            // non-admissible chars into multi-cell \u{HEX} escapes; the
+            // cursor rides the painted width, not the raw char count.
+            let painted = theme::safe_text(field.value(), area.width.saturating_sub(44) as usize);
+            form_put(
+                buffer,
+                area,
+                44u16.saturating_add(u16::try_from(painted.chars().count()).unwrap_or(u16::MAX)),
+                y,
+                "_",
+                focus,
+            );
+        }
+        if field.changed() {
+            form_put(
+                buffer,
+                area,
+                area.width.saturating_sub(16),
+                y,
+                "changed",
+                warning,
+            );
+        }
+        y = y.saturating_add(1);
+    }
+    if start > 0 || end < form.fields().len() {
+        // The ruled `+` grammar states real omitted counts — never "+0".
+        let more = form.fields().len() - end;
+        let window = if start == 0 {
+            format!("+{more} more")
+        } else if more == 0 {
+            format!("+{start} before")
+        } else {
+            format!("+{start} before  +{more} more")
+        };
+        form_put(buffer, area, 2, y, &window, muted);
+        y = y.saturating_add(1);
+    }
+
+    y = y.saturating_add(1);
+    form_put(
+        buffer,
+        area,
+        2,
+        y,
+        "no field can be added or removed -- the validator rejects shape changes",
+        muted,
+    );
+    y = y.saturating_add(2);
+    form_put(
+        buffer,
+        area,
+        0,
+        y,
+        if form.commit_selected() { ">" } else { " " },
+        focus,
+    );
+    form_put(
+        buffer,
+        area,
+        2,
+        y,
+        "COMMIT",
+        field_style.add_modifier(Modifier::BOLD),
+    );
+    y = y.saturating_add(1);
+    form_put(buffer, area, 2, y, form.commit_message(), field_style);
+    if form.commit_selected() {
+        let painted =
+            theme::safe_text(form.commit_message(), area.width.saturating_sub(2) as usize);
+        form_put(
+            buffer,
+            area,
+            2u16.saturating_add(u16::try_from(painted.chars().count()).unwrap_or(u16::MAX)),
+            y,
+            "_",
+            focus,
+        );
+    }
+    y = y.saturating_add(1);
+    form_put(
+        buffer,
+        area,
+        2,
+        y,
+        "one file, one commit, one config_change evidence record",
+        muted,
+    );
+    form_put(
+        buffer,
+        area,
+        1,
+        area.height.saturating_sub(1),
+        "tab field   enter commit   esc cancel   exclusive lock is held; concurrent edits are refused",
+        muted,
+    );
+}
+
+fn form_put(buffer: &mut Buffer, area: Rect, x: u16, y: u16, text: &str, paint: Style) {
+    if x >= area.width || y >= area.height {
+        return;
+    }
+    let width = area.width.saturating_sub(x) as usize;
+    let safe = theme::safe_text(text, width);
+    buffer.set_stringn(area.x + x, area.y + y, safe.as_ref(), width, paint);
+}
+
+fn config_style(name: &str, tier: ColorTier) -> Style {
+    let token = gwk_theme::SIGNAL
+        .iter()
+        .find(|token| token.name == name)
+        .expect("the SIGNAL token inventory is pinned");
+    theme::token_style(token, tier)
+}
+
 /// Every actionable target in stable keyboard order.
 pub fn target_order(state: &ConfigState) -> Vec<ConfigTarget> {
     state
@@ -1059,10 +1774,7 @@ fn rows(state: &ConfigState) -> Vec<Row> {
         rows.push(Row {
             binding: theme::binding("idle"),
             text: file.path.as_str().to_owned(),
-            right: Some(match file.route {
-                EditRoute::Form => "validated form",
-                EditRoute::Editor => "$EDITOR + typed commit",
-            }),
+            right: Some(file.route.as_str()),
             target: Some(ConfigTarget::File(file.path)),
         });
     }
@@ -1218,8 +1930,8 @@ fn paint_row(
         buffer.set_string(
             area.x,
             y,
-            " ",
-            Style::default().add_modifier(Modifier::REVERSED),
+            ">",
+            Style::default().add_modifier(Modifier::BOLD),
         );
     }
 
@@ -1246,16 +1958,41 @@ fn paint_row(
     );
 
     if let Some(right) = row.right {
-        let safe_right = theme::safe_text(right, area.width as usize);
-        let right_width = UnicodeWidthStr::width(safe_right.as_ref());
-        let text_width = UnicodeWidthStr::width(safe_text.as_ref());
-        let right_x = right_edge.saturating_sub(u16::try_from(right_width).unwrap_or(u16::MAX));
-        if right_x > text_x.saturating_add(u16::try_from(text_width).unwrap_or(u16::MAX)) {
-            buffer.set_stringn(right_x, y, safe_right.as_ref(), right_width, text_style);
-        }
+        crate::row::paint_tail(
+            buffer,
+            area,
+            y,
+            text_x.saturating_add(u16::try_from(safe_text.chars().count()).unwrap_or(u16::MAX)),
+            right,
+            text_style,
+        );
     }
 }
 
 fn short_ref(value: Option<&str>) -> &str {
     value.map_or("-", |revision| revision.get(..8).unwrap_or(revision))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quote_adjacent_closing_delimiters_stay_inside_their_own_value() {
+        // TOML permits one or two quotes adjacent to a multiline closing
+        // delimiter as content; a scanner that closes on the FIRST run of
+        // three swallows every following assignment into the first span.
+        for contents in [
+            "a = \"\"\"x\"\"\"\"\nb = 1\n",
+            "a = \"\"\"x\"\"\"\"\"\nb = 1\n",
+            "a = '''x''''\nb = 1\n",
+            "a = '''x'''''\nb = 1\n",
+        ] {
+            let spans = assignment_value_spans(ConfigPath::Capabilities, contents).expect("spans");
+            assert!(
+                spans.contains_key(&vec!["b".to_owned()]),
+                "second assignment lost in {contents:?}"
+            );
+        }
+    }
 }

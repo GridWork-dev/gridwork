@@ -530,3 +530,37 @@ agreement.
 - `Gate` carries no actor, so "who decided this" cannot be rendered.
 - No cursor row/col exists in the frame contract (the wire `cursor` is a resume seq), so
   INPUT mode has nothing to point at.
+
+### Round 6 - shared shell edge rulings (operator picker, 2026-08-11)
+
+- **Attention in an unfocused lens uses a suffix `!` mark, never a count.** The mark is
+  compact, survives Mono, and does not repeat a body-owned tally in navigation chrome.
+- **A narrow row drops its right-aligned tail as one column and leaves a compact `+`
+  omission mark.** The tail is never truncated mid-value or silently discarded.
+- **DAG and flow indentation caps at six visual levels, then prints the real depth as
+  `+7`, `+8`, and so on.** Deep ancestry remains distinguishable without consuming the
+  row's text budget.
+- **The merged shell refreshes the active lens plus a warm Hall and Queue on each event
+  batch.** Other projection-backed lenses refresh lazily when opened. This keeps the
+  navigator's attention mark current without re-paging the full estate on every append.
+- **Queue mute asks for an exact `YYYY-MM-DDTHH:MM:SSZ` deadline, then confirms.** The
+  operator chose the absolute timestamp over duration parsing or fixed presets: it mirrors
+  the CLI and does not invent a mute length, timezone, or product default.
+
+### Round 7 - post-review operator rulings (operator picker, 2026-08-11)
+
+- **Token columns state the floor and mark the gap.** When some cost entries lack a
+  token count, the axis renders the summed floor with a `+?` marker
+  (`50.0k+?/10.0k+?`) - never a bare `?`, which discards a mostly-known sum, and never
+  a silent zero-fill, which reads as complete. One shared helper
+  (`console::token_axis`) feeds the lens and the CLI table twin so the two surfaces
+  cannot drift. The Round-5 mock painter's zero-fill coincides on the seeded day
+  (every entry reports tokens) and is superseded by this ruling.
+- **`--view replay` opens the workspace at TERM lifetimes.** Every other `--view`
+  value opens the workspace on a TTY; replay follows, focused on the lens that owns
+  terminal lifetimes, until a real replay surface ships. Piped and non-tty
+  invocations keep the one-shot snapshot, like every other view.
+- **`/` filters the estate rail on TERM attach.** The mock-attach keybar is the
+  artifact of record and shows `/ filter`; VIEW-mode `/` now filters the rail's
+  terminal and queue rows on their painted text (the attached row always stays).
+  INPUT mode is unchanged.

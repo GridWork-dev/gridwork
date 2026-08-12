@@ -49,6 +49,7 @@
 pub mod board;
 pub mod chrome;
 pub mod config;
+pub mod console;
 pub mod drilldown;
 pub mod estate;
 pub mod hall;
@@ -56,7 +57,10 @@ pub mod input;
 pub mod probe;
 pub mod queue;
 pub mod replay;
+pub mod row;
 pub mod runtime;
 pub mod seven_act;
+pub mod shell;
+pub mod tables;
 pub mod theme;
 pub mod workspace;

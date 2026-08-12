@@ -165,8 +165,12 @@ fn hall_live_uses_matching_event_sequences_never_projection_watermarks() {
     assert_eq!(district.stations[0].changed_seq, Seq::new(11));
     assert_eq!(district.stations[0].agents[0].changed_seq, Seq::new(11));
     assert_eq!(
-        district.stations[0].agents[0].duration.as_deref(),
-        Some("live")
+        district.stations[0].agents[0].started_at.as_ref(),
+        Some(&timestamp())
+    );
+    assert_eq!(
+        estate.frame.focus.as_ref().map(|focus| &focus.district),
+        Some(&district.id)
     );
     assert_eq!(
         district.stations[0].agents[0].state,
@@ -352,7 +356,7 @@ fn hall_live_does_not_label_a_terminal_attempt_live() {
     };
     let estate = events.build(&projections, None).expect("terminal estate");
     assert_eq!(
-        estate.frame.districts[0].stations[0].agents[0].duration,
+        estate.frame.districts[0].stations[0].agents[0].started_at,
         None
     );
 }

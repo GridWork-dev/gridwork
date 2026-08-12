@@ -139,6 +139,16 @@ impl DrilldownState {
         self.viewport_col = col.min(cols.saturating_sub(1));
     }
 
+    pub fn move_viewport_rows(&mut self, delta: i8) {
+        let row = if delta < 0 {
+            self.viewport_row
+                .saturating_sub(delta.unsigned_abs().into())
+        } else {
+            self.viewport_row.saturating_add(delta as u16)
+        };
+        self.set_viewport(row, self.viewport_col);
+    }
+
     /// Consume one typed server control value from the shared wire.
     ///
     /// Non-PTY controls are unrelated. PTY controls carrying another session

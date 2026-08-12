@@ -14,6 +14,13 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use gwk_domain::protocol::{
+    CONNECTION_EGRESS_BYTES_PER_WINDOW, CONNECTION_INGRESS_BYTES_PER_WINDOW, ClientControl,
+    FRAME_BODY_MAX_BYTES, FrameKind, KernelRequest, KernelResult, ProtocolVersion, ServerControl,
+};
+use gwk_kernel::wire::frame::{Budget, Incoming, read_frame, write_frame};
+use tokio::net::UnixListener;
+
 /// A directory the daemon will accept as a socket's parent.
 fn private_dir(tag: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
@@ -50,6 +57,89 @@ fn gw_args(args: &[&str], env: &[(&str, &str)]) -> Output {
     command.output().expect("run gw")
 }
 
+#[cfg(target_os = "linux")]
+fn gw_tty(socket: &Path, args: &[&str]) -> Output {
+    // script's `-- <command> <args>` form needs util-linux 2.41+, and even
+    // there the argv is re-joined through `sh -c`; `-c` before the typescript
+    // file is the one spelling every version since 2.39 parses identically.
+    // The args here are fixed test literals — only the binary path is quoted.
+    let command = format!("'{}' {}", env!("CARGO_BIN_EXE_gw"), args.join(" "));
+    Command::new("script")
+        .args(["-q", "-e", "-c", &command, "/dev/null"])
+        .env("GWK_SOCKET_PATH", socket)
+        .output()
+        .expect("run gw under a pseudo-terminal")
+}
+
+async fn serve_empty_projection_pages(listener: UnixListener, connections: usize) {
+    for _ in 0..connections {
+        let (mut stream, _) = listener.accept().await.expect("accept CLI client");
+        let mut budget = Budget::new(
+            CONNECTION_INGRESS_BYTES_PER_WINDOW,
+            CONNECTION_EGRESS_BYTES_PER_WINDOW,
+        );
+        let hello = read_frame(&mut stream, FRAME_BODY_MAX_BYTES, &mut budget)
+            .await
+            .expect("read hello");
+        let Incoming::Frame(hello) = hello else {
+            panic!("CLI closed before hello");
+        };
+        assert_eq!(hello.kind, FrameKind::Json);
+        assert!(matches!(
+            serde_json::from_slice::<ClientControl>(&hello.body).expect("decode hello"),
+            ClientControl::Hello { .. }
+        ));
+        let ack = ServerControl::HelloAck {
+            protocol_major: ProtocolVersion::V1,
+            protocol_minor: 0,
+            capabilities: Vec::new(),
+            sealed: true,
+            watermark: Some(gwk_domain::ids::Seq::new(221)),
+        };
+        write_frame(
+            &mut stream,
+            FrameKind::Json,
+            &serde_json::to_vec(&ack).expect("encode hello ack"),
+            &mut budget,
+        )
+        .await
+        .expect("write hello ack");
+
+        loop {
+            let frame = read_frame(&mut stream, FRAME_BODY_MAX_BYTES, &mut budget)
+                .await
+                .expect("read projection request");
+            let Incoming::Frame(frame) = frame else {
+                break;
+            };
+            let ClientControl::Request {
+                request_id,
+                request,
+            } = serde_json::from_slice(&frame.body).expect("decode projection request")
+            else {
+                panic!("unexpected control after hello");
+            };
+            assert!(matches!(request, KernelRequest::ListProjection { .. }));
+            let answer = ServerControl::Response {
+                request_id,
+                result: KernelResult::ProjectionPage {
+                    records: Vec::new(),
+                    next_cursor: None,
+                    watermark: Some(gwk_domain::ids::Seq::new(221)),
+                },
+            };
+            write_frame(
+                &mut stream,
+                FrameKind::Json,
+                &serde_json::to_vec(&answer).expect("encode projection answer"),
+                &mut budget,
+            )
+            .await
+            .expect("write projection answer");
+        }
+    }
+}
+
 fn code(output: &Output) -> i32 {
     output.status.code().expect("gw exited on a signal")
 }
@@ -80,8 +170,9 @@ fn the_command_tree_is_printed_as_prose_and_everything_else_as_json() {
     assert!(text.contains("gw attempt budget"), "{text}");
     assert!(text.contains("gw session list"), "{text}");
     assert!(text.contains("gw session inspect"), "{text}");
-    assert!(text.contains("gw session snapshot"), "{text}");
-    assert!(text.contains("gw session attach"), "{text}");
+    assert!(text.contains("gw term list"), "{text}");
+    assert!(text.contains("gw term tail"), "{text}");
+    assert!(text.contains("gw term attach"), "{text}");
 
     let info = gw(&socket, "build-info");
     assert_eq!(code(&info), 0);
@@ -218,9 +309,14 @@ fn a_daemon_that_is_not_there_is_unavailable_rather_than_a_crash() {
 
     for line in [
         "cost rollup",
+        "attempt list",
         "attempt stop at-1",
         "attempt budget at-1",
         "attempt budget clear at-1 --expected-version 1",
+        "session list",
+        "term list",
+        "term tail pty-1",
+        "term attach pty-1",
     ] {
         let out = gw(&socket, line);
         assert_eq!(
@@ -337,6 +433,67 @@ fn pr_reaches_gh_as_an_argument_array_and_relays_its_refusal() {
     );
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn list_output_is_a_table_on_a_tty_and_wire_json_when_piped_or_forced() {
+    let dir = private_dir("tty-table");
+
+    let tty_socket = dir.join("tty.sock");
+    let listener = UnixListener::bind(&tty_socket).expect("bind tty fake kernel");
+    let server = tokio::spawn(serve_empty_projection_pages(listener, 1));
+    let tty = tokio::task::spawn_blocking({
+        let socket = tty_socket.clone();
+        move || gw_tty(&socket, &["attempt", "list"])
+    })
+    .await
+    .expect("join tty gw");
+    tokio::time::timeout(std::time::Duration::from_secs(5), server)
+        .await
+        .expect("tty fake kernel timed out")
+        .expect("join tty fake kernel");
+    assert_eq!(code(&tty), 0, "{}", String::from_utf8_lossy(&tty.stdout));
+    let tty_text = String::from_utf8_lossy(&tty.stdout).replace('\r', "");
+    assert!(tty_text.contains("ATTEMPT"), "{tty_text}");
+    assert!(tty_text.contains("0 rows · watermark 221"), "{tty_text}");
+    assert!(!tty_text.contains("\"records\""), "{tty_text}");
+
+    let forced_socket = dir.join("forced.sock");
+    let listener = UnixListener::bind(&forced_socket).expect("bind forced fake kernel");
+    let server = tokio::spawn(serve_empty_projection_pages(listener, 1));
+    let forced = tokio::task::spawn_blocking({
+        let socket = forced_socket.clone();
+        move || gw_tty(&socket, &["attempt", "list", "--json"])
+    })
+    .await
+    .expect("join forced gw");
+    tokio::time::timeout(std::time::Duration::from_secs(5), server)
+        .await
+        .expect("forced fake kernel timed out")
+        .expect("join forced fake kernel");
+    assert_eq!(code(&forced), 0);
+    let forced_text = String::from_utf8_lossy(&forced.stdout).replace('\r', "");
+    let forced_json: serde_json::Value =
+        serde_json::from_str(forced_text.trim()).expect("forced tty output is JSON");
+    assert_eq!(forced_json["type"], "projection_page");
+    assert_eq!(forced_json["records"], serde_json::json!([]));
+
+    let pipe_socket = dir.join("pipe.sock");
+    let listener = UnixListener::bind(&pipe_socket).expect("bind pipe fake kernel");
+    let server = tokio::spawn(serve_empty_projection_pages(listener, 1));
+    let piped = tokio::task::spawn_blocking({
+        let socket = pipe_socket.clone();
+        move || gw(&socket, "attempt list")
+    })
+    .await
+    .expect("join piped gw");
+    tokio::time::timeout(std::time::Duration::from_secs(5), server)
+        .await
+        .expect("pipe fake kernel timed out")
+        .expect("join pipe fake kernel");
+    assert_eq!(code(&piped), 0);
+    assert_eq!(json(&piped)["type"], "projection_page");
+}
+
 /// The runtime role `admin::init` grants to. Created by the maintenance pool.
 const RUNTIME_ROLE: &str = "gwk_cli_runtime";
 const TEST_KEK: [u8; 32] = [0x5a; 32];
@@ -433,8 +590,8 @@ async fn the_binary_talks_to_a_real_daemon() {
         let attempt_budget_missing = gw(socket, "attempt budget at-nope");
         let sessions = gw(socket, "session list");
         let session_missing = gw(socket, "session inspect es-nope");
-        let pty_missing = gw(socket, "session snapshot pty-nope");
-        let pty_attach_missing = gw(socket, "session attach pty-nope");
+        let pty_missing = gw(socket, "term tail pty-nope");
+        let pty_attach_missing = gw(socket, "term attach pty-nope");
         let missing = gw(socket, "projection get task t-nope");
 
         // A blob, all the way there and back through the built binary.

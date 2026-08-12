@@ -11,7 +11,7 @@
 //!
 //! * **Command answers are JSON on standard output.** `--pretty` changes the
 //!   formatting and never the value. `--help` is prose; `tui`, `event tail`,
-//!   and `session attach` own the interactive terminal. None is a command
+//!   and `term attach` own the interactive terminal. None is a command
 //!   answer.
 //! * **The exit says what to do about it** ([`exit`]). One table, derived from
 //!   the refusal's own code, so the exit and the JSON can never disagree.
@@ -30,6 +30,7 @@ pub mod pr;
 pub mod tui;
 
 use std::collections::BTreeSet;
+use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
 
 use args::{Invocation, Sink, Source, Verb};
@@ -52,6 +53,7 @@ use gwk_tui::board::{
     estate_overview, replace_attempt_budget, stop_attempt,
 };
 use gwk_tui::replay::ReplayTimeline;
+use gwk_tui::tables::{PageMeta, attempt_table, cost_table, session_table, term_table};
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 
@@ -68,8 +70,9 @@ pub async fn run(argv: &[String]) -> u8 {
         Ok(invocation) => invocation,
         Err(failure) => return report(&failure, false),
     };
-    let Invocation { verb, pretty } = invocation;
-    match execute(verb, pretty).await {
+    let Invocation { verb, pretty, json } = invocation;
+    let human_tables = !json && std::io::stdout().is_terminal();
+    match execute(verb, pretty, human_tables).await {
         Ok(()) => exit::OK,
         Err(failure) => report(&failure, pretty),
     }
@@ -94,7 +97,7 @@ fn emit(value: &Value, pretty: bool) {
     }
 }
 
-async fn execute(verb: Verb, pretty: bool) -> Result<(), Failure> {
+async fn execute(verb: Verb, pretty: bool, human_tables: bool) -> Result<(), Failure> {
     match verb {
         Verb::Help => {
             print!("{}", args::HELP);
@@ -156,6 +159,16 @@ async fn execute(verb: Verb, pretty: bool) -> Result<(), Failure> {
             cursor,
             limit,
         } => {
+            if human_tables
+                && matches!(
+                    kind,
+                    ProjectionKind::Attempt
+                        | ProjectionKind::EngineSession
+                        | ProjectionKind::PtySession
+                )
+            {
+                return human_projection_list(kind, cursor, limit).await;
+            }
             ask(
                 KernelRequest::ListProjection {
                     projection: kind,
@@ -176,7 +189,8 @@ async fn execute(verb: Verb, pretty: bool) -> Result<(), Failure> {
             aggregate_type,
             event_type,
             view,
-        } => tui::event_tail(cursor, aggregate_type, event_type, view).await,
+            motion,
+        } => tui::event_tail(cursor, aggregate_type, event_type, view, motion).await,
         Verb::EstateOverview => {
             let state = load_summary_state(false).await?;
             emit_serialized(&estate_overview(&state), pretty)
@@ -187,7 +201,24 @@ async fn execute(verb: Verb, pretty: bool) -> Result<(), Failure> {
         }
         Verb::CostRollup => {
             let state = load_cost_state().await?;
-            emit_serialized(&cost_rollup(&state), pretty)
+            if human_tables {
+                print!(
+                    "{}",
+                    cost_table(
+                        &state,
+                        &now(),
+                        &PageMeta {
+                            complete: state.complete,
+                            watermark: state.watermark,
+                            next_cursor: None,
+                        },
+                        terminal_width(),
+                    )
+                );
+                Ok(())
+            } else {
+                emit_serialized(&cost_rollup(&state), pretty)
+            }
         }
         Verb::AgentFleet => {
             let state = load_fleet_state().await?;
@@ -216,7 +247,7 @@ async fn execute(verb: Verb, pretty: bool) -> Result<(), Failure> {
             )
             .await
         }
-        Verb::SessionSnapshot { id } => {
+        Verb::TermTail { id } => {
             ask(
                 KernelRequest::PtySnapshot {
                     session_id: PtySessionId::new(id),
@@ -225,7 +256,7 @@ async fn execute(verb: Verb, pretty: bool) -> Result<(), Failure> {
             )
             .await
         }
-        Verb::SessionAttach { id } => tui::session_attach(PtySessionId::new(id)).await,
+        Verb::TermAttach { id, motion } => tui::term_attach(PtySessionId::new(id), motion).await,
         Verb::Tui { motion } => tui::run(motion).await,
         Verb::Theme => {
             emit(&chrome_theme()?, pretty);
@@ -357,13 +388,190 @@ const ACTIVITY_PROJECTIONS: &[ProjectionKind] = &[
     ProjectionKind::CostEntry,
 ];
 const FLEET_PROJECTIONS: &[ProjectionKind] = &[
+    ProjectionKind::Task,
     ProjectionKind::EngineSession,
     ProjectionKind::DispatchNode,
     ProjectionKind::Attempt,
     ProjectionKind::Worktree,
     ProjectionKind::Lease,
+    ProjectionKind::CostEntry,
+];
+const FLEET_CONTEXT_PROJECTIONS: &[ProjectionKind] = &[
+    ProjectionKind::Task,
+    ProjectionKind::EngineSession,
+    ProjectionKind::DispatchNode,
+    ProjectionKind::Worktree,
+    ProjectionKind::Lease,
+    ProjectionKind::CostEntry,
 ];
 const COST_PROJECTIONS: &[ProjectionKind] = &[ProjectionKind::CostEntry];
+
+async fn human_projection_list(
+    kind: ProjectionKind,
+    cursor: Option<String>,
+    limit: Option<u32>,
+) -> Result<(), Failure> {
+    if kind == ProjectionKind::Attempt {
+        let (state, meta) = load_attempt_table_state(cursor, limit).await?;
+        print!("{}", attempt_table(&state, &now(), &meta, terminal_width()));
+        return Ok(());
+    }
+    let (records, next_cursor, watermark) = projection_page(kind, cursor, limit).await?;
+    let meta = PageMeta {
+        complete: next_cursor.is_none(),
+        watermark,
+        next_cursor,
+    };
+    let width = terminal_width();
+    let rendered = match kind {
+        ProjectionKind::Attempt => unreachable!("attempt tables return above"),
+        ProjectionKind::EngineSession => {
+            let sessions = records
+                .into_iter()
+                .map(|record| match record {
+                    ProjectionRecord::EngineSession { engine_session } => Ok(engine_session),
+                    other => Err(wrong_projection(kind, &other)),
+                })
+                .collect::<Result<Vec<_>, Failure>>()?;
+            session_table(&sessions, &meta, width)
+        }
+        ProjectionKind::PtySession => {
+            let sessions = records
+                .into_iter()
+                .map(|record| match record {
+                    ProjectionRecord::PtySession { pty_session } => Ok(pty_session),
+                    other => Err(wrong_projection(kind, &other)),
+                })
+                .collect::<Result<Vec<_>, Failure>>()?;
+            term_table(&sessions, &meta, width)
+        }
+        _ => return Err(Failure::internal("list kind has no terminal table")),
+    };
+    print!("{rendered}");
+    Ok(())
+}
+
+async fn load_attempt_table_state(
+    cursor: Option<String>,
+    limit: Option<u32>,
+) -> Result<(BoardState, PageMeta), Failure> {
+    let mut last_watermarks = Vec::new();
+    for _ in 0..SUMMARY_SNAPSHOT_ATTEMPTS {
+        let mut client = connect().await?;
+        let result = client
+            .ask(KernelRequest::ListProjection {
+                projection: ProjectionKind::Attempt,
+                cursor: cursor.clone(),
+                limit,
+            })
+            .await?;
+        let (records, next_cursor, watermark) = match result {
+            KernelResult::ProjectionPage {
+                records,
+                next_cursor,
+                watermark,
+            } => (records, next_cursor, watermark),
+            KernelResult::Error {
+                code,
+                message,
+                detail,
+            } => return Err(kernel_failure(code, message, detail)),
+            other => {
+                return Err(Failure::internal(format!(
+                    "read attempt table page: kernel answered with {other:?}"
+                )));
+            }
+        };
+        if !records.is_empty() && watermark.is_none() {
+            return Err(Failure::new(
+                KernelErrorCode::Schema,
+                "attempt projection rows arrived without a page watermark",
+            ));
+        }
+        let mut attempts = Vec::with_capacity(records.len());
+        for record in records {
+            let ProjectionRecord::Attempt { attempt } = record else {
+                return Err(wrong_projection(ProjectionKind::Attempt, &record));
+            };
+            attempts.push(attempt);
+        }
+
+        let (mut state, mut watermarks) =
+            load_board_state_once(&mut client, FLEET_CONTEXT_PROJECTIONS, BoardView::Fleet).await?;
+        watermarks.push(watermark);
+        let coherent = watermarks
+            .first()
+            .is_none_or(|first| watermarks.iter().all(|candidate| candidate == first));
+        if coherent {
+            state.attempts = attempts;
+            state.complete = next_cursor.is_none();
+            state.watermark = watermark;
+            return Ok((
+                state,
+                PageMeta {
+                    complete: next_cursor.is_none(),
+                    watermark,
+                    next_cursor,
+                },
+            ));
+        }
+        last_watermarks = watermarks;
+    }
+    Err(Failure::new(
+        KernelErrorCode::StaleVersion,
+        format!(
+            "attempt table projections did not share one watermark after {SUMMARY_SNAPSHOT_ATTEMPTS} reads: {last_watermarks:?}"
+        ),
+    ))
+}
+
+async fn projection_page(
+    kind: ProjectionKind,
+    cursor: Option<String>,
+    limit: Option<u32>,
+) -> Result<(Vec<ProjectionRecord>, Option<String>, Option<Seq>), Failure> {
+    let result = connect()
+        .await?
+        .ask(KernelRequest::ListProjection {
+            projection: kind,
+            cursor,
+            limit,
+        })
+        .await?;
+    match result {
+        KernelResult::ProjectionPage {
+            records,
+            next_cursor,
+            watermark,
+        } => Ok((records, next_cursor, watermark)),
+        KernelResult::Error {
+            code,
+            message,
+            detail,
+        } => Err(kernel_failure(code, message, detail)),
+        other => Err(Failure::internal(format!(
+            "list {}: kernel answered with {other:?}",
+            kind.as_str()
+        ))),
+    }
+}
+
+fn wrong_projection(wanted: ProjectionKind, record: &ProjectionRecord) -> Failure {
+    Failure::new(
+        KernelErrorCode::Schema,
+        format!(
+            "{} projection page carried a {} row",
+            wanted.as_str(),
+            record.kind().as_str()
+        ),
+    )
+}
+
+fn terminal_width() -> usize {
+    crossterm::terminal::size()
+        .map(|(columns, _)| usize::from(columns))
+        .unwrap_or(80)
+}
 
 /// Read every projection consumed by the summary twins at one projector
 /// watermark. Projection pages are not snapshots, so a write between kinds
@@ -668,7 +876,7 @@ async fn submit(command: &KernelCommand, key: &str, pretty: bool) -> Result<(), 
     ask(KernelRequest::SubmitCommand { envelope }, pretty).await
 }
 
-fn envelope(command: &KernelCommand, key: &str, project: &str) -> CommandEnvelope {
+pub(crate) fn envelope(command: &KernelCommand, key: &str, project: &str) -> CommandEnvelope {
     CommandEnvelope {
         command_id: CommandId::new(format!("cmd-{key}")),
         project_id: ProjectId::new(project),
@@ -982,7 +1190,7 @@ fn hex_lower(bytes: &[u8]) -> String {
 /// bits therefore fold in the pid and an in-process counter to break those
 /// ties. Truncating the pid to 16 bits is safe here because it is a tiebreak
 /// within a tick, not the uniqueness itself.
-fn nonce() -> u128 {
+pub(crate) fn nonce() -> u128 {
     static CALL: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

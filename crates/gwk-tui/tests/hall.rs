@@ -37,6 +37,7 @@ fn agent(id: &str, role: Option<&str>, state: AgentState, seq: u64) -> Agent {
         id: agent_id(id),
         role: role.map(str::to_owned),
         state,
+        started_at: None,
         duration: None,
         changed_seq: Seq::new(seq),
     }
