@@ -296,15 +296,16 @@ impl EventIndex {
                             id: agent_id(attempt.attempt.id.as_str())?,
                             role: attempt.attempt.role.clone(),
                             state,
-                            duration: (attempt.attempt.runtime_started_at.is_some()
-                                && matches!(
-                                    state,
-                                    AgentState::Starting
-                                        | AgentState::Running
-                                        | AgentState::Canceling
-                                        | AgentState::NeedsAttention
-                                ))
-                            .then(|| "live".to_owned()),
+                            started_at: matches!(
+                                state,
+                                AgentState::Starting
+                                    | AgentState::Running
+                                    | AgentState::Canceling
+                                    | AgentState::NeedsAttention
+                            )
+                            .then(|| attempt.attempt.runtime_started_at.clone())
+                            .flatten(),
+                            duration: None,
                             changed_seq: attempt.sequence,
                         });
                     }
@@ -325,6 +326,10 @@ impl EventIndex {
             .into_values()
             .map(DistrictBuild::finish)
             .collect::<Result<Vec<_>, _>>()?;
+        let focus = districts.first().map(|district| crate::hall::Focus {
+            district: district.id.clone(),
+            changed_seq: district.changed_seq,
+        });
 
         let mut messages = Vec::new();
         for row in &projections.messages {
@@ -345,7 +350,7 @@ impl EventIndex {
         Ok(EstateSnapshot {
             frame: FrameInput {
                 districts,
-                focus: None,
+                focus,
                 attention: normalized_attention,
                 watermark: frame_watermark,
             },

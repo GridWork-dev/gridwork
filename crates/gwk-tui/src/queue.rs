@@ -43,7 +43,6 @@ use gwk_theme::tier::ColorTier;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
-use unicode_width::UnicodeWidthStr;
 
 use crate::input::HitMap;
 use crate::theme;
@@ -84,6 +83,15 @@ pub struct QueueState {
 pub enum QueueTarget {
     Attention(AttentionItemId),
     Gate(GateId),
+}
+
+/// Every actionable target in deterministic visual order, including targets
+/// currently outside a short frame's visible window.
+pub fn target_order(state: &QueueState) -> Vec<QueueTarget> {
+    rows(state, ColorTier::Mono)
+        .into_iter()
+        .filter_map(|row| row.target)
+        .collect()
 }
 
 /// How many message rows the mail section shows. Arrival is the fact being
@@ -143,6 +151,39 @@ pub fn resolve(target: &QueueTarget, resolution: Option<String>) -> Option<Kerne
         }),
         // A gate is decided, never resolved — the same reason ack refuses it.
         QueueTarget::Gate(_) => None,
+    }
+}
+
+/// Build the typed decision for an option whose semantics can be stated using
+/// the gate's closed verdict vocabulary. Unknown option words are refused
+/// rather than silently treating every choice as a pass.
+pub fn decide(gate: &Gate, option: &str) -> Option<KernelCommand> {
+    if gate.verdict != GateVerdict::Pending
+        || !gate
+            .options
+            .as_ref()
+            .is_some_and(|options| options.iter().any(|candidate| candidate == option))
+    {
+        return None;
+    }
+    Some(KernelCommand::DecideGate {
+        gate_id: gate.id.clone(),
+        expected_version: gate.version,
+        verdict: verdict_for_option(option)?,
+        chosen_option: Some(option.to_owned()),
+        evidence_ref: None,
+    })
+}
+
+pub fn verdict_for_option(option: &str) -> Option<GateVerdict> {
+    match option.trim().to_ascii_lowercase().as_str() {
+        "accept" | "acceptforsession" | "allow" | "always" | "approve" | "approved"
+        | "continue" | "once" | "pass" | "proceed" | "yes" => Some(GateVerdict::Pass),
+        "cancel" | "decline" | "deny" | "fail" | "no" | "reject" | "rejected" | "stop" => {
+            Some(GateVerdict::Fail)
+        }
+        "ask" | "defer" | "hold" | "partial" => Some(GateVerdict::Partial),
+        _ => None,
     }
 }
 
@@ -374,7 +415,17 @@ fn rows(state: &QueueState, tier: ColorTier) -> Vec<Row> {
             )
         })
         .collect();
-    if arrived.is_empty() {
+    let failed: Vec<&Message> = state
+        .messages
+        .iter()
+        .filter(|message| {
+            matches!(
+                message.state,
+                MessageState::DeadLetter | MessageState::Rejected
+            )
+        })
+        .collect();
+    if arrived.is_empty() && failed.is_empty() {
         out.push(Row::plain("no messages".into(), muted_style));
     } else {
         for message in arrived.iter().take(MAIL_BUDGET) {
@@ -393,6 +444,44 @@ fn rows(state: &QueueState, tier: ColorTier) -> Vec<Row> {
             // The same honesty the body overflow keeps: a cut is named.
             out.push(Row::plain(
                 format!("+{} more", arrived.len() - MAIL_BUDGET),
+                muted_style,
+            ));
+        }
+        for message in failed.iter().take(MAIL_BUDGET) {
+            let sender = message.sender.as_deref().unwrap_or("?");
+            let recipient = message.recipient.as_deref().unwrap_or("?");
+            let kind = message.kind.as_deref().unwrap_or("message");
+            let state_word = match message.state {
+                MessageState::DeadLetter => "dead",
+                MessageState::Rejected => "rejected",
+                _ => "failed",
+            };
+            out.push(Row {
+                mark: Some(warn),
+                text: format!(
+                    "{state_word} {}  {sender} to {recipient}  ({kind})",
+                    hhmm(&message.updated_at)
+                ),
+                right: None,
+                style: theme::state_style(warn, tier),
+                target: None,
+            });
+            let attempts = message.delivery_attempts;
+            out.push(Row::plain(
+                format!(
+                    "   {attempts} attempt{} -- {}",
+                    if attempts == 1 { "" } else { "s" },
+                    message
+                        .dead_letter_reason
+                        .as_deref()
+                        .unwrap_or("no reason recorded")
+                ),
+                muted_style,
+            ));
+        }
+        if failed.len() > MAIL_BUDGET {
+            out.push(Row::plain(
+                format!("+{} more failed deliveries", failed.len() - MAIL_BUDGET),
                 muted_style,
             ));
         }
@@ -472,13 +561,25 @@ pub fn render(
     }
     let body_rows = area.height - 1;
     let built = rows(state, tier);
-    let overflow = built.len().saturating_sub(body_rows as usize);
-    let visible = if overflow > 0 {
-        // One of the visible rows becomes the cut notice.
-        (body_rows as usize).saturating_sub(1)
+    let capacity = body_rows as usize;
+    let needs_notice = built.len() > capacity && capacity > 1;
+    let visible = capacity
+        .saturating_sub(usize::from(needs_notice))
+        .min(built.len());
+    let selected_row = selected.and_then(|target| {
+        built
+            .iter()
+            .position(|row| row.target.as_ref() == Some(target))
+    });
+    let start = if visible == 0 {
+        0
     } else {
-        built.len()
+        selected_row
+            .filter(|index| *index >= visible)
+            .map_or(0, |index| index + 1 - visible)
+            .min(built.len().saturating_sub(visible))
     };
+    let end = (start + visible).min(built.len());
 
     let selection_fg = match tier {
         // At ≥256 colours the selected row's foreground shifts to `selection`
@@ -491,7 +592,7 @@ pub fn render(
         ColorTier::Ansi16 | ColorTier::Mono => None,
     };
 
-    for (i, row) in built.iter().take(visible).enumerate() {
+    for (i, row) in built[start..end].iter().enumerate() {
         let y = area.y + i as u16;
         let is_selected = matches!((selected, &row.target), (Some(sel), Some(t)) if *sel == *t);
         let text_style = match (is_selected, selection_fg) {
@@ -504,8 +605,8 @@ pub fn render(
             buf.set_string(
                 area.x,
                 y,
-                " ",
-                Style::default().add_modifier(Modifier::REVERSED),
+                ">",
+                Style::default().add_modifier(Modifier::BOLD),
             );
         }
         let mut x = area.x + 1;
@@ -525,26 +626,33 @@ pub fn render(
         let safe_text = theme::safe_text(&row.text, width as usize);
         buf.set_stringn(x, y, safe_text.as_ref(), width as usize, text_style);
         if let Some(right) = &row.right {
-            let safe_right = theme::safe_text(right, area.width as usize);
-            let right_width = UnicodeWidthStr::width(safe_right.as_ref());
-            let text_width = UnicodeWidthStr::width(safe_text.as_ref());
-            let rx = (area.x + area.width)
-                .saturating_sub(u16::try_from(right_width).unwrap_or(u16::MAX));
-            if rx > x.saturating_add(u16::try_from(text_width).unwrap_or(u16::MAX)) {
-                buf.set_string(rx, y, safe_right.as_ref(), text_style);
-            }
+            crate::row::paint_tail(
+                buf,
+                area,
+                y,
+                x.saturating_add(u16::try_from(safe_text.chars().count()).unwrap_or(u16::MAX)),
+                right,
+                text_style,
+            );
         }
         if let Some(target) = &row.target {
             hits.register(Rect::new(area.x, y, area.width, 1), target.clone());
         }
     }
 
-    if overflow > 0 {
+    if needs_notice {
         let y = area.y + body_rows.saturating_sub(1);
+        let notice = if start == 0 {
+            format!("+{} more", built.len() - end)
+        } else if end == built.len() {
+            format!("+{start} before")
+        } else {
+            format!("+{start} before  +{} more", built.len() - end)
+        };
         buf.set_stringn(
             area.x + 1,
             y,
-            format!("+{} more", built.len() - visible),
+            notice,
             area.width.saturating_sub(1) as usize,
             theme::state_style(binding("idle"), tier),
         );
@@ -941,7 +1049,7 @@ mod tests {
     }
 
     #[test]
-    fn queue_selection_is_a_reverse_video_space_in_column_zero() {
+    fn queue_selection_is_a_visible_marker_in_column_zero() {
         let mut state = empty_state();
         state.attention = vec![item("a-1", "the row")];
         let target = QueueTarget::Attention(AttentionItemId::new("a-1"));
@@ -949,15 +1057,16 @@ mod tests {
         let (_, _, buf) = dump_frame(40, 6, &state, Some(&target));
         // The row renders after the verdict line, so it sits at y=1.
         let accent = &buf[(0, 1)];
-        assert_eq!(accent.symbol(), " ", "the accent is a space, not a glyph");
+        assert_eq!(accent.symbol(), ">", "selection survives symbol goldens");
         assert!(
-            accent.style().add_modifier.contains(Modifier::REVERSED),
-            "the accent is reverse video — the tier-independent primitive"
+            accent.style().add_modifier.contains(Modifier::BOLD),
+            "the marker keeps the focus emphasis"
         );
         let unselected = &buf[(0, 0)];
-        assert!(
-            !unselected.style().add_modifier.contains(Modifier::REVERSED),
-            "only the selected row carries the accent"
+        assert_eq!(
+            unselected.symbol(),
+            " ",
+            "only selection carries the marker"
         );
     }
 
@@ -1025,6 +1134,32 @@ mod tests {
         ] {
             assert_eq!(refused, None);
         }
+    }
+
+    #[test]
+    fn queue_gate_options_map_to_typed_verdicts_without_guessing_unknown_words() {
+        let gate = gate("g-1", "ship it?");
+        assert_eq!(
+            decide(&gate, "allow"),
+            Some(KernelCommand::DecideGate {
+                gate_id: GateId::new("g-1"),
+                expected_version: 1,
+                verdict: GateVerdict::Pass,
+                chosen_option: Some("allow".into()),
+                evidence_ref: None,
+            })
+        );
+        assert_eq!(verdict_for_option("deny"), Some(GateVerdict::Fail));
+        assert_eq!(verdict_for_option("hold"), Some(GateVerdict::Partial));
+        for option in ["once", "always", "accept", "acceptForSession"] {
+            assert_eq!(verdict_for_option(option), Some(GateVerdict::Pass));
+        }
+        for option in ["reject", "decline", "cancel"] {
+            assert_eq!(verdict_for_option(option), Some(GateVerdict::Fail));
+        }
+        assert_eq!(verdict_for_option("ask"), Some(GateVerdict::Partial));
+        assert_eq!(verdict_for_option("restart later"), None);
+        assert_eq!(decide(&gate, "not offered"), None);
     }
 
     #[test]

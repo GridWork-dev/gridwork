@@ -63,10 +63,22 @@ fn hall_attention_id(value: &str) -> HallAttentionId {
 }
 
 fn agent(id: &str, role: Option<&str>, state: AgentState, seq: u64) -> Agent {
+    let started_at = match id {
+        "agent-pty-impl" => Some("2026-08-11T09:40:00Z"),
+        "agent-pty-review" => Some("2026-08-11T09:48:00Z"),
+        "agent-blob-arch" => Some("2026-08-11T11:25:00Z"),
+        "agent-tui-impl" => Some("2026-08-11T10:00:00Z"),
+        "agent-tui-audit" => Some("2026-08-11T17:29:06Z"),
+        "agent-tui-cancel" => Some("2026-08-11T12:02:00Z"),
+        "agent-deploy-arch" => Some("2026-08-11T15:20:00Z"),
+        "agent-audit-sec" => Some("2026-08-11T16:20:00Z"),
+        _ => None,
+    };
     Agent {
         id: agent_id(id),
         role: role.map(str::to_owned),
         state,
+        started_at: started_at.map(ts),
         duration: None,
         changed_seq: Seq::new(seq),
     }

@@ -86,7 +86,6 @@ use gwk_theme::tier::ColorTier;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
-use unicode_width::UnicodeWidthStr;
 
 use crate::input::HitMap;
 use crate::replay::{ReplayFrame, ReplayTimeline};
@@ -477,9 +476,8 @@ pub struct AgentFleet {
     pub unknowns: Vec<FleetUnknown>,
 }
 
-/// A spawn chain deeper than this stops indenting further: the tree is
-/// still walked and every node still gets a row, but a pathological chain
-/// cannot push its own text off the pane.
+/// A tree deeper than this stops indenting further. Rows retain their logical
+/// depth so the painter can state the real level after the capped indent.
 const INDENT_CAP: u16 = 6;
 
 /// Cells per layer of the DAG.
@@ -558,7 +556,8 @@ fn running_count(state: &BoardState) -> usize {
 
 /// One row's paint: layer, mark cell, styled text, and what it stands for.
 struct Row {
-    /// The DAG layer, in indent cells before the mark.
+    /// The logical layer, in indent cells before the mark. Paint caps this
+    /// without discarding the real depth.
     indent: u16,
     /// The graph-tier mark and the style its cell keeps even when the row
     /// is selected — the state colour is part of the row's meaning.
@@ -654,7 +653,7 @@ fn node_row(node: &DispatchNode, indent: u16, muted: Style) -> Row {
     // pretends to understand it: the word is printed as the wire said it.
     let label = node.label.as_deref().unwrap_or_else(|| node.id.as_str());
     Row {
-        indent: indent.min(INDENT_CAP * INDENT_STEP),
+        indent,
         mark: Some((graph_mark("dispatch"), muted)),
         text: format!("{label}  {}  ({})", node.state, node.kind),
         right: None,
@@ -1067,12 +1066,7 @@ fn flow_rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
             out.push(message_row(message, indent, tier));
             if let Some(replies) = replies_by_parent.get(message.id.as_str()) {
                 for reply in replies.iter().rev() {
-                    stack.push((
-                        reply,
-                        indent
-                            .saturating_add(INDENT_STEP)
-                            .min(INDENT_CAP * INDENT_STEP),
-                    ));
+                    stack.push((reply, indent.saturating_add(INDENT_STEP)));
                 }
             }
         }
@@ -3036,6 +3030,59 @@ pub fn render(
     glyphs: GlyphSet,
     hits: &mut HitMap<BoardTarget>,
 ) {
+    render_with_status(area, buf, state, selected, tier, glyphs, hits, None);
+}
+
+/// Paint a Board-backed five-lens surface without reviving the retired Board
+/// tab strip. The shell owns navigation; this footer keeps only the active
+/// surface name, running pulse, and projector watermark.
+pub fn render_embedded(
+    area: Rect,
+    buf: &mut Buffer,
+    state: &BoardState,
+    selected: Option<&BoardTarget>,
+    tier: ColorTier,
+    glyphs: GlyphSet,
+    hits: &mut HitMap<BoardTarget>,
+) {
+    render_with_status(
+        area,
+        buf,
+        state,
+        selected,
+        tier,
+        glyphs,
+        hits,
+        Some(embedded_surface_name(state.view)),
+    );
+}
+
+fn embedded_surface_name(view: BoardView) -> &'static str {
+    match view {
+        BoardView::Estate => "hall",
+        BoardView::Activity => "queue",
+        BoardView::Runs => "runs",
+        BoardView::Dag => "tasks",
+        BoardView::Flow => "messages",
+        BoardView::Events => "events",
+        BoardView::Replay => "term",
+        BoardView::Fleet => "leases",
+        BoardView::CostHealth => "cost",
+        BoardView::Audit => "audit",
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_with_status(
+    area: Rect,
+    buf: &mut Buffer,
+    state: &BoardState,
+    selected: Option<&BoardTarget>,
+    tier: ColorTier,
+    glyphs: GlyphSet,
+    hits: &mut HitMap<BoardTarget>,
+    surface_name: Option<&str>,
+) {
     hits.clear();
     if area.height == 0 || area.width == 0 {
         return;
@@ -3145,11 +3192,18 @@ pub fn render(
             buf.set_string(
                 area.x,
                 y,
-                " ",
-                Style::default().add_modifier(Modifier::REVERSED),
+                ">",
+                Style::default().add_modifier(Modifier::BOLD),
             );
         }
         let mut x = area.x + 1 + row.indent.min(INDENT_CAP * INDENT_STEP);
+        let depth = row.indent / INDENT_STEP;
+        if depth > INDENT_CAP {
+            let label = format!("+{depth} ");
+            let budget = (area.x + area.width).saturating_sub(x);
+            buf.set_stringn(x, y, &label, budget as usize, text_style);
+            x = x.saturating_add(u16::try_from(label.len()).unwrap_or(u16::MAX));
+        }
         if let Some((mark, mark_style)) = row.mark {
             // Static marks only in this lens; frame 0 is every frame. The
             // mark keeps its own style even on the selected row, and its
@@ -3163,14 +3217,14 @@ pub fn render(
         let safe_text = theme::safe_text(&row.text, width as usize);
         buf.set_stringn(x, y, safe_text.as_ref(), width as usize, text_style);
         if let Some(right) = &row.right {
-            let safe_right = theme::safe_text(right, area.width as usize);
-            let right_width = UnicodeWidthStr::width(safe_right.as_ref());
-            let text_width = UnicodeWidthStr::width(safe_text.as_ref());
-            let rx = (area.x + area.width)
-                .saturating_sub(u16::try_from(right_width).unwrap_or(u16::MAX));
-            if rx > x.saturating_add(u16::try_from(text_width).unwrap_or(u16::MAX)) {
-                buf.set_string(rx, y, safe_right.as_ref(), text_style);
-            }
+            crate::row::paint_tail(
+                buf,
+                area,
+                y,
+                x.saturating_add(u16::try_from(safe_text.chars().count()).unwrap_or(u16::MAX)),
+                right,
+                text_style,
+            );
         }
         if let Some(target) = &row.target {
             hits.register(Rect::new(area.x, y, area.width, 1), target.clone());
@@ -3257,24 +3311,35 @@ pub fn render(
     // as-of stamp. Every inactive view's name stays visible — the other
     // panels are one keystroke away, and the bar says so rather than hiding
     // four of five behind a discoverable-by-accident binding.
-    let tabs = BoardView::ALL
-        .iter()
-        .map(|view| {
-            if *view == state.view {
-                format!("[{}]", view.as_str())
-            } else {
-                view.as_str().to_owned()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
     let as_of = state
         .watermark
         .as_ref()
         .map_or_else(|| "-".to_string(), |w| w.to_string());
-    // `rN@seq` keeps the running-attempt pulse and projector watermark visible
-    // after the run-ledger tab joined the 72-cell baseline frame.
-    let status = format!("BOARD {tabs}  r{}@{as_of}", running_count(state));
+    let status = surface_name.map_or_else(
+        || {
+            let tabs = BoardView::ALL
+                .iter()
+                .map(|view| {
+                    if *view == state.view {
+                        format!("[{}]", view.as_str())
+                    } else {
+                        view.as_str().to_owned()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            // `rN@seq` keeps the running-attempt pulse and projector watermark visible
+            // after the run-ledger tab joined the 72-cell baseline frame.
+            format!("BOARD {tabs}  r{}@{as_of}", running_count(state))
+        },
+        |name| {
+            format!(
+                "{}  r{}@{as_of}",
+                name.to_ascii_uppercase(),
+                running_count(state)
+            )
+        },
+    );
     let safe_status = theme::safe_text(&status, area.width as usize);
     buf.set_stringn(
         area.x,
@@ -5164,8 +5229,8 @@ mod tests {
         );
         // The task row sits at y=1 under the summary: accent 0, mark 1, text 3.
         let accent = &buf[(0, 1)];
-        assert_eq!(accent.symbol(), " ");
-        assert!(accent.style().add_modifier.contains(Modifier::REVERSED));
+        assert_eq!(accent.symbol(), ">");
+        assert!(accent.style().add_modifier.contains(Modifier::BOLD));
         assert_eq!(
             buf[(1, 1)].style().fg,
             running_fg,
@@ -5292,7 +5357,7 @@ mod tests {
     }
 
     #[test]
-    fn board_spawn_indent_stops_at_the_cap() {
+    fn board_spawn_indent_caps_visually_and_labels_the_real_depth() {
         let mut state = empty_state();
         state.tasks = vec![task(
             "t-1",
@@ -5322,13 +5387,17 @@ mod tests {
             .collect();
 
         let (dump, _, _) = dump_frame(96, 20, &state, None);
-        let column = |label: &str| {
-            dump.lines()
-                .find_map(|line| line.find(label))
-                .unwrap_or_else(|| panic!("{label} missing:\n{dump}"))
+        let leading = |label: &str| {
+            let line = dump
+                .lines()
+                .find(|line| line.contains(label))
+                .unwrap_or_else(|| panic!("{label} missing:\n{dump}"));
+            line.len() - line.trim_start().len()
         };
-        assert!(column("layer3") < column("layer4"), "{dump}");
-        assert_eq!(column("layer4"), column("layer11"), "{dump}");
+        assert!(leading("layer3") < leading("layer4"), "{dump}");
+        assert_eq!(leading("layer4"), leading("layer11"), "{dump}");
+        assert!(dump.contains("+7 "), "{dump}");
+        assert!(dump.contains("+13 "), "{dump}");
     }
 
     #[test]
@@ -5401,5 +5470,31 @@ mod tests {
             Some("BOARD estate brief run dag [flow] events replay fleet cost audit  r2@407"),
             "the flow view keeps the ambient pulse:\n{dump}"
         );
+    }
+
+    #[test]
+    fn embedded_board_status_names_the_five_lens_surface() {
+        let state = workday_state();
+        let mut terminal = Terminal::new(TestBackend::new(72, 18)).expect("terminal");
+        let mut hits = HitMap::new();
+        terminal
+            .draw(|frame| {
+                render_embedded(
+                    frame.area(),
+                    frame.buffer_mut(),
+                    &state,
+                    None,
+                    ColorTier::Mono,
+                    GlyphSet::Unicode,
+                    &mut hits,
+                );
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let footer = (0..buffer.area.width)
+            .map(|x| buffer[(x, buffer.area.height - 1)].symbol())
+            .collect::<String>();
+        assert_eq!(footer.trim_end(), "TASKS  r2@407");
+        assert!(!footer.contains("BOARD"));
     }
 }

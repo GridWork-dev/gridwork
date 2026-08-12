@@ -9,15 +9,15 @@
  msg 09:31  orchestrator to researcher  (brief)
  msg 09:58  researcher to orchestrator  (findings)
  msg 10:24  reviewer to orchestrator  (ack)
+ ! dead 16:45  watchdog to orchestrator  (alert)
+    3 attempts -- nobody listening
+ ! rejected 17:06  implementer to orchestrator  (status)
+    1 attempt -- no reason recorded
  recent -- resolve is re-arm: a recurring problem raises anew
  v decided: allow (pass)
  v decided: deny (fail)
  v decided: hold (partial)
  v runner pool exhausted  -- pool widened
-
-
-
-
 
 
 

@@ -2,9 +2,9 @@
 //!
 //! No argument-parsing dependency, and that is a decision rather than an
 //! omission. The tree is closed for v1 and flat — a verb, sometimes a subverb, a
-//! positional or two, and a handful of named flags — and every answer this
-//! binary prints is machine JSON, so the human affordances a parser library is
-//! bought for are the part least needed here. What is left is a `match`.
+//! positional or two, and a handful of named flags. List verbs choose a table
+//! only after parsing, when stdout's terminal state is known; their wire answer
+//! remains JSON. What is left here is still a `match`.
 //!
 //! Flags and positionals are separated in ONE pass against the closed set of
 //! flag names, before any verb is resolved. That is what makes their order free
@@ -61,7 +61,15 @@ const VALUE_FLAGS: &[&str] = &[
 ];
 
 /// Every flag that is its own answer.
-const SWITCHES: &[&str] = &["--dry-run", "--help", "--pretty", "--version", "-V", "-h"];
+const SWITCHES: &[&str] = &[
+    "--dry-run",
+    "--help",
+    "--json",
+    "--pretty",
+    "--version",
+    "-V",
+    "-h",
+];
 
 /// Rows an event page asks for when the caller names no limit.
 const DEFAULT_EVENT_LIMIT: u32 = 256;
@@ -87,6 +95,8 @@ pub struct Invocation {
     /// Formatting only. Never content — a pretty answer and a compact one decode
     /// to the same value.
     pub pretty: bool,
+    /// Keep the protocol JSON even when stdout is a terminal.
+    pub json: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -161,10 +171,10 @@ pub enum Verb {
         expected_version: u32,
         budget: Budget,
     },
-    SessionSnapshot {
+    TermTail {
         id: String,
     },
-    SessionAttach {
+    TermAttach {
         id: String,
     },
 
@@ -256,6 +266,7 @@ gw — the GridWork kernel's command line
   gw activity brief
   gw cost rollup
   gw agent fleet
+  gw attempt list [--cursor <key>] [--limit <n>]
   gw attempt stop <attempt-id>
   gw attempt budget <attempt-id>
   gw attempt budget set <attempt-id> --expected-version <n>
@@ -263,8 +274,9 @@ gw — the GridWork kernel's command line
   gw attempt budget clear <attempt-id> --expected-version <n>
   gw session list [--cursor <key>] [--limit <n>]
   gw session inspect <engine-session-id>
-  gw session snapshot <pty-session-id>
-  gw session attach <pty-session-id>
+  gw term list [--cursor <key>] [--limit <n>]
+  gw term tail <pty-session-id>
+  gw term attach <pty-session-id>
   gw tui [--motion=off|reduced|full]
   gw theme
   gw attention list [--cursor <key>] [--limit <n>]
@@ -285,10 +297,11 @@ gw — the GridWork kernel's command line
              [--repo <owner/repo>] [--dry-run]
 
   --pretty   format the JSON answer for a human; the value is unchanged
+  --json     force protocol JSON for list verbs even when stdout is a terminal
   --version  same answer as `build-info`, under the name every CLI is asked by
   --help     this
 
-Every command answer is JSON on standard output; `tui`, `board`, `event tail`, and `session attach` are interactive. Exits: 0 success, 2 usage or input,
+List verbs print a table on a terminal and protocol JSON when piped; `--json` forces JSON. `tui`, `board`, `event tail`, and `term attach` are interactive. Exits: 0 success, 2 usage or input,
 3 refused, 4 not found, 5 unavailable, 6 does not verify, 10 a fault in gw.
 
 `pr` is the one verb that speaks to `gh` instead of the socket — always an
@@ -313,6 +326,7 @@ pub fn parse(argv: &[String]) -> Result<Invocation, Failure> {
         return Ok(Invocation {
             verb: Verb::Help,
             pretty: false,
+            json: false,
         });
     }
     // An alias, not a second answer. `--version` is the name every CLI gets asked
@@ -323,22 +337,38 @@ pub fn parse(argv: &[String]) -> Result<Invocation, Failure> {
         return Ok(Invocation {
             verb: Verb::BuildInfo,
             pretty: rest.switch("--pretty"),
+            json: rest.switch("--json"),
         });
     }
     let pretty = rest.switch("--pretty");
+    let json = rest.switch("--json");
     let verb = verb(&mut rest)?;
     rest.done()?;
     if pretty
         && matches!(
             verb,
-            Verb::Tui { .. } | Verb::EventTail { .. } | Verb::SessionAttach { .. }
+            Verb::Tui { .. } | Verb::EventTail { .. } | Verb::TermAttach { .. }
         )
     {
         return Err(Failure::usage(
             "--pretty does not apply to interactive views",
         ));
     }
-    Ok(Invocation { verb, pretty })
+    if json
+        && matches!(
+            verb,
+            Verb::Tui { .. }
+                | Verb::EventTail { .. }
+                | Verb::TermAttach { .. }
+                | Verb::BlobGet { .. }
+                | Verb::Pr { .. }
+        )
+    {
+        return Err(Failure::usage(
+            "--json does not apply to interactive or pass-through output",
+        ));
+    }
+    Ok(Invocation { verb, pretty, json })
 }
 
 fn verb(rest: &mut Rest) -> Result<Verb, Failure> {
@@ -393,13 +423,17 @@ fn verb(rest: &mut Rest) -> Result<Verb, Failure> {
                 kind: ProjectionKind::EngineSession,
                 id: rest.word("session inspect")?,
             }),
-            "snapshot" => Ok(Verb::SessionSnapshot {
-                id: rest.word("session snapshot")?,
-            }),
-            "attach" => Ok(Verb::SessionAttach {
-                id: rest.word("session attach")?,
-            }),
             other => Err(unknown("session", other)),
+        },
+        "term" => match rest.word("term")?.as_str() {
+            "list" => rest.page(ProjectionKind::PtySession),
+            "tail" => Ok(Verb::TermTail {
+                id: rest.word("term tail")?,
+            }),
+            "attach" => Ok(Verb::TermAttach {
+                id: rest.word("term attach")?,
+            }),
+            other => Err(unknown("term", other)),
         },
         "tui" => Ok(Verb::Tui {
             motion: rest
@@ -555,6 +589,7 @@ fn event(rest: &mut Rest) -> Result<Verb, Failure> {
 
 fn attempt(rest: &mut Rest) -> Result<Verb, Failure> {
     match rest.word("attempt")?.as_str() {
+        "list" => rest.page(ProjectionKind::Attempt),
         "stop" => Ok(Verb::AttemptStop {
             id: rest.word("attempt stop")?,
         }),
@@ -962,6 +997,14 @@ mod tests {
         );
         assert_eq!(parsed("agent fleet").expect("parse").verb, Verb::AgentFleet);
         assert_eq!(
+            parsed("attempt list").expect("parse").verb,
+            Verb::ProjectionList {
+                kind: ProjectionKind::Attempt,
+                cursor: None,
+                limit: None,
+            }
+        );
+        assert_eq!(
             parsed("session list").expect("parse").verb,
             Verb::ProjectionList {
                 kind: ProjectionKind::EngineSession,
@@ -977,12 +1020,20 @@ mod tests {
             }
         );
         assert_eq!(
-            parsed("session snapshot pty-1").expect("parse").verb,
-            Verb::SessionSnapshot { id: "pty-1".into() }
+            parsed("term tail pty-1").expect("parse").verb,
+            Verb::TermTail { id: "pty-1".into() }
         );
         assert_eq!(
-            parsed("session attach pty-1").expect("parse").verb,
-            Verb::SessionAttach { id: "pty-1".into() }
+            parsed("term attach pty-1").expect("parse").verb,
+            Verb::TermAttach { id: "pty-1".into() }
+        );
+        assert_eq!(
+            parsed("term list").expect("parse").verb,
+            Verb::ProjectionList {
+                kind: ProjectionKind::PtySession,
+                cursor: None,
+                limit: None,
+            }
         );
         assert_eq!(
             parsed("tui --motion=reduced").expect("parse").verb,
@@ -1124,6 +1175,7 @@ mod tests {
                 limit: Some(5)
             }
         );
+        assert!(parsed("term list --json").expect("parse").json);
     }
 
     #[test]
@@ -1162,6 +1214,8 @@ mod tests {
             "tui --pretty",
             "event tail --pretty",
             "session attach pty-1 --pretty",
+            "term attach pty-1 --pretty",
+            "term attach pty-1 --json",
             "attempt budget set at-1 --expected-version 1",
             "attempt budget set at-1 --max-tokens 1",
             "attempt budget clear at-1",

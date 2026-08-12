@@ -2,7 +2,7 @@
 
  ✓ in sync -- latest config commit has evidence
  ⠄ identity/authority-policy.toml                                                                 $EDITOR + typed commit
- ⠄ identity/capabilities.toml                                                                             validated form
+>⠄ identity/capabilities.toml                                                                             validated form
  ⠄ identity/namespace-scopes.toml                                                                         validated form
  ⠄ identity/orchestration.toml                                                                            validated form
 

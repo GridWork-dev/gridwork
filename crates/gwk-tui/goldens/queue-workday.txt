@@ -1,5 +1,5 @@
  3 need attention                                           oldest 09:00
- ! gate permission  rm -rf build/ in worktree?
+>! gate permission  rm -rf build/ in worktree?
     options: allow / deny
  ! KEK rotation is overdue  (watchdog)
  ! deploy blocked on grant  3x since 09:14  (authority)

@@ -11,7 +11,7 @@ use std::fmt;
 use std::rc::Rc;
 use std::time::Duration;
 
-use gwk_domain::ids::Seq;
+use gwk_domain::ids::{Seq, Timestamp};
 use gwk_theme::marks::{GlyphSet, Mark};
 use gwk_theme::tier::ColorTier;
 use ratatui::buffer::Buffer;
@@ -174,6 +174,9 @@ pub struct Agent {
     pub id: AgentId,
     pub role: Option<String>,
     pub state: AgentState,
+    /// The engine-reported runtime start. Elapsed labels are derived at the
+    /// render boundary; sequence values never stand in for time.
+    pub started_at: Option<Timestamp>,
     /// Caller-formatted standing liveness text, visible even with motion off.
     pub duration: Option<String>,
     pub changed_seq: Seq,
