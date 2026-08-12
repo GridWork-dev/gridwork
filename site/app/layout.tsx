@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import { JetBrains_Mono } from "next/font/google";
-import Script from "next/script";
 import type { ReactNode } from "react";
 import { RootProvider } from "fumadocs-ui/provider/next";
 
@@ -50,12 +49,16 @@ export default function RootLayout({ children }: { children: ReactNode }) {
     >
       <head>
         {/* Cookieless, aggregate-only. data-domain is the canonical host;
-            gridwork.dev 301s at the edge, so the origin only ever sees this one. */}
-        <Script
+            gridwork.dev 301s at the edge, so the origin only ever sees this one.
+
+            A plain tag, not next/script: afterInteractive injects the script
+            client-side after hydration, so it never appears in the served HTML
+            and a reader auditing the page source cannot see what is measuring
+            them. The literal tag is also what Plausible documents. */}
+        <script
           defer
           data-domain="gridwork.sh"
           src="https://plausible.io/js/script.js"
-          strategy="afterInteractive"
         />
         <StructuredData />
       </head>
