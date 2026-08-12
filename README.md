@@ -35,13 +35,13 @@ allowed to do that. GridWork is an operating layer for a fleet of terminal agent
 
 ## Where it actually is
 
-Pre-alpha, at stage 4 of 6. **Stages 1–3 — the contract, the kernel, and the
-engines — are done**: the first two published on crates.io, stage 3 exiting with
-its twelve-cell parity matrix certified green at pinned engine versions
+Pre-alpha, at stage 5 of 6. **Stages 1–4 — the contract, the kernel, the
+engines, and the console — are done**: the first two published on crates.io, stage 3
+exiting with its twelve-cell parity matrix certified green at pinned engine versions
 ([docs/PARITY.md](docs/PARITY.md)). The kernel is a daemon owning an append-only event store,
 projections written in the same transaction as their events, content-addressed
 encrypted blobs, authority evaluation that leaves a receipt, event subscriptions, and
-`gw` — the headless CLI over the same protocol the TUI will use. Certified against a
+`gw` — the headless CLI over the same protocol the TUI uses. Certified against a
 real PostgreSQL 16 and its performance envelope measured, not asserted.
 
 Stage 3's crates are in this tree, deliberately unpublished until 1.0 packaging:
@@ -53,14 +53,15 @@ deltas into the kernel's session registry, and `PtyAttach`/`PtySnapshot` answer
 consumers from there; a consumer's input now reaches the hosted session —
 authority-gated, one ledger receipt per send — while routing resize and stop is
 still open, and sessions still start from the operator's declaration
-rather than a request). Stage 4 — the console — is in flight: `gwk-tui` now
-carries five lenses (Queue, Board, Hall — the live fleet view — Config, and the
-session drill-down), and `gw tui` wires the Hall lens into a production
-terminal loop over the kernel's live projections and events. Queue, Board,
-Config, and the drill-down are not part of that installed surface yet — so the
-terminal-native and engine-agnostic bullets above are still partly describing
-what GridWork is being built to be, but the daemon's human face is no longer
-JSON output alone.
+rather than a request). Stage 4 — the console — shipped as the ruled five-lens
+workspace: `gw tui` opens HALL, WORK, FLEET, FLOW, and TERM over the kernel's
+live projections and events, `gw board`, `gw event tail`, and `gw term attach`
+open the same console shell focused on a lens, and every CLI verb renders a
+real table on a TTY while a pipe still gets the wire JSON byte for byte. The
+terminal-native bullet above now describes what runs, with one named gap:
+persisted terminal recordings replay as a deterministic timeline in the
+console, but the ledger-synced, exportable-as-evidence half of replay is not
+built yet. Stage 5 — the workspace multiplexer — is next.
 
 The build order — contract → kernel → engines → console → workspace → context
 runtime — with what each

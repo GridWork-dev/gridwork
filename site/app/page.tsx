@@ -112,7 +112,7 @@ export default function HomePage() {
             apache-2.0
           </span>
           <a className="landing-stage" href="/docs/roadmap">
-            stage 4/6 · console
+            stage 5/6 · workspace
           </a>
           <span className="landing-status-segment landing-status-optional">
             pre-1.0
@@ -227,8 +227,9 @@ $ gw kernel health
           <div className="landing-section-heading">
             <h2 id="truth-title">Where it actually is</h2>
             <p>
-              Pre-alpha, at <strong>stage 4 of 6</strong>. The contract, kernel,
-              and engines are done; the console is the work now.
+              Pre-alpha, at <strong>stage 5 of 6</strong>. The contract, kernel,
+              engines, and console are done; the workspace multiplexer is the
+              work now.
             </p>
           </div>
 

@@ -6,10 +6,11 @@ an issue first.
 
 ## What's actually useful right now
 
-The kernel and the engines have landed and the console is in flight (stage 4 of 6
-on the [roadmap](ROADMAP.md)): the PTY engine and adapter crates are certified but
-still in-tree and unpublished, and `gwk-tui` now puts an early `gw tui` surface over
-the daemon — so there is a running daemon to break and a young console to build on.
+The kernel, the engines, and the console have landed (stage 5 of 6 on the
+[roadmap](ROADMAP.md)): the PTY engine and adapter crates are certified but
+still in-tree and unpublished, and `gw tui` opens the five-lens workspace over
+the daemon — so there is a running daemon to break and a fresh console to
+drive hard.
 What is most useful:
 
 - **Read the contract and argue with it.** `crates/gwk-domain/src/fsm.rs` and
