@@ -176,7 +176,7 @@ fn paint_gate(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) {
     // Options come off the gate; the selected one is prefixed, not merely
     // coloured, so the choice survives Mono.
     for (index, (key, option, note)) in [
-        ("1", "allow", "restarts gridwork-kernel on gw-ms-a2"),
+        ("1", "allow", "restarts gridwork-kernel on gw-box-1"),
         (
             "2",
             "deny",

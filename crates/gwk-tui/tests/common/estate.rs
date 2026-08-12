@@ -1109,7 +1109,7 @@ fn raw() -> Raw {
                 "att-disk",
                 "watchdog",
                 "disk pressure on the build host",
-                "host:gw-ms-a2",
+                "host:gw-box-1",
                 None,
                 "2026-08-11T09:10:00Z",
             );
