@@ -1271,14 +1271,18 @@ mod tests {
             ),
         ];
         let mut runtime = WorkspaceRuntime::from_projection(&rows);
-        let pane = runtime.focused_pane().unwrap();
+        let pane = runtime.focused_pane().expect("projected focused pane");
         runtime.ensure_attachment(pane, PtySessionId::new("wire"));
 
         runtime.replace_projection(&rows);
 
-        let pane = runtime.focused_pane().unwrap();
+        let pane = runtime.focused_pane().expect("refreshed focused pane");
         assert_eq!(
-            runtime.attachment(pane).unwrap().session_id().as_str(),
+            runtime
+                .attachment(pane)
+                .expect("preserved attachment")
+                .session_id()
+                .as_str(),
             "wire"
         );
     }
@@ -1389,7 +1393,7 @@ mod tests {
         assert!(
             runtime
                 .visible_bound_panes()
-                .unwrap_err()
+                .expect_err("ninth visible pane must exceed the socket limit")
                 .contains("admits 8")
         );
     }
@@ -1416,13 +1420,13 @@ mod tests {
         assert!(effect.dirty);
         assert_eq!(
             effect.pane,
-            Some(runtime.state.active_tab().unwrap().pane_ids()[1])
+            Some(runtime.state.active_tab().expect("active tab").pane_ids()[1])
         );
-        let first = runtime.state.active_tab().unwrap().pane_ids()[0];
+        let first = runtime.state.active_tab().expect("active tab").pane_ids()[0];
         assert_eq!(
             runtime
                 .attachment(first)
-                .unwrap()
+                .expect("first pane attachment")
                 .diagnostics()
                 .foreign_references,
             0
@@ -1432,9 +1436,14 @@ mod tests {
     #[test]
     fn runtime_refuses_an_attach_dimension_past_the_mirror_budget() {
         let mut runtime = fixture();
-        let (pane, session) = runtime.visible_bound_panes().unwrap().remove(0);
+        let (pane, session) = runtime
+            .visible_bound_panes()
+            .expect("visible bound panes")
+            .remove(0);
         runtime.ensure_attachment(pane, session.clone());
-        runtime.begin_attach(pane, RequestId::new("large")).unwrap();
+        runtime
+            .begin_attach(pane, RequestId::new("large"))
+            .expect("begin oversized attach");
         let control = ServerControl::Response {
             request_id: RequestId::new("large"),
             result: KernelResult::PtyAttached {
@@ -1449,14 +1458,20 @@ mod tests {
         let effect = runtime.ingest(&control);
         assert_eq!(effect.pane, Some(pane));
         assert!(effect.dirty);
-        assert!(runtime.attachment(pane).unwrap().generation().is_none());
+        assert!(
+            runtime
+                .attachment(pane)
+                .expect("oversized attachment remains tracked")
+                .generation()
+                .is_none()
+        );
     }
 
     #[test]
     fn xterm_profile_encodes_navigation_functions_modifiers_and_utf8() {
         let key = |code, modifiers| KeyEvent::new(code, modifiers);
         assert_eq!(
-            encode_key(key(KeyCode::Up, KeyModifiers::NONE)).unwrap(),
+            encode_key(key(KeyCode::Up, KeyModifiers::NONE)).expect("encode Up"),
             b"\x1b[A"
         );
         assert_eq!(
@@ -1464,31 +1479,31 @@ mod tests {
                 KeyCode::Left,
                 KeyModifiers::SHIFT | KeyModifiers::CONTROL,
             ))
-            .unwrap(),
+            .expect("encode Ctrl-Shift-Left"),
             b"\x1b[1;6D"
         );
         assert_eq!(
-            encode_key(key(KeyCode::F(1), KeyModifiers::NONE)).unwrap(),
+            encode_key(key(KeyCode::F(1), KeyModifiers::NONE)).expect("encode F1"),
             b"\x1bOP"
         );
         assert_eq!(
-            encode_key(key(KeyCode::F(5), KeyModifiers::ALT)).unwrap(),
+            encode_key(key(KeyCode::F(5), KeyModifiers::ALT)).expect("encode Alt-F5"),
             b"\x1b[15;3~"
         );
         assert_eq!(
-            encode_key(key(KeyCode::Char('λ'), KeyModifiers::NONE)).unwrap(),
+            encode_key(key(KeyCode::Char('λ'), KeyModifiers::NONE)).expect("encode UTF-8"),
             "λ".as_bytes()
         );
         assert_eq!(
-            encode_key(key(KeyCode::Char('c'), KeyModifiers::CONTROL)).unwrap(),
+            encode_key(key(KeyCode::Char('c'), KeyModifiers::CONTROL)).expect("encode Ctrl-C"),
             &[3]
         );
         assert_eq!(
-            encode_key(key(KeyCode::Char('~'), KeyModifiers::CONTROL)).unwrap(),
+            encode_key(key(KeyCode::Char('~'), KeyModifiers::CONTROL)).expect("encode Ctrl-~"),
             &[30]
         );
         assert_eq!(
-            encode_key(key(KeyCode::Char(';'), KeyModifiers::CONTROL)).unwrap(),
+            encode_key(key(KeyCode::Char(';'), KeyModifiers::CONTROL)).expect("encode Ctrl-;"),
             b";"
         );
         assert!(
