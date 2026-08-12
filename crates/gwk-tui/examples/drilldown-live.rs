@@ -150,6 +150,7 @@ mod tests {
                 frame: gwk_domain::frame::PtyFrame {
                     styles: Vec::new(),
                     rows: Vec::new(),
+                    cursor: None,
                 },
             },
         }

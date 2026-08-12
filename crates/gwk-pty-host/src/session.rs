@@ -143,7 +143,10 @@ pub enum SessionExit {
 /// Everything a session can be asked to do while it runs.
 pub enum SessionCommand {
     /// Bytes for the child, as a terminal would send them.
-    Input(Vec<u8>),
+    Input {
+        bytes: Vec<u8>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     Resize {
         cols: u16,
         rows: u16,
@@ -293,10 +296,15 @@ pub(crate) async fn run(
                 let _ = session.wait().await;
                 return SessionExit::Stopped;
             }
-            Wake::Command(Some(SessionCommand::Input(bytes))) => {
-                if let Err(e) = session.send(&bytes).await {
-                    tracing::warn!(%e, "input did not reach the child");
+            Wake::Command(Some(SessionCommand::Input { bytes, reply })) => {
+                let result = session
+                    .send(&bytes)
+                    .await
+                    .map_err(|error| error.to_string());
+                if let Err(error) = &result {
+                    tracing::warn!(%error, "input did not reach the child");
                 }
+                let _ = reply.send(result);
             }
             Wake::Command(Some(SessionCommand::Resize { cols, rows })) => {
                 match session.resize(cols, rows) {

@@ -4,7 +4,8 @@
     "protocol_major": 1,
     "protocol_minor": 0,
     "capabilities": [
-      "pty_raw"
+      "pty_raw",
+      "pty_input"
     ],
     "sealed": true,
     "watermark": "9007199254740993"
@@ -203,7 +204,11 @@
               "count": 1
             }
           ]
-        ]
+        ],
+        "cursor": {
+          "row": 1,
+          "col": 1
+        }
       }
     }
   },
@@ -321,5 +326,13 @@
       "type": "pty_published",
       "session_id": "pty-1"
     }
+  },
+  {
+    "type": "pty_input",
+    "command_id": "input-1",
+    "session_id": "pty-1",
+    "generation": "pty-life-1",
+    "byte_size": "3",
+    "data_base64": "AP8K"
   }
 ]

@@ -173,6 +173,18 @@ string_id!(
     PtySessionGeneration
 );
 
+/// The ledger aggregate for one hosted PTY session lifetime.
+///
+/// The wire-facing session id is reusable across host restarts; pairing it
+/// with the kernel-minted generation keeps commands and receipts bound to one
+/// exact lifetime.
+pub fn pty_session_lifetime_id(
+    id: &PtySessionId,
+    generation: &PtySessionGeneration,
+) -> PtySessionId {
+    PtySessionId::new(format!("{id}:{generation}"))
+}
+
 u64_decimal_string!(
     /// A position in the global event log. Assigned by the kernel append actor
     /// in COMMIT order — unique and strictly increasing, but NOT gapless.

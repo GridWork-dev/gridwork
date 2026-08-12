@@ -79,6 +79,8 @@ const WORKFLOW_RUN_VERSION: &str = "SELECT version FROM gwk.workflow_run WHERE i
 const WORKFLOW_RUN_STATE: &str = "SELECT state FROM gwk.workflow_run WHERE id = $1";
 const PTY_SESSION_VERSION: &str = "SELECT version FROM gwk.pty_session WHERE id = $1";
 const PTY_SESSION_STATE: &str = "SELECT state FROM gwk.pty_session WHERE id = $1";
+const PTY_SESSION_CURSOR: &str =
+    "SELECT state, generation, version FROM gwk.pty_session WHERE id = $1";
 const AGGREGATE_OWNER: &str = "SELECT project_id FROM gwk.event \
      WHERE aggregate_type = $1 AND aggregate_id = $2 \
      ORDER BY aggregate_version LIMIT 1";
@@ -108,6 +110,73 @@ enum Prior {
     Conflict(String),
 }
 
+/// The wire layer needs to know whether a successful input submission is new:
+/// a replay must return the original command result without typing the bytes a
+/// second time.
+pub(crate) struct Submission {
+    pub result: KernelResult,
+    pub newly_applied: bool,
+}
+
+/// The ephemeral half of one typed PTY-input request. Invalid wire encodings
+/// still reach the store as a refusal so a well-formed send command always
+/// leaves its required receipt without moving the bytes into durable state.
+pub(crate) enum PtyInputCarrier<'a> {
+    Bytes(&'a [u8]),
+    Invalid(String),
+}
+
+/// Require the ephemeral carrier exactly for the metadata command that names
+/// it. This keeps the ordinary submit path from appending a false "sent" event
+/// with no bytes behind it, and keeps arbitrary commands from smuggling an
+/// unlogged side payload.
+fn validate_pty_input_carrier(
+    command: &KernelCommand,
+    pty_input: Option<&PtyInputCarrier<'_>>,
+) -> Result<(), Refusal> {
+    match (command, pty_input) {
+        (
+            KernelCommand::SendPtyInput {
+                byte_count,
+                pty_session_id,
+                ..
+            },
+            Some(PtyInputCarrier::Bytes(bytes)),
+        ) => {
+            if bytes.is_empty() {
+                return Err(Refusal::validation(format!(
+                    "send_pty_input for {pty_session_id} carries an empty batch"
+                )));
+            }
+            if bytes.len() > gwk_domain::protocol::PTY_INPUT_MAX_BYTES {
+                return Err(Refusal::validation(format!(
+                    "send_pty_input for {pty_session_id} carries {} bytes, over the {}-byte batch bound",
+                    bytes.len(),
+                    gwk_domain::protocol::PTY_INPUT_MAX_BYTES,
+                )));
+            }
+            let actual = u64::try_from(bytes.len())
+                .map_err(|_| Refusal::validation("PTY input size does not fit u64"))?;
+            if actual != byte_count.value() {
+                return Err(Refusal::validation(format!(
+                    "send_pty_input for {pty_session_id} declares {byte_count} bytes but carries {actual}"
+                )));
+            }
+            Ok(())
+        }
+        (KernelCommand::SendPtyInput { .. }, Some(PtyInputCarrier::Invalid(message))) => {
+            Err(Refusal::validation(message.clone()))
+        }
+        (KernelCommand::SendPtyInput { .. }, None) => Err(Refusal::validation(
+            "send_pty_input requires the typed ephemeral byte carrier",
+        )),
+        (_, Some(_)) => Err(Refusal::validation(
+            "the PTY input byte carrier may accompany send_pty_input only",
+        )),
+        (_, None) => Ok(()),
+    }
+}
+
 impl PgEventStore {
     /// Apply one command, or answer why not.
     ///
@@ -115,13 +184,39 @@ impl PgEventStore {
     /// [`KernelResult::Error`] rather than an `Err`, so the wire layer has
     /// nothing left to translate.
     pub async fn submit(&self, envelope: &CommandEnvelope) -> KernelResult {
-        match self.try_submit(envelope).await {
-            Ok(result) => result,
-            Err(refusal) => refusal.into_result(),
+        self.submit_inner(envelope, None).await.result
+    }
+
+    pub(crate) async fn submit_pty_input_for_delivery(
+        &self,
+        envelope: &CommandEnvelope,
+        carrier: PtyInputCarrier<'_>,
+    ) -> Submission {
+        self.submit_inner(envelope, Some(carrier)).await
+    }
+
+    async fn submit_inner(
+        &self,
+        envelope: &CommandEnvelope,
+        pty_input: Option<PtyInputCarrier<'_>>,
+    ) -> Submission {
+        match self.try_submit(envelope, pty_input).await {
+            Ok((result, newly_applied)) => Submission {
+                result,
+                newly_applied,
+            },
+            Err(refusal) => Submission {
+                result: refusal.into_result(),
+                newly_applied: false,
+            },
         }
     }
 
-    async fn try_submit(&self, envelope: &CommandEnvelope) -> Result<KernelResult, Refusal> {
+    async fn try_submit(
+        &self,
+        envelope: &CommandEnvelope,
+        pty_input: Option<PtyInputCarrier<'_>>,
+    ) -> Result<(KernelResult, bool), Refusal> {
         let _permit = self.admit().map_err(|_| {
             Refusal::new(
                 KernelErrorCode::Overloaded,
@@ -132,10 +227,26 @@ impl PgEventStore {
             .map_err(|e| Refusal::new(KernelErrorCode::Schema, e.to_string()))?;
         let command = KernelCommand::from_envelope(envelope)
             .map_err(|e| Refusal::validation(e.to_string()))?;
+        let pty_input_command = matches!(command, KernelCommand::SendPtyInput { .. });
+        let input_preflight_refusal = if pty_input_command {
+            validate_pty_input_carrier(&command, pty_input.as_ref())
+                .err()
+                .or_else(|| {
+                    envelope.expected_version.is_some().then(|| {
+                        Refusal::validation(
+                            "send_pty_input is generation-guarded and carries no expected_version",
+                        )
+                    })
+                })
+        } else {
+            validate_pty_input_carrier(&command, pty_input.as_ref())?;
+            None
+        };
         let route = route_of(envelope, &command)?;
         check_routing(envelope, &route)?;
         check_body_project(envelope, &command)?;
         check_activation(envelope, &command)?;
+        check_authority_admin(envelope, &command)?;
         let payload = serde_json::to_value(&command)
             .map_err(|e| Refusal::storage(format!("serialize command body: {e}")))?;
 
@@ -156,6 +267,18 @@ impl PgEventStore {
         if !admitted(epoch, &command) {
             return Err(epoch::sealed_refusal(epoch, command.command_type()));
         }
+        if let Some(refusal) = input_preflight_refusal {
+            return self
+                .receipted_input_refusal(
+                    tx,
+                    envelope,
+                    &command,
+                    &route,
+                    "request validation",
+                    refusal,
+                )
+                .await;
+        }
 
         let expected_version = match prior_for_key(&mut tx, envelope, &route, &payload).await? {
             Prior::Replay(events) => {
@@ -166,7 +289,7 @@ impl PgEventStore {
                 tx.commit()
                     .await
                     .map_err(|e| Refusal::storage(format!("commit: {e}")))?;
-                return self.applied(envelope, events).await;
+                return Ok((self.applied(envelope, events).await?, false));
             }
             Prior::Conflict(reason) => {
                 return Err(Refusal::new(KernelErrorCode::IdempotencyConflict, reason));
@@ -185,27 +308,59 @@ impl PgEventStore {
                     &route.aggregate_id,
                 )
                 .await?;
-                if let authority::Decision::Page { action_class } = decision {
+                if let authority::Decision::Page {
+                    action_class,
+                    observed_basis,
+                } = decision
+                {
                     // A page does NOT mutate the target, so this returns before
                     // `decide` — but it still commits, because the receipt and
                     // the attention item are the whole point of paging. This is
                     // the one refusal in the kernel that leaves rows behind.
-                    return self.paged(tx, envelope, &route, action_class).await;
+                    return self
+                        .paged(tx, envelope, &command, &route, action_class, observed_basis)
+                        .await;
                 }
-                if let Some(action_class) = decision.action_class() {
+                let authority_result = decision.action_class().zip(decision.observed_basis());
+                let pty_input = pty_input_command;
+                if !pty_input && let Some((action_class, observed_basis)) = authority_result {
                     write_receipt(
                         &mut tx,
-                        &receipt_for(
-                            envelope,
-                            &route,
-                            action_class,
-                            "matching unexpired scoped grant",
-                        ),
+                        &receipt_for(envelope, &route, &command, action_class, observed_basis),
                     )
                     .await?;
                 }
                 check_attention_dedup(&mut tx, &command).await?;
-                decide(&mut tx, envelope, &command, &route).await?
+                let expected_version = match decide(&mut tx, envelope, &command, &route).await {
+                    Ok(version) => version,
+                    Err(refusal) if pty_input => {
+                        let authority = authority_result.ok_or_else(|| {
+                            Refusal::storage("send_pty_input was not authority-classified")
+                        })?;
+                        return self
+                            .receipted_input_refusal(
+                                tx,
+                                envelope,
+                                &command,
+                                &route,
+                                authority.1,
+                                refusal,
+                            )
+                            .await;
+                    }
+                    Err(refusal) => return Err(refusal),
+                };
+                if pty_input {
+                    let (action_class, observed_basis) = authority_result.ok_or_else(|| {
+                        Refusal::storage("send_pty_input was not authority-classified")
+                    })?;
+                    write_receipt(
+                        &mut tx,
+                        &receipt_for(envelope, &route, &command, action_class, observed_basis),
+                    )
+                    .await?;
+                }
+                expected_version
             }
         };
         check_expected_version(envelope, expected_version)?;
@@ -238,7 +393,7 @@ impl PgEventStore {
             .await
             .map_err(|e| Refusal::storage(format!("commit: {e}")))?;
 
-        self.applied(envelope, appended.events).await
+        Ok((self.applied(envelope, appended.events).await?, true))
     }
 
     /// The paged answer: a refusal that commits its own trail.
@@ -251,20 +406,17 @@ impl PgEventStore {
         &self,
         mut tx: sqlx::Transaction<'_, sqlx::Postgres>,
         envelope: &CommandEnvelope,
+        command: &KernelCommand,
         route: &Route,
         action_class: &'static str,
-    ) -> Result<KernelResult, Refusal> {
+        observed_basis: &'static str,
+    ) -> Result<(KernelResult, bool), Refusal> {
         let actor = actor_json(envelope)?;
         let at = envelope.issued_at.as_str();
         let subject = format!("{}/{}", route.aggregate_type, route.aggregate_id);
         write_receipt(
             &mut tx,
-            &receipt_for(
-                envelope,
-                route,
-                action_class,
-                "no matching unexpired scoped grant",
-            ),
+            &receipt_for(envelope, route, command, action_class, observed_basis),
         )
         .await?;
         page_attention(
@@ -293,6 +445,35 @@ impl PgEventStore {
             ),
         )
         .with_detail(serde_json::json!({ "action_class": action_class, "subject": subject })))
+    }
+
+    /// Commit the one receipt a well-formed input call owes even when its
+    /// session lifetime is stale or absent. The target event is not appended.
+    async fn receipted_input_refusal(
+        &self,
+        mut tx: sqlx::Transaction<'_, sqlx::Postgres>,
+        envelope: &CommandEnvelope,
+        command: &KernelCommand,
+        route: &Route,
+        basis: &str,
+        refusal: Refusal,
+    ) -> Result<(KernelResult, bool), Refusal> {
+        let observed_basis = format!("{basis}; refused={}", refusal.code);
+        write_receipt(
+            &mut tx,
+            &receipt_for(
+                envelope,
+                route,
+                command,
+                gwk_domain::command::PTY_INPUT_ACTION_CLASS,
+                &observed_basis,
+            ),
+        )
+        .await?;
+        tx.commit()
+            .await
+            .map_err(|e| Refusal::storage(format!("commit input refusal receipt: {e}")))?;
+        Err(refusal)
     }
 
     /// The success answer, with the watermark read after the commit that
@@ -558,6 +739,17 @@ fn route_of(envelope: &CommandEnvelope, command: &KernelCommand) -> Result<Route
             pty_session_id.as_str().to_owned(),
             "pty_detach_recorded",
         ),
+        C::SendPtyInput {
+            pty_session_id,
+            generation,
+            ..
+        } => (
+            "pty_session",
+            gwk_domain::ids::pty_session_lifetime_id(pty_session_id, generation)
+                .as_str()
+                .to_owned(),
+            "pty_input_requested",
+        ),
         C::ClosePtySession { pty_session_id, .. } => (
             "pty_session",
             pty_session_id.as_str().to_owned(),
@@ -778,9 +970,16 @@ fn check_routing(envelope: &CommandEnvelope, route: &Route) -> Result<(), Refusa
 fn receipt_for(
     envelope: &CommandEnvelope,
     route: &Route,
+    command: &KernelCommand,
     action_class: &str,
     observed_basis: &str,
 ) -> gwk_domain::entity::Receipt {
+    let observed_basis = match command {
+        KernelCommand::SendPtyInput { byte_count, .. } => {
+            format!("{observed_basis}; byte_count={byte_count}")
+        }
+        _ => observed_basis.to_owned(),
+    };
     gwk_domain::entity::Receipt {
         id: ReceiptId::new(format!(
             "receipt:{}:{}",
@@ -797,7 +996,7 @@ fn receipt_for(
         // unable to answer which kind of fact it is holding.
         from: None,
         to: None,
-        observed_basis: Some(observed_basis.to_owned()),
+        observed_basis: Some(observed_basis),
         // The command's own time, not the clock: replay must rebuild the same
         // ledger it built live.
         ts: envelope.issued_at.clone(),
@@ -904,6 +1103,30 @@ fn check_activation(envelope: &CommandEnvelope, command: &KernelCommand) -> Resu
             "activating cutover {cutover_id:?} requires idempotency key {required:?}, not {:?}",
             envelope.idempotency_key.as_str()
         )));
+    }
+    Ok(())
+}
+
+/// Authority administration is an operator act. The UDS peer credential is
+/// the process boundary; this logical actor check prevents a conforming
+/// orchestrator from granting or revoking its own standing authority.
+fn check_authority_admin(
+    envelope: &CommandEnvelope,
+    command: &KernelCommand,
+) -> Result<(), Refusal> {
+    if matches!(
+        command,
+        KernelCommand::GrantAuthority { .. } | KernelCommand::RevokeAuthority { .. }
+    ) && envelope.actor.kind != "operator"
+    {
+        return Err(Refusal::new(
+            KernelErrorCode::Authority,
+            format!(
+                "{} requires actor kind operator, not {:?}",
+                command.command_type(),
+                envelope.actor.kind
+            ),
+        ));
     }
     Ok(())
 }
@@ -1270,6 +1493,37 @@ async fn decide(
             .await?
         }
 
+        // Input is guarded by the host generation rather than by a caller-read
+        // projection version. The lifetime row is `{id}:{generation}`; a closed
+        // row is therefore a stale generation, not a generic illegal state.
+        C::SendPtyInput {
+            pty_session_id,
+            generation,
+            ..
+        } => {
+            let Some((state, stored_generation, version)) =
+                pty_session_cursor(conn, &route.aggregate_id).await?
+            else {
+                return Err(Refusal::not_found(format!(
+                    "no live pty_session {pty_session_id}:{generation}"
+                )));
+            };
+            if stored_generation != generation.as_str() || state != "running" {
+                return Err(Refusal::new(
+                    KernelErrorCode::StaleVersion,
+                    format!(
+                        "pty session {pty_session_id}:{generation} is stale; ledger state is {state} under generation {stored_generation}"
+                    ),
+                )
+                .with_detail(serde_json::json!({
+                    "presented_generation": generation.as_str(),
+                    "stored_generation": stored_generation,
+                    "state": state,
+                })));
+            }
+            version
+        }
+
         // A detach is TRUE HISTORY even on a closed row: a retire drops the
         // broadcast sender and the live attach streams end AFTER the close
         // lands, so refusing here would systematically undercount the S8
@@ -1543,6 +1797,28 @@ async fn pty_session_state(conn: &mut PgConnection, id: &str) -> Result<Option<S
         .map_err(|e| Refusal::storage(format!("read pty_session state: {e}")))
 }
 
+/// State, generation, and CAS version for one PTY lifetime row.
+async fn pty_session_cursor(
+    conn: &mut PgConnection,
+    id: &str,
+) -> Result<Option<(String, String, u32)>, Refusal> {
+    let Some(row) = sqlx::query(PTY_SESSION_CURSOR)
+        .bind(id)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(|e| Refusal::storage(format!("read pty_session cursor: {e}")))?
+    else {
+        return Ok(None);
+    };
+    let state = row
+        .try_get("state")
+        .map_err(|e| Refusal::storage(format!("pty_session state: {e}")))?;
+    let generation = row
+        .try_get("generation")
+        .map_err(|e| Refusal::storage(format!("pty_session generation: {e}")))?;
+    Ok(Some((state, generation, row_version(&row)?)))
+}
+
 /// The state column of one workflow run, or `None` when no such row exists.
 async fn workflow_run_state(conn: &mut PgConnection, id: &str) -> Result<Option<String>, Refusal> {
     sqlx::query_scalar::<_, String>(WORKFLOW_RUN_STATE)
@@ -1722,7 +1998,7 @@ fn build_event(
 
 #[cfg(test)]
 mod tests {
-    use gwk_domain::ids::{AttemptId, TaskId};
+    use gwk_domain::ids::{AttemptId, ByteCount, PtySessionGeneration, PtySessionId, TaskId};
 
     use super::*;
 
@@ -1800,6 +2076,67 @@ mod tests {
             (route.aggregate_type, route.event_type),
             ("evidence", "evidence_recorded")
         );
+    }
+
+    #[test]
+    fn pty_input_requires_one_matching_bounded_ephemeral_carrier() {
+        let command = KernelCommand::SendPtyInput {
+            pty_session_id: PtySessionId::new("pty-1"),
+            generation: PtySessionGeneration::new("gen-1"),
+            byte_count: ByteCount::new(3),
+        };
+        let matching = PtyInputCarrier::Bytes(b"abc");
+        validate_pty_input_carrier(&command, Some(&matching)).expect("matching carrier");
+
+        let empty = PtyInputCarrier::Bytes(b"");
+        let short = PtyInputCarrier::Bytes(b"ab");
+        for (carrier, expected) in [
+            (None, "requires the typed ephemeral byte carrier"),
+            (Some(&empty), "empty batch"),
+            (Some(&short), "declares 3 bytes but carries 2"),
+        ] {
+            let refusal = validate_pty_input_carrier(&command, carrier).expect_err("refused");
+            assert_eq!(refusal.code, KernelErrorCode::Validation);
+            assert!(refusal.message.contains(expected), "{refusal}");
+        }
+
+        let oversized = vec![0; gwk_domain::protocol::PTY_INPUT_MAX_BYTES + 1];
+        let oversized_command = KernelCommand::SendPtyInput {
+            pty_session_id: PtySessionId::new("pty-1"),
+            generation: PtySessionGeneration::new("gen-1"),
+            byte_count: ByteCount::new(oversized.len() as u64),
+        };
+        let oversized = PtyInputCarrier::Bytes(&oversized);
+        let refusal = validate_pty_input_carrier(&oversized_command, Some(&oversized))
+            .expect_err("oversized carrier");
+        assert_eq!(refusal.code, KernelErrorCode::Validation);
+        assert!(refusal.message.contains("over the"), "{refusal}");
+
+        let other = KernelCommand::CreateTask {
+            task_id: TaskId::new("t-1"),
+            kind: None,
+            title: None,
+            spec_ref: None,
+            project: None,
+            priority: None,
+            tracker_ref: None,
+        };
+        let refusal = validate_pty_input_carrier(&other, Some(&matching))
+            .expect_err("only input commands carry bytes");
+        assert_eq!(refusal.code, KernelErrorCode::Validation);
+    }
+
+    #[test]
+    fn pty_input_routes_to_the_exact_session_lifetime() {
+        let command = KernelCommand::SendPtyInput {
+            pty_session_id: PtySessionId::new("console"),
+            generation: PtySessionGeneration::new("7:3"),
+            byte_count: ByteCount::new(1),
+        };
+        let route = route_of(&envelope(&command), &command).expect("routes");
+        assert_eq!(route.aggregate_type, "pty_session");
+        assert_eq!(route.aggregate_id, "console:7:3");
+        assert_eq!(route.event_type, "pty_input_requested");
     }
 
     #[test]

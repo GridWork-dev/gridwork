@@ -13,14 +13,21 @@ mod common;
 
 use common::{apply, drop_database, fresh_store, maintenance_pool, refuse};
 use gwk_domain::command::KernelCommand;
-use gwk_domain::ids::{PtySessionGeneration, PtySessionId};
+use gwk_domain::ids::{
+    AttemptId, EngineId, EngineSessionId, PtySessionGeneration, PtySessionId, TaskId,
+};
 use gwk_domain::protocol::KernelErrorCode;
 use sqlx::Row;
 
 fn open(id: &str, generation: &str) -> KernelCommand {
+    open_for_engine(id, generation, None)
+}
+
+fn open_for_engine(id: &str, generation: &str, engine_session_id: Option<&str>) -> KernelCommand {
     KernelCommand::OpenPtySession {
         pty_session_id: PtySessionId::new(id),
         generation: PtySessionGeneration::new(generation),
+        engine_session_id: engine_session_id.map(EngineSessionId::new),
         title: None,
     }
 }
@@ -93,6 +100,100 @@ async fn a_session_counts_attaches_and_closes_terminal() {
     assert_eq!(count, 1);
 
     drop(store);
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
+async fn successive_pty_lifetimes_join_from_child_to_engine_session() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "pty_engine_join", 8).await;
+
+    apply(
+        &store,
+        "task",
+        KernelCommand::CreateTask {
+            task_id: TaskId::new("task-1"),
+            kind: None,
+            title: None,
+            spec_ref: None,
+            project: None,
+            priority: None,
+            tracker_ref: None,
+        },
+    )
+    .await;
+    apply(
+        &store,
+        "attempt",
+        KernelCommand::CreateAttempt {
+            attempt_id: AttemptId::new("attempt-1"),
+            task_id: TaskId::new("task-1"),
+            engine: EngineId::new("engine-1"),
+            capability: None,
+            role: None,
+            model_lane: None,
+            permission_profile: None,
+            worktree_lease_id: None,
+            base_sha: None,
+            budget: None,
+        },
+    )
+    .await;
+    apply(
+        &store,
+        "engine-session",
+        KernelCommand::OpenEngineSession {
+            engine_session_id: EngineSessionId::new("session-1"),
+            attempt_id: AttemptId::new("attempt-1"),
+            engine: EngineId::new("engine-1"),
+            provider_session_ref: None,
+        },
+    )
+    .await;
+
+    apply(
+        &store,
+        "pty-1",
+        open_for_engine("pty-1", "gen-1", Some("session-1")),
+    )
+    .await;
+    apply(
+        &store,
+        "pty-2",
+        open_for_engine("pty-2", "gen-2", Some("session-1")),
+    )
+    .await;
+
+    let rows: Vec<(String, Option<String>)> =
+        sqlx::query_as("SELECT id, engine_session_id FROM gwk.pty_session ORDER BY id")
+            .fetch_all(store.pool())
+            .await
+            .expect("pty engine joins");
+    assert_eq!(
+        rows,
+        vec![
+            ("pty-1".to_owned(), Some("session-1".to_owned())),
+            ("pty-2".to_owned(), Some("session-1".to_owned())),
+        ]
+    );
+    // The join is child-side, so opening PTYs must leave the parent alone.
+    // `engine_session` carries no version column to read, and in an
+    // event-sourced store the stronger statement is the log's anyway: the two
+    // opens appended nothing to the parent aggregate. A row comparison would
+    // pass against a rewrite that happened to land the same values.
+    let parent_events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM gwk.event \
+         WHERE aggregate_type = 'engine_session' AND aggregate_id = 'session-1'",
+    )
+    .fetch_one(store.pool())
+    .await
+    .expect("parent engine session events");
+    assert_eq!(
+        parent_events, 1,
+        "opening child PTYs must not rewrite their engine session"
+    );
+
     drop_database(&maintenance, &name).await;
 }
 

@@ -247,6 +247,11 @@ pub struct Gate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[specta(optional)]
     pub chosen_option: Option<String>,
+    /// The envelope actor that made the current decision. Absent while the
+    /// gate is pending; replaced together with verdict on a re-decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub decided_by: Option<Actor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[specta(optional)]
     pub evidence_ref: Option<String>,
@@ -596,9 +601,19 @@ pub struct PtySession {
     /// `running` until closed; a close writes `closed`.
     pub state: String,
     /// The host lifetime this session belongs to. A reclaimed id under a new
-    /// generation is a NEW aggregate lifetime on the wire, but ledger ids are
-    /// unique per open — the generation is recorded, never re-keyed.
+    /// generation is a NEW aggregate lifetime. Ledger ids are keyed as
+    /// `{wire_id}:{generation}` and this field preserves the generation as a
+    /// first-class value for projections and guards.
     pub generation: PtySessionGeneration,
+    /// The provider execution this terminal belongs to, when it has one.
+    ///
+    /// The join points from PTY lifetime to engine session because an engine
+    /// session may be headless and may own successive terminal generations.
+    /// That keeps opening a replacement PTY append-only with respect to its
+    /// parent rather than rewriting the engine-session row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub engine_session_id: Option<EngineSessionId>,
     /// Live attaches opened against this session over its lifetime.
     pub attach_count: u32,
     /// Attach ends recorded against this session over its lifetime.

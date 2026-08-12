@@ -21,8 +21,8 @@ use gwk_domain::port::EventStore;
 use gwk_domain::protocol::{
     CONNECTION_EGRESS_BYTES_PER_WINDOW, CONNECTION_INGRESS_BYTES_PER_WINDOW, CONTRACT_VERSION,
     FRAME_BODY_MAX_BYTES, KernelErrorCode, KernelResult, MAX_SUBSCRIPTIONS_PER_CONNECTION,
-    ProjectionKind, ProjectionRecord, ProtocolVersion, SLOW_CONSUMER_TIMEOUT_SECS,
-    SUBSCRIPTION_POLL_SECS, ServerControl,
+    PTY_INPUT_CAPABILITY, ProjectionKind, ProjectionRecord, ProtocolVersion, PtyInputData,
+    SLOW_CONSUMER_TIMEOUT_SECS, SUBSCRIPTION_POLL_SECS, ServerControl,
 };
 use gwk_kernel::store::connect_pool;
 use gwk_kernel::wire::frame::{Budget, Incoming, read_frame};
@@ -1315,7 +1315,55 @@ fn pty_cell(glyph: &str) -> gwk_domain::frame::StyledCell {
 }
 
 fn pty_frame(rows: usize, cols: usize) -> gwk_domain::frame::PtyFrame {
-    gwk_domain::frame::PtyFrame::from_cells(&vec![vec![pty_cell(" "); cols]; rows])
+    gwk_domain::frame::PtyFrame::from_cells(&vec![vec![pty_cell(" "); cols]; rows], None)
+}
+
+async fn submit_kernel_command(
+    client: &mut Client,
+    request_id: &str,
+    key: &str,
+    actor_kind: &str,
+    command: &gwk_domain::KernelCommand,
+) -> KernelResult {
+    let request = gwk_domain::KernelRequest::SubmitCommand {
+        envelope: envelope_as(key, actor(actor_kind), command),
+    };
+    client
+        .ask(
+            request_id,
+            &serde_json::to_string(&request).expect("serialize command request"),
+        )
+        .await
+}
+
+async fn send_pty_input(
+    client: &mut Client,
+    request_id: &str,
+    key: &str,
+    actor_kind: &str,
+    session_id: &str,
+    generation: &gwk_domain::PtySessionGeneration,
+    bytes: &[u8],
+) -> KernelResult {
+    let command = gwk_domain::KernelCommand::SendPtyInput {
+        pty_session_id: gwk_domain::PtySessionId::new(session_id),
+        generation: generation.clone(),
+        byte_count: gwk_domain::ByteCount::new(bytes.len() as u64),
+    };
+    // A host-published session is owned by the SYSTEM project — the kernel
+    // authors its lifecycle receipts there — so a send addressing one has to
+    // name that project or the cross-project ownership check refuses it as a
+    // validation error before authority is ever evaluated.
+    let request = gwk_domain::KernelRequest::SendPtyInput {
+        envelope: envelope_in(gwk_kernel::SYSTEM_PROJECT, key, actor(actor_kind), &command),
+        data_base64: PtyInputData::new(BASE64_STANDARD.encode(bytes)),
+    };
+    client
+        .ask(
+            request_id,
+            &serde_json::to_string(&request).expect("serialize input request"),
+        )
+        .await
 }
 
 #[tokio::test]
@@ -1710,6 +1758,576 @@ async fn a_published_pty_session_is_served_end_to_end_and_a_foreign_writer_is_re
     drop(viewer2);
     drop(viewer3);
     served.close().await;
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
+async fn receipted_pty_input_reaches_the_owning_host_once_across_the_real_wire() {
+    use gwk_domain::command::KernelCommand;
+    use gwk_domain::ids::ByteCount;
+    use gwk_domain::protocol::KernelRequest;
+    use sqlx::Row;
+
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "wire_pty_input", 8).await;
+    let pool = store.pool().clone();
+    let served = Running::open(store, "ptyinput").await;
+    let mut host = served
+        .client_with_capabilities(&[PTY_INPUT_CAPABILITY])
+        .await;
+    let mut sender = served
+        .client_with_capabilities(&[PTY_INPUT_CAPABILITY])
+        .await;
+
+    let frame = serde_json::to_string(&pty_frame(2, 4)).expect("serialize frame");
+    match host
+        .ask(
+            "seed",
+            &format!(
+                r#"{{"type":"pty_publish_snapshot","session_id":"console","seq":"0","frame":{frame}}}"#
+            ),
+        )
+        .await
+    {
+        KernelResult::PtyPublished { .. } => {}
+        other => panic!("seed: {other:?}"),
+    }
+    let generation = match sender
+        .ask(
+            "generation",
+            r#"{"type":"pty_snapshot","session_id":"console"}"#,
+        )
+        .await
+    {
+        KernelResult::PtySnapshot { generation, .. } => generation,
+        other => panic!("generation: {other:?}"),
+    };
+
+    let bytes = [0x00, 0xff, b'\n'];
+    let command = KernelCommand::SendPtyInput {
+        pty_session_id: gwk_domain::PtySessionId::new("console"),
+        generation: generation.clone(),
+        byte_count: ByteCount::new(bytes.len() as u64),
+    };
+    // The session was host-published, so it is owned by the system project.
+    let envelope = envelope_in(
+        gwk_kernel::SYSTEM_PROJECT,
+        "wire-input",
+        actor("operator"),
+        &command,
+    );
+    let request = KernelRequest::SendPtyInput {
+        envelope: envelope.clone(),
+        data_base64: PtyInputData::new(BASE64_STANDARD.encode(bytes)),
+    };
+    let request = serde_json::to_string(&request).expect("serialize input request");
+    match sender.ask("send", &request).await {
+        KernelResult::CommandApplied { events, .. } => {
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].event_type, "pty_input_requested");
+            assert!(
+                events[0].payload.get("data_base64").is_none(),
+                "terminal bytes must not enter the immutable event"
+            );
+        }
+        other => panic!("send: {other:?}"),
+    }
+
+    match tokio::time::timeout(std::time::Duration::from_secs(3), host.recv())
+        .await
+        .expect("input reaches the owning host promptly")
+        .expect("host connection remains open")
+    {
+        ServerControl::PtyInput {
+            command_id,
+            session_id,
+            generation: delivered_generation,
+            byte_size,
+            data_base64,
+        } => {
+            assert_eq!(command_id, envelope.command_id);
+            assert_eq!(session_id.as_str(), "console");
+            assert_eq!(delivered_generation, generation);
+            assert_eq!(byte_size, ByteCount::new(bytes.len() as u64));
+            assert_eq!(
+                BASE64_STANDARD
+                    .decode(data_base64.as_str())
+                    .expect("delivery base64"),
+                bytes
+            );
+        }
+        other => panic!("owner received {other:?}"),
+    }
+
+    // A retry is the same logical call. It returns the original command result
+    // but must not type the bytes a second time.
+    assert!(matches!(
+        sender.ask("retry", &request).await,
+        KernelResult::CommandApplied { .. }
+    ));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), host.recv())
+            .await
+            .is_err(),
+        "an idempotent replay must not redeliver input"
+    );
+
+    let event_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM gwk.event WHERE event_type = 'pty_input_requested'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("input event count");
+    assert_eq!(event_count, 1);
+    let receipt = sqlx::query(
+        "SELECT actor->>'kind' AS actor_kind, action, subject_id, observed_basis \
+         FROM gwk.receipt WHERE id = 'receipt:system:wire-input'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("input receipt");
+    assert_eq!(receipt.get::<String, _>("actor_kind"), "operator");
+    assert_eq!(receipt.get::<String, _>("action"), "pty_input");
+    assert_eq!(
+        receipt.get::<String, _>("subject_id"),
+        format!("console:{generation}")
+    );
+    assert_eq!(
+        receipt.get::<String, _>("observed_basis"),
+        "operator authority; byte_count=3"
+    );
+
+    drop(host);
+    drop(sender);
+    served.close().await;
+    drop(pool);
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
+async fn pty_input_authority_honors_live_grants_revocation_and_actor_kind() {
+    use gwk_domain::command::PTY_INPUT_ACTION_CLASS;
+    use gwk_domain::ids::{AuthorityGrantId, Timestamp};
+    use sqlx::Row;
+
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "wire_pty_input_auth", 8).await;
+    let pool = store.pool().clone();
+    let served = Running::open(store, "ptyinputauth").await;
+    let mut host = served
+        .client_with_capabilities(&[PTY_INPUT_CAPABILITY])
+        .await;
+    let mut sender = served
+        .client_with_capabilities(&[PTY_INPUT_CAPABILITY])
+        .await;
+    let frame = serde_json::to_string(&pty_frame(2, 4)).expect("serialize frame");
+
+    match host
+        .ask(
+            "seed",
+            &format!(
+                r#"{{"type":"pty_publish_snapshot","session_id":"console","seq":"0","frame":{frame}}}"#
+            ),
+        )
+        .await
+    {
+        KernelResult::PtyPublished { .. } => {}
+        other => panic!("seed: {other:?}"),
+    }
+    let generation = match sender
+        .ask(
+            "generation",
+            r#"{"type":"pty_snapshot","session_id":"console"}"#,
+        )
+        .await
+    {
+        KernelResult::PtySnapshot { generation, .. } => generation,
+        other => panic!("generation: {other:?}"),
+    };
+    let subject = format!("console:{generation}");
+
+    match send_pty_input(
+        &mut sender,
+        "ungranted-request",
+        "ungranted",
+        "orchestrator",
+        "console",
+        &generation,
+        b"a",
+    )
+    .await
+    {
+        KernelResult::Error { code, message, .. } => {
+            assert_eq!(code, KernelErrorCode::Authority, "{message}")
+        }
+        other => panic!("ungranted orchestrator: {other:?}"),
+    }
+
+    let grant = gwk_domain::KernelCommand::GrantAuthority {
+        authority_grant_id: AuthorityGrantId::new("pty-input-live"),
+        grantee: actor("orchestrator"),
+        action_class: PTY_INPUT_ACTION_CLASS.to_owned(),
+        scope: Some(subject.clone()),
+        expires_at: Some(Timestamp::new("2099-01-01T00:00:00Z")),
+    };
+    assert!(matches!(
+        submit_kernel_command(
+            &mut sender,
+            "grant-request",
+            "grant-input",
+            "operator",
+            &grant,
+        )
+        .await,
+        KernelResult::CommandApplied { .. }
+    ));
+    assert!(matches!(
+        send_pty_input(
+            &mut sender,
+            "granted-request",
+            "granted",
+            "orchestrator",
+            "console",
+            &generation,
+            b"b",
+        )
+        .await,
+        KernelResult::CommandApplied { .. }
+    ));
+    assert!(matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(3), host.recv())
+            .await
+            .expect("granted input reaches host")
+            .expect("host remains open"),
+        ServerControl::PtyInput { data_base64, .. }
+            if BASE64_STANDARD.decode(data_base64.as_str()).expect("delivery") == b"b"
+    ));
+
+    let revoke = gwk_domain::KernelCommand::RevokeAuthority {
+        authority_grant_id: AuthorityGrantId::new("pty-input-live"),
+        reason: Some("operator revoked terminal input".to_owned()),
+    };
+    assert!(matches!(
+        submit_kernel_command(
+            &mut sender,
+            "revoke-request",
+            "revoke-input",
+            "operator",
+            &revoke,
+        )
+        .await,
+        KernelResult::CommandApplied { .. }
+    ));
+    match send_pty_input(
+        &mut sender,
+        "revoked-request",
+        "revoked",
+        "orchestrator",
+        "console",
+        &generation,
+        b"c",
+    )
+    .await
+    {
+        KernelResult::Error { code, .. } => assert_eq!(code, KernelErrorCode::Authority),
+        other => panic!("revoked orchestrator: {other:?}"),
+    }
+
+    let expired = gwk_domain::KernelCommand::GrantAuthority {
+        authority_grant_id: AuthorityGrantId::new("pty-input-expired"),
+        grantee: actor("orchestrator"),
+        action_class: PTY_INPUT_ACTION_CLASS.to_owned(),
+        scope: Some(subject.clone()),
+        expires_at: Some(Timestamp::new("2000-01-01T00:00:00Z")),
+    };
+    assert!(matches!(
+        submit_kernel_command(
+            &mut sender,
+            "expired-grant-request",
+            "grant-expired",
+            "operator",
+            &expired,
+        )
+        .await,
+        KernelResult::CommandApplied { .. }
+    ));
+    match send_pty_input(
+        &mut sender,
+        "expired-request",
+        "expired",
+        "orchestrator",
+        "console",
+        &generation,
+        b"d",
+    )
+    .await
+    {
+        KernelResult::Error { code, .. } => assert_eq!(code, KernelErrorCode::Authority),
+        other => panic!("expired orchestrator: {other:?}"),
+    }
+
+    let engine_grant = gwk_domain::KernelCommand::GrantAuthority {
+        authority_grant_id: AuthorityGrantId::new("pty-input-engine"),
+        grantee: actor("engine"),
+        action_class: PTY_INPUT_ACTION_CLASS.to_owned(),
+        scope: Some(subject.clone()),
+        expires_at: None,
+    };
+    assert!(matches!(
+        submit_kernel_command(
+            &mut sender,
+            "engine-grant-request",
+            "grant-engine",
+            "operator",
+            &engine_grant,
+        )
+        .await,
+        KernelResult::CommandApplied { .. }
+    ));
+    match send_pty_input(
+        &mut sender,
+        "engine-request",
+        "engine",
+        "engine",
+        "console",
+        &generation,
+        b"e",
+    )
+    .await
+    {
+        KernelResult::Error { code, .. } => assert_eq!(code, KernelErrorCode::Authority),
+        other => panic!("granted engine: {other:?}"),
+    }
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), host.recv())
+            .await
+            .is_err(),
+        "only the one granted orchestrator send reaches the host"
+    );
+
+    let receipts = sqlx::query(
+        "SELECT id, actor->>'kind' AS actor_kind, subject_id, observed_basis \
+         FROM gwk.receipt WHERE action = 'pty_input' ORDER BY id",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("input receipts");
+    assert_eq!(receipts.len(), 5, "one receipt per logical send call");
+    assert!(receipts.iter().all(|row| {
+        row.get::<String, _>("subject_id") == subject
+            && row
+                .get::<String, _>("observed_basis")
+                .ends_with("byte_count=1")
+    }));
+    let basis = |key: &str| {
+        receipts
+            .iter()
+            .find(|row| row.get::<String, _>("id") == format!("receipt:system:{key}"))
+            .map(|row| {
+                (
+                    row.get::<String, _>("actor_kind"),
+                    row.get::<String, _>("observed_basis"),
+                )
+            })
+            .expect("receipt by key")
+    };
+    assert_eq!(
+        basis("granted"),
+        (
+            "orchestrator".to_owned(),
+            "matching unexpired scoped grant; byte_count=1".to_owned(),
+        )
+    );
+    for key in ["ungranted", "revoked", "expired"] {
+        assert_eq!(
+            basis(key),
+            (
+                "orchestrator".to_owned(),
+                "no matching unexpired scoped grant; byte_count=1".to_owned(),
+            )
+        );
+    }
+    assert_eq!(
+        basis("engine"),
+        (
+            "engine".to_owned(),
+            "actor kind is neither operator nor orchestrator; byte_count=1".to_owned(),
+        )
+    );
+    let input_events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM gwk.event WHERE event_type = 'pty_input_requested'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("input event count");
+    assert_eq!(input_events, 1, "only the granted send mutates");
+
+    drop(host);
+    drop(sender);
+    served.close().await;
+    drop(pool);
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
+async fn pty_input_refuses_stale_and_missing_generations_with_receipts() {
+    use sqlx::Row;
+
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "wire_pty_input_generation", 8).await;
+    let pool = store.pool().clone();
+    let served = Running::open(store, "ptyinputgeneration").await;
+    let frame = serde_json::to_string(&pty_frame(2, 4)).expect("serialize frame");
+    let publish = format!(
+        r#"{{"type":"pty_publish_snapshot","session_id":"console","seq":"0","frame":{frame}}}"#
+    );
+    let mut host = served
+        .client_with_capabilities(&[PTY_INPUT_CAPABILITY])
+        .await;
+    let mut sender = served
+        .client_with_capabilities(&[PTY_INPUT_CAPABILITY])
+        .await;
+
+    assert!(matches!(
+        host.ask("old-seed", &publish).await,
+        KernelResult::PtyPublished { .. }
+    ));
+    let old = match sender
+        .ask(
+            "old-generation",
+            r#"{"type":"pty_snapshot","session_id":"console"}"#,
+        )
+        .await
+    {
+        KernelResult::PtySnapshot { generation, .. } => generation,
+        other => panic!("old generation: {other:?}"),
+    };
+    assert!(matches!(
+        host.ask(
+            "old-retire",
+            r#"{"type":"pty_retire","session_id":"console"}"#,
+        )
+        .await,
+        KernelResult::PtyRetired { .. }
+    ));
+
+    let mut current_host = served
+        .client_with_capabilities(&[PTY_INPUT_CAPABILITY])
+        .await;
+    assert!(matches!(
+        current_host.ask("current-seed", &publish).await,
+        KernelResult::PtyPublished { .. }
+    ));
+    let current = match sender
+        .ask(
+            "current-generation",
+            r#"{"type":"pty_snapshot","session_id":"console"}"#,
+        )
+        .await
+    {
+        KernelResult::PtySnapshot { generation, .. } => generation,
+        other => panic!("current generation: {other:?}"),
+    };
+    assert_ne!(old, current);
+
+    match send_pty_input(
+        &mut sender,
+        "stale-request",
+        "stale",
+        "operator",
+        "console",
+        &old,
+        b"x",
+    )
+    .await
+    {
+        KernelResult::Error { code, detail, .. } => {
+            assert_eq!(code, KernelErrorCode::StaleVersion);
+            assert_eq!(detail.expect("stale detail")["state"], "closed");
+        }
+        other => panic!("stale send: {other:?}"),
+    }
+    match send_pty_input(
+        &mut sender,
+        "missing-request",
+        "missing",
+        "operator",
+        "console",
+        &gwk_domain::PtySessionGeneration::new("missing"),
+        b"y",
+    )
+    .await
+    {
+        KernelResult::Error { code, message, .. } => {
+            assert_eq!(code, KernelErrorCode::NotFound);
+            assert!(message.contains("console:missing"), "{message}");
+        }
+        other => panic!("missing send: {other:?}"),
+    }
+    assert!(matches!(
+        send_pty_input(
+            &mut sender,
+            "current-request",
+            "current",
+            "operator",
+            "console",
+            &current,
+            b"z",
+        )
+        .await,
+        KernelResult::CommandApplied { .. }
+    ));
+    assert!(matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(3), current_host.recv())
+            .await
+            .expect("current input reaches current host")
+            .expect("current host remains open"),
+        ServerControl::PtyInput { data_base64, .. }
+            if BASE64_STANDARD.decode(data_base64.as_str()).expect("delivery") == b"z"
+    ));
+
+    let receipts = sqlx::query(
+        "SELECT subject_id, observed_basis FROM gwk.receipt \
+         WHERE action = 'pty_input' ORDER BY id",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("generation receipts");
+    assert_eq!(receipts.len(), 3);
+    assert!(receipts.iter().any(|row| {
+        row.get::<String, _>("subject_id") == format!("console:{old}")
+            && row
+                .get::<String, _>("observed_basis")
+                .contains("refused=stale_version")
+    }));
+    assert!(receipts.iter().any(|row| {
+        row.get::<String, _>("subject_id") == "console:missing"
+            && row
+                .get::<String, _>("observed_basis")
+                .contains("refused=not_found")
+    }));
+    assert!(receipts.iter().any(|row| {
+        row.get::<String, _>("subject_id") == format!("console:{current}")
+            && row
+                .get::<String, _>("observed_basis")
+                .starts_with("operator authority")
+    }));
+    let input_events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM gwk.event WHERE event_type = 'pty_input_requested'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("input event count");
+    assert_eq!(input_events, 1, "only the current generation mutates");
+
+    drop(host);
+    drop(current_host);
+    drop(sender);
+    served.close().await;
+    drop(pool);
     drop_database(&maintenance, &name).await;
 }
 

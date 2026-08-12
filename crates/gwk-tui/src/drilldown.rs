@@ -666,6 +666,7 @@ mod tests {
                 .iter()
                 .map(|row| row.iter().map(|glyph| cell(glyph)).collect())
                 .collect::<Vec<Vec<StyledCell>>>(),
+            None,
         )
     }
 
@@ -1166,6 +1167,7 @@ mod tests {
                 style: 0,
                 glyphs: vec!["x".to_owned()],
             }]],
+            cursor: None,
         };
         assert_eq!(
             state.ingest(&snapshot("snapshot-1", "pty-1", 1, dangling)),
@@ -1221,7 +1223,7 @@ mod tests {
             "snapshot-1",
             "pty-1",
             1,
-            PtyFrame::from_cells(&[vec![styled]]),
+            PtyFrame::from_cells(&[vec![styled]], None),
         ));
 
         let (dump, buf, _) = dump(&state, 64, 3);

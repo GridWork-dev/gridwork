@@ -22,19 +22,20 @@ use gwk_domain::entity::{
 };
 use gwk_domain::envelope::{Actor, CommandEnvelope, EventEnvelope, Origin, PayloadRef};
 use gwk_domain::frame::{
-    CellColor, CellStyle, CellUnderline, PtyAnsiSlot, PtyCellUpdate, PtyDelta, PtyFrame, PtyRun,
+    CellColor, CellStyle, CellUnderline, PtyAnsiSlot, PtyCellUpdate, PtyCursor, PtyDelta, PtyFrame,
+    PtyRun,
 };
 use gwk_domain::fsm::{AttemptState, CommandState, MessageState, Outcome, TaskState};
 use gwk_domain::ids::{
     AggregateId, AttemptId, BlobUploadId, ByteCount, CommandId, CorrelationId, CostMicros,
-    EngineId, EventCount, EventId, IdempotencyKey, LeaseId, MessageId, ProjectId, PtyFrameSeq,
-    PtySessionGeneration, PtySessionId, RequestId, Seq, TaskId, Timestamp, WorkflowRunId,
-    WorkspaceNodeId,
+    EngineId, EngineSessionId, EventCount, EventId, IdempotencyKey, LeaseId, MessageId, ProjectId,
+    PtyFrameSeq, PtySessionGeneration, PtySessionId, RequestId, Seq, TaskId, Timestamp,
+    WorkflowRunId, WorkspaceNodeId,
 };
 use gwk_domain::inherited::{BudgetCursor, OrchestratorCheckpoint, PendingApproval};
 use gwk_domain::protocol::{
     CapabilityName, ClientControl, FrameKind, KernelErrorCode, KernelRequest, KernelResult,
-    PROTOCOL_MINOR, ProjectionKind, ProtocolVersion, ServerControl,
+    PROTOCOL_MINOR, ProjectionKind, ProtocolVersion, PtyInputData, ServerControl,
 };
 use gwk_domain::transition::TransitionResult;
 
@@ -334,6 +335,7 @@ fn golden_pty_session() -> PtySession {
         version: 5,
         state: "closed".to_owned(),
         generation: PtySessionGeneration::new("gen-0001"),
+        engine_session_id: Some(EngineSessionId::new("session-0001")),
         attach_count: 3,
         detach_count: 3,
         title: Some("the daily driver".to_owned()),
@@ -437,6 +439,33 @@ fn pty_generation() -> PtySessionGeneration {
     PtySessionGeneration::new("pty-life-1")
 }
 
+fn golden_pty_input_envelope() -> CommandEnvelope {
+    let command = KernelCommand::SendPtyInput {
+        pty_session_id: pty_session_id(),
+        generation: pty_generation(),
+        byte_count: ByteCount::new(3),
+    };
+    CommandEnvelope {
+        command_id: CommandId::new("input-1"),
+        project_id: ProjectId::new("proj-alpha"),
+        command_type: command.command_type().into(),
+        schema_version: 1,
+        issued_at: Timestamp::new("2026-08-11T12:00:00Z"),
+        actor: actor("operator", Some("op-1")),
+        origin: Origin {
+            system: "gw".into(),
+            r#ref: None,
+        },
+        target_aggregate_type: None,
+        target_aggregate_id: None,
+        expected_version: None,
+        idempotency_key: IdempotencyKey::new("input-1"),
+        causation_id: None,
+        correlation_id: None,
+        payload: serde_json::to_value(command).expect("serialize input command"),
+    }
+}
+
 /// The SGR-0 rendition: no colors, no underline, every flag off.
 fn plain_style() -> CellStyle {
     CellStyle {
@@ -524,6 +553,7 @@ fn golden_pty_frame() -> PtyFrame {
                 },
             ],
         ],
+        cursor: Some(PtyCursor { row: 1, col: 1 }),
     }
 }
 
@@ -559,6 +589,7 @@ fn golden_client_control() -> Vec<ClientControl> {
                 capability("event_subscribe"),
                 capability("blob"),
                 capability("pty_raw"),
+                capability("pty_input"),
             ],
             client: Some("gw".into()),
         },
@@ -664,6 +695,13 @@ fn golden_client_control() -> Vec<ClientControl> {
                 cols: 100,
             },
         },
+        ClientControl::Request {
+            request_id: RequestId::new("req-15"),
+            request: KernelRequest::SendPtyInput {
+                envelope: golden_pty_input_envelope(),
+                data_base64: PtyInputData::new("AP8K"),
+            },
+        },
     ]
 }
 
@@ -674,7 +712,7 @@ fn golden_server_control() -> Vec<ServerControl> {
             protocol_minor: PROTOCOL_MINOR,
             // The INTERSECTION: the client asked for three capabilities; this
             // kernel offers only the raw PTY fallback.
-            capabilities: vec![capability("pty_raw")],
+            capabilities: vec![capability("pty_raw"), capability("pty_input")],
             sealed: true,
             watermark: Some(Seq::new(9_007_199_254_740_993)),
         },
@@ -815,6 +853,13 @@ fn golden_server_control() -> Vec<ServerControl> {
             result: KernelResult::PtyPublished {
                 session_id: pty_session_id(),
             },
+        },
+        ServerControl::PtyInput {
+            command_id: CommandId::new("input-1"),
+            session_id: pty_session_id(),
+            generation: pty_generation(),
+            byte_size: ByteCount::new(3),
+            data_base64: PtyInputData::new("AP8K"),
         },
     ]
 }

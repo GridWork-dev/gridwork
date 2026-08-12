@@ -27,7 +27,7 @@ pub use blob::{
 pub use checkpoint::{
     CHECKPOINT_EVENT_INTERVAL, CHECKPOINT_INTERVAL_SECS, CHECKPOINT_SCHEMA_VERSION, Checkpoint,
 };
-pub use command::{CommandDecodeError, KernelCommand};
+pub use command::{CommandDecodeError, KernelCommand, PTY_INPUT_ACTION_CLASS};
 // Deliberately NOT in the generated TypeScript contract: nothing in `engine`
 // derives `specta::Type` and nothing is registered in xtask's export registry.
 // This is how the host's own components agree with each other, not something a
@@ -43,8 +43,8 @@ pub use envelope::{
     Origin, PayloadRef, UnknownSchemaVersion, accept_schema_version,
 };
 pub use frame::{
-    CellColor, CellStyle, CellUnderline, PtyAnsiSlot, PtyCellUpdate, PtyDelta, PtyFrame, PtyRun,
-    StyleInterner, StyledCell,
+    CellColor, CellStyle, CellUnderline, PtyAnsiSlot, PtyCellUpdate, PtyCursor, PtyDelta, PtyFrame,
+    PtyRun, StyleInterner, StyledCell,
 };
 pub use fsm::{
     AttemptState, CommandState, GateVerdict, LeaseMode, LeaseState, MessageState, Outcome,
@@ -67,8 +67,9 @@ pub use protocol::{
     CONNECTION_INGRESS_BYTES_PER_WINDOW, CONTRACT_VERSION, CapabilityName, CapabilityNameError,
     ClientControl, FRAME_BODY_MAX_BYTES, FRAME_BODY_MIN_BYTES, FRAME_LENGTH_PREFIX_BYTES,
     FRAME_PAYLOAD_MAX_BYTES, FrameKind, HELLO_DEADLINE_SECS, HELLO_MAX_BYTES, KernelErrorCode,
-    KernelRequest, KernelResult, MAX_CAPABILITIES, PROTOCOL_MINOR, PTY_RAW_CAPABILITY,
-    PTY_RAW_PAYLOAD_DEADLINE_SECS, ProjectionKind, ProjectionRecord, ProtocolVersion,
+    KernelRequest, KernelResult, MAX_CAPABILITIES, PROTOCOL_MINOR, PTY_INPUT_CAPABILITY,
+    PTY_INPUT_MAX_BASE64_BYTES, PTY_INPUT_MAX_BYTES, PTY_RAW_CAPABILITY,
+    PTY_RAW_PAYLOAD_DEADLINE_SECS, ProjectionKind, ProjectionRecord, ProtocolVersion, PtyInputData,
     SLOW_CONSUMER_TIMEOUT_SECS, ServerControl,
 };
 pub use transition::{
