@@ -1350,8 +1350,12 @@ async fn send_pty_input(
         generation: generation.clone(),
         byte_count: gwk_domain::ByteCount::new(bytes.len() as u64),
     };
+    // A host-published session is owned by the SYSTEM project — the kernel
+    // authors its lifecycle receipts there — so a send addressing one has to
+    // name that project or the cross-project ownership check refuses it as a
+    // validation error before authority is ever evaluated.
     let request = gwk_domain::KernelRequest::SendPtyInput {
-        envelope: envelope_as(key, actor(actor_kind), &command),
+        envelope: envelope_in(gwk_kernel::SYSTEM_PROJECT, key, actor(actor_kind), &command),
         data_base64: PtyInputData::new(BASE64_STANDARD.encode(bytes)),
     };
     client
@@ -1806,7 +1810,13 @@ async fn receipted_pty_input_reaches_the_owning_host_once_across_the_real_wire()
         generation: generation.clone(),
         byte_count: ByteCount::new(bytes.len() as u64),
     };
-    let envelope = envelope_as("wire-input", actor("operator"), &command);
+    // The session was host-published, so it is owned by the system project.
+    let envelope = envelope_in(
+        gwk_kernel::SYSTEM_PROJECT,
+        "wire-input",
+        actor("operator"),
+        &command,
+    );
     let request = KernelRequest::SendPtyInput {
         envelope: envelope.clone(),
         data_base64: PtyInputData::new(BASE64_STANDARD.encode(bytes)),
@@ -1949,7 +1959,9 @@ async fn pty_input_authority_honors_live_grants_revocation_and_actor_kind() {
     )
     .await
     {
-        KernelResult::Error { code, .. } => assert_eq!(code, KernelErrorCode::Authority),
+        KernelResult::Error { code, message, .. } => {
+            assert_eq!(code, KernelErrorCode::Authority, "{message}")
+        }
         other => panic!("ungranted orchestrator: {other:?}"),
     }
 

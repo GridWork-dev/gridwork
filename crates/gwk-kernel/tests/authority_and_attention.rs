@@ -12,24 +12,14 @@
 mod common;
 
 use common::{
-    PROJECT, actor, apply, apply_as, drop_database, envelope_as, event_count, fresh_store,
+    PROJECT, actor, administer, apply, drop_database, envelope_as, event_count, fresh_store,
     maintenance_pool, refuse, refuse_as,
 };
 use gwk_domain::command::KernelCommand;
-use gwk_domain::envelope::EventEnvelope;
 use gwk_domain::ids::{AttentionItemId, AuthorityGrantId, CommandId, EvidenceId, Timestamp};
 use gwk_domain::protocol::{KernelErrorCode, KernelResult};
 use gwk_kernel::store::PgEventStore;
 use sqlx::Row;
-
-/// Administering authority is an operator act, so every grant and revoke here
-/// is submitted AS the operator while the grantee stays the kernel actor the
-/// granted commands are submitted as. The two are deliberately different: the
-/// standing authority a conforming orchestrator runs under is authority it
-/// cannot issue to itself.
-async fn administer(store: &PgEventStore, key: &str, command: KernelCommand) -> Vec<EventEnvelope> {
-    apply_as(store, key, actor("operator"), command).await
-}
 
 /// The one gated command in the risk table.
 fn stop(id: &str) -> KernelCommand {

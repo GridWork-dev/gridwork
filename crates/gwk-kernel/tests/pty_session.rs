@@ -177,13 +177,20 @@ async fn successive_pty_lifetimes_join_from_child_to_engine_session() {
             ("pty-2".to_owned(), Some("session-1".to_owned())),
         ]
     );
-    let parent_version: i64 =
-        sqlx::query_scalar("SELECT version FROM gwk.engine_session WHERE id = 'session-1'")
-            .fetch_one(store.pool())
-            .await
-            .expect("parent engine session");
+    // The join is child-side, so opening PTYs must leave the parent alone.
+    // `engine_session` carries no version column to read, and in an
+    // event-sourced store the stronger statement is the log's anyway: the two
+    // opens appended nothing to the parent aggregate. A row comparison would
+    // pass against a rewrite that happened to land the same values.
+    let parent_events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM gwk.event \
+         WHERE aggregate_type = 'engine_session' AND aggregate_id = 'session-1'",
+    )
+    .fetch_one(store.pool())
+    .await
+    .expect("parent engine session events");
     assert_eq!(
-        parent_version, 1,
+        parent_events, 1,
         "opening child PTYs must not rewrite their engine session"
     );
 

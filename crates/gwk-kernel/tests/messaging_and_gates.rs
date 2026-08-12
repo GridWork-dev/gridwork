@@ -12,8 +12,8 @@
 mod common;
 
 use common::{
-    actor, apply, apply_as, drop_database, envelope, event_count, fresh_store, maintenance_pool,
-    refuse, state_row,
+    actor, administer, apply, apply_as, drop_database, envelope, event_count, fresh_store,
+    maintenance_pool, refuse, state_row,
 };
 use gwk_domain::command::KernelCommand;
 use gwk_domain::fsm::{CommandState, GateVerdict, MessageState, Outcome};
@@ -76,7 +76,7 @@ fn issue(id: &str) -> KernelCommand {
 /// case that issues one has to hold a `stop` grant first. Without this they
 /// page instead of applying — which is the gate working, not a test problem.
 async fn grant_stop(store: &PgEventStore) {
-    apply(
+    administer(
         store,
         "grant-stop",
         KernelCommand::GrantAuthority {

@@ -130,6 +130,22 @@ pub async fn apply_as(
     }
 }
 
+/// Submit an authority grant or revoke and require success.
+///
+/// Administering authority is an operator act — the kernel refuses
+/// `grant_authority` and `revoke_authority` from any other actor kind, so a
+/// conforming orchestrator cannot write the standing authority it runs under.
+/// Every suite that seeds a grant therefore submits it AS the operator while
+/// the GRANTEE stays the kernel actor its granted commands are submitted as.
+/// The two being different actors is the property, not a fixture detail.
+pub async fn administer(
+    store: &PgEventStore,
+    key: &str,
+    command: KernelCommand,
+) -> Vec<EventEnvelope> {
+    apply_as(store, key, actor("operator"), command).await
+}
+
 /// Submit and require a refusal, returning the code and message to assert on.
 pub async fn refuse(
     store: &PgEventStore,
@@ -650,7 +666,7 @@ pub async fn populate(store: &PgEventStore) {
     .await;
     // `issue_command` is in the authority risk table, so the grant comes first
     // — and it is the row that populates `authority_grant`.
-    apply(
+    administer(
         store,
         "grant",
         KernelCommand::GrantAuthority {
