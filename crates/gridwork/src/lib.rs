@@ -189,7 +189,8 @@ async fn execute(verb: Verb, pretty: bool, human_tables: bool) -> Result<(), Fai
             aggregate_type,
             event_type,
             view,
-        } => tui::event_tail(cursor, aggregate_type, event_type, view).await,
+            motion,
+        } => tui::event_tail(cursor, aggregate_type, event_type, view, motion).await,
         Verb::EstateOverview => {
             let state = load_summary_state(false).await?;
             emit_serialized(&estate_overview(&state), pretty)
@@ -255,7 +256,7 @@ async fn execute(verb: Verb, pretty: bool, human_tables: bool) -> Result<(), Fai
             )
             .await
         }
-        Verb::TermAttach { id } => tui::term_attach(PtySessionId::new(id)).await,
+        Verb::TermAttach { id, motion } => tui::term_attach(PtySessionId::new(id), motion).await,
         Verb::Tui { motion } => tui::run(motion).await,
         Verb::Theme => {
             emit(&chrome_theme()?, pretty);

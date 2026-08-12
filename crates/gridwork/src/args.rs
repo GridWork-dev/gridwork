@@ -152,6 +152,9 @@ pub enum Verb {
         /// Which Board panel opens first. Every panel remains one keystroke
         /// away once the loop is up; this only names the opening one.
         view: BoardView,
+        /// Three entry verbs open ONE workspace; each accepts the same
+        /// motion dial instead of hardcoding a policy per spelling.
+        motion: MotionMode,
     },
 
     /// A coherent fold over the projections that describe current work.
@@ -176,6 +179,7 @@ pub enum Verb {
     },
     TermAttach {
         id: String,
+        motion: MotionMode,
     },
 
     Tui {
@@ -261,7 +265,8 @@ gw — the GridWork kernel's command line
   gw event read [--cursor <seq>] [--limit <n>]
   gw event follow [--cursor <seq>]
   gw event tail [--cursor <seq>] [--aggregate-type <type>] [--event-type <type>] [--view <name>]
-  gw board [--view <name>]
+      [--motion=off|reduced|full]
+  gw board [--view <name>] [--motion=off|reduced|full]
   gw estate overview
   gw activity brief
   gw cost rollup
@@ -276,7 +281,7 @@ gw — the GridWork kernel's command line
   gw session inspect <engine-session-id>
   gw term list [--cursor <key>] [--limit <n>]
   gw term tail <pty-session-id>
-  gw term attach <pty-session-id>
+  gw term attach <pty-session-id> [--motion=off|reduced|full]
   gw tui [--motion=off|reduced|full]
   gw theme
   gw attention list [--cursor <key>] [--limit <n>]
@@ -301,7 +306,10 @@ gw — the GridWork kernel's command line
   --version  same answer as `build-info`, under the name every CLI is asked by
   --help     this
 
-List verbs print a table on a terminal and protocol JSON when piped; `--json` forces JSON. `tui`, `board`, `event tail`, and `term attach` are interactive. Exits: 0 success, 2 usage or input,
+`attempt list`, `session list`, `term list`, and `cost rollup` print a table
+on a terminal and protocol JSON when piped; `--json` forces JSON there, and
+every other list verb prints protocol JSON on both. `tui`, `board`,
+`event tail`, and `term attach` are interactive. Exits: 0 success, 2 usage or input,
 3 refused, 4 not found, 5 unavailable, 6 does not verify, 10 a fault in gw.
 
 `pr` is the one verb that speaks to `gh` instead of the socket — always an
@@ -399,6 +407,11 @@ fn verb(rest: &mut Rest) -> Result<Verb, Failure> {
                 .map(|value| board_view(&value))
                 .transpose()?
                 .unwrap_or(BoardView::Estate),
+            motion: rest
+                .flag("--motion")
+                .map(|value| motion_mode(&value))
+                .transpose()?
+                .unwrap_or(MotionMode::Full),
         }),
         "estate" => match rest.word("estate")?.as_str() {
             "overview" => Ok(Verb::EstateOverview),
@@ -423,6 +436,12 @@ fn verb(rest: &mut Rest) -> Result<Verb, Failure> {
                 kind: ProjectionKind::EngineSession,
                 id: rest.word("session inspect")?,
             }),
+            // The noun split moved terminal lifetimes out of `session`; a
+            // muscle-memory spelling gets the new address, not a generic
+            // unknown-command shrug.
+            moved @ ("attach" | "snapshot" | "tail") => Err(Failure::usage(format!(
+                "session {moved} moved with the gw term noun split: terminal lifetimes are `gw term list/attach/tail` (engine sessions stay under `gw session`)"
+            ))),
             other => Err(unknown("session", other)),
         },
         "term" => match rest.word("term")?.as_str() {
@@ -432,6 +451,12 @@ fn verb(rest: &mut Rest) -> Result<Verb, Failure> {
             }),
             "attach" => Ok(Verb::TermAttach {
                 id: rest.word("term attach")?,
+                // Off by default: the hosted session owns the screen.
+                motion: rest
+                    .flag("--motion")
+                    .map(|value| motion_mode(&value))
+                    .transpose()?
+                    .unwrap_or(MotionMode::Off),
             }),
             other => Err(unknown("term", other)),
         },
@@ -582,6 +607,11 @@ fn event(rest: &mut Rest) -> Result<Verb, Failure> {
                 .map(|value| board_view(&value))
                 .transpose()?
                 .unwrap_or(BoardView::Events),
+            motion: rest
+                .flag("--motion")
+                .map(|value| motion_mode(&value))
+                .transpose()?
+                .unwrap_or(MotionMode::Full),
         }),
         other => Err(unknown("event", other)),
     }
@@ -1025,7 +1055,10 @@ mod tests {
         );
         assert_eq!(
             parsed("term attach pty-1").expect("parse").verb,
-            Verb::TermAttach { id: "pty-1".into() }
+            Verb::TermAttach {
+                id: "pty-1".into(),
+                motion: MotionMode::Off
+            }
         );
         assert_eq!(
             parsed("term list").expect("parse").verb,
@@ -1129,6 +1162,7 @@ mod tests {
                 aggregate_type: Some("attempt".into()),
                 event_type: Some("attempt_started".into()),
                 view: BoardView::Events,
+                motion: MotionMode::Full,
             }
         );
         assert_eq!(
@@ -1138,6 +1172,7 @@ mod tests {
                 aggregate_type: None,
                 event_type: None,
                 view: BoardView::Fleet,
+                motion: MotionMode::Full,
             }
         );
         assert_eq!(
@@ -1147,6 +1182,7 @@ mod tests {
                 aggregate_type: None,
                 event_type: None,
                 view: BoardView::Estate,
+                motion: MotionMode::Full,
             }
         );
         assert_eq!(
@@ -1156,9 +1192,20 @@ mod tests {
                 aggregate_type: None,
                 event_type: None,
                 view: BoardView::CostHealth,
+                motion: MotionMode::Full,
             }
         );
         assert!(parsed("board --view bogus").is_err());
+        // The moved spellings answer with the new address, not a generic
+        // unknown-command shrug.
+        for line in ["session attach pty-1", "session snapshot pty-1"] {
+            let refusal = parsed(line).expect_err("the old spelling is refused");
+            assert!(
+                refusal.message.contains("gw term"),
+                "{line}: {}",
+                refusal.message
+            );
+        }
     }
 
     #[test]
@@ -1213,7 +1260,11 @@ mod tests {
             "tui --motion=",
             "tui --pretty",
             "event tail --pretty",
+            // The old spelling: refused with a pointer at `gw term attach`,
+            // never absorbed (the noun split moved it).
             "session attach pty-1 --pretty",
+            "session attach pty-1",
+            "session snapshot pty-1",
             "term attach pty-1 --pretty",
             "term attach pty-1 --json",
             "attempt budget set at-1 --expected-version 1",

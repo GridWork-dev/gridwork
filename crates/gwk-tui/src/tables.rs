@@ -99,7 +99,7 @@ pub fn attempt_table(state: &BoardState, now: &Timestamp, meta: &PageMeta, width
         })
         .collect::<Vec<_>>();
     let mut output = table(&columns, &rows, width);
-    output.push_str(&trailer(rows.len(), meta, width));
+    output.push_str(&trailer(rows.len(), meta));
     output
 }
 
@@ -128,7 +128,7 @@ pub fn term_table(sessions: &[PtySession], meta: &PageMeta, width: usize) -> Str
         })
         .collect::<Vec<_>>();
     let mut output = table(&columns, &rows, width);
-    output.push_str(&trailer(rows.len(), meta, width));
+    output.push_str(&trailer(rows.len(), meta));
     output.push_str(
         "\nATTEMPT is ? for every row: pty_session carries no attempt or engine-session\n\
          reference, and engine_session carries no pty reference. Correlating `gw term`\n\
@@ -167,7 +167,7 @@ pub fn session_table(sessions: &[EngineSession], meta: &PageMeta, width: usize) 
         })
         .collect::<Vec<_>>();
     let mut output = table(&columns, &rows, width);
-    output.push_str(&trailer(rows.len(), meta, width));
+    output.push_str(&trailer(rows.len(), meta));
     output
 }
 
@@ -386,7 +386,7 @@ fn push_cell(output: &mut String, text: &str, width: usize, last: bool) {
     }
 }
 
-fn trailer(rows: usize, meta: &PageMeta, width: usize) -> String {
+fn trailer(rows: usize, meta: &PageMeta) -> String {
     let count = if meta.complete {
         format!("{rows} rows")
     } else {
@@ -394,7 +394,12 @@ fn trailer(rows: usize, meta: &PageMeta, width: usize) -> String {
     };
     match &meta.next_cursor {
         Some(cursor) => {
-            let cursor = safe_cell(cursor, width);
+            // The cursor is a machine token the operator retypes into the
+            // next invocation: escape it, never width-truncate it — a cut
+            // token pastes as a broken page and the '+' mark would read as
+            // part of the value. The terminal may wrap the trailer line.
+            // (4096 cells bounds a hostile value; real cursors are short.)
+            let cursor = theme::safe_text(cursor, 4096);
             format!(
                 "{count} · watermark {} · more: --cursor {cursor}\n",
                 watermark(meta)

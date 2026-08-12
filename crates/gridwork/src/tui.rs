@@ -2106,6 +2106,7 @@ pub async fn event_tail(
     aggregate_type: Option<String>,
     event_type: Option<String>,
     view: BoardView,
+    motion: MotionMode,
 ) -> Result<(), Failure> {
     let terminal_env = TerminalEnv::from_process(ColorChoice::Auto);
     let tier = resolve_tier(&terminal_env);
@@ -2134,7 +2135,7 @@ pub async fn event_tail(
 
     run_workspace(
         WorkspaceStart::events(cursor, aggregate_type, event_type, view),
-        MotionMode::Full,
+        motion,
     )
     .await
 }
@@ -2400,7 +2401,7 @@ fn clear_board_projection(state: &mut BoardState, kind: ProjectionKind) {
 /// Attach to one explicitly named hosted PTY session. Engine-session ids are
 /// deliberately not coerced into PTY ids: the contract keeps those namespaces
 /// separate, and callers use `session list/inspect` for the former.
-pub async fn term_attach(session_id: PtySessionId) -> Result<(), Failure> {
+pub async fn term_attach(session_id: PtySessionId, motion: MotionMode) -> Result<(), Failure> {
     let terminal_env = TerminalEnv::from_process(ColorChoice::Auto);
     let tier = resolve_tier(&terminal_env);
     if !interactive_terminal(&terminal_env) {
@@ -2409,7 +2410,7 @@ pub async fn term_attach(session_id: PtySessionId) -> Result<(), Failure> {
         refresh_session_snapshot(&mut data, &mut state).await?;
         return render_session_snapshot(&state, tier);
     }
-    run_workspace(WorkspaceStart::attach(session_id), MotionMode::Off).await
+    run_workspace(WorkspaceStart::attach(session_id), motion).await
 }
 
 fn interactive_terminal(environment: &TerminalEnv) -> bool {

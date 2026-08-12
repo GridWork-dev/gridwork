@@ -305,7 +305,21 @@ impl EventIndex {
                             )
                             .then(|| attempt.attempt.runtime_started_at.clone())
                             .flatten(),
-                            duration: None,
+                            // The standing liveness label: the legacy hall
+                            // canvas (still the piped one-shot snapshot path)
+                            // renders only this field, while the console hall
+                            // derives real elapsed from started_at. Dropping
+                            // it silently stripped liveness from non-tty
+                            // `gw tui` output.
+                            duration: (attempt.attempt.runtime_started_at.is_some()
+                                && matches!(
+                                    state,
+                                    AgentState::Starting
+                                        | AgentState::Running
+                                        | AgentState::Canceling
+                                        | AgentState::NeedsAttention
+                                ))
+                            .then(|| "live".to_owned()),
                             changed_seq: attempt.sequence,
                         });
                     }
