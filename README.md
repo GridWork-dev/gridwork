@@ -61,7 +61,7 @@ real table on a TTY while a pipe still gets the wire JSON byte for byte. The
 terminal-native bullet above now describes what runs, with one named gap:
 persisted terminal recordings replay as a deterministic timeline in the
 console, but the ledger-synced, exportable-as-evidence half of replay is not
-built yet. Stage 5 — the workspace multiplexer — is next.
+built yet. Stage 5 — the workspace multiplexer — is the work now.
 
 The build order — contract → kernel → engines → console → workspace → context
 runtime — with what each

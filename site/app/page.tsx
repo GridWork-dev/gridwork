@@ -14,8 +14,8 @@ const stages = [
   ["01", "Contract", "shipped", "The shared language and conformance surface."],
   ["02", "Kernel", "shipped", "The sole writer, projections, blobs, attention, and authority."],
   ["03", "Engines", "shipped", "PTY and agent-control adapters, certified by the parity matrix."],
-  ["04", "Console", "current", "Queue, Board, fleet view, and time-synced replay."],
-  ["05", "Workspace", "planned", "A daily-driver terminal multiplexer."],
+  ["04", "Console", "shipped", "Five lenses over one estate: hall, work, fleet, flow, term."],
+  ["05", "Workspace", "current", "A daily-driver terminal multiplexer."],
   ["06", "Context runtime", "planned", "Skills, memory, and knowledge as measured, receipted surfaces."],
 ] as const;
 
@@ -67,7 +67,7 @@ const crates = [
     "gwk-pty-host",
     null,
     "Resident PTY engine host: session registry, spawn, detach/reattach routing",
-    "in tree, unpublished — skeleton",
+    "in tree, unpublished — not in cargo install gridwork until its own release",
   ],
   [
     "gwk-adapter-*",
@@ -91,7 +91,7 @@ const crates = [
     "gwk-tui",
     null,
     "The client: modes, lenses, palette",
-    "in tree, unpublished — skeleton",
+    "in tree, unpublished — five lenses and the live estate runtime",
   ],
 ] as const;
 
@@ -243,6 +243,9 @@ $ gw kernel health
                 <li>Certification runs against a real PostgreSQL 16.</li>
                 <li>The performance envelope is measured, not asserted.</li>
                 <li>The headless <code>gw</code> CLI speaks the kernel protocol.</li>
+                <li>
+                  <code>gw tui</code> opens five live lenses over the estate.
+                </li>
               </ul>
             </section>
 
@@ -252,8 +255,8 @@ $ gw kernel health
               </h3>
               <ul>
                 <li>
-                  The full TUI — <code>gw tui</code> wires only the Hall lens
-                  live today.
+                  The exportable-as-evidence half of replay — recordings replay
+                  in the console, but not yet ledger-synced.
                 </li>
                 <li>The workspace: the real multiplexer.</li>
                 <li>
@@ -305,8 +308,8 @@ $ gw kernel health
           <div className="landing-section-heading">
             <h2 id="roadmap-title">Six stages, in order</h2>
             <p>
-              Stages land when their gates are green. Contract, kernel, and
-              engines have shipped; console work is current.
+              Stages land when their gates are green. Contract, kernel,
+              engines, and console have shipped; the workspace is current.
             </p>
           </div>
 
