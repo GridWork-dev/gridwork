@@ -2080,7 +2080,14 @@ fn filtered_queue(state: &QueueState, query: &str) -> QueueState {
 fn filtered_config(state: &ConfigState, query: &str) -> ConfigState {
     let mut filtered = state.clone();
     if !query.is_empty() {
-        filtered.files.retain(|row| debug_matches(row, query));
+        // Match what the lens paints — path and route — never the file
+        // contents: a body-text hit on a row that shows neither reads as
+        // a filter that ignores the query.
+        let query = query.to_ascii_lowercase();
+        filtered.files.retain(|row| {
+            row.path.as_str().to_ascii_lowercase().contains(&query)
+                || row.route.as_str().to_ascii_lowercase().contains(&query)
+        });
     }
     filtered
 }
@@ -2956,5 +2963,24 @@ mod tests {
                 _ => assert!(!kinds.is_empty(), "{view:?} pages nothing"),
             }
         }
+    }
+
+    #[test]
+    fn config_filter_matches_the_painted_row_not_the_file_body() {
+        let state = ConfigState {
+            files: vec![gwk_tui::config::ConfigFileState {
+                path: gwk_tui::config::ConfigPath::Capabilities,
+                route: gwk_tui::config::EditRoute::Form,
+                contents: "secret_marker = 1\n".to_owned(),
+            }],
+            config_head: None,
+            last_evidence_ref: None,
+            dirty: false,
+            divergent: false,
+        };
+        assert_eq!(filtered_config(&state, "capabilities").files.len(), 1);
+        assert_eq!(filtered_config(&state, "form").files.len(), 1);
+        // A body-only hit shows a row whose painted text carries no match.
+        assert!(filtered_config(&state, "secret_marker").files.is_empty());
     }
 }

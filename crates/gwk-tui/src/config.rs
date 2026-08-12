@@ -98,6 +98,17 @@ pub enum EditRoute {
     Editor,
 }
 
+impl EditRoute {
+    /// The exact words the lens paints for this route; `/` filters match
+    /// against the same text the operator reads.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Form => "validated form",
+            Self::Editor => "$EDITOR + typed commit",
+        }
+    }
+}
+
 /// The exact TOML shape a generated form owns for one allowlisted file.
 ///
 /// The template carries every accepted key and its value kind. Validation
@@ -1192,16 +1203,27 @@ fn find_value_end(bytes: &[u8], start: usize) -> (usize, usize) {
                 }
                 ValueQuote::MultilineBasic => {
                     if bytes.get(index..index + 3) == Some(b"\"\"\"") && !escaped {
+                        // TOML: up to two quotes adjacent to the closing
+                        // delimiter are content — the delimiter is the last
+                        // three of the run, so shift past the content quotes.
+                        let mut extra = 0;
+                        while extra < 2 && bytes.get(index + 3 + extra) == Some(&b'"') {
+                            extra += 1;
+                        }
                         quote = None;
-                        index += 2;
+                        index += 2 + extra;
                     } else {
                         escaped = byte == b'\\' && !escaped;
                     }
                 }
                 ValueQuote::MultilineLiteral => {
                     if bytes.get(index..index + 3) == Some(b"'''") {
+                        let mut extra = 0;
+                        while extra < 2 && bytes.get(index + 3 + extra) == Some(&b'\'') {
+                            extra += 1;
+                        }
                         quote = None;
-                        index += 2;
+                        index += 2 + extra;
                     }
                 }
             }
@@ -1752,10 +1774,7 @@ fn rows(state: &ConfigState) -> Vec<Row> {
         rows.push(Row {
             binding: theme::binding("idle"),
             text: file.path.as_str().to_owned(),
-            right: Some(match file.route {
-                EditRoute::Form => "validated form",
-                EditRoute::Editor => "$EDITOR + typed commit",
-            }),
+            right: Some(file.route.as_str()),
             target: Some(ConfigTarget::File(file.path)),
         });
     }
@@ -1952,4 +1971,28 @@ fn paint_row(
 
 fn short_ref(value: Option<&str>) -> &str {
     value.map_or("-", |revision| revision.get(..8).unwrap_or(revision))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quote_adjacent_closing_delimiters_stay_inside_their_own_value() {
+        // TOML permits one or two quotes adjacent to a multiline closing
+        // delimiter as content; a scanner that closes on the FIRST run of
+        // three swallows every following assignment into the first span.
+        for contents in [
+            "a = \"\"\"x\"\"\"\"\nb = 1\n",
+            "a = \"\"\"x\"\"\"\"\"\nb = 1\n",
+            "a = '''x''''\nb = 1\n",
+            "a = '''x'''''\nb = 1\n",
+        ] {
+            let spans = assignment_value_spans(ConfigPath::Capabilities, contents).expect("spans");
+            assert!(
+                spans.contains_key(&vec!["b".to_owned()]),
+                "second assignment lost in {contents:?}"
+            );
+        }
+    }
 }
