@@ -12,11 +12,23 @@ set -euo pipefail
 base_patterns='/home/[a-z0-9_-]+/|/Users/[a-z0-9_-]+/|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]+|_(TOKEN|SECRET|API_KEY|PASSWORD)=[^[:space:]]|BEGIN [A-Z ]*PRIVATE KEY|claude\.ai/code/session_'
 
 here="$(cd "$(dirname "$0")" && pwd)"
+overlay_file="$here/leak-scan.local"
+if [[ ! -f "$overlay_file" ]]; then
+  # A linked worktree never carries untracked files, so a lane pushing from one
+  # would silently run without the estate overlay — the gap that let an estate
+  # identifier publish. Resolve the overlay through the shared git common dir
+  # back to the primary checkout; a fresh clone (CI) resolves to its own absent
+  # file and stays overlay-free, which is the same behavior as before.
+  common="$(git -C "$here" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+  if [[ -n "$common" && -f "$common/../tools/leak-scan.local" ]]; then
+    overlay_file="$common/../tools/leak-scan.local"
+  fi
+fi
 overlay_patterns=''
-if [[ -f "$here/leak-scan.local" ]]; then
+if [[ -f "$overlay_file" ]]; then
   # An all-comment/blank local file must yield NO overlay tier, not an empty ERE
   # (an empty alternation branch matches every line and would redden the whole tree).
-  overlay_patterns="$(grep -Ev '^[[:space:]]*(#|$)' "$here/leak-scan.local" | paste -sd'|' - || true)"
+  overlay_patterns="$(grep -Ev '^[[:space:]]*(#|$)' "$overlay_file" | paste -sd'|' - || true)"
 fi
 patterns="$base_patterns"
 if [[ -n "$overlay_patterns" ]]; then
