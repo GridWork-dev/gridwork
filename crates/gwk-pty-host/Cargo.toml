@@ -2,7 +2,7 @@
 name = "gwk-pty-host"
 version = "0.0.1"
 description = "Resident PTY engine host: session registry, spawn, and detach/reattach routing"
-homepage = "https://gridwork.sh"
+homepage = "https://gridwork.dev"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

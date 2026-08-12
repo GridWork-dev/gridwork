@@ -2,7 +2,7 @@
 name = "gwk-adapter-codex"
 version = "0.0.2"
 description = "codex engine adapter: app-server JSON-RPC, vendored schemas, native TUI through gwk-pty"
-homepage = "https://gridwork.sh"
+homepage = "https://gridwork.dev"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

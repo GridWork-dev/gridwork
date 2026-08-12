@@ -2,7 +2,7 @@
 name = "gwk-pty"
 version = "0.0.2"
 description = "PTY engine: authoritative terminal grid, render-state deltas, and dual-attach reattach"
-homepage = "https://gridwork.sh"
+homepage = "https://gridwork.dev"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
