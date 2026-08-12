@@ -26,9 +26,9 @@ allowed to do that. GridWork is an operating layer for a fleet of terminal agent
 - **A kernel, not a wrapper.** A daemon owns the event store, the attention queue, the
   authority policy (what agents may do unattended, what pages a human), workflow runs,
   and worktree lifecycle. Clients are thin.
-- **Terminal-native.** The surface is a TUI: an orchestration mode (attention queue,
-  work board, a live view of the fleet) and a workspace mode (a real multiplexer). No
-  web console, ever.
+- **Terminal-native.** The surface is a TUI: an orchestration mode — ruled as five
+  lenses over one estate: hall, work, fleet, flow, term — and a workspace mode (a real
+  multiplexer). No web console, ever.
 - **Engine-agnostic.** Agents are driven over [ACP](https://agentclientprotocol.com) —
   an open protocol for talking to coding agents — plus engine hooks and PTY. Control
   never rides keystrokes.
@@ -50,8 +50,9 @@ parity harness that certifies them, and `gwk-pty-host` (the resident host:
 session supervision, wire-frame conversion, command origination, and a
 consumer-facing attach route — the host publishes each session's snapshots and
 deltas into the kernel's session registry, and `PtyAttach`/`PtySnapshot` answer
-consumers from there; routing a consumer's input, resize, and stop to a hosted
-session is still open, and sessions still start from the operator's declaration
+consumers from there; a consumer's input now reaches the hosted session —
+authority-gated, one ledger receipt per send — while routing resize and stop is
+still open, and sessions still start from the operator's declaration
 rather than a request). Stage 4 — the console — is in flight: `gwk-tui` now
 carries five lenses (Queue, Board, Hall — the live fleet view — Config, and the
 session drill-down), and `gw tui` wires the Hall lens into a production

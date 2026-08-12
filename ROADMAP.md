@@ -63,8 +63,9 @@ the engine crates stay in-tree, unpublished until 1.0 packaging.
 
 ## 4 · Console *(current)*
 
-- The orchestration TUI: Queue (attention), Board (work), and a live view of the
-  running fleet
+- The orchestration TUI, ruled as five lenses over one estate — hall, work, fleet,
+  flow, term (the design record lives in-tree:
+  `crates/gwk-tui/tests/mockups/DESIGN-NOTES.md`); the Board dissolves into them
 - Time-synced replay of ledger + terminal, exportable as evidence
 
 ## 5 · Workspace
@@ -81,7 +82,7 @@ the engine crates stay in-tree, unpublished until 1.0 packaging.
 
 ## 1.0
 
-All planes complete and packaged: kernel + protocol + CLI; Queue + Board + Hall; mux;
+All planes complete and packaged: kernel + protocol + CLI; the five-lens console; mux;
 and Context Runtime. Single-command install (`cargo install gridwork` and friends), and
 distribution stops assuming you run your own postgres — a zero-setup embedded backend
 is part of 1.0 packaging, not before. "And friends" is doing real work here: through

@@ -3,7 +3,7 @@ title: Roadmap
 description: Six ordered stages to GridWork 1.0, with shipped, current, and planned work stated separately.
 ---
 
-{/* curated-from: ROADMAP.md sha256=8df3c57f07cd681b35577ae25e054b5bf0d7e6698c59dd3a486355b7b47d6718 */}
+{/* curated-from: ROADMAP.md sha256=77abc11e7f5ffec56db102486deee3d9e5f447ca971f91819d368ec732d1a254 */}
 
 GridWork is built in public, pre-1.0. Stages land in order, and each stage exits with
 working, tested code — there are no aspirational branches.
@@ -68,8 +68,9 @@ the engine crates stay in-tree, unpublished until 1.0 packaging.
 
 ## 4 · Console *(current)*
 
-- The orchestration TUI: Queue (attention), Board (work), and a live view of the
-  running fleet
+- The orchestration TUI, ruled as five lenses over one estate — hall, work, fleet,
+  flow, term (the design record lives in-tree:
+  `crates/gwk-tui/tests/mockups/DESIGN-NOTES.md`); the Board dissolves into them
 - Time-synced replay of ledger + terminal, exportable as evidence
 
 ## 5 · Workspace
@@ -86,7 +87,7 @@ the engine crates stay in-tree, unpublished until 1.0 packaging.
 
 ## 1.0
 
-All planes complete and packaged: kernel + protocol + CLI; Queue + Board + Hall; mux;
+All planes complete and packaged: kernel + protocol + CLI; the five-lens console; mux;
 and Context Runtime. Single-command install (`cargo install gridwork` and friends), and
 distribution stops assuming you run your own postgres — a zero-setup embedded backend
 is part of 1.0 packaging, not before.

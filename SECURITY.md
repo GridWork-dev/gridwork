@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Use [GitHub private vulnerability reporting](../../security/advisories/new) — do not
+Use [GitHub private vulnerability reporting](https://github.com/GridWork-dev/gridwork/security/advisories/new) — do not
 open a public issue for anything exploitable. You'll get an acknowledgment within a few
 days; pre-1.0 there is no bug bounty.
 
