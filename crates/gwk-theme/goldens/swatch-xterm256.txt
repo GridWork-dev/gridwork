@@ -50,5 +50,5 @@ CYCLES
   spinner_reversed ⠆⡄⣠⢰⠸⠹⠙⠋
 
 WIDTH RULER - every mark is one cell, so the pipes line up
-  |✦|✧|▴|▸|◃|▿|∙|⠄|⠒|⠉|⠋|⠆|!|⊘|✗|✓|⊖|?|⊞|⊚|∘|⋄|
-  |X|X|X|X|X|X|X|X|X|X|X|X|X|X|X|X|X|X|X|X|X|X|
+  |✦|✧|▴|▸|◃|▿|∙|⠄|⠒|⠉|⠋|⠆|!|⊘|✗|✓|⊖|?|⊞|⊚|∘|⋄|⣀|⣤|⣶|⣿|
+  |X|X|X|X|X|X|X|X|X|X|X|X|X|X|X|X|X|X|X|X|X|X|X|X|X|X|
