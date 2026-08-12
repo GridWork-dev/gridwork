@@ -1708,21 +1708,36 @@ fn attach_rail_state(model: &ConsoleModel, attached: &PtySessionId) -> AttachRai
     }));
     queue.truncate(5);
 
+    // Round 7 ruling: `/` filters the estate rail — the attach screen's only
+    // list content. The match runs on the text the rail paints, nothing
+    // invisible.
+    let query = model.shell.filter().to_ascii_lowercase();
+    if !query.is_empty() {
+        queue.retain(|item| item.text.to_ascii_lowercase().contains(&query));
+    }
+    let terms = model
+        .terms
+        .sessions
+        .iter()
+        .map(|session| AttachRailTerm {
+            subject: format!("{}:{}", session.id, session.generation),
+            state: session.state.clone(),
+            attached: &session.id == attached,
+        })
+        .filter(|term| {
+            query.is_empty()
+                || term.attached
+                || term.subject.to_ascii_lowercase().contains(&query)
+                || term.state.to_ascii_lowercase().contains(&query)
+        })
+        .collect();
+
     AttachRailState {
         running,
         attention: attention_count,
         blocked,
         cost: console::dollars(model.hall_cost_micros),
-        terms: model
-            .terms
-            .sessions
-            .iter()
-            .map(|session| AttachRailTerm {
-                subject: format!("{}:{}", session.id, session.generation),
-                state: session.state.clone(),
-                attached: &session.id == attached,
-            })
-            .collect(),
+        terms,
         queue,
     }
 }
@@ -2110,15 +2125,6 @@ pub async fn event_tail(
 ) -> Result<(), Failure> {
     let terminal_env = TerminalEnv::from_process(ColorChoice::Auto);
     let tier = resolve_tier(&terminal_env);
-    if view == BoardView::Replay {
-        check_snapshot_filters(
-            view,
-            cursor.as_ref(),
-            aggregate_type.as_ref(),
-            event_type.as_ref(),
-        )?;
-        return board_view_snapshot(view, tier).await;
-    }
     if !interactive_terminal(&terminal_env) {
         check_snapshot_filters(
             view,

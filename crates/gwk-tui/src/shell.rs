@@ -444,7 +444,7 @@ impl ShellState {
                 self.mode = ShellMode::Navigator;
                 ShellAction::None
             }
-            KeyCode::Char('/') if self.surface != Surface::TermAttach => {
+            KeyCode::Char('/') => {
                 self.filter_origin.clone_from(&self.filter);
                 self.mode = ShellMode::Filter;
                 ShellAction::None
@@ -1076,7 +1076,7 @@ fn key_hints(shell: &ShellState) -> &'static str {
             Surface::FleetAgents => {
                 ": go   / filter   enter open   s stop   b budget   [/] tab   q quit"
             }
-            Surface::TermAttach => "i input   r rail   j/k scroll   : go   q back",
+            Surface::TermAttach => "i input   r rail   j/k scroll   / filter   : go   q back",
             // q leaves a WORK surface for the Hall (the ruled "q back");
             // everywhere else in this arm it quits.
             Surface::WorkTasks | Surface::WorkRuns => {

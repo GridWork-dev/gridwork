@@ -105,7 +105,7 @@ fn zero_and_maximum_costs_render_without_panicking_or_overflowing() {
 }
 
 #[test]
-fn cost_table_scopes_today_and_keeps_missing_tokens_unknown() {
+fn cost_table_scopes_today_and_marks_unreported_tokens() {
     let mut state = common::estate::estate_board_state(BoardView::CostHealth);
     let mut entry = state.costs[0].clone();
     entry.recorded_at = Timestamp::new("2026-08-10T09:00:00Z");
@@ -122,9 +122,6 @@ fn cost_table_scopes_today_and_keeps_missing_tokens_unknown() {
         &complete(),
         120,
     );
-    assert!(
-        rendered.contains("?/ ?") || rendered.contains("?/?"),
-        "{rendered}"
-    );
+    assert!(rendered.contains("0+?/0+?"), "{rendered}");
     assert!(!rendered.contains("09:00"), "{rendered}");
 }

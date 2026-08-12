@@ -849,7 +849,7 @@ pub struct Spend {
 }
 
 impl Spend {
-    fn add(&mut self, entry: &CostEntry) {
+    pub(crate) fn add(&mut self, entry: &CostEntry) {
         match entry.cost_micros {
             Some(micros) => {
                 self.micros = self.micros.saturating_add(micros.value());
@@ -871,6 +871,10 @@ impl Spend {
         self.priced + self.unpriced
     }
 
+    pub(crate) fn micros(&self) -> u64 {
+        self.micros
+    }
+
     pub fn text(&self) -> String {
         match (self.priced, self.unpriced) {
             (0, 0) => "-".to_owned(),
@@ -884,18 +888,25 @@ impl Spend {
         if self.entries() == 0 {
             "-".to_owned()
         } else {
-            let input = if self.missing_input == 0 {
-                tokens(self.input)
-            } else {
-                "?".to_owned()
-            };
-            let output = if self.missing_output == 0 {
-                tokens(self.output)
-            } else {
-                "?".to_owned()
-            };
-            format!("{input}/{output}")
+            format!(
+                "{}/{}",
+                token_axis(self.input, self.missing_input),
+                token_axis(self.output, self.missing_output)
+            )
         }
+    }
+}
+
+/// One token axis in the ruled floor-plus-marker form (Round 7): the summed
+/// floor stays visible and an unreported remainder is stated as `+?` — never
+/// a bare `?` that discards a mostly-known sum, never a silent zero-fill
+/// that reads as complete. Shared by the lens and its CLI table twin so the
+/// two surfaces cannot drift apart again.
+pub(crate) fn token_axis(total: u64, missing: usize) -> String {
+    if missing == 0 {
+        tokens(total)
+    } else {
+        format!("{}+?", tokens(total))
     }
 }
 

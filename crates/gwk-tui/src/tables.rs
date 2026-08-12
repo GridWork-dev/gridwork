@@ -4,12 +4,12 @@
 //! semantics. This module owns the non-ratatui half; callers keep wire JSON
 //! untouched when stdout is not a terminal.
 
-use gwk_domain::entity::{CostEntry, EngineSession, PtySession};
+use gwk_domain::entity::{EngineSession, PtySession};
 use gwk_domain::ids::{Seq, TaskId, Timestamp};
 
 use crate::board::BoardState;
 use crate::console::{
-    attempt_state_word, dollars, elapsed, same_utc_date, short_role, spend_for, tokens,
+    Spend, attempt_state_word, dollars, elapsed, same_utc_date, short_role, spend_for,
 };
 use crate::theme;
 
@@ -177,7 +177,7 @@ pub fn cost_table(state: &BoardState, now: &Timestamp, meta: &PageMeta, width: u
         .iter()
         .filter(|entry| same_utc_date(&entry.recorded_at, now))
         .collect::<Vec<_>>();
-    let mut lanes: Vec<(String, String, LaneSpend)> = Vec::new();
+    let mut lanes: Vec<(String, String, Spend)> = Vec::new();
     for entry in &entries {
         let engine = entry.engine.as_str();
         let model = entry.model.as_deref().unwrap_or("-");
@@ -187,13 +187,13 @@ pub fn cost_table(state: &BoardState, now: &Timestamp, meta: &PageMeta, width: u
         {
             Some((_, _, spend)) => spend.add(entry),
             None => {
-                let mut spend = LaneSpend::default();
+                let mut spend = Spend::default();
                 spend.add(entry);
                 lanes.push((engine.to_owned(), model.to_owned(), spend));
             }
         }
     }
-    lanes.sort_by_key(|(_, _, spend)| std::cmp::Reverse(spend.micros));
+    lanes.sort_by_key(|(_, _, spend)| std::cmp::Reverse(spend.micros()));
     let lane_columns = [
         column("ENGINE", 0),
         column("MODEL", 0),
@@ -207,7 +207,7 @@ pub fn cost_table(state: &BoardState, now: &Timestamp, meta: &PageMeta, width: u
             vec![
                 engine.clone(),
                 model.clone(),
-                (spend.priced + spend.unpriced).to_string(),
+                spend.entries().to_string(),
                 spend.token_text(),
                 spend.text(),
             ]
@@ -264,63 +264,6 @@ pub fn cost_table(state: &BoardState, now: &Timestamp, meta: &PageMeta, width: u
         dollars(total)
     ));
     output
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-struct LaneSpend {
-    micros: u64,
-    priced: usize,
-    unpriced: usize,
-    input: u64,
-    output: u64,
-    missing_input: usize,
-    missing_output: usize,
-}
-
-impl LaneSpend {
-    fn add(&mut self, entry: &CostEntry) {
-        if let Some(cost) = entry.cost_micros {
-            self.micros = self.micros.saturating_add(cost.value());
-            self.priced = self.priced.saturating_add(1);
-        } else {
-            self.unpriced = self.unpriced.saturating_add(1);
-        }
-        match entry.input_tokens {
-            Some(count) => self.input = self.input.saturating_add(count.value()),
-            None => self.missing_input = self.missing_input.saturating_add(1),
-        }
-        match entry.output_tokens {
-            Some(count) => self.output = self.output.saturating_add(count.value()),
-            None => self.missing_output = self.missing_output.saturating_add(1),
-        }
-    }
-
-    fn text(self) -> String {
-        match (self.priced, self.unpriced) {
-            (0, 0) => "-".to_owned(),
-            (0, unpriced) => format!("+{unpriced}u"),
-            (_, 0) => dollars(self.micros),
-            (_, unpriced) => format!("{} +{unpriced}u", dollars(self.micros)),
-        }
-    }
-
-    fn token_text(self) -> String {
-        if self.priced + self.unpriced == 0 {
-            "-".to_owned()
-        } else {
-            let input = if self.missing_input == 0 {
-                tokens(self.input)
-            } else {
-                "?".to_owned()
-            };
-            let output = if self.missing_output == 0 {
-                tokens(self.output)
-            } else {
-                "?".to_owned()
-            };
-            format!("{input}/{output}")
-        }
-    }
 }
 
 fn table(columns: &[Column], rows: &[Vec<String>], width: usize) -> String {

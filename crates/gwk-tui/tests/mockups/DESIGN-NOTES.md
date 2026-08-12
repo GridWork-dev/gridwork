@@ -546,3 +546,21 @@ agreement.
 - **Queue mute asks for an exact `YYYY-MM-DDTHH:MM:SSZ` deadline, then confirms.** The
   operator chose the absolute timestamp over duration parsing or fixed presets: it mirrors
   the CLI and does not invent a mute length, timezone, or product default.
+
+### Round 7 - post-review operator rulings (operator picker, 2026-08-11)
+
+- **Token columns state the floor and mark the gap.** When some cost entries lack a
+  token count, the axis renders the summed floor with a `+?` marker
+  (`50.0k+?/10.0k+?`) - never a bare `?`, which discards a mostly-known sum, and never
+  a silent zero-fill, which reads as complete. One shared helper
+  (`console::token_axis`) feeds the lens and the CLI table twin so the two surfaces
+  cannot drift. The Round-5 mock painter's zero-fill coincides on the seeded day
+  (every entry reports tokens) and is superseded by this ruling.
+- **`--view replay` opens the workspace at TERM lifetimes.** Every other `--view`
+  value opens the workspace on a TTY; replay follows, focused on the lens that owns
+  terminal lifetimes, until a real replay surface ships. Piped and non-tty
+  invocations keep the one-shot snapshot, like every other view.
+- **`/` filters the estate rail on TERM attach.** The mock-attach keybar is the
+  artifact of record and shows `/ filter`; VIEW-mode `/` now filters the rail's
+  terminal and queue rows on their painted text (the attached row always stays).
+  INPUT mode is unchanged.
