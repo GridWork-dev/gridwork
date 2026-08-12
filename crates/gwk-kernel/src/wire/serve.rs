@@ -11,7 +11,8 @@
 //! Subscriptions are the other half, and they are why a connection is two loops
 //! instead of one. A batch is a frame the client did not individually request,
 //! so it cannot be written by the code that answers requests: one loop owns the
-//! write half and takes work from two queues, responses before batches. What a
+//! write half and takes work from priority queues, responses before reverse
+//! controls before batches. What a
 //! subscription then DOES lives in [`subscribe`](super::subscribe) — this layer
 //! admits one, bounds how many a connection may hold, and writes what they
 //! produce.
@@ -1533,7 +1534,7 @@ where
     })?
 }
 
-/// Own the write half, and take work from the two queues that feed it.
+/// Own the write half, and take work from the three queues that feed it.
 ///
 /// Responses first, always. A `StreamClosed` travels on the response queue for
 /// this reason: the thing it has to get past is precisely a batch queue that a
@@ -1565,7 +1566,7 @@ where
                     active: None,
                 }, Some(input.written)),
             Some(outgoing) = batches.recv() => (outgoing, None),
-            // Both queues closed: the reader is done and no subscription is
+            // All queues closed: the reader is done and no subscription is
             // left to produce anything.
             else => return Ok(()),
         };
@@ -1576,30 +1577,38 @@ where
         {
             continue;
         }
-        let written = match tokio::time::timeout(
-            std::time::Duration::from_secs(gwk_domain::protocol::SLOW_CONSUMER_TIMEOUT_SECS),
-            write_outgoing(writer, &outgoing.control, outgoing.raw.as_deref(), budget),
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(_) => {
-                if let Some(active) = &outgoing.active {
-                    active.store(false, std::sync::atomic::Ordering::Release);
+        let bounded_write = outgoing.active.is_some() || input_written.is_some();
+        let written = if bounded_write {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(gwk_domain::protocol::SLOW_CONSUMER_TIMEOUT_SECS),
+                write_outgoing(writer, &outgoing.control, outgoing.raw.as_deref(), budget),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => {
+                    if let Some(active) = &outgoing.active {
+                        active.store(false, std::sync::atomic::Ordering::Release);
+                    }
+                    let error = WireError::new(
+                        KernelErrorCode::SlowConsumer,
+                        "a PTY control delivery blocked on the client beyond the slow-consumer timeout",
+                    );
+                    if let Some(written) = input_written.take() {
+                        let _ = written.send(Err(pty::PtyRefusal {
+                            code: error.code,
+                            message: error.message.clone(),
+                            detail: None,
+                        }));
+                    }
+                    return Err(error);
                 }
-                let error = WireError::new(
-                    KernelErrorCode::SlowConsumer,
-                    "a control delivery blocked on the client beyond the slow-consumer timeout",
-                );
-                if let Some(written) = input_written.take() {
-                    let _ = written.send(Err(pty::PtyRefusal {
-                        code: error.code,
-                        message: error.message.clone(),
-                        detail: None,
-                    }));
-                }
-                return Err(error);
             }
+        } else {
+            // Event and rendered-PTY streams enforce backpressure at their
+            // bounded queues. Cancelling a framed write here can leave the peer
+            // with a length prefix and only part of its body.
+            write_outgoing(writer, &outgoing.control, outgoing.raw.as_deref(), budget).await
         };
         if let Err(error) = written {
             if let Some(written) = input_written.take() {

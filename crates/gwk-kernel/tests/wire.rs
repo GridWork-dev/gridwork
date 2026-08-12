@@ -1882,7 +1882,7 @@ async fn receipted_pty_input_reaches_the_owning_host_once_across_the_real_wire()
     assert_eq!(event_count, 1);
     let receipt = sqlx::query(
         "SELECT actor->>'kind' AS actor_kind, action, subject_id, observed_basis \
-         FROM gwk.receipt WHERE id = 'receipt:p:wire-input'",
+         FROM gwk.receipt WHERE id = 'receipt:system:wire-input'",
     )
     .fetch_one(&pool)
     .await
@@ -2124,7 +2124,7 @@ async fn pty_input_authority_honors_live_grants_revocation_and_actor_kind() {
     let basis = |key: &str| {
         receipts
             .iter()
-            .find(|row| row.get::<String, _>("id") == format!("receipt:p:{key}"))
+            .find(|row| row.get::<String, _>("id") == format!("receipt:system:{key}"))
             .map(|row| {
                 (
                     row.get::<String, _>("actor_kind"),
