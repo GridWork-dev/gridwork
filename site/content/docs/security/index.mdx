@@ -3,7 +3,7 @@ title: Threat model
 description: Assets, trust boundaries, ten threat stances, implementation status, and explicit non-goals.
 ---
 
-{/* curated-from: docs/security/THREAT_MODEL.md sha256=9e50b6393ea60ca060f8e5230a42bc2b083984cd7101d2cfa66f4abc1597771d */}
+{/* curated-from: docs/security/THREAT_MODEL.md sha256=8970cfe01a76bb51654065ddacbd90890249c85561e31c579d3fd74ffc20c732 */}
 {/* curated-from: SECURITY.md sha256=76ceaf65dce41deafa4f17823fa4f6069b729525c24a624fae9f9450248bb14c */}
 
 What GridWork defends against, what it deliberately does not, and where each
@@ -11,9 +11,10 @@ mitigation lives. Written for contributors: if your change touches one of
 these boundaries, the relevant stance is review criteria, not background
 reading. Reporting: see `SECURITY.md`.
 
-GridWork is pre-alpha, at stage 4 of 6 (see `ROADMAP.md`): the kernel and the
-engines are built — the engine crates certified by the parity matrix — while the
-console and the rest of the human surface are not, so several stances below are still
+GridWork is pre-alpha, at stage 5 of 6 (see `ROADMAP.md`): the kernel, the
+engines, and the console are built — the engine crates certified by the parity
+matrix, the console shipped as the five-lens workspace — while the workspace
+multiplexer and the context runtime are not, so several stances below are still
 design commitments whose enforcing code does not exist yet. Each stance therefore
 carries a status: **in force** (enforced at HEAD), **partial** (naming what is
 enforced versus designed), or **designed, not yet built**. A design stance is a

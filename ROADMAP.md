@@ -61,14 +61,19 @@ cases, with the performance envelope measured and receipted per run.
 Shipped means the stage's gates are green, not that its crates are published:
 the engine crates stay in-tree, unpublished until 1.0 packaging.
 
-## 4 · Console *(current)*
+## 4 · Console *(shipped)*
 
 - The orchestration TUI, ruled as five lenses over one estate — hall, work, fleet,
   flow, term (the design record lives in-tree:
-  `crates/gwk-tui/tests/mockups/DESIGN-NOTES.md`); the Board dissolves into them
-- Time-synced replay of ledger + terminal, exportable as evidence
+  `crates/gwk-tui/tests/mockups/DESIGN-NOTES.md`); the Board dissolved into them,
+  and `gw board`, `gw event tail`, and `gw term attach` open the one console shell
+- Replay of persisted terminal recordings as a deterministic timeline in the console
 
-## 5 · Workspace
+Shipped with named residue: the ledger-synced, exportable-as-evidence half of
+replay is not built, and two stage-3 leftovers — consumer-routed resize/stop and
+request-driven session starts — are still open.
+
+## 5 · Workspace *(current)*
 
 - A full terminal multiplexer: workspaces, tabs, splits, scrollback, detach
 - Daily-driver quality — the stage where GridWork becomes the terminal you live in

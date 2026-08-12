@@ -3,23 +3,24 @@ title: Run GridWork today
 description: Certify a sample stream, install the gw CLI, initialize a PostgreSQL 16 kernel, and understand the current limits.
 ---
 
-{/* curated-from: README.md sha256=4a24dd1aec1958f699f41a6095db7cd95954e478928bf5523f77fc8aa88966d1 */}
+{/* curated-from: README.md sha256=0038a7a1e379f452679cca6650e680923277b8a1de708552acb7dd9ee3847903 */}
 
 ## Before you clone
 
-GridWork is pre-1.0, at stage 4 of 6. Stages 1–3 — the contract, the kernel,
-and the engines — are done: the first two ship on crates.io, and stage 3 exited
-with its twelve-cell parity matrix certified green. The kernel owns an
-append-only event store, transactional projections, encrypted content-addressed
-blobs, authority receipts, event subscriptions, and `gw`, the headless CLI over
-the protocol the future TUI will use.
+GridWork is pre-1.0, at stage 5 of 6. Stages 1–4 — the contract, the kernel,
+the engines, and the console — are done: the first two ship on crates.io, and
+stage 3 exited with its twelve-cell parity matrix certified green. The kernel
+owns an append-only event store, transactional projections, encrypted
+content-addressed blobs, authority receipts, event subscriptions, and `gw`,
+the headless CLI over the same protocol the TUI uses.
 
-Stage 4 — the console — is current. Five TUI lenses exist in the tree, and
-`gw tui` wires the Hall lens — the live fleet view — into a real terminal loop
-over the kernel's projections and events; Queue, Board, Config, and the session
-drill-down are not part of that installed surface yet, and the workspace and
-context-runtime stages do not ship at all. The headless CLI remains the complete
-protocol surface. The full order and status live in the [roadmap](/docs/roadmap).
+Stage 4 — the console — shipped as the five-lens workspace: `gw tui` opens
+HALL, WORK, FLEET, FLOW, and TERM over the kernel's live projections and
+events, `gw board`, `gw event tail`, and `gw term attach` open the same
+console shell focused on a lens, and every CLI verb renders a real table on a
+TTY while a pipe still gets the wire JSON. The workspace-multiplexer and
+context-runtime stages do not ship at all. The full order and status live in
+the [roadmap](/docs/roadmap).
 
 You need stable Rust (MSRV 1.94). The stream certifier needs nothing else. Running
 the kernel also needs PostgreSQL 16, an empty database it can own, and separate
