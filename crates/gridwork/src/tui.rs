@@ -1005,8 +1005,7 @@ async fn handle_workspace_input(
             if model.shell.surface() == Surface::TermLifetimes
                 && let Some(TermTarget::Session(session_id)) = model.term_selected.clone()
             {
-                if let Err(error) =
-                    open_workspace_attach(data, model, pty_stream, session_id).await
+                if let Err(error) = open_workspace_attach(data, model, pty_stream, session_id).await
                 {
                     model.shell.set_notice(format!("attach refused -- {error}"));
                 }
@@ -1428,12 +1427,6 @@ async fn execute_console_verb(
                     None
                 }
             }
-        }
-        (ContextVerb::DecideGate, _) => {
-            model.shell.set_notice(
-                "gate decision is visible, but this contract has no decide-gate command",
-            );
-            None
         }
         (ContextVerb::EditBudget, ConfirmationTarget::Budget(BoardTarget::Attempt(target_id))) => {
             model

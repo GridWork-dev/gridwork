@@ -569,7 +569,7 @@ fn paint_attempt_row(
             style("muted", tier),
         );
         put_cell(buf, area, 77, 91, y, &lease_text, style("muted", tier));
-        put_cell(
+        put_value_cell(
             buf,
             area,
             91,
@@ -582,7 +582,7 @@ fn paint_attempt_row(
     } else {
         (52, 65)
     };
-    put_cell(
+    put_value_cell(
         buf,
         area,
         spend_x,
@@ -591,11 +591,10 @@ fn paint_attempt_row(
         &spend.text(),
         style("fg", tier),
     );
-    put_cell(
+    put_tail_cell(
         buf,
         area,
         age_x,
-        area.width,
         y,
         &elapsed(&context.now, &attempt.created_at).unwrap_or_else(|| "-".to_owned()),
         style("muted", tier),
@@ -697,11 +696,15 @@ fn paint_spend_chart(
     now: &Timestamp,
 ) {
     const ROWS: u32 = 3;
-    const FIRST: u32 = 9;
-    const LAST: u32 = 17;
     let step: u16 = if area.width < 100 { 6 } else { 8 };
     let left = 8u16;
-    let mut buckets = vec![0u64; (LAST - FIRST + 1) as usize];
+    // The axis follows the data — any same-day hour with spend gets a
+    // bucket (the 09h-17h window in the mockups was the seeded workday, not
+    // a ruling; the doctrine binds "any bucket with spend gets a mark").
+    // When spend spans more hours than the row fits, the window keeps the
+    // latest hours and the header says how many earlier ones it dropped.
+    let mut day = [0u64; 24];
+    let mut any = false;
     for entry in state
         .costs
         .iter()
@@ -713,11 +716,29 @@ fn paint_spend_chart(
         let Some(hour) = timestamp_hour(entry.recorded_at.as_str()) else {
             continue;
         };
-        if (FIRST..=LAST).contains(&hour) {
-            let index = (hour - FIRST) as usize;
-            buckets[index] = buckets[index].saturating_add(micros.value());
+        if let Some(bucket) = day.get_mut(hour as usize) {
+            *bucket = bucket.saturating_add(micros.value());
+            any = true;
         }
     }
+    let (first, last) = if any {
+        let earliest = day.iter().position(|value| *value > 0).unwrap_or(0) as u32;
+        let latest = day.iter().rposition(|value| *value > 0).unwrap_or(0) as u32;
+        (earliest, latest)
+    } else {
+        let hour = timestamp_hour(now.as_str()).unwrap_or(0);
+        (hour, hour)
+    };
+    let max_buckets = u32::from((area.width.saturating_sub(left) / step).max(1));
+    let span = (last - first + 1).min(max_buckets);
+    let shown_first = last + 1 - span;
+    let omitted_hours = day[..shown_first as usize]
+        .iter()
+        .filter(|value| **value > 0)
+        .count();
+    let buckets: Vec<u64> = (shown_first..=last)
+        .map(|hour| day[hour as usize])
+        .collect();
     let peak = buckets.iter().copied().max().unwrap_or(0).max(1);
     let heights = buckets
         .iter()
@@ -732,13 +753,18 @@ fn paint_spend_chart(
         })
         .collect::<Vec<_>>();
     let (_, priced, unpriced) = cost_totals(state, now);
+    let earlier = if omitted_hours > 0 {
+        format!("   +{omitted_hours}h earlier")
+    } else {
+        String::new()
+    };
     put(
         buf,
         area,
         2,
         top,
         &format!(
-            "SPEND / HOUR   {priced} priced   {unpriced} unpriced   {} unattributed",
+            "SPEND / HOUR   {priced} priced   {unpriced} unpriced   {} unattributed{earlier}",
             unattributed(state)
         ),
         bold("fg", tier),
@@ -766,11 +792,11 @@ fn paint_spend_chart(
         }
     }
     let axis_y = top.saturating_add(1 + ROWS as u16);
-    for hour in FIRST..=LAST {
+    for hour in shown_first..=last {
         put(
             buf,
             area,
-            left.saturating_add((hour - FIRST) as u16 * step),
+            left.saturating_add((hour - shown_first) as u16 * step),
             axis_y,
             &format!("{hour:02}h"),
             style("muted", tier),
@@ -1177,6 +1203,53 @@ fn put_cell(buf: &mut Buffer, area: Rect, start: u16, end: u16, y: u16, text: &s
     }
     let safe = theme::safe_text(text, budget);
     buf.set_stringn(area.x + start, area.y + y, safe.as_ref(), budget, paint);
+}
+
+/// A cell carrying one machine value. An over-budget value drops whole
+/// behind the ruled `+` omission mark — a mid-value cut ("12d17h" painted
+/// as "12d1") reads as a plausible smaller value, which the design record
+/// bans outright.
+fn put_value_cell(
+    buf: &mut Buffer,
+    area: Rect,
+    start: u16,
+    end: u16,
+    y: u16,
+    text: &str,
+    paint: Style,
+) {
+    if y >= area.height || start >= area.width || end <= start {
+        return;
+    }
+    let budget = end.min(area.width).saturating_sub(start + 1) as usize;
+    if budget == 0 {
+        return;
+    }
+    let (lines, omitted) = theme::safe_text_lines(text, budget, 1);
+    let safe = lines.first().map_or("", String::as_str);
+    if omitted {
+        let mark_x = area.x + start + u16::try_from(budget).unwrap_or(u16::MAX) - 1;
+        buf.set_stringn(mark_x, area.y + y, "+", 1, paint);
+        return;
+    }
+    buf.set_stringn(area.x + start, area.y + y, safe, budget, paint);
+}
+
+/// The row's last value cell: budgets to the row edge — the phantom
+/// separator gutter belongs between columns, and burning one here cut the
+/// AGE cell to four cells at the 120-column design width.
+fn put_tail_cell(buf: &mut Buffer, area: Rect, start: u16, y: u16, text: &str, paint: Style) {
+    if y >= area.height || start >= area.width {
+        return;
+    }
+    let budget = area.width.saturating_sub(start) as usize;
+    let (lines, omitted) = theme::safe_text_lines(text, budget, 1);
+    let safe = lines.first().map_or("", String::as_str);
+    if omitted {
+        buf.set_stringn(area.x + area.width - 1, area.y + y, "+", 1, paint);
+        return;
+    }
+    buf.set_stringn(area.x + start, area.y + y, safe, budget, paint);
 }
 
 fn put_right(buf: &mut Buffer, area: Rect, y: u16, text: &str, paint: Style) {

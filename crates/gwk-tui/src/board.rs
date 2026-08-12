@@ -3148,6 +3148,14 @@ fn render_with_status(
             .map(|t| theme::token_style(t, tier)),
         ColorTier::Ansi16 | ColorTier::Mono => None,
     };
+    // The ratified selection token paints ON TOP of the `>`, never instead
+    // of it: reverse video is the expression 16-colour and mono can carry.
+    let accent_style = gwk_theme::SIGNAL
+        .iter()
+        .find(|t| t.name == "selection")
+        .map(|t| theme::token_style(t, tier))
+        .unwrap_or_default()
+        .add_modifier(Modifier::BOLD);
 
     let start = if visible == 0 {
         0
@@ -3189,12 +3197,7 @@ fn render_with_status(
             _ => row.style,
         };
         if is_selected {
-            buf.set_string(
-                area.x,
-                y,
-                ">",
-                Style::default().add_modifier(Modifier::BOLD),
-            );
+            buf.set_string(area.x, y, ">", accent_style);
         }
         let mut x = area.x + 1 + row.indent.min(INDENT_CAP * INDENT_STEP);
         let depth = row.indent / INDENT_STEP;
@@ -5232,6 +5235,11 @@ mod tests {
         assert_eq!(accent.symbol(), ">");
         assert!(accent.style().add_modifier.contains(Modifier::BOLD));
         assert_eq!(
+            accent.style().fg,
+            selection_fg,
+            "the ratified token paints ON TOP of the accent"
+        );
+        assert_eq!(
             buf[(1, 1)].style().fg,
             running_fg,
             "the mark keeps its state"
@@ -5240,6 +5248,16 @@ mod tests {
             buf[(3, 1)].style().fg,
             selection_fg,
             "the text takes the selection foreground"
+        );
+
+        // At mono the token's only expression is reverse video; a bare BOLD
+        // is a weight no ratified row carries at that tier.
+        let (_, _, mono) = dump_frame_tier(72, 12, &state, Some(&target), ColorTier::Mono);
+        let accent = &mono[(0, 1)];
+        assert_eq!(accent.symbol(), ">");
+        assert!(
+            accent.style().add_modifier.contains(Modifier::REVERSED),
+            "the selection token's reverse-video expression rides the accent at mono"
         );
     }
 

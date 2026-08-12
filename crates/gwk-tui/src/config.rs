@@ -1585,12 +1585,14 @@ pub fn render_form(area: Rect, buffer: &mut Buffer, form: &ConfigForm, tier: Col
             if selected { focus } else { field_style },
         );
         if selected {
+            // The painted value goes through safe_text, which expands
+            // non-admissible chars into multi-cell \u{HEX} escapes; the
+            // cursor rides the painted width, not the raw char count.
+            let painted = theme::safe_text(field.value(), area.width.saturating_sub(44) as usize);
             form_put(
                 buffer,
                 area,
-                44u16.saturating_add(
-                    u16::try_from(field.value().chars().count()).unwrap_or(u16::MAX),
-                ),
+                44u16.saturating_add(u16::try_from(painted.chars().count()).unwrap_or(u16::MAX)),
                 y,
                 "_",
                 focus,
@@ -1609,14 +1611,16 @@ pub fn render_form(area: Rect, buffer: &mut Buffer, form: &ConfigForm, tier: Col
         y = y.saturating_add(1);
     }
     if start > 0 || end < form.fields().len() {
-        form_put(
-            buffer,
-            area,
-            2,
-            y,
-            &format!("+{start} before  +{} more", form.fields().len() - end),
-            muted,
-        );
+        // The ruled `+` grammar states real omitted counts — never "+0".
+        let more = form.fields().len() - end;
+        let window = if start == 0 {
+            format!("+{more} more")
+        } else if more == 0 {
+            format!("+{start} before")
+        } else {
+            format!("+{start} before  +{more} more")
+        };
+        form_put(buffer, area, 2, y, &window, muted);
         y = y.saturating_add(1);
     }
 
@@ -1649,12 +1653,12 @@ pub fn render_form(area: Rect, buffer: &mut Buffer, form: &ConfigForm, tier: Col
     y = y.saturating_add(1);
     form_put(buffer, area, 2, y, form.commit_message(), field_style);
     if form.commit_selected() {
+        let painted =
+            theme::safe_text(form.commit_message(), area.width.saturating_sub(2) as usize);
         form_put(
             buffer,
             area,
-            2u16.saturating_add(
-                u16::try_from(form.commit_message().chars().count()).unwrap_or(u16::MAX),
-            ),
+            2u16.saturating_add(u16::try_from(painted.chars().count()).unwrap_or(u16::MAX)),
             y,
             "_",
             focus,

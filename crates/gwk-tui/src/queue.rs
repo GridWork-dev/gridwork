@@ -591,6 +591,14 @@ pub fn render(
             .map(|t| theme::token_style(t, tier)),
         ColorTier::Ansi16 | ColorTier::Mono => None,
     };
+    // The ratified selection token paints ON TOP of the `>`, never instead
+    // of it: reverse video is the expression 16-colour and mono can carry.
+    let accent_style = gwk_theme::SIGNAL
+        .iter()
+        .find(|t| t.name == "selection")
+        .map(|t| theme::token_style(t, tier))
+        .unwrap_or_default()
+        .add_modifier(Modifier::BOLD);
 
     for (i, row) in built[start..end].iter().enumerate() {
         let y = area.y + i as u16;
@@ -602,12 +610,7 @@ pub fn render(
             _ => row.style,
         };
         if is_selected {
-            buf.set_string(
-                area.x,
-                y,
-                ">",
-                Style::default().add_modifier(Modifier::BOLD),
-            );
+            buf.set_string(area.x, y, ">", accent_style);
         }
         let mut x = area.x + 1;
         if let Some(state_binding) = row.mark {
@@ -1289,6 +1292,21 @@ mod tests {
             buf[(3, 1)].style().fg,
             selection_fg,
             "the text takes the selection foreground"
+        );
+        assert_eq!(
+            buf[(0, 1)].style().fg,
+            selection_fg,
+            "the ratified token paints ON TOP of the accent"
+        );
+
+        // At mono the token's only expression is reverse video; a bare BOLD
+        // is a weight no ratified row carries at that tier.
+        let (_, _, mono) = dump_frame_tier(40, 6, &state, Some(&target), ColorTier::Mono);
+        let accent = &mono[(0, 1)];
+        assert_eq!(accent.symbol(), ">");
+        assert!(
+            accent.style().add_modifier.contains(Modifier::REVERSED),
+            "the selection token's reverse-video expression rides the accent at mono"
         );
     }
 

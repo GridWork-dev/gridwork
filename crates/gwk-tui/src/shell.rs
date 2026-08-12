@@ -1062,17 +1062,26 @@ fn key_hints(shell: &ShellState) -> &'static str {
         ShellMode::Confirm(_) => "enter/y confirm   esc/n cancel",
         ShellMode::GateDecision => "j/k choose   1-9 select   enter decide   esc cancel",
         ShellMode::Form => "tab field   type edit   enter commit   esc cancel",
-        ShellMode::Input => "ctrl-] leave input   every other key -> pty",
+        // The send path belongs to the input-path lane; until it lands the
+        // keybar must not claim delivery a no-op handler silently swallows.
+        ShellMode::Input => {
+            "ctrl-] leave input   send path not wired yet -- keys are not delivered"
+        }
         ShellMode::View => match shell.surface {
             Surface::Hall => ": go   / filter   enter open   j/k district   m motion   q quit",
             Surface::WorkQueue => {
-                ": go   / filter   enter open   a ack   m mute   u unmute   r resolve   d decide   q quit"
+                ": go   / filter   enter open   a ack   m mute   u unmute   r resolve   d decide   q back"
             }
-            Surface::WorkConfig => ": go   / filter   enter open   e edit   [/] tab   q quit",
+            Surface::WorkConfig => ": go   / filter   enter open   e edit   [/] tab   q back",
             Surface::FleetAgents => {
                 ": go   / filter   enter open   s stop   b budget   [/] tab   q quit"
             }
             Surface::TermAttach => "i input   r rail   j/k scroll   : go   q back",
+            // q leaves a WORK surface for the Hall (the ruled "q back");
+            // everywhere else in this arm it quits.
+            Surface::WorkTasks | Surface::WorkRuns => {
+                ": go   / filter   enter open   j/k row   [/] tab   q back"
+            }
             _ => ": go   / filter   enter open   j/k row   [/] tab   q quit",
         },
     }
