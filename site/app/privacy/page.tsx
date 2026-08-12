@@ -4,6 +4,7 @@ export const metadata: Metadata = {
   title: "Privacy — GridWork",
   description:
     "What this site measures: cookieless, aggregate page counts and nothing else.",
+  alternates: { canonical: "/privacy" },
 };
 
 export default function PrivacyPage() {

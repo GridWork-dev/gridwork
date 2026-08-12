@@ -77,5 +77,8 @@ export async function generateMetadata(
   return {
     title: page.data.title,
     description: page.data.description,
+    // Without this every docs page inherits the layout's canonical and points
+    // search engines at the landing page instead of itself.
+    alternates: { canonical: page.url },
   };
 }
