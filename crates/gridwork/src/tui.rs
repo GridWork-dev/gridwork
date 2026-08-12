@@ -45,6 +45,9 @@ use crate::exit::Failure;
 
 const PAGE_LIMIT: u32 = 256;
 const SNAPSHOT_ATTEMPTS: usize = 3;
+/// Stream closes survived back-to-back (no delivered batch between them)
+/// before the live loop stops resubscribing and reports the close.
+const STREAM_RESUME_ATTEMPTS: u32 = 3;
 const INPUT_POLL: Duration = Duration::from_millis(100);
 const EVENT_TAIL_ROWS: usize = 512;
 
@@ -258,13 +261,18 @@ impl WorkspaceStart {
         event_type: Option<String>,
         view: BoardView,
     ) -> Self {
+        // Without an explicit cursor, subscribe from the estate's own cursor
+        // rather than the head: the startup reads happen before the
+        // subscription opens, so a head subscription would leave a write
+        // landing in that window invisible until the next unrelated event.
+        let subscribe_from_estate = cursor.is_none();
         Self {
             surface: surface_for_board_view(view),
             event_cursor: cursor,
             aggregate_type,
             event_type,
             attach: None,
-            subscribe_from_estate: false,
+            subscribe_from_estate,
         }
     }
 
@@ -450,7 +458,7 @@ async fn run_workspace(start: WorkspaceStart, requested_motion: MotionMode) -> R
             .then(|| subscription_cursor(&model.estate))
             .flatten()
     });
-    let stream_id = stream_client.subscribe(cursor).await?;
+    let mut stream_id = stream_client.subscribe(cursor).await?;
     let mut stream = ControlPump::start(stream_client);
 
     let restore = TerminalRestore::install();
@@ -467,7 +475,7 @@ async fn run_workspace(start: WorkspaceStart, requested_motion: MotionMode) -> R
         &mut terminal,
         &mut data,
         &mut stream,
-        &stream_id,
+        &mut stream_id,
         &mut pty_stream,
         &mut events,
         &mut model,
@@ -491,7 +499,7 @@ async fn workspace_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     data: &mut Client,
     stream: &mut ControlPump,
-    stream_id: &RequestId,
+    stream_id: &mut RequestId,
     pty_stream: &mut Option<ControlPump>,
     events: &mut EventIndex,
     model: &mut ConsoleModel,
@@ -504,6 +512,10 @@ async fn workspace_loop(
     let mut pacer = FramePacer::new(motion);
     let mut hits = ConsoleHits::default();
     let mut dirty = true;
+    // Closes survived since the last delivered batch. A subscription that
+    // dies immediately after every resume is a kernel-side condition the
+    // loop cannot heal by resubscribing again.
+    let mut consecutive_closes: u32 = 0;
     let ctrl_c = tokio::signal::ctrl_c();
     tokio::pin!(ctrl_c);
     let mut terminate =
@@ -590,14 +602,31 @@ async fn workspace_loop(
                             append_event_batch(&mut model.board, batch.clone(), Some(cursor));
                             events.ingest(batch).map_err(estate_failure)?;
                             batched = true;
+                            consecutive_closes = 0;
                         }
                         Some(ServerControl::StreamClosed { request_id, code, last_cursor })
                             if request_id == *stream_id =>
                         {
-                            let resume = last_cursor
-                                .map(|seq| seq.value().to_string())
-                                .unwrap_or_else(|| "the beginning".to_owned());
-                            return Err(Failure::new(code, format!("event stream closed; resume from {resume}")));
+                            // A closed subscription names its resume cursor
+                            // (slow consumer, eviction) — in an interactive
+                            // shell that is a resumable condition, not a
+                            // crash. Resubscribe and refresh; the fold heals
+                            // whatever the gap skipped.
+                            consecutive_closes += 1;
+                            if consecutive_closes > STREAM_RESUME_ATTEMPTS {
+                                let resume = last_cursor
+                                    .map(|seq| seq.value().to_string())
+                                    .unwrap_or_else(|| "the beginning".to_owned());
+                                return Err(Failure::new(code, format!("event stream closed; resume from {resume}")));
+                            }
+                            let mut replacement = connect().await?;
+                            *stream_id = replacement
+                                .subscribe(last_cursor.or_else(|| subscription_cursor(&model.estate)))
+                                .await?;
+                            *stream = ControlPump::start(replacement);
+                            model.shell.set_notice(format!("event stream resumed after close ({code})"));
+                            batched = true;
+                            break;
                         }
                         Some(_) => {}
                     }
@@ -2234,64 +2263,77 @@ fn view_projections(view: BoardView) -> &'static [ProjectionKind] {
 }
 
 /// Re-page the active panel's projections and retain their projector watermark.
+///
+/// Every page is its own request, so a write landing mid-sweep skews the
+/// watermarks between pages. The sweep retries a bounded number of times for
+/// a coherent read and then accepts the torn join — it heals on the next
+/// event batch, and this runs on every batch, exactly when writes are in
+/// flight, so a torn fold must never be fatal. The stamp keeps the OLDEST
+/// watermark seen, so the as-of line never claims freshness some page
+/// doesn't have.
 async fn refresh_board_projections(
     client: &mut Client,
     state: &mut BoardState,
 ) -> Result<(), Failure> {
+    if view_projections(state.view).is_empty() {
+        // Nothing paged (the Events tail folds from the stream): leave the
+        // tail-maintained as-of stamp alone.
+        return Ok(());
+    }
     let mut watermarks = Vec::new();
-    for &kind in view_projections(state.view) {
-        clear_board_projection(state, kind);
-        let mut cursor = None;
-        let mut seen = BTreeSet::new();
-        loop {
-            let result = client
-                .ask(KernelRequest::ListProjection {
-                    projection: kind,
-                    cursor: cursor.clone(),
-                    limit: Some(PAGE_LIMIT),
-                })
-                .await?;
-            let (records, next_cursor, watermark) = match result {
-                KernelResult::ProjectionPage {
-                    records,
-                    next_cursor,
-                    watermark,
-                } => (records, next_cursor, watermark),
-                KernelResult::Error { code, message, .. } => {
-                    return Err(Failure::new(code, message));
+    for _ in 0..SNAPSHOT_ATTEMPTS {
+        watermarks.clear();
+        for &kind in view_projections(state.view) {
+            clear_board_projection(state, kind);
+            let mut cursor = None;
+            let mut seen = BTreeSet::new();
+            loop {
+                let result = client
+                    .ask(KernelRequest::ListProjection {
+                        projection: kind,
+                        cursor: cursor.clone(),
+                        limit: Some(PAGE_LIMIT),
+                    })
+                    .await?;
+                let (records, next_cursor, watermark) = match result {
+                    KernelResult::ProjectionPage {
+                        records,
+                        next_cursor,
+                        watermark,
+                    } => (records, next_cursor, watermark),
+                    KernelResult::Error { code, message, .. } => {
+                        return Err(Failure::new(code, message));
+                    }
+                    other => {
+                        return Err(Failure::internal(format!(
+                            "refresh board projections: kernel answered with {other:?}"
+                        )));
+                    }
+                };
+                watermarks.push(watermark);
+                for record in records {
+                    crate::push_board_record(state, kind, record)?;
                 }
-                other => {
+                let Some(next) = next_cursor else {
+                    break;
+                };
+                if !seen.insert(next.clone()) {
                     return Err(Failure::internal(format!(
-                        "refresh board projections: kernel answered with {other:?}"
+                        "{} projection cursor repeated {next:?}",
+                        kind.as_str()
                     )));
                 }
-            };
-            watermarks.push(watermark);
-            for record in records {
-                crate::push_board_record(state, kind, record)?;
+                cursor = Some(next);
             }
-            let Some(next) = next_cursor else {
-                break;
-            };
-            if !seen.insert(next.clone()) {
-                return Err(Failure::internal(format!(
-                    "{} projection cursor repeated {next:?}",
-                    kind.as_str()
-                )));
-            }
-            cursor = Some(next);
+        }
+        let coherent = watermarks
+            .first()
+            .is_none_or(|first| watermarks.iter().all(|watermark| watermark == first));
+        if coherent {
+            break;
         }
     }
-    let coherent = watermarks
-        .first()
-        .is_none_or(|first| watermarks.iter().all(|watermark| watermark == first));
-    if !coherent {
-        return Err(Failure::new(
-            KernelErrorCode::StaleVersion,
-            format!("workspace projections did not share one watermark: {watermarks:?}"),
-        ));
-    }
-    state.watermark = watermarks.first().copied().flatten();
+    state.watermark = watermarks.iter().copied().flatten().min();
     Ok(())
 }
 
