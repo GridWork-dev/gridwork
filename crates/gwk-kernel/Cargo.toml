@@ -2,7 +2,7 @@
 name = "gwk-kernel"
 version = "0.0.3"
 description = "The GridWork kernel: the PostgreSQL backend behind the gwk contract"
-homepage = "https://gridwork.dev"
+homepage = "https://gridwork.sh"
 keywords = ["gridwork", "event-sourcing", "postgres", "daemon", "agent"]
 categories = ["database-implementations", "development-tools"]
 readme = "README.md"

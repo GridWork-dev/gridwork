@@ -2,7 +2,7 @@
 name = "gwk-adapter-claude"
 version = "0.0.2"
 description = "claude-code engine adapter: bidirectional stream-json, PreToolUse approval, native TUI through gwk-pty"
-homepage = "https://gridwork.dev"
+homepage = "https://gridwork.sh"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

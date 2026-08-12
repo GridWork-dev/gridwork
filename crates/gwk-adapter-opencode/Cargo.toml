@@ -2,7 +2,7 @@
 name = "gwk-adapter-opencode"
 version = "0.0.2"
 description = "opencode engine adapter: ACP wire v1, server event bus, native TUI through gwk-pty"
-homepage = "https://gridwork.dev"
+homepage = "https://gridwork.sh"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

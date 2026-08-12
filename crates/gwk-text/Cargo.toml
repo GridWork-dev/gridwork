@@ -2,7 +2,7 @@
 name = "gwk-text"
 version = "0.0.1"
 description = "Pure column arithmetic and extended grapheme-boundary utilities"
-homepage = "https://gridwork.dev"
+homepage = "https://gridwork.sh"
 readme = "README.md"
 edition.workspace = true
 rust-version.workspace = true

@@ -8,5 +8,5 @@
 //! - [`gwk-theme`](https://docs.rs/gwk-theme) — the SIGNAL design tokens
 //! - [`gwk-kernel`](https://docs.rs/gwk-kernel) — the daemon: event store, projections, blobs, attention, authority, the wire
 //!
-//! The terminal binary lives in [`gridwork`](https://docs.rs/gridwork). See <https://gridwork.dev>.
+//! The terminal binary lives in [`gridwork`](https://docs.rs/gridwork). See <https://gridwork.sh>.
 #![no_std]

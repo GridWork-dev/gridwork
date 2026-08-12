@@ -16,12 +16,12 @@ const description =
   "GridWork is an open, pre-1.0 agent operating system for the terminal. Its Rust contract and event-sourced kernel ship today; engines and TUI are in progress.";
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://gridwork.dev"),
+  metadataBase: new URL("https://gridwork.sh"),
   title,
   description,
   openGraph: {
     type: "website",
-    url: "https://gridwork.dev",
+    url: "https://gridwork.sh",
     siteName: "GridWork",
     title,
     description,
