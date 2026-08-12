@@ -1111,20 +1111,25 @@ fn encode_character(character: char, modifiers: KeyModifiers) -> Result<Vec<u8>,
         bytes.push(0x1b);
     }
     if modifiers.contains(KeyModifiers::CONTROL) {
-        // Derivation: XTERM-CTLSEQS §Control Bytes, Characters, and Sequences,
-        // §Special Keyboard Keys — C0 occupies codes 0..31, DEL is 127, and
-        // special keyboard keys conventionally send controls. The graphic-to-
-        // control pairing below is the compatibility profile this client owns.
+        // Derivation: KITTY-KBD §Legacy key event encoding, Legacy text keys;
+        // §Legacy ctrl mapping of ASCII keys — legacy Ctrl-key input maps the
+        // listed ASCII keys to their documented C0/DEL bytes, leaves other
+        // ASCII keys unchanged, and reserves Ctrl+Shift for CSI-u encoding.
+        if modifiers.contains(KeyModifiers::SHIFT) {
+            return Err(format!(
+                "Ctrl-Shift-{character} requires an unnegotiated CSI-u profile"
+            ));
+        }
         let code = match character {
             '@' | ' ' | '2' => 0,
             'a'..='z' => character as u8 - b'a' + 1,
-            'A'..='Z' => character as u8 - b'A' + 1,
             '[' | '3' => 27,
             '\\' | '4' => 28,
             ']' | '5' => 29,
-            '^' | '6' => 30,
+            '^' | '6' | '~' => 30,
             '_' | '7' | '/' => 31,
             '?' | '8' => 127,
+            other if other.is_ascii() => other as u8,
             _ => return Err(format!("Ctrl-{character} has no compatibility byte")),
         };
         bytes.push(code);
@@ -1477,6 +1482,21 @@ mod tests {
         assert_eq!(
             encode_key(key(KeyCode::Char('c'), KeyModifiers::CONTROL)).unwrap(),
             &[3]
+        );
+        assert_eq!(
+            encode_key(key(KeyCode::Char('~'), KeyModifiers::CONTROL)).unwrap(),
+            &[30]
+        );
+        assert_eq!(
+            encode_key(key(KeyCode::Char(';'), KeyModifiers::CONTROL)).unwrap(),
+            b";"
+        );
+        assert!(
+            encode_key(key(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ))
+            .is_err()
         );
         assert!(encode_key(key(KeyCode::F(13), KeyModifiers::NONE)).is_err());
     }
