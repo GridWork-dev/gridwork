@@ -539,6 +539,7 @@ $ gw kernel health
                     SECURITY.md
                   </a>
                 </li>
+                <li><a href="/privacy">Privacy</a></li>
               </ul>
             </nav>
           </div>

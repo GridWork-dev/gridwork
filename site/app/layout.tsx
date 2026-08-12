@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { JetBrains_Mono } from "next/font/google";
+import Script from "next/script";
 import type { ReactNode } from "react";
 import { RootProvider } from "fumadocs-ui/provider/next";
 
@@ -43,6 +44,16 @@ export default function RootLayout({ children }: { children: ReactNode }) {
       style={{ colorScheme: "dark" }}
       suppressHydrationWarning
     >
+      <head>
+        {/* Cookieless, aggregate-only. data-domain is the canonical host;
+            gridwork.dev 301s at the edge, so the origin only ever sees this one. */}
+        <Script
+          defer
+          data-domain="gridwork.sh"
+          src="https://plausible.io/js/script.js"
+          strategy="afterInteractive"
+        />
+      </head>
       <body className="flex min-h-screen flex-col font-mono">
         <RootProvider theme={{ enabled: false }} search={{ enabled: false }}>
           {children}
