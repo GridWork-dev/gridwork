@@ -42,12 +42,13 @@ use std::sync::{Arc, Mutex};
 
 use gwk_domain::frame::{CellStyle, PtyDelta, PtyFrame, PtyRun, StyledCell};
 use gwk_domain::ids::{
-    ByteCount, PtyFrameSeq, PtySessionGeneration, PtySessionId, RequestId, WriterEpoch,
+    ByteCount, CommandId, PtyFrameSeq, PtySessionGeneration, PtySessionId, RequestId, WriterEpoch,
 };
 use gwk_domain::protocol::{
-    FRAME_BODY_MAX_BYTES, KernelErrorCode, KernelResult, SLOW_CONSUMER_TIMEOUT_SECS, ServerControl,
+    FRAME_BODY_MAX_BYTES, KernelErrorCode, KernelResult, PtyInputData, SLOW_CONSUMER_TIMEOUT_SECS,
+    ServerControl,
 };
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 use super::serve::Outgoing;
 
@@ -108,6 +109,20 @@ const MAX_SESSIONS: usize = 64;
 /// Never reused within a process lifetime, which is what lets "the owner is
 /// gone" and "the owner is someone else" be the same comparison.
 pub type ConnectionId = u64;
+
+/// One reverse input control waiting for the connection writer. The sender's
+/// command response is not successful until `written` confirms the complete
+/// JSON frame left the kernel's socket writer.
+pub(crate) struct InputControl {
+    pub(crate) control: ServerControl,
+    pub(crate) written: oneshot::Sender<Result<(), PtyRefusal>>,
+}
+
+#[derive(Clone)]
+struct ControlRoute {
+    sender: mpsc::Sender<InputControl>,
+    input_enabled: bool,
+}
 
 /// One broadcast batch: the deltas that move a consumer to revision `seq`.
 #[derive(Debug, Clone)]
@@ -170,6 +185,11 @@ impl PtyRefusal {
         }
     }
 
+    fn with_detail(mut self, detail: serde_json::Value) -> Self {
+        self.detail = Some(detail);
+        self
+    }
+
     /// The value form every serve arm answers with.
     pub fn into_result(self) -> KernelResult {
         KernelResult::Error {
@@ -222,6 +242,9 @@ struct Session {
     /// The mirror snapshots are answered from. Rectangular by construction:
     /// a publish that would break that is refused before anything changes.
     cells: Vec<Vec<StyledCell>>,
+    /// Last cursor carried by a full snapshot. Resizes clear it because the
+    /// current delta contract carries no cursor-only movement.
+    cursor: Option<gwk_domain::frame::PtyCursor>,
     retained: VecDeque<(PtyBatch, usize)>,
     retained_bytes: usize,
     /// The highest seq ever evicted from `retained` — the horizon a reattach
@@ -267,6 +290,10 @@ impl Session {
 /// Every hosted session, by id. One per daemon, shared by every connection.
 pub struct PtyHub {
     sessions: Mutex<HashMap<PtySessionId, Session>>,
+    /// Priority control queue for each live wire connection. Session ownership
+    /// stores only the id; this map is the reverse route from that id back to
+    /// the outbound host connection.
+    controls: Mutex<HashMap<ConnectionId, ControlRoute>>,
     connections: AtomicU64,
     writer_epoch: WriterEpoch,
     generations: AtomicU64,
@@ -286,6 +313,7 @@ impl PtyHub {
     pub fn new(writer_epoch: WriterEpoch) -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
+            controls: Mutex::new(HashMap::new()),
             connections: AtomicU64::new(0),
             writer_epoch,
             generations: AtomicU64::new(0),
@@ -296,6 +324,131 @@ impl PtyHub {
     /// ever equal a zero-initialized field by accident.
     pub fn connection(&self) -> ConnectionId {
         self.connections.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// Register the priority server-control queue for one accepted connection.
+    /// Publishing may claim sessions only after this route exists in the serve
+    /// path; direct hub tests may omit it until they exercise reverse delivery.
+    pub(crate) fn register_connection(
+        &self,
+        connection: ConnectionId,
+        controls: mpsc::Sender<InputControl>,
+        input_enabled: bool,
+    ) {
+        self.control_routes().insert(
+            connection,
+            ControlRoute {
+                sender: controls,
+                input_enabled,
+            },
+        );
+    }
+
+    /// Route one committed input batch to the connection owning this exact
+    /// session generation. Queue admission is bounded by the existing priority
+    /// response channel and by the same slow-consumer deadline as PTY output.
+    pub async fn deliver_input(
+        &self,
+        id: &PtySessionId,
+        generation: &PtySessionGeneration,
+        command_id: CommandId,
+        byte_size: ByteCount,
+        data_base64: PtyInputData,
+    ) -> Result<(), PtyRefusal> {
+        let owner = {
+            let sessions = self.lock();
+            let session = sessions.get(id).ok_or_else(|| unknown_session(id))?;
+            if &session.generation != generation {
+                return Err(PtyRefusal::new(
+                    KernelErrorCode::StaleVersion,
+                    format!(
+                        "pty session {id} generation {generation} is stale; current generation is {}",
+                        session.generation
+                    ),
+                )
+                .with_detail(serde_json::json!({
+                    "presented_generation": generation.as_str(),
+                    "actual_generation": session.generation.as_str(),
+                })));
+            }
+            session.owner
+        };
+        let route = self.control_routes().get(&owner).cloned().ok_or_else(|| {
+            PtyRefusal::new(
+                KernelErrorCode::NotFound,
+                format!("pty session {id} has no live owning host connection"),
+            )
+        })?;
+        if !route.input_enabled {
+            return Err(PtyRefusal::new(
+                KernelErrorCode::Capability,
+                format!("pty session {id}'s owning host did not negotiate pty_input"),
+            ));
+        }
+        let permit = match tokio::time::timeout(
+            std::time::Duration::from_secs(SLOW_CONSUMER_TIMEOUT_SECS),
+            route.sender.reserve_owned(),
+        )
+        .await
+        {
+            Ok(Ok(permit)) => permit,
+            Ok(Err(_)) => {
+                return Err(PtyRefusal::new(
+                    KernelErrorCode::NotFound,
+                    format!("pty session {id}'s owning host connection closed"),
+                ));
+            }
+            Err(_) => {
+                return Err(PtyRefusal::new(
+                    KernelErrorCode::SlowConsumer,
+                    format!("pty session {id}'s owning host stopped accepting controls"),
+                ));
+            }
+        };
+
+        // Queue capacity was reserved without holding the session map. Re-read
+        // the exact lifetime now, then consume the permit while the lifecycle
+        // lock is held so retire/reclaim cannot redirect stale bytes to a new
+        // generation on the same connection.
+        let (written, acknowledged) = oneshot::channel();
+        {
+            let sessions = self.lock();
+            let session = sessions.get(id).ok_or_else(|| unknown_session(id))?;
+            if &session.generation != generation || session.owner != owner {
+                return Err(PtyRefusal::new(
+                    KernelErrorCode::StaleVersion,
+                    format!("pty session {id} generation {generation} changed before delivery"),
+                )
+                .with_detail(serde_json::json!({
+                    "presented_generation": generation.as_str(),
+                    "actual_generation": session.generation.as_str(),
+                })));
+            }
+            let control = ServerControl::PtyInput {
+                command_id,
+                session_id: id.clone(),
+                generation: generation.clone(),
+                byte_size,
+                data_base64,
+            };
+            permit.send(InputControl { control, written });
+        }
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(SLOW_CONSUMER_TIMEOUT_SECS + 1),
+            acknowledged,
+        )
+        .await
+        {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(PtyRefusal::new(
+                KernelErrorCode::NotFound,
+                format!("pty session {id}'s owning host connection closed"),
+            )),
+            Err(_) => Err(PtyRefusal::new(
+                KernelErrorCode::SlowConsumer,
+                format!("pty session {id}'s owning host stopped accepting controls"),
+            )),
+        }
     }
 
     /// Publish a full screen: claim (first publish), reseed (owner, at or
@@ -312,6 +465,7 @@ impl PtyHub {
         frame: PtyFrame,
     ) -> Result<Option<PtySessionGeneration>, PtyRefusal> {
         let (rows, cols, cells) = strict_frame(&frame)?;
+        let cursor = frame.cursor;
         let bytes = measured(&frame)?;
         let mut sessions = self.lock();
         match sessions.get_mut(id) {
@@ -333,6 +487,7 @@ impl PtyHub {
                         generation,
                         seq,
                         cells,
+                        cursor,
                         retained: VecDeque::new(),
                         retained_bytes: 0,
                         // The claim's whole history is evicted by definition:
@@ -398,6 +553,7 @@ impl PtyHub {
                     }
                 }
                 session.cells = cells;
+                session.cursor = cursor;
                 session.seq = seq;
                 if advanced {
                     // The head moved without deltas covering the distance.
@@ -505,6 +661,7 @@ impl PtyHub {
             match delta {
                 PtyDelta::Resized { rows, cols } => {
                     session.cells = vec![vec![blank(); usize::from(*cols)]; usize::from(*rows)];
+                    session.cursor = None;
                 }
                 PtyDelta::CellsChanged { styles, updates } => {
                     // Resolve each update through the batch's own table and
@@ -704,6 +861,7 @@ impl PtyHub {
     /// the close event's hangup provenance is what tells a crash from a
     /// typed retire in the cutover receipt.
     pub fn disconnect(&self, conn: ConnectionId) -> Vec<(PtySessionId, PtySessionGeneration)> {
+        self.control_routes().remove(&conn);
         let mut sessions = self.lock();
         let claimed: Vec<PtySessionId> = sessions
             .iter()
@@ -846,7 +1004,7 @@ impl PtyHub {
         })?;
         // A fresh first-appearance-order table per answer: the mirror holds
         // no persistent index space, so serving is where interning happens.
-        let frame = PtyFrame::from_cells(&session.cells);
+        let frame = PtyFrame::from_cells(&session.cells, session.cursor);
         let bytes = serde_json::to_vec(&frame)
             .map_err(|e| {
                 PtyRefusal::new(KernelErrorCode::Storage, format!("measure a snapshot: {e}"))
@@ -889,6 +1047,12 @@ impl PtyHub {
         // map's invariants hold between verbs (each verb validates before it
         // mutates), so serving beats taking the whole PTY surface down.
         self.sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn control_routes(&self) -> std::sync::MutexGuard<'_, HashMap<ConnectionId, ControlRoute>> {
+        self.controls
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -1263,6 +1427,17 @@ fn strict_frame(frame: &PtyFrame) -> Result<(u16, u16, Vec<Vec<StyledCell>>), Pt
         }
     }
     let cols = width.unwrap_or(0) as u16;
+    if let Some(cursor) = frame.cursor
+        && (cursor.row >= rows || cursor.col >= cols)
+    {
+        return Err(PtyRefusal::new(
+            KernelErrorCode::Validation,
+            format!(
+                "a pty cursor at ({}, {}) is outside the {rows}x{cols} grid",
+                cursor.row, cursor.col
+            ),
+        ));
+    }
     // Everything the expansion checks was just refused typed, so this arm is
     // a defensive impossibility, not a second decoder.
     let cells = frame.cells().ok_or_else(|| {
@@ -1431,7 +1606,10 @@ mod tests {
     }
 
     fn frame(rows: u16, cols: u16) -> PtyFrame {
-        PtyFrame::from_cells(&vec![vec![blank(); usize::from(cols)]; usize::from(rows)])
+        PtyFrame::from_cells(
+            &vec![vec![blank(); usize::from(cols)]; usize::from(rows)],
+            None,
+        )
     }
 
     fn update(row: u16, col: u16, glyph: &str) -> PtyCellUpdate {
@@ -1474,6 +1652,71 @@ mod tests {
             .retire(stranger, &id("s"))
             .expect_err("a second publisher must not retire");
         assert_eq!(refused.code, KernelErrorCode::Authority);
+    }
+
+    #[tokio::test]
+    async fn input_routes_only_to_the_owner_of_the_exact_generation() {
+        let hub = PtyHub::default();
+        let host = hub.connection();
+        let (controls, mut received) = mpsc::channel(2);
+        hub.register_connection(host, controls, true);
+        let generation = hub
+            .publish_snapshot(host, &id("s"), Some(0), frame(2, 4))
+            .expect("claim")
+            .expect("new lifetime");
+
+        let session_id = id("s");
+        let delivered = hub.deliver_input(
+            &session_id,
+            &generation,
+            CommandId::new("input-1"),
+            ByteCount::new(3),
+            PtyInputData::new("AP8K"),
+        );
+        let received_control = async {
+            let InputControl { control, written } =
+                received.recv().await.expect("owner receives control");
+            let _ = written.send(Ok(()));
+            control
+        };
+        let (delivered, received_control) = tokio::join!(delivered, received_control);
+        delivered.expect("deliver");
+        assert_eq!(
+            received_control,
+            ServerControl::PtyInput {
+                command_id: CommandId::new("input-1"),
+                session_id: id("s"),
+                generation: generation.clone(),
+                byte_size: ByteCount::new(3),
+                data_base64: PtyInputData::new("AP8K"),
+            }
+        );
+
+        let stale = hub
+            .deliver_input(
+                &id("s"),
+                &PtySessionGeneration::new("older"),
+                CommandId::new("input-2"),
+                ByteCount::new(1),
+                PtyInputData::new("YQ=="),
+            )
+            .await
+            .expect_err("stale generation");
+        assert_eq!(stale.code, KernelErrorCode::StaleVersion);
+        assert!(received.try_recv().is_err(), "stale input must not route");
+
+        hub.disconnect(host);
+        let absent = hub
+            .deliver_input(
+                &id("s"),
+                &generation,
+                CommandId::new("input-3"),
+                ByteCount::new(1),
+                PtyInputData::new("YQ=="),
+            )
+            .await
+            .expect_err("retired session");
+        assert_eq!(absent.code, KernelErrorCode::NotFound);
     }
 
     #[test]
@@ -1733,6 +1976,7 @@ mod tests {
         let tall = PtyFrame {
             styles: Vec::new(),
             rows: vec![Vec::new(); usize::from(u16::MAX) + 1],
+            cursor: None,
         };
         assert_eq!(
             hub.publish_snapshot(host, &id("s"), None, tall)
@@ -1750,10 +1994,49 @@ mod tests {
                 glyph: " ".to_owned(),
                 count: u32::MAX,
             }]],
+            cursor: None,
         };
         assert_eq!(
             hub.publish_snapshot(host, &id("s"), None, wide)
                 .expect_err("a row past u16")
+                .code,
+            KernelErrorCode::Validation
+        );
+    }
+
+    #[test]
+    fn snapshots_preserve_valid_cursors_refuse_invalid_ones_and_resize_clears_them() {
+        let hub = PtyHub::default();
+        let host = hub.connection();
+        let mut seeded = frame(2, 4);
+        seeded.cursor = Some(gwk_domain::frame::PtyCursor { row: 1, col: 3 });
+        hub.publish_snapshot(host, &id("s"), Some(0), seeded)
+            .expect("valid cursor");
+        let (_, _, snapshot) = hub.snapshot(&id("s")).expect("snapshot");
+        assert_eq!(
+            snapshot.cursor,
+            Some(gwk_domain::frame::PtyCursor { row: 1, col: 3 })
+        );
+
+        hub.publish_deltas(
+            host,
+            &id("s"),
+            1,
+            vec![PtyDelta::Resized { rows: 3, cols: 5 }],
+        )
+        .expect("resize");
+        let (_, _, resized) = hub.snapshot(&id("s")).expect("resized snapshot");
+        assert_eq!(
+            resized.cursor, None,
+            "a resize invalidates the snapshot cursor"
+        );
+
+        let other = hub.connection();
+        let mut invalid = frame(2, 4);
+        invalid.cursor = Some(gwk_domain::frame::PtyCursor { row: 2, col: 0 });
+        assert_eq!(
+            hub.publish_snapshot(other, &id("bad"), None, invalid)
+                .expect_err("cursor outside the grid")
                 .code,
             KernelErrorCode::Validation
         );
@@ -1769,6 +2052,7 @@ mod tests {
                 style: 1,
                 glyphs: vec!["x".to_owned()],
             }]],
+            cursor: None,
         };
         assert_eq!(
             hub.publish_snapshot(host, &id("s"), None, dangling)
@@ -1800,6 +2084,7 @@ mod tests {
                 glyph: " ".to_owned(),
                 count: 2,
             }]],
+            cursor: None,
         };
         assert_eq!(
             hub.publish_snapshot(host, &id("s"), None, twice)
@@ -1849,6 +2134,7 @@ mod tests {
                         count: 2,
                     },
                 ]],
+                cursor: None,
             };
             assert_eq!(
                 hub.publish_snapshot(host, &id("s"), None, zero)
@@ -1875,6 +2161,7 @@ mod tests {
                     count: 1,
                 },
             ]],
+            cursor: None,
         };
         hub.publish_snapshot(host, &id("s"), None, non_maximal)
             .expect("non-maximal runs are tolerated");
@@ -2390,6 +2677,7 @@ mod tests {
                 style: 0,
                 glyphs: vec!["x".repeat(PUBLISH_BYTE_BUDGET + 1)],
             }]],
+            cursor: None,
         };
         assert_eq!(
             hub.publish_snapshot(host, &id("s"), None, big)

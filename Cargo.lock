@@ -1262,6 +1262,7 @@ dependencies = [
 name = "gwk-pty-host"
 version = "0.0.1"
 dependencies = [
+ "base64 0.23.0",
  "gwk-adapter-claude",
  "gwk-adapter-codex",
  "gwk-adapter-opencode",

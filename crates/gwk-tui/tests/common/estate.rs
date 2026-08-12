@@ -13,7 +13,7 @@ use gwk_domain::entity::{
     Lease, Message, PtySession, Receipt, Task, WorkflowRun, Worktree,
 };
 use gwk_domain::envelope::{Actor, EventEnvelope, Origin};
-use gwk_domain::frame::{CellColor, CellStyle, PtyAnsiSlot, PtyFrame, StyledCell};
+use gwk_domain::frame::{CellColor, CellStyle, PtyAnsiSlot, PtyCursor, PtyFrame, StyledCell};
 use gwk_domain::fsm::{AttemptState, GateVerdict, LeaseMode, LeaseState, MessageState, TaskState};
 use gwk_domain::ids::{
     AggregateId, AttemptId, AttentionItemId, CorrelationId, CostEntryId, CostMicros,
@@ -451,6 +451,15 @@ fn gate(
         kind: Some(kind.into()),
         question: Some(question.into()),
         options: Some(vec!["allow".into(), "deny".into()]),
+        // The kernel sets `decided_by` from the deciding envelope's actor and
+        // leaves it absent while the gate is pending (project.rs). Deriving it
+        // from the verdict here keeps the fixture on the right side of that
+        // invariant instead of taking an eighth argument nobody could get wrong
+        // in only one direction.
+        decided_by: (!matches!(verdict, GateVerdict::Pending)).then(|| Actor {
+            kind: "operator".into(),
+            id: Some("liam".into()),
+        }),
         verdict,
         chosen_option: chosen.map(str::to_owned),
         evidence_ref: None,
@@ -658,6 +667,12 @@ fn pty_session(
         generation: PtySessionGeneration::new(generation),
         attach_count: 0,
         detach_count: 0,
+        // Set per session below: the running shell belongs to a seeded engine
+        // session, the closed editor to none. This is the join the design round
+        // found missing in both directions — `gw term list`'s ATTEMPT column
+        // rendered `?` on every row because it could not exist even in
+        // principle. Seeding one populated and one absent keeps both paths live.
+        engine_session_id: None,
         title: Some(title.into()),
         opened_at: ts(opened),
         updated_at: ts(updated),
@@ -683,6 +698,10 @@ pub fn estate_pty_sessions() -> (PtySession, PtySession) {
     );
     running.attach_count = 2;
     running.detach_count = 1;
+    // The shell the TUI implementer's engine session is driving — the same
+    // `es-tui-impl` the cost entries and the dispatch tree already name, so the
+    // join resolves to a real attempt rather than a dangling id.
+    running.engine_session_id = Some(EngineSessionId::new("es-tui-impl"));
 
     let mut closed = pty_session(
         "pty-2",
@@ -1102,7 +1121,7 @@ fn raw() -> Raw {
                 "att-disk",
                 "watchdog",
                 "disk pressure on the build host",
-                "host:gw-ms-a2",
+                "host:gw-box-1",
                 None,
                 "2026-08-11T09:10:00Z",
             );
@@ -1846,12 +1865,21 @@ pub fn drilldown_attached() -> DrilldownState {
     while rows.len() < 29 {
         rows.push(blank_row(WIDTH));
     }
+    const PROMPT: &str = "gw@kernel:~/gridwork$ ";
     rows.push(text_row(
         WIDTH,
-        &[("gw@kernel:~/gridwork$ ", plain_style()), ("_", cyan_bold)],
+        &[(PROMPT, plain_style()), ("_", cyan_bold)],
     ));
 
-    let frame = PtyFrame::from_cells(&rows);
+    // Zero-based, on the block the prompt row already draws. INPUT mode needs a
+    // real cursor to point at — the design round found the frame contract had
+    // none — so the fixture carries one rather than leaving the field absent,
+    // which is the child-hid-it case and a different thing to render.
+    let cursor = PtyCursor {
+        row: (rows.len() - 1) as u16,
+        col: PROMPT.chars().count() as u16,
+    };
+    let frame = PtyFrame::from_cells(&rows, Some(cursor));
     let snapshot = ServerControl::Response {
         request_id,
         result: KernelResult::PtySnapshot {

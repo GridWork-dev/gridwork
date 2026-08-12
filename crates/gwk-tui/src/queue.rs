@@ -719,6 +719,7 @@ mod tests {
             options: Some(vec!["allow".into(), "deny".into()]),
             verdict: GateVerdict::Pending,
             chosen_option: None,
+            decided_by: None,
             evidence_ref: None,
             created_at: ts("2026-08-06T09:30:00Z"),
             updated_at: ts("2026-08-06T09:30:00Z"),

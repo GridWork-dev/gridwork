@@ -17,7 +17,7 @@
 //! fact — see [`color`].
 
 use gwk_domain::frame::{
-    CellColor, CellStyle as WireStyle, CellUnderline, PtyCellUpdate, PtyDelta, PtyFrame,
+    CellColor, CellStyle as WireStyle, CellUnderline, PtyCellUpdate, PtyCursor, PtyDelta, PtyFrame,
     StyleInterner, StyledCell,
 };
 use gwk_pty::render::{Frame, Row};
@@ -101,6 +101,7 @@ fn blank() -> StyledCell {
 /// consumer's copy current.
 pub struct WireScreen {
     cells: Vec<Vec<StyledCell>>,
+    cursor: Option<PtyCursor>,
 }
 
 impl WireScreen {
@@ -108,6 +109,7 @@ impl WireScreen {
     pub fn new(cols: u16, rows: u16) -> Self {
         Self {
             cells: vec![vec![blank(); usize::from(cols)]; usize::from(rows)],
+            cursor: None,
         }
     }
 
@@ -123,7 +125,7 @@ impl WireScreen {
     /// (the `from_cells` canonical form), which is what turns a blank screen
     /// from megabytes of repeated style objects into kilobytes of fills.
     pub fn snapshot(&self) -> PtyFrame {
-        PtyFrame::from_cells(&self.cells)
+        PtyFrame::from_cells(&self.cells, self.cursor)
     }
 
     /// Apply one engine frame; the returned deltas bring a consumer holding
@@ -144,6 +146,7 @@ impl WireScreen {
                 cols: frame.cols,
             });
         }
+        self.cursor = frame.cursor.map(|(col, row)| PtyCursor { row, col });
         // The batch's own style table, built as the updates are: every
         // message self-contained, no index space outliving it.
         let mut styles = StyleInterner::default();
@@ -446,6 +449,30 @@ mod tests {
         assert_eq!(cells, screen.cells);
     }
 
+    #[test]
+    fn snapshot_converts_visible_cursor_coordinates_and_omits_hidden_cursor() {
+        let mut screen = WireScreen::new(8, 3);
+        screen.apply(&Frame {
+            seq: 0,
+            cols: 8,
+            rows: 3,
+            cursor: Some((4, 2)),
+            full: false,
+            changed: Vec::new(),
+        });
+        assert_eq!(screen.snapshot().cursor, Some(PtyCursor { row: 2, col: 4 }));
+
+        screen.apply(&Frame {
+            seq: 1,
+            cols: 8,
+            rows: 3,
+            cursor: None,
+            full: false,
+            changed: Vec::new(),
+        });
+        assert_eq!(screen.snapshot().cursor, None);
+    }
+
     // ---- The size floor the interned shape exists for (P16) ----
     //
     // The spike measured the per-cell shape at 151.009-151.031 bytes/cell:
@@ -513,11 +540,10 @@ mod tests {
         }
         let (_, screen) = apply_once(200, 60, input.as_bytes());
         let bytes = measured(&screen);
-        // Re-measured 2026-08-09 for the record the SPEC asks for: 3,455
-        // bytes (was 4,032,131). Pinned exactly — a style-field or serde
-        // change moves this number, and the point of recording it is that
-        // the move is looked at rather than absorbed.
-        assert_eq!(bytes, 3_455, "the attr-heavy fixture moved: {bytes} bytes");
+        // Re-measured 2026-08-11 after the visible cursor joined the frame:
+        // 3,485 bytes (was 3,455 without the cursor, 4,032,131 per-cell).
+        // Pinned exactly so every wire-shape move is reviewed, not absorbed.
+        assert_eq!(bytes, 3_485, "the attr-heavy fixture moved: {bytes} bytes");
         assert!(bytes <= publish_byte_budget());
     }
 

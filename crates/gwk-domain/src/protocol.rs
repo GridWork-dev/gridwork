@@ -178,8 +178,24 @@ pub const CAPABILITY_NAME_MAX_BYTES: usize = 64;
 /// hello.
 pub const PTY_RAW_CAPABILITY: &str = "pty_raw";
 
+/// Negotiates typed PTY input in both directions. A client must not submit
+/// [`KernelRequest::SendPtyInput`], and the kernel must not send
+/// [`ServerControl::PtyInput`], unless this name survived the hello
+/// intersection.
+pub const PTY_INPUT_CAPABILITY: &str = "pty_input";
+
 /// Longest a publisher may leave a raw header without its paired payload.
 pub const PTY_RAW_PAYLOAD_DEADLINE_SECS: u64 = 5;
+
+/// Largest raw input batch one send call may carry. This is a responsiveness
+/// and memory bound, not a line-mode restriction: every byte value is legal,
+/// while a paste larger than this is flushed as more than one receipted call.
+pub const PTY_INPUT_MAX_BYTES: usize = 64 * 1024;
+
+/// Largest standard-padded base64 carrier that can decode to one legal PTY
+/// input batch. Checked before decoding so the decoded allocation obeys the
+/// same bound as the resulting byte vector.
+pub const PTY_INPUT_MAX_BASE64_BYTES: usize = PTY_INPUT_MAX_BYTES.div_ceil(3) * 4;
 
 // Relations between the bounds, checked at COMPILE time in every build — a
 // later edit that makes the hello cap exceed the frame cap, or the blob chunk
@@ -196,7 +212,32 @@ const _: () = {
     // to read.
     assert!(SUBSCRIPTION_POLL_SECS < SLOW_CONSUMER_TIMEOUT_SECS);
     assert!(crate::blob::BLOB_CHUNK_BYTES.div_ceil(3) * 4 < FRAME_BODY_MAX_BYTES as usize);
+    assert!(PTY_INPUT_MAX_BASE64_BYTES < FRAME_BODY_MAX_BYTES as usize);
 };
+
+/// A base64 PTY-input carrier whose debug form can never expose terminal data.
+///
+/// Validation remains at the wire boundary because this string alone cannot
+/// prove its decoded length or correspondence with a command's `byte_count`.
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
+#[serde(transparent)]
+pub struct PtyInputData(String);
+
+impl PtyInputData {
+    pub fn new(encoded: impl Into<String>) -> Self {
+        Self(encoded.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for PtyInputData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PtyInputData(<redacted>)")
+    }
+}
 
 /// The kind byte of a frame. Not a JSON type — it never appears inside a body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -662,9 +703,20 @@ pub enum KernelRequest {
     /// Prove the fresh epoch: exactly one genesis event, zero business rows.
     /// Served sealed and active.
     VerifySealed {},
-    /// The only mutation path. Sealed kernels admit `activate_kernel` alone.
+    /// The ordinary mutation path. Sealed kernels admit `activate_kernel`
+    /// alone. PTY input uses [`Self::SendPtyInput`] because its secret-bearing
+    /// bytes must not become command/event payload.
     SubmitCommand {
         envelope: CommandEnvelope,
+    },
+    /// Submit a [`crate::command::KernelCommand::SendPtyInput`] envelope and
+    /// carry its raw bytes ephemerally. `data_base64` is decoded exactly once,
+    /// must be non-empty, and must match the command body's `byte_count`.
+    /// Only the metadata command is appended; the bytes are delivered to the
+    /// owning host connection after commit and are never stored in the log.
+    SendPtyInput {
+        envelope: CommandEnvelope,
+        data_base64: PtyInputData,
     },
     GetProjection {
         projection: ProjectionKind,
@@ -1058,6 +1110,16 @@ pub enum ServerControl {
         request_id: RequestId,
         result: KernelResult,
     },
+    /// One committed, authority-checked input batch for the connection that
+    /// owns `session_id`. The host validates `byte_size`, decodes the base64,
+    /// and writes the resulting bytes through its local session registry.
+    PtyInput {
+        command_id: CommandId,
+        session_id: PtySessionId,
+        generation: PtySessionGeneration,
+        byte_size: ByteCount,
+        data_base64: PtyInputData,
+    },
     /// One batch on a live subscription. `cursor` is the last sequence in the
     /// batch — what a reconnect resumes from.
     EventBatch {
@@ -1221,6 +1283,72 @@ mod tests {
             serde_json::from_value::<KernelRequest>(json).expect("decode raw attach"),
             attach
         );
+    }
+
+    #[test]
+    fn pty_input_controls_round_trip_with_bytes_only_in_the_ephemeral_carriers() {
+        let command = crate::command::KernelCommand::SendPtyInput {
+            pty_session_id: PtySessionId::new("pty-1"),
+            generation: PtySessionGeneration::new("life-1"),
+            byte_count: ByteCount::new(3),
+        };
+        let envelope = crate::envelope::CommandEnvelope {
+            command_id: CommandId::new("input-1"),
+            project_id: crate::ids::ProjectId::new("p"),
+            command_type: command.command_type().to_owned(),
+            schema_version: crate::envelope::ENVELOPE_SCHEMA_VERSION,
+            issued_at: crate::ids::Timestamp::new("2026-08-11T00:00:00Z"),
+            actor: crate::envelope::Actor {
+                kind: "operator".to_owned(),
+                id: None,
+            },
+            origin: crate::envelope::Origin {
+                system: "gw".to_owned(),
+                r#ref: None,
+            },
+            target_aggregate_type: None,
+            target_aggregate_id: None,
+            expected_version: None,
+            idempotency_key: crate::ids::IdempotencyKey::new("input-1"),
+            causation_id: None,
+            correlation_id: None,
+            payload: serde_json::to_value(&command).expect("serialize input metadata"),
+        };
+        let request = KernelRequest::SendPtyInput {
+            envelope,
+            data_base64: PtyInputData::new("AP8K"),
+        };
+        let json = serde_json::to_value(&request).expect("serialize input request");
+        assert_eq!(json["type"], "send_pty_input");
+        assert_eq!(json["data_base64"], "AP8K");
+        assert!(
+            json["envelope"]["payload"].get("data_base64").is_none(),
+            "terminal bytes must not enter the command payload"
+        );
+        assert_eq!(
+            serde_json::from_value::<KernelRequest>(json).expect("decode input request"),
+            request
+        );
+
+        let delivery = ServerControl::PtyInput {
+            command_id: CommandId::new("input-1"),
+            session_id: PtySessionId::new("pty-1"),
+            generation: PtySessionGeneration::new("life-1"),
+            byte_size: ByteCount::new(3),
+            data_base64: PtyInputData::new("AP8K"),
+        };
+        let json = serde_json::to_value(&delivery).expect("serialize input delivery");
+        assert_eq!(json["type"], "pty_input");
+        assert_eq!(
+            serde_json::from_value::<ServerControl>(json).expect("decode input delivery"),
+            delivery
+        );
+        let request_debug = format!("{request:?}");
+        let delivery_debug = format!("{delivery:?}");
+        assert!(!request_debug.contains("AP8K"));
+        assert!(!delivery_debug.contains("AP8K"));
+        assert!(request_debug.contains("<redacted>"));
+        assert!(delivery_debug.contains("<redacted>"));
     }
 
     #[test]
@@ -1509,6 +1637,7 @@ mod tests {
                     options: Some(vec!["allow".into(), "deny".into()]),
                     verdict: GateVerdict::Pending,
                     chosen_option: None,
+                    decided_by: None,
                     evidence_ref: None,
                     created_at: ts(),
                     updated_at: ts(),
@@ -1690,6 +1819,7 @@ mod tests {
                     version: 3,
                     state: "running".into(),
                     generation: crate::ids::PtySessionGeneration::new("gen-1"),
+                    engine_session_id: Some(EngineSessionId::new("sess-1")),
                     attach_count: 2,
                     detach_count: 1,
                     title: None,

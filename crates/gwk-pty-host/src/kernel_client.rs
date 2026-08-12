@@ -19,19 +19,30 @@
 
 use std::path::Path;
 
+use base64::prelude::{BASE64_STANDARD, Engine as _};
 use gwk_domain::frame::{PtyDelta, PtyFrame};
 use gwk_domain::ids::{ByteCount, DispatchNodeId, PtyFrameSeq, PtySessionId, RequestId};
 use gwk_domain::protocol::{
     CONNECTION_EGRESS_BYTES_PER_WINDOW, CONNECTION_INGRESS_BYTES_PER_WINDOW, ClientControl,
-    FRAME_BODY_MAX_BYTES, FRAME_PAYLOAD_MAX_BYTES, FrameKind, KernelRequest, PTY_RAW_CAPABILITY,
-    ProjectionKind, ProjectionRecord, ProtocolVersion, ServerControl,
+    FRAME_BODY_MAX_BYTES, FRAME_PAYLOAD_MAX_BYTES, FrameKind, KernelRequest, PTY_INPUT_CAPABILITY,
+    PTY_INPUT_MAX_BASE64_BYTES, PTY_INPUT_MAX_BYTES, PTY_RAW_CAPABILITY, ProjectionKind,
+    ProjectionRecord, ProtocolVersion, ServerControl,
 };
 use gwk_domain::{CommandEnvelope, KernelErrorCode, KernelResult};
 use gwk_kernel::wire::frame::{Budget, Incoming, read_frame, write_frame};
 use tokio::net::UnixStream;
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+
+use crate::registry::Attacher;
 
 /// This host's `client` label on the handshake, for the kernel's own logs.
 pub const CLIENT_LABEL: &str = "gwk-pty-host";
+
+/// Controls decoded ahead of the publisher loop. Bounded independently of the
+/// kernel's queue so a host that stops servicing input cannot grow without end.
+const INCOMING_QUEUE_DEPTH: usize = 64;
 
 /// Why a kernel connection or request could not be completed.
 #[derive(Debug, thiserror::Error)]
@@ -67,25 +78,51 @@ pub enum KernelClientError {
         code: KernelErrorCode,
         message: String,
     },
+    #[error("could not apply input command {command_id} to {session_id}:{generation}: {message}")]
+    Input {
+        command_id: gwk_domain::ids::CommandId,
+        session_id: PtySessionId,
+        generation: gwk_domain::ids::PtySessionGeneration,
+        message: String,
+    },
 }
 
 /// One outbound connection to the kernel, already through the handshake.
 #[derive(Debug)]
 pub struct KernelClient {
-    stream: UnixStream,
-    budget: Budget,
+    writer: OwnedWriteHalf,
+    egress: Budget,
+    incoming: mpsc::Receiver<Result<ServerControl, gwk_kernel::WireError>>,
+    reader: JoinHandle<()>,
     /// Requests are numbered rather than randomized, matching `gridwork`'s
     /// own client: this connection asks one question at a time, and a
     /// counter is enough to tell a stray answer from the one this call is
     /// waiting on.
     issued: u64,
     raw_enabled: bool,
+    input: Option<Attacher>,
 }
 
 impl KernelClient {
     /// Connect to the kernel's Unix socket at `path` and complete the
     /// handshake.
     pub async fn connect(path: &Path) -> Result<Self, KernelClientError> {
+        Self::connect_inner(path, None).await
+    }
+
+    /// Connect the publisher for one local session. Reverse input controls on
+    /// this connection are delivered through the same session handle.
+    pub async fn connect_for_session(
+        path: &Path,
+        input: Attacher,
+    ) -> Result<Self, KernelClientError> {
+        Self::connect_inner(path, Some(input)).await
+    }
+
+    async fn connect_inner(
+        path: &Path,
+        input: Option<Attacher>,
+    ) -> Result<Self, KernelClientError> {
         let stream =
             UnixStream::connect(path)
                 .await
@@ -93,14 +130,20 @@ impl KernelClient {
                     path: path.display().to_string(),
                     source,
                 })?;
+        let (reader, writer) = stream.into_split();
+        let (incoming_tx, incoming) = mpsc::channel(INCOMING_QUEUE_DEPTH);
+        let reader = tokio::spawn(read_controls(reader, incoming_tx));
         let mut client = Self {
-            stream,
-            budget: Budget::new(
+            writer,
+            egress: Budget::new(
                 CONNECTION_INGRESS_BYTES_PER_WINDOW,
                 CONNECTION_EGRESS_BYTES_PER_WINDOW,
             ),
+            incoming,
+            reader,
             issued: 0,
             raw_enabled: false,
+            input,
         };
         client
             .send(&ClientControl::Hello {
@@ -111,6 +154,8 @@ impl KernelClient {
                 // takes.
                 capabilities: vec![
                     gwk_domain::CapabilityName::new(PTY_RAW_CAPABILITY)
+                        .expect("the protocol's own capability name is valid"),
+                    gwk_domain::CapabilityName::new(PTY_INPUT_CAPABILITY)
                         .expect("the protocol's own capability name is valid"),
                 ],
                 client: Some(CLIENT_LABEL.to_owned()),
@@ -353,42 +398,147 @@ impl KernelClient {
             .into());
         }
         self.send(&header).await?;
-        write_frame(&mut self.stream, FrameKind::PtyRaw, bytes, &mut self.budget).await?;
+        write_frame(&mut self.writer, FrameKind::PtyRaw, bytes, &mut self.egress).await?;
         loop {
-            match self.receive().await? {
-                Some(ServerControl::Response {
+            let Some(control) = self.receive().await? else {
+                return Err(KernelClientError::ClosedDuring("the raw publish"));
+            };
+            let Some(control) = Self::consume_input(self.input.as_ref(), control).await? else {
+                continue;
+            };
+            match control {
+                ServerControl::Response {
                     request_id: answered,
                     result: KernelResult::PtyPublished { .. },
-                }) if answered == request_id => return Ok(()),
-                Some(ServerControl::Response {
+                } if answered == request_id => return Ok(()),
+                ServerControl::Response {
                     request_id: answered,
                     result: KernelResult::Error { code, message, .. },
-                }) if answered == request_id => {
+                } if answered == request_id => {
                     return Err(KernelClientError::Refused {
                         refused,
                         code,
                         message,
                     });
                 }
-                Some(
-                    ServerControl::EventBatch { .. }
-                    | ServerControl::StreamClosed { .. }
-                    | ServerControl::PtyDeltaBatch { .. }
-                    | ServerControl::PtyStreamClosed { .. }
-                    | ServerControl::PtyRawSnapshot { .. }
-                    | ServerControl::PtyRawChunk { .. }
-                    | ServerControl::PtyRawResized { .. }
-                    | ServerControl::PtyRawStreamClosed { .. },
-                ) => {}
-                Some(other) => {
+                ServerControl::EventBatch { .. }
+                | ServerControl::StreamClosed { .. }
+                | ServerControl::PtyDeltaBatch { .. }
+                | ServerControl::PtyStreamClosed { .. }
+                | ServerControl::PtyRawSnapshot { .. }
+                | ServerControl::PtyRawChunk { .. }
+                | ServerControl::PtyRawResized { .. }
+                | ServerControl::PtyRawStreamClosed { .. } => {}
+                other => {
                     return Err(KernelClientError::Unexpected {
                         waited_on: "a raw publish acknowledgement",
                         found: format!("{other:?}"),
                     });
                 }
-                None => return Err(KernelClientError::ClosedDuring("the raw publish")),
             }
         }
+    }
+
+    /// Wait for one reverse control while the publisher has no request in
+    /// flight. This method only dequeues and returns ownership: applying an
+    /// input happens after the surrounding `tokio::select!` chooses this arm,
+    /// so cancellation can never discard a command mid-write.
+    pub async fn wait_for_control(&mut self) -> Result<ServerControl, KernelClientError> {
+        let Some(control) = self.receive().await? else {
+            return Err(KernelClientError::ClosedDuring("PTY input wait"));
+        };
+        Ok(control)
+    }
+
+    pub async fn apply_input_control(
+        &self,
+        control: ServerControl,
+    ) -> Result<(), KernelClientError> {
+        match Self::consume_input(self.input.as_ref(), control).await? {
+            None => Ok(()),
+            Some(other) => Err(KernelClientError::Unexpected {
+                waited_on: "PTY input",
+                found: format!("{other:?}"),
+            }),
+        }
+    }
+
+    /// Consume a reverse input control, returning non-input controls unchanged.
+    async fn consume_input(
+        input: Option<&Attacher>,
+        control: ServerControl,
+    ) -> Result<Option<ServerControl>, KernelClientError> {
+        let ServerControl::PtyInput {
+            command_id,
+            session_id,
+            generation,
+            byte_size,
+            data_base64,
+        } = control
+        else {
+            return Ok(Some(control));
+        };
+        let Some(input) = input else {
+            return Err(KernelClientError::Input {
+                command_id,
+                session_id,
+                generation,
+                message: "this connection has no local session input route".to_owned(),
+            });
+        };
+        if input.id() != &session_id {
+            return Err(KernelClientError::Input {
+                command_id,
+                session_id,
+                generation,
+                message: format!("this publisher owns local session {}", input.id()),
+            });
+        }
+        if data_base64.as_str().len() > PTY_INPUT_MAX_BASE64_BYTES {
+            return Err(KernelClientError::Input {
+                command_id,
+                session_id,
+                generation,
+                message: format!(
+                    "base64 carrier is {} bytes, maximum {PTY_INPUT_MAX_BASE64_BYTES}",
+                    data_base64.as_str().len()
+                ),
+            });
+        }
+        let bytes = BASE64_STANDARD
+            .decode(data_base64.as_str())
+            .map_err(|error| KernelClientError::Input {
+                command_id: command_id.clone(),
+                session_id: session_id.clone(),
+                generation: generation.clone(),
+                message: format!("invalid base64: {error}"),
+            })?;
+        let actual = u64::try_from(bytes.len()).map_err(|_| KernelClientError::Input {
+            command_id: command_id.clone(),
+            session_id: session_id.clone(),
+            generation: generation.clone(),
+            message: "decoded byte count does not fit u64".to_owned(),
+        })?;
+        if bytes.len() > PTY_INPUT_MAX_BYTES || actual != byte_size.value() {
+            return Err(KernelClientError::Input {
+                command_id,
+                session_id,
+                generation,
+                message: format!(
+                    "header declares {byte_size} bytes, decoded {actual}, maximum {PTY_INPUT_MAX_BYTES}"
+                ),
+            });
+        }
+        input
+            .input(bytes)
+            .await
+            .map_err(|error| KernelClientError::Input {
+                command_id,
+                session_id,
+                generation,
+                message: error.to_string(),
+            })?;
+        Ok(None)
     }
 
     /// Liveness only, for a boot-time connectivity check.
@@ -410,49 +560,40 @@ impl KernelClient {
         })
         .await?;
         loop {
-            match self.receive().await? {
-                Some(ServerControl::Response {
+            let Some(control) = self.receive().await? else {
+                return Err(KernelClientError::ClosedDuring("the request"));
+            };
+            let Some(control) = Self::consume_input(self.input.as_ref(), control).await? else {
+                continue;
+            };
+            match control {
+                ServerControl::Response {
                     request_id: answered,
                     result,
-                }) if answered == request_id => return Ok(result),
+                } if answered == request_id => return Ok(result),
                 // A batch from a subscription or attach opened earlier on
                 // this connection can arrive between a request and its
                 // response — this client never opens either, but the wire
                 // does not know that, so the loop still has to skip past one.
-                Some(
-                    ServerControl::EventBatch { .. }
-                    | ServerControl::StreamClosed { .. }
-                    | ServerControl::PtyDeltaBatch { .. }
-                    | ServerControl::PtyStreamClosed { .. },
-                ) => {}
-                Some(other) => {
+                ServerControl::EventBatch { .. }
+                | ServerControl::StreamClosed { .. }
+                | ServerControl::PtyDeltaBatch { .. }
+                | ServerControl::PtyStreamClosed { .. } => {}
+                other => {
                     return Err(KernelClientError::Unexpected {
                         waited_on: "a response",
                         found: format!("{other:?}"),
                     });
                 }
-                None => return Err(KernelClientError::ClosedDuring("the request")),
             }
         }
     }
 
     async fn receive(&mut self) -> Result<Option<ServerControl>, KernelClientError> {
-        let frame = read_frame(&mut self.stream, FRAME_BODY_MAX_BYTES, &mut self.budget).await?;
-        match frame {
-            Incoming::Closed => Ok(None),
-            Incoming::Frame(frame) => {
-                if frame.kind != FrameKind::Json {
-                    return Err(gwk_kernel::WireError::new(
-                        KernelErrorCode::Handshake,
-                        format!("kind {:?} carries no control value", frame.kind),
-                    )
-                    .into());
-                }
-                serde_json::from_slice(&frame.body).map(Some).map_err(|e| {
-                    gwk_kernel::WireError::new(KernelErrorCode::Schema, format!("decode: {e}"))
-                        .into()
-                })
-            }
+        match self.incoming.recv().await {
+            Some(Ok(control)) => Ok(Some(control)),
+            Some(Err(error)) => Err(error.into()),
+            None => Ok(None),
         }
     }
 
@@ -460,7 +601,7 @@ impl KernelClient {
         let body = serde_json::to_vec(control).map_err(|e| {
             gwk_kernel::WireError::new(KernelErrorCode::Schema, format!("serialize a request: {e}"))
         })?;
-        write_frame(&mut self.stream, FrameKind::Json, &body, &mut self.budget).await?;
+        write_frame(&mut self.writer, FrameKind::Json, &body, &mut self.egress).await?;
         Ok(())
     }
 
@@ -470,9 +611,52 @@ impl KernelClient {
     }
 }
 
+impl Drop for KernelClient {
+    fn drop(&mut self) {
+        self.reader.abort();
+    }
+}
+
+/// Own the socket's read half for its whole lifetime. A frame decode is never
+/// cancelled while the connection continues; consumers select only on the
+/// cancellation-safe bounded channel this task feeds.
+async fn read_controls(
+    mut reader: OwnedReadHalf,
+    controls: mpsc::Sender<Result<ServerControl, gwk_kernel::WireError>>,
+) {
+    let mut ingress = Budget::new(
+        CONNECTION_INGRESS_BYTES_PER_WINDOW,
+        CONNECTION_EGRESS_BYTES_PER_WINDOW,
+    );
+    loop {
+        let control = match read_frame(&mut reader, FRAME_BODY_MAX_BYTES, &mut ingress).await {
+            Ok(Incoming::Closed) => return,
+            Ok(Incoming::Frame(frame)) if frame.kind == FrameKind::Json => {
+                serde_json::from_slice(&frame.body).map_err(|error| {
+                    gwk_kernel::WireError::new(KernelErrorCode::Schema, format!("decode: {error}"))
+                })
+            }
+            Ok(Incoming::Frame(frame)) => Err(gwk_kernel::WireError::new(
+                KernelErrorCode::Handshake,
+                format!("kind {:?} carries no control value", frame.kind),
+            )),
+            Err(error) => Err(error),
+        };
+        let failed = control.is_err();
+        if controls.send(control).await.is_err() || failed {
+            return;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::SessionRegistry;
+    use crate::session::{RestartPolicy, SessionConfig};
+    use gwk_domain::ids::{CommandId, PtySessionGeneration};
+    use gwk_domain::protocol::PtyInputData;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn connecting_to_an_absent_socket_is_a_typed_error_not_a_panic() {
@@ -500,5 +684,75 @@ mod tests {
         assert!(matches!(error, KernelClientError::Connect { .. }));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn reverse_input_control_decodes_and_writes_the_exact_bytes_to_the_child() {
+        let id = PtySessionId::new("input-control");
+        let mut registry = SessionRegistry::new();
+        registry
+            .spawn(
+                id.clone(),
+                Box::new(|cols, rows| {
+                    gwk_pty::Session::spawn(pty_process::Command::new("/bin/cat"), cols, rows)
+                }),
+                SessionConfig {
+                    cols: 40,
+                    rows: 6,
+                    recording_cap: 1024,
+                    retained_batches: 1024,
+                    restart: RestartPolicy::Never,
+                },
+            )
+            .await
+            .expect("spawn cat");
+        let input = registry.attacher(&id).expect("attacher");
+        let bytes = b"hello\n";
+        let consumed = KernelClient::consume_input(
+            Some(&input),
+            ServerControl::PtyInput {
+                command_id: CommandId::new("input-1"),
+                session_id: id.clone(),
+                generation: PtySessionGeneration::new("life-1"),
+                byte_size: ByteCount::new(bytes.len() as u64),
+                data_base64: PtyInputData::new(BASE64_STANDARD.encode(bytes)),
+            },
+        )
+        .await
+        .expect("consume input");
+        assert!(consumed.is_none(), "input controls are consumed in place");
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Ok(snapshot) = registry.snapshot(&id).await {
+                    let text = snapshot.frame.cells().expect("snapshot expands")[0]
+                        .iter()
+                        .map(|cell| cell.glyph.as_str())
+                        .collect::<String>();
+                    if text.starts_with("hello") {
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("cat echoed the input");
+
+        let invalid = KernelClient::consume_input(
+            Some(&input),
+            ServerControl::PtyInput {
+                command_id: CommandId::new("input-2"),
+                session_id: id.clone(),
+                generation: PtySessionGeneration::new("life-1"),
+                byte_size: ByteCount::new(99),
+                data_base64: PtyInputData::new(BASE64_STANDARD.encode(b"x")),
+            },
+        )
+        .await
+        .expect_err("mismatched byte count");
+        assert!(matches!(invalid, KernelClientError::Input { .. }));
+
+        registry.stop(&id).await.expect("stop cat");
     }
 }

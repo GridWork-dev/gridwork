@@ -256,7 +256,7 @@ async fn publish_once(
     id: &PtySessionId,
     stop: &mut watch::Receiver<bool>,
 ) -> Outcome {
-    let mut client = match KernelClient::connect(socket).await {
+    let mut client = match KernelClient::connect_for_session(socket, attacher.clone()).await {
         Ok(client) => client,
         Err(e) => return Outcome::Retry(format!("connect: {e}")),
     };
@@ -292,6 +292,15 @@ async fn publish_once(
 
     loop {
         tokio::select! {
+            control = client.wait_for_control() => {
+                let control = match control {
+                    Ok(control) => control,
+                    Err(error) => return Outcome::Retry(format!("input control: {error}")),
+                };
+                if let Err(error) = client.apply_input_control(control).await {
+                    return Outcome::Retry(format!("input control: {error}"));
+                }
+            }
             batch = live.recv() => match batch {
                 Ok(batch) => {
                     if let Err(e) = client

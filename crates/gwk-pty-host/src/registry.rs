@@ -15,6 +15,7 @@
 
 use std::collections::HashMap;
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use gwk_domain::ids::PtySessionId;
 use gwk_pty::SpawnError;
@@ -42,6 +43,13 @@ pub enum RegistryError {
     Spawn(#[from] SpawnError),
     #[error("could not start the session's thread: {0}")]
     Thread(String),
+    #[error("input write to session {session_id} failed: {message}")]
+    Input {
+        session_id: PtySessionId,
+        message: String,
+    },
+    #[error("input write to session {0} exceeded the delivery deadline")]
+    InputTimeout(PtySessionId),
 }
 
 /// One live session's handles.
@@ -52,13 +60,43 @@ struct Entry {
 
 /// One session's attach handle, detached from the registry — see
 /// [`SessionRegistry::attacher`].
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Attacher {
     id: PtySessionId,
     commands: mpsc::Sender<SessionCommand>,
 }
 
 impl Attacher {
+    pub fn id(&self) -> &PtySessionId {
+        &self.id
+    }
+
+    /// Send one raw input batch without reacquiring the registry lock.
+    pub async fn input(&self, bytes: Vec<u8>) -> Result<(), RegistryError> {
+        let id = self.id.clone();
+        let operation = async {
+            let (reply, answer) = oneshot::channel();
+            self.commands
+                .send(SessionCommand::Input { bytes, reply })
+                .await
+                .map_err(|_| RegistryError::Ended(id.clone()))?;
+            match answer.await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(message)) => Err(RegistryError::Input {
+                    session_id: id.clone(),
+                    message,
+                }),
+                Err(_) => Err(RegistryError::Ended(id.clone())),
+            }
+        };
+        tokio::time::timeout(
+            Duration::from_secs(gwk_domain::protocol::SLOW_CONSUMER_TIMEOUT_SECS),
+            operation,
+        )
+        .await
+        .map_err(|_| RegistryError::InputTimeout(self.id.clone()))?
+    }
+
     /// Exactly [`SessionRegistry::attach`], without the registry.
     pub async fn attach(&self, cursor: Option<u64>) -> Result<Attached, RegistryError> {
         let (reply, answer) = oneshot::channel();
@@ -163,7 +201,7 @@ impl SessionRegistry {
 
     /// Send input to a session's child.
     pub async fn input(&self, id: &PtySessionId, bytes: Vec<u8>) -> Result<(), RegistryError> {
-        self.send(id, SessionCommand::Input(bytes)).await
+        self.attacher(id)?.input(bytes).await
     }
 
     /// Resize a session's grid and PTY.

@@ -1,8 +1,9 @@
 //! The ratified mark inventory — the console's symbol vocabulary.
 //!
-//! Twenty-two marks over twenty-eight codepoints. Seven name WHO an agent
+//! Twenty-six marks over thirty-two codepoints. Seven name WHO an agent
 //! is, eleven name WHAT it is doing — those two cells sit side by side —
-//! and four name WHAT KIND OF NODE a Board row stands for. Cardinality is
+//! four name WHAT KIND OF NODE a Board row stands for, and four name HOW
+//! MUCH: the chart ladder a cost axis is drawn with. Cardinality is
 //! identity **plus** expression, never identity times expression: a
 //! per-pair composite would need seventy-seven mutually distinguishable
 //! single-cell codepoints and the admissible pool is roughly two dozen.
@@ -47,6 +48,11 @@ pub enum MarkKind {
     /// never who runs it or what it is doing: on a Board row the state is a
     /// printed word, so this cell is free to carry the kind.
     GraphTier,
+    /// HOW MUCH — the magnitude ladder a chart cell is drawn with (the FLEET
+    /// cost axis). Four static levels of one Braille cell, ink-ordered so a
+    /// taller reading is always a heavier one: weight survives the squint
+    /// that position or size alone does not (the ADR-0030 lesson).
+    Chart,
 }
 
 /// One admitted mark.
@@ -145,6 +151,20 @@ pub const MARKS: &[Mark] = &[
     Mark { name: "attempt",  glyphs: &['⊚'], ascii: 'A', kind: MarkKind::GraphTier },
     Mark { name: "dispatch", glyphs: &['∘'], ascii: 'D', kind: MarkKind::GraphTier },
     Mark { name: "message",  glyphs: &['⋄'], ascii: 'M', kind: MarkKind::GraphTier },
+
+    // Chart — the magnitude ladder, minted by operator picker 2026-08-11 to
+    // discharge the design round's standing ask: Unicode block elements are
+    // EAW-Ambiguous and inadmissible, so a cost axis had no ruled mark and the
+    // mockups substituted ASCII bars. Braille, because that family is already
+    // load-bearing here (the spinner) and adds no second font-coverage risk
+    // and no second width class. The four levels are the bottom row filling
+    // upward — U+28C0, U+28E4, U+28F6, U+28FF — strictly ink-ordered, so the
+    // ladder degrades to monochrome and to a squint without losing its order.
+    // The ASCII escape ladder is ink-ordered the same way.
+    Mark { name: "spark_1", glyphs: &['⣀'], ascii: '.', kind: MarkKind::Chart },
+    Mark { name: "spark_2", glyphs: &['⣤'], ascii: ':', kind: MarkKind::Chart },
+    Mark { name: "spark_3", glyphs: &['⣶'], ascii: '=', kind: MarkKind::Chart },
+    Mark { name: "spark_4", glyphs: &['⣿'], ascii: '#', kind: MarkKind::Chart },
 ];
 
 /// One agent state: which mark expresses it and which token colours it.
@@ -300,16 +320,16 @@ mod tests {
     }
 
     #[test]
-    fn twenty_two_marks_over_twenty_eight_codepoints() {
-        assert_eq!(MARKS.len(), 22, "the ruled inventory is 22 marks");
+    fn twenty_six_marks_over_thirty_two_codepoints() {
+        assert_eq!(MARKS.len(), 26, "the ruled inventory is 26 marks");
         let codepoints: BTreeSet<char> = MARKS
             .iter()
             .flat_map(|m| m.glyphs.iter().copied())
             .collect();
         assert_eq!(
             codepoints.len(),
-            28,
-            "the ruled inventory is 28 codepoints — 20 static plus one 8-frame cycle, \
+            32,
+            "the ruled inventory is 32 codepoints — 24 static plus one 8-frame cycle, \
              with the reversed cycle contributing no new ones"
         );
         assert_eq!(
@@ -333,6 +353,36 @@ mod tests {
                 .count(),
             4
         );
+        assert_eq!(
+            MARKS.iter().filter(|m| m.kind == MarkKind::Chart).count(),
+            4
+        );
+    }
+
+    #[test]
+    fn the_chart_ladder_is_strictly_ink_ordered_in_both_glyph_sets() {
+        // The property the mint was ruled on: a taller reading is a heavier
+        // cell, in Unicode (Braille dot count) and under the ASCII escape
+        // alike, so the ladder's order survives monochrome and a squint.
+        let ladder: Vec<&Mark> = MARKS.iter().filter(|m| m.kind == MarkKind::Chart).collect();
+        let dots: Vec<u32> = ladder
+            .iter()
+            .map(|m| (m.head() as u32 - 0x2800).count_ones())
+            .collect();
+        assert!(
+            dots.windows(2).all(|w| w[0] < w[1]),
+            "the Braille ladder must strictly gain dots per level: {dots:?}"
+        );
+        // Every rung is Braille — the family already load-bearing via the
+        // spinner, so the ladder adds no second font-coverage risk.
+        for m in &ladder {
+            let cp = m.head() as u32;
+            assert!(
+                (0x2800..=0x28FF).contains(&cp),
+                "chart mark {:?} left the Braille block: U+{cp:04X}",
+                m.name
+            );
+        }
     }
 
     #[test]
@@ -433,7 +483,7 @@ mod tests {
         // second-letter rule, so this binds each of the OTHER kinds within
         // itself — expression is where the states live, graph tier is where
         // the Board's node kinds live, and the two never share a cell.
-        for kind in [MarkKind::Expression, MarkKind::GraphTier] {
+        for kind in [MarkKind::Expression, MarkKind::GraphTier, MarkKind::Chart] {
             let mut seen: Vec<(char, &str)> = MARKS
                 .iter()
                 .filter(|m| m.kind == kind)

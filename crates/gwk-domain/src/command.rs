@@ -26,6 +26,9 @@ use crate::ids::{
 use crate::ingestion::IngestionKind;
 use crate::inherited::{FindingAction, OrchestratorCheckpoint, RoundFindingSummary};
 
+/// Standing-authority action class for terminal input.
+pub const PTY_INPUT_ACTION_CLASS: &str = "pty_input";
+
 /// One requested mutation, tagged by `type`.
 ///
 /// Variants are grouped by aggregate. Absent optionals are OMITTED on the wire
@@ -537,6 +540,12 @@ pub enum KernelCommand {
     OpenPtySession {
         pty_session_id: PtySessionId,
         generation: PtySessionGeneration,
+        /// Optional parent execution. The PTY lifetime owns the join because
+        /// engine sessions may be headless and may outlive several PTY
+        /// generations; opening a new terminal must not rewrite its parent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[specta(optional)]
+        engine_session_id: Option<EngineSessionId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[specta(optional)]
         title: Option<String>,
@@ -548,6 +557,18 @@ pub enum KernelCommand {
     RecordPtyDetach {
         pty_session_id: PtySessionId,
         expected_version: u32,
+    },
+    /// Send one opaque byte batch to one exact hosted-session lifetime.
+    ///
+    /// The bytes deliberately do not live in this event-sourced command body:
+    /// [`crate::protocol::KernelRequest::SendPtyInput`] carries them ephemerally
+    /// as base64 and the kernel validates this count before appending. Terminal
+    /// input can contain credentials; the immutable log records that a batch
+    /// was sent, never its content.
+    SendPtyInput {
+        pty_session_id: PtySessionId,
+        generation: PtySessionGeneration,
+        byte_count: ByteCount,
     },
     ClosePtySession {
         pty_session_id: PtySessionId,
@@ -682,6 +703,7 @@ impl KernelCommand {
             Self::OpenPtySession { .. } => "open_pty_session",
             Self::RecordPtyAttach { .. } => "record_pty_attach",
             Self::RecordPtyDetach { .. } => "record_pty_detach",
+            Self::SendPtyInput { .. } => "send_pty_input",
             Self::ClosePtySession { .. } => "close_pty_session",
             Self::RegisterDispatchNode { .. } => "register_dispatch_node",
             Self::TransitionDispatchNode { .. } => "transition_dispatch_node",
@@ -757,7 +779,7 @@ mod tests {
         // slip in `command_type()` would silently route the wrong handler. Walk
         // the serialized tag of a value from EVERY variant instead.
         let all = all_variants();
-        assert_eq!(all.len(), 46, "the v1 command set is 46 variants");
+        assert_eq!(all.len(), 47, "the v1 command set is 47 variants");
         for command in &all {
             let json = serde_json::to_value(command).expect("serialize");
             let tag = json["type"].as_str().expect("tagged with a string type");
@@ -1159,6 +1181,11 @@ mod tests {
                 workflow_run_id: WorkflowRunId::new("run-1"),
                 outcome: "completed".into(),
                 expected_version: 2,
+            },
+            KernelCommand::SendPtyInput {
+                pty_session_id: PtySessionId::new("pty-1"),
+                generation: PtySessionGeneration::new("gen-1"),
+                byte_count: ByteCount::new(3),
             },
             KernelCommand::RegisterDispatchNode {
                 dispatch_node_id: DispatchNodeId::new("node-1"),

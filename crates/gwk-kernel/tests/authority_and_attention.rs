@@ -12,8 +12,8 @@
 mod common;
 
 use common::{
-    PROJECT, actor, apply, drop_database, envelope_as, event_count, fresh_store, maintenance_pool,
-    refuse,
+    PROJECT, actor, administer, apply, drop_database, envelope_as, event_count, fresh_store,
+    maintenance_pool, refuse, refuse_as,
 };
 use gwk_domain::command::KernelCommand;
 use gwk_domain::ids::{AttentionItemId, AuthorityGrantId, CommandId, EvidenceId, Timestamp};
@@ -141,7 +141,7 @@ async fn a_matching_grant_allows_and_revoking_it_pages_again() {
     let (name, store) = fresh_store(&maintenance, "grant", 64).await;
 
     // Unscoped grant covers the whole action class.
-    apply(&store, "grant", grant("g-1", "stop", None, None)).await;
+    administer(&store, "grant", grant("g-1", "stop", None, None)).await;
     apply(&store, "stop", stop("c-1")).await;
 
     // Allowed commands are receipted too — every result writes one.
@@ -155,7 +155,7 @@ async fn a_matching_grant_allows_and_revoking_it_pages_again() {
     // Allowed, so no attention was raised.
     assert_eq!(counts(&store).await.1, 0);
 
-    apply(
+    administer(
         &store,
         "revoke",
         KernelCommand::RevokeAuthority {
@@ -189,7 +189,7 @@ async fn scope_matches_exactly_and_expiry_is_read_against_the_command() {
     let (name, store) = fresh_store(&maintenance, "scope", 64).await;
 
     // Scoped to c-1 only. A prefix reading would let this cover c-1-extra.
-    apply(&store, "grant", grant("g-1", "stop", Some("c-1"), None)).await;
+    administer(&store, "grant", grant("g-1", "stop", Some("c-1"), None)).await;
     apply(&store, "allowed", stop("c-1")).await;
 
     let (code, _) = refuse(&store, "denied", stop("c-1-extra")).await;
@@ -201,7 +201,7 @@ async fn scope_matches_exactly_and_expiry_is_read_against_the_command() {
 
     // Expiry is compared against the envelope's issued_at (2026-07-28), not the
     // wall clock — otherwise replay would re-decide history.
-    apply(
+    administer(
         &store,
         "grant-2",
         grant("g-2", "stop", Some("c-9"), Some("2026-07-27T00:00:00Z")),
@@ -638,12 +638,70 @@ async fn a_grant_to_another_actor_does_not_allow_this_one() {
         expires_at: None,
     };
     let applied = store
-        .submit(&envelope_as("grant", actor("kernel"), &other))
+        .submit(&envelope_as("grant", actor("operator"), &other))
         .await;
     assert!(matches!(applied, KernelResult::CommandApplied { .. }));
 
     let (code, _) = refuse(&store, "stop", stop("c-1")).await;
     assert_eq!(code, KernelErrorCode::Authority);
+
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
+async fn administering_authority_is_refused_to_every_actor_but_the_operator() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "admin", 64).await;
+
+    // The check the UDS peer credential cannot make: a conforming orchestrator
+    // speaking the protocol correctly must not be able to write its own
+    // standing authority. Granting is refused on the actor kind alone, before
+    // any scope or expiry is read.
+    let (code, message) = refuse_as(
+        &store,
+        "self-grant",
+        actor("kernel"),
+        grant("g-1", "stop", None, None),
+    )
+    .await;
+    assert_eq!(code, KernelErrorCode::Authority, "{message}");
+    assert!(message.contains("operator"), "{message}");
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM gwk.authority_grant")
+        .fetch_one(store.pool())
+        .await
+        .expect("grant rows");
+    assert_eq!(rows, 0, "a refused grant writes nothing");
+
+    // The operator's identical command lands, so the refusal above is about
+    // WHO asked and not about the grant being unreachable — without this the
+    // test would still pass against a kernel that refused every grant.
+    administer(&store, "grant", grant("g-1", "stop", None, None)).await;
+    apply(&store, "stop", stop("c-1")).await;
+
+    // Revoking is the same act from the other side: holding a grant does not
+    // let the grantee hand it back to itself, which is the path that would let
+    // an orchestrator quietly clear the trail behind a refusal.
+    let (code, _) = refuse_as(
+        &store,
+        "self-revoke",
+        actor("kernel"),
+        KernelCommand::RevokeAuthority {
+            authority_grant_id: AuthorityGrantId::new("g-1"),
+            reason: None,
+        },
+    )
+    .await;
+    assert_eq!(code, KernelErrorCode::Authority);
+    let revoked: Option<String> =
+        sqlx::query_scalar("SELECT to_json(revoked_at) #>> '{}' FROM gwk.authority_grant")
+            .fetch_one(store.pool())
+            .await
+            .expect("grant row");
+    assert!(
+        revoked.is_none(),
+        "a refused revoke leaves the grant standing"
+    );
 
     drop_database(&maintenance, &name).await;
 }
@@ -677,7 +735,7 @@ async fn a_granted_config_change_lands_with_its_receipt_in_one_commit() {
     let maintenance = maintenance_pool().await;
     let (name, store) = fresh_store(&maintenance, "configallow", 64).await;
 
-    apply(&store, "grant", grant("g-1", "config_change", None, None)).await;
+    administer(&store, "grant", grant("g-1", "config_change", None, None)).await;
     apply(&store, "cfg", config_evidence("e-1")).await;
 
     // Two events (the grant, the evidence), ONE receipt: the grant is

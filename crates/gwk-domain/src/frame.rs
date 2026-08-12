@@ -270,6 +270,17 @@ impl PtyRun {
     }
 }
 
+/// The visible terminal cursor, in zero-based grid coordinates.
+///
+/// Hidden cursors are represented by an absent [`PtyFrame::cursor`], keeping
+/// row and column inseparable instead of admitting a half-specified position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
+#[serde(deny_unknown_fields)]
+pub struct PtyCursor {
+    pub row: u16,
+    pub col: u16,
+}
+
 /// A full styled frame: every cell of a hosted PTY session's grid at one
 /// [`crate::ids::PtyFrameSeq`], as a frame-scoped style table plus row-major
 /// runs (`rows[row]` = that row's runs, left to right).
@@ -292,6 +303,10 @@ pub struct PtyFrame {
     pub styles: Vec<CellStyle>,
     /// `rows[row]` = the row's runs, left to right.
     pub rows: Vec<Vec<PtyRun>>,
+    /// Zero-based visible cursor position. Absent means the child hid it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub cursor: Option<PtyCursor>,
 }
 
 impl PtyFrame {
@@ -303,7 +318,7 @@ impl PtyFrame {
     /// This is the canonical producer form: adjacent runs never share a
     /// style, so a decoder holding the tolerate-non-maximal ruling still
     /// never sees a non-maximal run from this constructor.
-    pub fn from_cells(cells: &[Vec<StyledCell>]) -> Self {
+    pub fn from_cells(cells: &[Vec<StyledCell>], cursor: Option<PtyCursor>) -> Self {
         let mut interner = StyleInterner::default();
         let mut rows = Vec::with_capacity(cells.len());
         for row in cells {
@@ -339,14 +354,15 @@ impl PtyFrame {
         Self {
             styles: interner.into_styles(),
             rows,
+            cursor,
         }
     }
 
     /// Expand back to the per-cell grid the runs describe, or `None` for a
     /// frame no rectangular grid matches: a style index outside the table,
-    /// rows of unequal width, or a dimension past `u16` (the wire's grid
-    /// universe — and the bound that stops a small `fill` run from demanding
-    /// an enormous allocation).
+    /// rows of unequal width, a cursor outside the grid, or a dimension past
+    /// `u16` (the wire's grid universe — and the bound that stops a small
+    /// `fill` run from demanding an enormous allocation).
     ///
     /// Deliberately more tolerant than the kernel's strict decoder: a
     /// duplicate table entry, a zero-width run, or two adjacent runs sharing
@@ -399,6 +415,12 @@ impl PtyFrame {
             }
             cells.push(expanded);
         }
+        let cols = width.unwrap_or(0);
+        if self.cursor.is_some_and(|cursor| {
+            usize::from(cursor.row) >= self.rows.len() || usize::from(cursor.col) >= cols
+        }) {
+            return None;
+        }
         Some(cells)
     }
 }
@@ -450,10 +472,8 @@ pub struct PtyCellUpdate {
 /// Two kinds, deliberately not one: a resize invalidates every coordinate a
 /// client is already holding, so it cannot be folded into a cell update
 /// without also telling the client the grid itself grew or shrank. Cursor
-/// position and visibility are NOT modeled here — out of scope for this pass
-/// (see the crate's kernel-protocol tests for what is pinned); a client
-/// tracking those needs is a gap to close in the engine-side task, not a
-/// silent omission this type hides.
+/// position and visibility live on full [`PtyFrame`] snapshots; this delta set
+/// does not carry cursor-only movement.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PtyDelta {
@@ -651,7 +671,7 @@ mod tests {
         // scalars joined by ZWJ. The run shape's whole reason for carrying
         // per-cell glyph STRINGS is that this must round-trip intact.
         let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}";
-        let frame = PtyFrame::from_cells(&[vec![cell(family), cell("x")]]);
+        let frame = PtyFrame::from_cells(&[vec![cell(family), cell("x")]], None);
         let json = serde_json::to_value(&frame).expect("serialize");
         let back: PtyFrame = serde_json::from_value(json).expect("deserialize");
         assert_eq!(back.cells().expect("expand")[0][0].glyph, family);
@@ -663,7 +683,7 @@ mod tests {
         // glyph styled like its head. A joined-string encoding would lose the
         // cell entirely; the per-cell glyph list is what keeps it.
         let wide = vec![cell("\u{5BEC}"), cell(""), cell("b")];
-        let frame = PtyFrame::from_cells(std::slice::from_ref(&wide));
+        let frame = PtyFrame::from_cells(std::slice::from_ref(&wide), None);
         let json = serde_json::to_value(&frame).expect("serialize");
         let back: PtyFrame = serde_json::from_value(json).expect("deserialize");
         assert_eq!(back.cells().expect("expand")[0], wide);
@@ -671,16 +691,33 @@ mod tests {
 
     #[test]
     fn pty_frame_dimensions_are_derived_not_stored() {
-        let frame = PtyFrame::from_cells(&[vec![cell("a"), bold("b")], vec![cell("c"), cell("d")]]);
+        let cursor = PtyCursor { row: 1, col: 1 };
+        let frame = PtyFrame::from_cells(
+            &[vec![cell("a"), bold("b")], vec![cell("c"), cell("d")]],
+            Some(cursor),
+        );
         let json = serde_json::to_value(&frame).expect("serialize");
         let object = json.as_object().expect("object");
         assert!(!object.contains_key("rows_count"), "no stored geometry");
         assert!(!object.contains_key("cols"), "cols must not be a field");
         let mut keys = object.keys().collect::<Vec<_>>();
         keys.sort();
-        assert_eq!(keys, ["rows", "styles"], "exactly the table and the runs");
+        assert_eq!(
+            keys,
+            ["cursor", "rows", "styles"],
+            "the table, runs, and cursor only"
+        );
         let back: PtyFrame = serde_json::from_value(json).expect("deserialize");
         assert_eq!(back, frame);
+        assert_eq!(back.cursor, Some(cursor));
+
+        assert!(
+            serde_json::from_value::<PtyCursor>(serde_json::json!({
+                "row": 1, "col": 1, "extra": true
+            }))
+            .is_err(),
+            "cursor coordinates reject unknown fields"
+        );
     }
 
     #[test]
@@ -728,10 +765,13 @@ mod tests {
         // Row 0: two blank cells, then two bold — two maximal runs. Row 1:
         // bold first, so the table order is decided by row 0 (first
         // appearance), not by any later reuse.
-        let frame = PtyFrame::from_cells(&[
-            vec![cell(" "), cell(" "), bold("a"), bold("b")],
-            vec![bold("x"), cell("y"), cell("y"), cell("y")],
-        ]);
+        let frame = PtyFrame::from_cells(
+            &[
+                vec![cell(" "), cell(" "), bold("a"), bold("b")],
+                vec![bold("x"), cell("y"), cell("y"), cell("y")],
+            ],
+            None,
+        );
 
         assert_eq!(frame.styles.len(), 2, "two distinct styles, each once");
         assert!(!frame.styles[0].bold, "blank appeared first");
@@ -776,7 +816,7 @@ mod tests {
             vec![cell("g"), cell("w"), bold("!")],
             vec![bold("k"), cell(""), cell(" ")],
         ];
-        let frame = PtyFrame::from_cells(&grid);
+        let frame = PtyFrame::from_cells(&grid, None);
         assert_eq!(frame.cells().expect("expand"), grid);
     }
 
@@ -788,6 +828,7 @@ mod tests {
                 style: 1,
                 glyphs: vec!["x".to_owned()],
             }]],
+            cursor: None,
         };
         assert!(frame.cells().is_none(), "index 1 into a one-entry table");
     }
@@ -808,6 +849,7 @@ mod tests {
                     count: 3,
                 }],
             ],
+            cursor: None,
         };
         assert!(frame.cells().is_none(), "rows of width 4 and 3");
     }
@@ -824,6 +866,7 @@ mod tests {
                 glyph: " ".to_owned(),
                 count: u32::MAX,
             }]],
+            cursor: None,
         };
         assert!(frame.cells().is_none());
     }
@@ -852,11 +895,21 @@ mod tests {
                     count: 0,
                 },
             ]],
+            cursor: None,
         };
         let cells = frame.cells().expect("tolerated");
         assert_eq!(cells[0].len(), 2);
         assert_eq!(cells[0][0].glyph, "a");
         assert_eq!(cells[0][1].glyph, "b");
+    }
+
+    #[test]
+    fn expansion_refuses_a_cursor_outside_the_grid() {
+        let frame = PtyFrame::from_cells(
+            &[vec![cell("a"), cell("b")]],
+            Some(PtyCursor { row: 1, col: 0 }),
+        );
+        assert!(frame.cells().is_none(), "row 1 is outside a one-row grid");
     }
 
     #[test]

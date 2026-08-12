@@ -21,6 +21,7 @@
 use gwk_domain::command::KernelCommand;
 use gwk_domain::entity::DISPATCH_NODE_INITIAL_STATE;
 use gwk_domain::envelope::EventEnvelope;
+use gwk_domain::fsm::GateVerdict;
 use gwk_domain::protocol::{KernelErrorCode, KernelResult};
 use serde::Deserialize;
 use sqlx::{PgConnection, postgres::PgQueryResult};
@@ -820,20 +821,22 @@ pub(crate) async fn apply_event(
             evidence_ref,
             ..
         } => {
+            let decided_by = (!matches!(verdict, GateVerdict::Pending)).then_some(&event.actor);
             // `chosen_option` replaces rather than coalesces, exactly like the
             // verdict beside it: a re-decide is a whole new decision, and a
             // stale choice under a fresh verdict would misreport what was
             // answered back to the engine.
             let done = sqlx::query(
                 "UPDATE gwk.gate \
-                 SET verdict = $2, chosen_option = $3, version = $4, \
-                     updated_at = $5::timestamptz, \
-                     evidence_ref = COALESCE($6, evidence_ref) \
+                 SET verdict = $2, chosen_option = $3, decided_by = $4, version = $5, \
+                     updated_at = $6::timestamptz, \
+                     evidence_ref = COALESCE($7, evidence_ref) \
                  WHERE id = $1",
             )
             .bind(gate_id.as_str())
             .bind(wire_str(verdict)?)
             .bind(chosen_option.as_deref())
+            .bind(json_opt(decided_by)?)
             .bind(version)
             .bind(at)
             .bind(evidence_ref.as_deref())
@@ -1205,17 +1208,19 @@ pub(crate) async fn apply_event(
         KernelCommand::OpenPtySession {
             pty_session_id,
             generation,
+            engine_session_id,
             title,
         } => {
             sqlx::query(
                 "INSERT INTO gwk.pty_session \
-                   (id, version, state, generation, attach_count, detach_count, title, \
-                    opened_at, updated_at) \
-                 VALUES ($1, $2, 'running', $3, 0, 0, $4, $5::timestamptz, $5::timestamptz)",
+                   (id, version, state, generation, engine_session_id, attach_count, detach_count, title, \
+                     opened_at, updated_at) \
+                  VALUES ($1, $2, 'running', $3, $4, 0, 0, $5, $6::timestamptz, $6::timestamptz)",
             )
             .bind(pty_session_id.as_str())
             .bind(version)
             .bind(generation.as_str())
+            .bind(engine_session_id.as_ref().map(|id| id.as_str()))
             .bind(title.as_deref())
             .bind(at)
             .execute(&mut *conn)
@@ -1249,6 +1254,24 @@ pub(crate) async fn apply_event(
             .await
             .map_err(|e| db("record pty detach", e))?;
             require_one(done, "pty_session", pty_session_id.as_str())?;
+        }
+        KernelCommand::SendPtyInput {
+            pty_session_id,
+            generation,
+            ..
+        } => {
+            let lifetime = gwk_domain::ids::pty_session_lifetime_id(pty_session_id, generation);
+            let done = sqlx::query(
+                "UPDATE gwk.pty_session SET version = $2, updated_at = $3::timestamptz \
+                 WHERE id = $1",
+            )
+            .bind(lifetime.as_str())
+            .bind(version)
+            .bind(at)
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| db("record pty input", e))?;
+            require_one(done, "pty_session", lifetime.as_str())?;
         }
         KernelCommand::ClosePtySession { pty_session_id, .. } => {
             // No DELETE: the S8 receipt reads closed sessions' rows, and the
@@ -1311,7 +1334,8 @@ pub(crate) async fn write_receipt(
     conn: &mut PgConnection,
     receipt: &gwk_domain::entity::Receipt,
 ) -> Result<(), Refusal> {
-    sqlx::query(
+    let actor = json_opt(Some(&receipt.actor))?;
+    let inserted = sqlx::query(
         "INSERT INTO gwk.receipt \
            (id, actor, action, subject_type, subject_id, from_state, to_state, \
             observed_basis, ts) \
@@ -1319,7 +1343,7 @@ pub(crate) async fn write_receipt(
          ON CONFLICT (id) DO NOTHING",
     )
     .bind(receipt.id.as_str())
-    .bind(json_opt(Some(&receipt.actor))?)
+    .bind(actor.clone())
     .bind(&receipt.action)
     .bind(&receipt.subject_type)
     .bind(&receipt.subject_id)
@@ -1330,7 +1354,48 @@ pub(crate) async fn write_receipt(
     .execute(&mut *conn)
     .await
     .map_err(|e| db("write receipt", e))?;
-    Ok(())
+    if inserted.rows_affected() == 1 {
+        return Ok(());
+    }
+
+    // A receipt is immutable, so an identical retry is a no-op and a changed
+    // fact under the same id is an idempotency conflict. Silently keeping the
+    // old row would let a refused send later succeed while its only receipt
+    // continued to attest the refusal.
+    let identical: bool = sqlx::query_scalar(
+        "SELECT actor = $2::jsonb \
+             AND action = $3 \
+             AND subject_type = $4 \
+             AND subject_id = $5 \
+             AND from_state IS NOT DISTINCT FROM $6 \
+             AND to_state IS NOT DISTINCT FROM $7 \
+             AND observed_basis IS NOT DISTINCT FROM $8 \
+             AND ts = $9::timestamptz \
+           FROM gwk.receipt WHERE id = $1",
+    )
+    .bind(receipt.id.as_str())
+    .bind(actor)
+    .bind(&receipt.action)
+    .bind(&receipt.subject_type)
+    .bind(&receipt.subject_id)
+    .bind(receipt.from.as_deref())
+    .bind(receipt.to.as_deref())
+    .bind(receipt.observed_basis.as_deref())
+    .bind(receipt.ts.as_str())
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(|e| db("compare existing receipt", e))?;
+    if identical {
+        Ok(())
+    } else {
+        Err(Refusal::new(
+            KernelErrorCode::IdempotencyConflict,
+            format!(
+                "receipt {} already records a different authority decision",
+                receipt.id
+            ),
+        ))
+    }
 }
 
 /// Raise the deduplicated attention item a page owes.

@@ -114,10 +114,36 @@ pub fn envelope(key: &str, command: &KernelCommand) -> CommandEnvelope {
 /// Submit and require success. The key is the caller's, so every case names its
 /// own — reusing one is exactly what this kernel is supposed to refuse.
 pub async fn apply(store: &PgEventStore, key: &str, command: KernelCommand) -> Vec<EventEnvelope> {
-    match store.submit(&envelope(key, &command)).await {
+    apply_as(store, key, actor("kernel"), command).await
+}
+
+/// Submit as a specific envelope actor and require success.
+pub async fn apply_as(
+    store: &PgEventStore,
+    key: &str,
+    actor: Actor,
+    command: KernelCommand,
+) -> Vec<EventEnvelope> {
+    match store.submit(&envelope_as(key, actor, &command)).await {
         KernelResult::CommandApplied { events, .. } => events,
         other => panic!("{key}: expected CommandApplied, got {other:?}"),
     }
+}
+
+/// Submit an authority grant or revoke and require success.
+///
+/// Administering authority is an operator act — the kernel refuses
+/// `grant_authority` and `revoke_authority` from any other actor kind, so a
+/// conforming orchestrator cannot write the standing authority it runs under.
+/// Every suite that seeds a grant therefore submits it AS the operator while
+/// the GRANTEE stays the kernel actor its granted commands are submitted as.
+/// The two being different actors is the property, not a fixture detail.
+pub async fn administer(
+    store: &PgEventStore,
+    key: &str,
+    command: KernelCommand,
+) -> Vec<EventEnvelope> {
+    apply_as(store, key, actor("operator"), command).await
 }
 
 /// Submit and require a refusal, returning the code and message to assert on.
@@ -126,7 +152,19 @@ pub async fn refuse(
     key: &str,
     command: KernelCommand,
 ) -> (KernelErrorCode, String) {
-    match store.submit(&envelope(key, &command)).await {
+    refuse_as(store, key, actor("kernel"), command).await
+}
+
+/// Submit as a specific envelope actor and require a refusal. The actor is the
+/// subject of some refusals rather than a detail of them — authority
+/// administration is refused on actor kind alone.
+pub async fn refuse_as(
+    store: &PgEventStore,
+    key: &str,
+    actor: Actor,
+    command: KernelCommand,
+) -> (KernelErrorCode, String) {
+    match store.submit(&envelope_as(key, actor, &command)).await {
         KernelResult::Error { code, message, .. } => (code, message),
         other => panic!("{key}: expected a refusal, got {other:?}"),
     }
@@ -628,7 +666,7 @@ pub async fn populate(store: &PgEventStore) {
     .await;
     // `issue_command` is in the authority risk table, so the grant comes first
     // — and it is the row that populates `authority_grant`.
-    apply(
+    administer(
         store,
         "grant",
         KernelCommand::GrantAuthority {
@@ -810,6 +848,7 @@ pub async fn populate(store: &PgEventStore) {
         KernelCommand::OpenPtySession {
             pty_session_id: PtySessionId::new("pty-1"),
             generation: PtySessionGeneration::new("gen-1"),
+            engine_session_id: Some(EngineSessionId::new("s-1")),
             title: Some("the parity fixture session".to_owned()),
         },
     )
@@ -883,11 +922,26 @@ impl Client<UnixStream> {
     pub async fn connect(path: &std::path::Path) -> (Self, ServerControl) {
         Self::greet(UnixStream::connect(path).await.expect("connect")).await
     }
+
+    pub async fn connect_with_capabilities(
+        path: &std::path::Path,
+        capabilities: &[&str],
+    ) -> (Self, ServerControl) {
+        Self::greet_with(
+            UnixStream::connect(path).await.expect("connect"),
+            capabilities,
+        )
+        .await
+    }
 }
 
 impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Client<S> {
     /// Take an open transport through the handshake.
     pub async fn greet(stream: S) -> (Self, ServerControl) {
+        Self::greet_with(stream, &[]).await
+    }
+
+    pub async fn greet_with(stream: S, capabilities: &[&str]) -> (Self, ServerControl) {
         let mut client = Self {
             stream,
             budget: Budget::new(
@@ -895,8 +949,11 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Client<S> {
                 CONNECTION_EGRESS_BYTES_PER_WINDOW,
             ),
         };
+        let capabilities = serde_json::to_string(capabilities).expect("serialize capabilities");
         client
-            .send(r#"{"type":"hello","protocol_major":1,"protocol_minor":0,"capabilities":[]}"#)
+            .send(&format!(
+                r#"{{"type":"hello","protocol_major":1,"protocol_minor":0,"capabilities":{capabilities}}}"#
+            ))
             .await;
         let ack = client.recv().await.expect("the daemon acked");
         (client, ack)
@@ -1020,6 +1077,12 @@ impl Running {
 
     pub async fn client(&self) -> Client {
         Client::connect(&self.path).await.0
+    }
+
+    pub async fn client_with_capabilities(&self, capabilities: &[&str]) -> Client {
+        Client::connect_with_capabilities(&self.path, capabilities)
+            .await
+            .0
     }
 
     /// Stop accepting and drain. Every client must be dropped first — a live one

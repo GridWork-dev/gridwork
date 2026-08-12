@@ -3,6 +3,7 @@
   "version": 5,
   "state": "closed",
   "generation": "gen-0001",
+  "engine_session_id": "session-0001",
   "attach_count": 3,
   "detach_count": 3,
   "title": "the daily driver",
