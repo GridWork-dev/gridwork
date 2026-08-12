@@ -331,6 +331,11 @@ struct ConsoleModel {
     queue_selected: Option<QueueTarget>,
     config_selected: Option<ConfigTarget>,
     term_selected: Option<TermTarget>,
+    /// The terminal was suspended and resumed (an $EDITOR ran) since the
+    /// loop last polled — the signal listener must be re-armed so a SIGINT
+    /// latched during the cooked-mode windows doesn't quit the console on
+    /// the next poll.
+    terminal_resumed: bool,
 }
 
 impl ConsoleModel {
@@ -410,6 +415,7 @@ async fn run_workspace(start: WorkspaceStart, requested_motion: MotionMode) -> R
         queue_selected: None,
         config_selected: None,
         term_selected: None,
+        terminal_resumed: false,
     };
     if let Some(repository) = model.config_repository.as_ref() {
         match repository.reconcile_startup(
@@ -579,6 +585,13 @@ async fn workspace_loop(
                     ).await? {
                         return Ok(());
                     }
+                    if std::mem::take(&mut model.terminal_resumed) {
+                        // An $EDITOR ran in cooked mode; a ^C typed in those
+                        // windows latches a SIGINT the pinned listener would
+                        // deliver on this poll, quitting the console long
+                        // after the keystroke. A fresh listener discards it.
+                        ctrl_c.set(tokio::signal::ctrl_c());
+                    }
                     dirty = true;
                 }
                 Some(InputEvent::Fault(why)) => {
@@ -652,7 +665,12 @@ async fn workspace_loop(
                 }
             } => {
                 let Some(control) = control? else {
+                    // The hosted terminal's stream ended (host hangup, kernel
+                    // close). A frozen frame is indistinguishable from a
+                    // quiet one, so the end becomes visible state.
                     pty_stream.take();
+                    model.shell.set_notice("terminal stream closed");
+                    dirty = true;
                     continue;
                 };
                 if let Some(drilldown) = model.drilldown.as_mut() {
@@ -964,7 +982,16 @@ async fn handle_workspace_input(
             reconcile_selection(model);
             if destination == Surface::TermAttach && model.drilldown.is_none() {
                 if let Some(TermTarget::Session(session_id)) = model.term_selected.clone() {
-                    open_workspace_attach(data, model, pty_stream, session_id).await?;
+                    // A refused attach (swept host, closed lifetime, stale
+                    // generation) is a property of one row, not of the
+                    // console: land back on the list with the kernel's
+                    // reason instead of tearing the whole workspace down.
+                    if let Err(error) =
+                        open_workspace_attach(data, model, pty_stream, session_id).await
+                    {
+                        model.shell.route(Surface::TermLifetimes);
+                        model.shell.set_notice(format!("attach refused -- {error}"));
+                    }
                 } else {
                     model.shell.route(Surface::TermLifetimes);
                     model
@@ -978,7 +1005,11 @@ async fn handle_workspace_input(
             if model.shell.surface() == Surface::TermLifetimes
                 && let Some(TermTarget::Session(session_id)) = model.term_selected.clone()
             {
-                open_workspace_attach(data, model, pty_stream, session_id).await?;
+                if let Err(error) =
+                    open_workspace_attach(data, model, pty_stream, session_id).await
+                {
+                    model.shell.set_notice(format!("attach refused -- {error}"));
+                }
             } else if model.shell.surface() == Surface::WorkConfig {
                 open_config_edit(terminal, input_pump, data, model).await?;
             }
@@ -1164,6 +1195,7 @@ async fn open_config_edit(
             let evidence_id = EvidenceId::new(format!("config-{}", crate::nonce()));
             let edit = repository.commit_editor(path, evidence_id.clone());
             resume_workspace_terminal(terminal, input_pump)?;
+            model.terminal_resumed = true;
             match edit {
                 Ok(command) => {
                     match submit_console_command(
@@ -1236,6 +1268,15 @@ async fn commit_config_form(data: &mut Client, model: &mut ConsoleModel) -> Resu
         model
             .shell
             .set_notice(format!("config form refused -- {error}"));
+        return Ok(());
+    }
+    if !form.fields().iter().any(|field| field.changed()) {
+        // finish() would refuse this as NoFormChanges AFTER the form was
+        // consumed, destroying the session and the typed commit message;
+        // catching it here keeps the form open like every other refusal.
+        model
+            .shell
+            .set_notice("config form has no changes to commit");
         return Ok(());
     }
     let Some(repository) = model.config_repository.clone() else {
@@ -1436,6 +1477,13 @@ async fn execute_console_verb(
         model
             .shell
             .set_notice(format!("{} refused -- {error}", command.command_type()));
+        if verb == ContextVerb::EditBudget {
+            // The form was built against a version the kernel just refused;
+            // key handling is already back in view mode, so a kept form
+            // would paint dead fields over live keys. Drop it — 'b' rebuilds
+            // from the refreshed attempt.
+            model.budget_form = None;
+        }
         model.queue = refresh_queue(data).await?;
         refresh_surface(data, model).await?;
         reconcile_selection(model);
