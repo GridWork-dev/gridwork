@@ -37,6 +37,7 @@
 pub mod arrange;
 pub mod input;
 pub mod render;
+pub mod runtime;
 
 use std::cmp::Reverse;
 use std::fmt;
@@ -146,6 +147,23 @@ impl Tab {
             }
         }
         count(&self.root)
+    }
+
+    /// Every pane identity in paint order.
+    pub fn pane_ids(&self) -> Vec<PaneId> {
+        fn collect(node: &Node, out: &mut Vec<PaneId>) {
+            match node {
+                Node::Pane(id) => out.push(*id),
+                Node::Split(split) => {
+                    for part in &split.parts {
+                        collect(&part.node, out);
+                    }
+                }
+            }
+        }
+        let mut panes = Vec::new();
+        collect(&self.root, &mut panes);
+        panes
     }
 
     /// Every pane's rectangle inside `area`, in paint order.
@@ -296,7 +314,7 @@ impl WorkspaceState {
     }
 
     /// Create a workspace with one tab and one pane, and switch to it.
-    pub fn create_workspace(&mut self) {
+    pub fn create_workspace(&mut self) -> PaneId {
         let pane = self.mint_pane();
         let name = self.next_workspace.to_string();
         self.next_workspace += 1;
@@ -307,18 +325,18 @@ impl WorkspaceState {
             next_tab: 2,
         });
         self.active = self.workspaces.len() - 1;
+        pane
     }
 
     /// Create a tab in the active workspace, and switch to it.
-    pub fn create_tab(&mut self) {
+    pub fn create_tab(&mut self) -> Option<PaneId> {
         let pane = self.mint_pane();
-        let Some(workspace) = self.workspaces.get_mut(self.active) else {
-            return;
-        };
+        let workspace = self.workspaces.get_mut(self.active)?;
         let title = workspace.next_tab.to_string();
         workspace.next_tab += 1;
         workspace.tabs.push(Tab::new(title, pane));
         workspace.active = workspace.tabs.len() - 1;
+        Some(pane)
     }
 
     /// Split the focused pane along `axis`; the new pane takes focus.
@@ -327,16 +345,15 @@ impl WorkspaceState {
     /// newcomer — the other siblings keep their sizes. Under a parent already
     /// split on the same axis the new pane joins as a sibling; under the
     /// other axis it nests a fresh two-part split in place.
-    pub fn split(&mut self, axis: Axis) {
-        if self.active_tab_mut().is_none() {
-            return;
-        }
+    pub fn split(&mut self, axis: Axis) -> Option<PaneId> {
+        self.active_tab_mut()?;
         let pane = self.mint_pane();
-        let Some(tab) = self.active_tab_mut() else {
-            return;
-        };
+        let tab = self.active_tab_mut()?;
         if split_at(&mut tab.root, tab.focus, axis, pane) {
             tab.focus = pane;
+            Some(pane)
+        } else {
+            None
         }
     }
 
@@ -392,6 +409,13 @@ impl WorkspaceState {
     pub fn previous_workspace(&mut self) {
         if !self.workspaces.is_empty() {
             self.active = (self.active + self.workspaces.len() - 1) % self.workspaces.len();
+        }
+    }
+
+    /// Select one workspace by position. A stale position is a no-op.
+    pub fn select_workspace(&mut self, index: usize) {
+        if index < self.workspaces.len() {
+            self.active = index;
         }
     }
 

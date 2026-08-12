@@ -1,28 +1,40 @@
 //! The production terminal loop over live kernel projections and events.
-
+//!
+//! Derivation: POSIX-TERM §11.1.3, §11.1.10, §11.1.11 — a consumer
+//! attach is not the terminal's last file-description close or a modem
+//! disconnect, so dropping and rebuilding client streams never retires the
+//! hosted child. PTY controls and projection rows use this repository's own
+//! typed protocol and carry their own generation/cursor recovery semantics.
+//!
 use std::collections::BTreeSet;
 use std::io::IsTerminal as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use base64::prelude::{BASE64_STANDARD, Engine as _};
 use crossterm::QueueableCommand as _;
 use crossterm::cursor::Show;
 use crossterm::event::{self, Event};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
-use gwk_domain::entity::{CostEntry, Evidence};
+use gwk_domain::ByteCount;
+use gwk_domain::command::KernelCommand;
+use gwk_domain::entity::{CostEntry, Evidence, WorkspaceNode};
 use gwk_domain::envelope::EventEnvelope;
 use gwk_domain::fsm::GateVerdict;
-use gwk_domain::ids::{AttentionItemId, EvidenceId, PtySessionId, RequestId, Seq, Timestamp};
+use gwk_domain::ids::{
+    AttentionItemId, EvidenceId, PtySessionId, RequestId, Seq, Timestamp, WorkspaceNodeId,
+};
 use gwk_domain::protocol::{
-    KernelErrorCode, KernelRequest, KernelResult, ProjectionKind, ProjectionRecord, ServerControl,
+    KernelErrorCode, KernelRequest, KernelResult, PTY_INPUT_MAX_BYTES, ProjectionKind,
+    ProjectionRecord, PtyInputData, ServerControl,
 };
 use gwk_theme::marks::GlyphSet;
 use gwk_theme::tier::{ColorChoice, ColorTier, TerminalEnv};
 use gwk_tui::board::{self, BoardState, BoardTarget, BoardView, EventTail};
 use gwk_tui::config::{self, ConfigForm, ConfigRepository, ConfigState, ConfigTarget};
 use gwk_tui::console::{self, FleetContext, HallContext, LoadState};
-use gwk_tui::drilldown::{self, DrilldownState, DrilldownTarget, IngestDisposition};
+use gwk_tui::drilldown::{self, DrilldownState, IngestDisposition};
 use gwk_tui::estate::{EstateSnapshot, EventIndex, ProjectionSnapshot, Stamped};
 use gwk_tui::hall::{
     AgentState, DistrictId, Focus, FrameInput, HallTarget, MotionMode, district_stack_order,
@@ -32,15 +44,21 @@ use gwk_tui::queue::{self, QueueState, QueueTarget};
 use gwk_tui::replay::ReplayTimeline;
 use gwk_tui::runtime::{FramePacer, resolve_motion};
 use gwk_tui::shell::{
-    self, AttachRailItem, AttachRailState, AttachRailTerm, BudgetFormState, ContextVerb,
-    GateDecisionState, Lens, ShellAction, ShellState, Surface, TermState, TermTarget,
+    self, BudgetFormState, ContextVerb, GateDecisionState, Lens, ShellAction, ShellState, Surface,
+    TermState, TermTarget,
 };
+use gwk_tui::workspace;
+use gwk_tui::workspace::input::{
+    Action as WorkspaceAction, Mode as WorkspaceMode, Outcome as WorkspaceOutcome,
+};
+use gwk_tui::workspace::render::WorkspaceTarget;
+use gwk_tui::workspace::runtime::{Mutation as WorkspaceMutation, WorkspaceRuntime};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::{Terminal, TerminalOptions, Viewport};
 use tokio::sync::mpsc;
 
-use crate::client::Client;
+use crate::client::{Client, ClientReader, ClientWriter};
 use crate::exit::Failure;
 
 const PAGE_LIMIT: u32 = 256;
@@ -48,6 +66,7 @@ const SNAPSHOT_ATTEMPTS: usize = 3;
 /// Stream closes survived back-to-back (no delivered batch between them)
 /// before the live loop stops resubscribing and reports the close.
 const STREAM_RESUME_ATTEMPTS: u32 = 3;
+const PTY_RECONNECT_ATTEMPTS: usize = 3;
 const INPUT_POLL: Duration = Duration::from_millis(100);
 const EVENT_TAIL_ROWS: usize = 512;
 
@@ -136,11 +155,111 @@ impl InputPump {
 /// constraint — an unbounded buffer here would absorb batches forever and
 /// make SlowConsumer structurally unreachable while memory and staleness
 /// grew without witness.
-const CONTROL_PUMP_DEPTH: usize = 8;
+const CONTROL_PUMP_DEPTH: usize = 32;
 
 struct ControlPump {
     receiver: mpsc::Receiver<Result<Option<ServerControl>, Failure>>,
     task: tokio::task::JoinHandle<()>,
+}
+
+enum PtyPumpCommand {
+    Attach {
+        request_id: RequestId,
+        session_id: PtySessionId,
+        generation: Option<gwk_domain::ids::PtySessionGeneration>,
+        cursor: Option<gwk_domain::ids::PtyFrameSeq>,
+    },
+}
+
+struct PtyPump {
+    commands: mpsc::Sender<PtyPumpCommand>,
+    receiver: mpsc::Receiver<Result<Option<ServerControl>, Failure>>,
+    reader: tokio::task::JoinHandle<()>,
+    writer: tokio::task::JoinHandle<()>,
+}
+
+impl PtyPump {
+    fn start(client: Client) -> Self {
+        let (mut reader, mut writer): (ClientReader, ClientWriter) = client.into_parts();
+        let (control_sender, receiver) = mpsc::channel(CONTROL_PUMP_DEPTH);
+        let reader_sender = control_sender.clone();
+        let reader_task = tokio::spawn(async move {
+            loop {
+                let result = reader.receive().await;
+                let closed = matches!(result, Ok(None) | Err(_));
+                if reader_sender.send(result).await.is_err() || closed {
+                    break;
+                }
+            }
+        });
+        let (commands, mut command_receiver) = mpsc::channel(CONTROL_PUMP_DEPTH);
+        let writer_task = tokio::spawn(async move {
+            while let Some(command) = command_receiver.recv().await {
+                let result = match command {
+                    PtyPumpCommand::Attach {
+                        request_id,
+                        session_id,
+                        generation,
+                        cursor,
+                    } => {
+                        writer
+                            .request_with_id(
+                                request_id,
+                                KernelRequest::PtyAttach {
+                                    session_id,
+                                    generation,
+                                    cursor,
+                                },
+                            )
+                            .await
+                    }
+                };
+                if let Err(error) = result {
+                    let _ = control_sender.send(Err(error)).await;
+                    break;
+                }
+            }
+        });
+        Self {
+            commands,
+            receiver,
+            reader: reader_task,
+            writer: writer_task,
+        }
+    }
+
+    async fn attach(
+        &self,
+        request_id: RequestId,
+        session_id: PtySessionId,
+        generation: Option<gwk_domain::ids::PtySessionGeneration>,
+        cursor: Option<gwk_domain::ids::PtyFrameSeq>,
+    ) -> Result<(), Failure> {
+        self.commands
+            .send(PtyPumpCommand::Attach {
+                request_id,
+                session_id,
+                generation,
+                cursor,
+            })
+            .await
+            .map_err(|_| Failure::unreachable("the PTY writer stopped"))
+    }
+
+    async fn receive(&mut self) -> Result<Option<ServerControl>, Failure> {
+        self.receiver.recv().await.unwrap_or(Ok(None))
+    }
+
+    fn try_receive(&mut self) -> Option<Result<Option<ServerControl>, Failure>> {
+        self.receiver.try_recv().ok()
+    }
+}
+
+impl Drop for PtyPump {
+    fn drop(&mut self) {
+        self.reader.abort();
+        self.writer.abort();
+    }
 }
 
 impl ControlPump {
@@ -323,7 +442,7 @@ struct ConsoleModel {
     budget_form: Option<BudgetFormState>,
     confirmation_target: Option<ConfirmationTarget>,
     terms: TermState,
-    drilldown: Option<DrilldownState>,
+    workspace: WorkspaceRuntime,
     hall_phase: usize,
     hall_cost_micros: u64,
     hall_selected: Option<DistrictId>,
@@ -336,6 +455,29 @@ struct ConsoleModel {
     /// latched during the cooked-mode windows doesn't quit the console on
     /// the next poll.
     terminal_resumed: bool,
+    pending_workspace_mutation: Option<PendingWorkspaceMutation>,
+    pending_workspace_stream_restart: bool,
+    retired_workspace_bindings: BTreeSet<RetiredWorkspaceBinding>,
+}
+
+#[derive(Clone)]
+struct PendingWorkspaceMutation {
+    mutation: WorkspaceMutation,
+    keys: Vec<String>,
+    uncertain: bool,
+    completion: WorkspaceMutationCompletion,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkspaceMutationCompletion {
+    Stay,
+    Attach,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct RetiredWorkspaceBinding {
+    node: WorkspaceNodeId,
+    session: PtySessionId,
 }
 
 impl ConsoleModel {
@@ -360,6 +502,7 @@ struct ConsoleHits {
     board: HitMap<BoardTarget>,
     queue: HitMap<QueueTarget>,
     config: HitMap<ConfigTarget>,
+    workspace: HitMap<WorkspaceTarget>,
 }
 
 impl ConsoleHits {
@@ -368,6 +511,7 @@ impl ConsoleHits {
         self.board.clear();
         self.queue.clear();
         self.config.clear();
+        self.workspace.clear();
     }
 }
 
@@ -391,6 +535,7 @@ async fn run_workspace(start: WorkspaceStart, requested_motion: MotionMode) -> R
         watermark: None,
         complete: true,
     };
+    let workspace_rows = refresh_workspace_rows(&mut data).await?;
     let (config, config_repository, config_evidence, config_notice) =
         refresh_config(&mut data).await;
     let hall_selected = visible_district_order(&estate.frame).first().cloned();
@@ -407,7 +552,7 @@ async fn run_workspace(start: WorkspaceStart, requested_motion: MotionMode) -> R
         budget_form: None,
         confirmation_target: None,
         terms,
-        drilldown: None,
+        workspace: WorkspaceRuntime::from_projection(&workspace_rows),
         hall_phase: 0,
         hall_cost_micros: refresh_hall_cost(&mut data).await?,
         hall_selected,
@@ -416,6 +561,9 @@ async fn run_workspace(start: WorkspaceStart, requested_motion: MotionMode) -> R
         config_selected: None,
         term_selected: None,
         terminal_resumed: false,
+        pending_workspace_mutation: None,
+        pending_workspace_stream_restart: false,
+        retired_workspace_bindings: BTreeSet::new(),
     };
     if let Some(repository) = model.config_repository.as_ref() {
         match repository.reconcile_startup(
@@ -448,7 +596,10 @@ async fn run_workspace(start: WorkspaceStart, requested_motion: MotionMode) -> R
 
     let mut pty_stream = None;
     if let Some(session_id) = start.attach {
-        open_workspace_attach(&mut data, &mut model, &mut pty_stream, session_id).await?;
+        if !bind_workspace_session(&mut data, &mut model, session_id).await? {
+            model.shell.route(Surface::TermLifetimes);
+        }
+        restart_workspace_streams_soft(&mut data, &mut model, &mut pty_stream).await?;
     }
 
     let terminal_env = TerminalEnv::from_process(ColorChoice::Auto);
@@ -506,7 +657,7 @@ async fn workspace_loop(
     data: &mut Client,
     stream: &mut ControlPump,
     stream_id: &mut RequestId,
-    pty_stream: &mut Option<ControlPump>,
+    pty_stream: &mut Option<PtyPump>,
     events: &mut EventIndex,
     model: &mut ConsoleModel,
     tier: ColorTier,
@@ -522,6 +673,7 @@ async fn workspace_loop(
     // dies immediately after every resume is a kernel-side condition the
     // loop cannot heal by resubscribing again.
     let mut consecutive_closes: u32 = 0;
+    let mut consecutive_pty_failures: usize = 0;
     let ctrl_c = tokio::signal::ctrl_c();
     tokio::pin!(ctrl_c);
     let mut terminate =
@@ -569,6 +721,14 @@ async fn workspace_loop(
             _ = clock.tick() => {
                 model.queue.now = current_timestamp();
                 model.update_attention_marks();
+                let mutation_completed = resume_workspace_mutation(data, model).await?;
+                let retirement_changed = retry_retired_workspace_bindings(data, model).await?;
+                if mutation_completed
+                    || retirement_changed
+                    || model.pending_workspace_stream_restart
+                {
+                    restart_workspace_streams_soft(data, model, pty_stream).await?;
+                }
                 dirty = true;
             },
             input_event = input.receiver.recv() => match input_event {
@@ -612,8 +772,37 @@ async fn workspace_loop(
                         Some(ServerControl::EventBatch { request_id, events: batch, cursor })
                             if request_id == *stream_id =>
                         {
+                            let workspace_changed = batch
+                                .iter()
+                                .any(|event| event.aggregate_type == "workspace_node");
+                            let ended_lifetimes: Vec<_> = batch
+                                .iter()
+                                .filter(|event| event.event_type == "pty_session_closed")
+                                .map(|event| PtySessionId::new(event.aggregate_id.as_str()))
+                                .collect();
+                            let session_ended = !ended_lifetimes.is_empty();
                             append_event_batch(&mut model.board, batch.clone(), Some(cursor));
                             events.ingest(batch).map_err(estate_failure)?;
+                            if workspace_changed {
+                                let rows = refresh_workspace_rows(data).await?;
+                                if !model.workspace.matches_projection(&rows) {
+                                    model.workspace.replace_projection(&rows);
+                                }
+                            }
+                            if !ended_lifetimes.is_empty() {
+                                let panes: Vec<_> = ended_lifetimes
+                                    .iter()
+                                    .flat_map(|lifetime| {
+                                        model.workspace.panes_for_session(lifetime)
+                                    })
+                                    .collect();
+                                for pane in panes {
+                                    close_retired_workspace_pane(data, model, pane).await?;
+                                }
+                            }
+                            if workspace_changed || session_ended {
+                                restart_workspace_streams_soft(data, model, pty_stream).await?;
+                            }
                             batched = true;
                             consecutive_closes = 0;
                         }
@@ -664,21 +853,73 @@ async fn workspace_loop(
                     None => std::future::pending().await,
                 }
             } => {
-                let Some(control) = control? else {
-                    // The hosted terminal's stream ended (host hangup, kernel
-                    // close). A frozen frame is indistinguishable from a
-                    // quiet one, so the end becomes visible state.
-                    pty_stream.take();
-                    model.shell.set_notice("terminal stream closed");
-                    dirty = true;
-                    continue;
-                };
-                if let Some(drilldown) = model.drilldown.as_mut() {
-                    let disposition = drilldown.ingest(&control);
-                    if disposition != IngestDisposition::Unrelated && drilldown.cells().is_none() {
-                        refresh_session_snapshot(data, drilldown).await?;
+                let mut next = match control {
+                    Ok(control) => control,
+                    Err(error) => {
+                        model.workspace.clear_requests();
+                        pty_stream.take();
+                        consecutive_pty_failures = consecutive_pty_failures.saturating_add(1);
+                        consecutive_pty_failures = recover_workspace_streams(
+                            data,
+                            model,
+                            pty_stream,
+                            &error,
+                            consecutive_pty_failures,
+                        )
+                        .await;
+                        dirty = true;
+                        continue;
                     }
-                    dirty = disposition != IngestDisposition::Unrelated;
+                };
+                let mut snapshots = BTreeSet::new();
+                let mut reconnect = false;
+                let mut retired = false;
+                loop {
+                    let Some(control) = next else {
+                        model.workspace.clear_requests();
+                        pty_stream.take();
+                        consecutive_pty_failures = consecutive_pty_failures.saturating_add(1);
+                        consecutive_pty_failures = recover_workspace_streams(
+                            data,
+                            model,
+                            pty_stream,
+                            &Failure::unreachable("terminal transport closed"),
+                            consecutive_pty_failures,
+                        )
+                        .await;
+                        dirty = true;
+                        break;
+                    };
+                    consecutive_pty_failures = 0;
+                    let effect = model.workspace.ingest(&control);
+                    dirty |= effect.dirty;
+                    if effect.needs_snapshot && let Some(pane) = effect.pane {
+                        snapshots.insert(pane);
+                    }
+                    reconnect |= effect.reconnect;
+                    if effect.retired && let Some(pane) = effect.pane {
+                        retired |= close_retired_workspace_pane(data, model, pane).await?;
+                    }
+                    next = match pty_stream.as_mut().and_then(PtyPump::try_receive) {
+                        Some(buffered) => buffered?,
+                        None => break,
+                    };
+                }
+                for pane in snapshots {
+                    if let Some(state) = model.workspace.attachment_mut(pane)
+                        && let Err(error) = refresh_session_snapshot(data, state).await
+                    {
+                        if error.code == KernelErrorCode::NotFound {
+                            retired |= close_retired_workspace_pane(data, model, pane).await?;
+                        } else {
+                            model
+                                .shell
+                                .set_notice(format!("terminal snapshot unavailable -- {error}"));
+                        }
+                    }
+                }
+                if reconnect || retired {
+                    restart_workspace_streams_soft(data, model, pty_stream).await?;
                 }
             }
         }
@@ -824,43 +1065,30 @@ fn draw_workspace(
                         );
                     }
                     Surface::TermAttach => {
-                        if let Some(drilldown) = &model.drilldown {
-                            let selected = DrilldownTarget::Session(drilldown.session_id().clone());
-                            let body = shell::body_area(area);
-                            let session_area = if model.shell.rail_visible() && area.width > 100 {
-                                let rail = Rect::new(body.x, body.y, 28, body.height);
-                                shell::render_attach_rail(
-                                    rail,
-                                    frame.buffer_mut(),
-                                    &attach_rail_state(model, drilldown.session_id()),
-                                    tier,
-                                );
-                                for y in body.y..body.y.saturating_add(body.height) {
-                                    frame.buffer_mut().set_string(
-                                        body.x.saturating_add(28),
-                                        y,
-                                        "|",
-                                        ratatui::style::Style::default(),
-                                    );
-                                }
-                                Rect::new(
-                                    body.x.saturating_add(30),
-                                    body.y,
-                                    body.width.saturating_sub(30),
-                                    body.height,
-                                )
-                            } else {
-                                body
-                            };
-                            drilldown::render(
-                                session_area,
-                                frame.buffer_mut(),
-                                drilldown,
-                                Some(&selected),
-                                tier,
-                                &mut HitMap::new(),
-                            );
-                        }
+                        let body = shell::body_area(area);
+                        workspace::render::render(
+                            body,
+                            frame.buffer_mut(),
+                            &model.workspace.state,
+                            tier,
+                            glyphs,
+                            &gwk_tui::chrome::ChromeTheme::signal(),
+                            &mut hits.workspace,
+                        );
+                        workspace::runtime::render_panes(
+                            body,
+                            frame.buffer_mut(),
+                            &model.workspace,
+                            tier,
+                        );
+                        workspace::render::render_input(
+                            body,
+                            frame.buffer_mut(),
+                            &model.workspace.input,
+                            tier,
+                            glyphs,
+                            &gwk_tui::chrome::ChromeTheme::signal(),
+                        );
                     }
                     surface => {
                         let mut state = filtered_board(&model.board, model.shell.filter());
@@ -900,7 +1128,7 @@ async fn handle_workspace_input(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     input_pump: &mut InputPump,
     data: &mut Client,
-    pty_stream: &mut Option<ControlPump>,
+    pty_stream: &mut Option<PtyPump>,
     model: &mut ConsoleModel,
     hits: &ConsoleHits,
     pacer: &mut FramePacer,
@@ -942,14 +1170,68 @@ async fn handle_workspace_input(
             Surface::WorkConfig => {
                 model.config_selected = hits.config.click(mouse).cloned();
             }
-            Surface::TermLifetimes | Surface::TermAttach => {}
+            Surface::TermLifetimes => {}
+            Surface::TermAttach => {
+                if let Some(target) = hits.workspace.click(mouse) {
+                    match target {
+                        WorkspaceTarget::Pane(pane) => {
+                            model.workspace.state.focus_pane(*pane);
+                            update_workspace_subject(model);
+                        }
+                        WorkspaceTarget::Tab(index) => {
+                            model.workspace.state.select_tab(*index);
+                            restart_workspace_streams_soft(data, model, pty_stream).await?;
+                        }
+                    }
+                }
+            }
             _ => model.board_selected = hits.board.click(mouse).cloned(),
         }
+        return Ok(false);
+    }
+    if model.shell.surface() == Surface::TermAttach
+        && model.shell.mode() == shell::ShellMode::View
+        && model.workspace.input.mode() == WorkspaceMode::Passthrough
+        && let Event::Paste(text) = event
+    {
+        send_workspace_bytes(data, pty_stream, model, text.into_bytes()).await?;
         return Ok(false);
     }
     let Event::Key(key) = event else {
         return Ok(false);
     };
+    if model.shell.surface() == Surface::TermAttach && model.shell.mode() == shell::ShellMode::View
+    {
+        match model.workspace.input.handle(key) {
+            WorkspaceOutcome::Forward => {
+                send_workspace_key(data, pty_stream, model, key).await?;
+                return Ok(false);
+            }
+            WorkspaceOutcome::Handled => return Ok(false),
+            WorkspaceOutcome::Act(WorkspaceAction::LeaveWorkspace) => {
+                model.shell.route(Surface::TermLifetimes);
+                pty_stream.take();
+                return Ok(false);
+            }
+            WorkspaceOutcome::Act(action)
+                if model
+                    .workspace
+                    .apply_host_action(action, shell::body_area(area.into())) =>
+            {
+                if workspace_action_changes_stream_set(action) {
+                    restart_workspace_streams_soft(data, model, pty_stream).await?;
+                }
+                update_workspace_subject(model);
+                return Ok(false);
+            }
+            WorkspaceOutcome::Act(action) => {
+                mutate_workspace(data, model, action).await?;
+                restart_workspace_streams_soft(data, model, pty_stream).await?;
+                update_workspace_subject(model);
+                return Ok(false);
+            }
+        }
+    }
     let previous = model.shell.surface();
     let action = model.shell.handle(key);
     match action {
@@ -965,8 +1247,7 @@ async fn handle_workspace_input(
             reconcile_selection(model);
         }
         ShellAction::RouteChanged(destination) => {
-            if model.drilldown.is_some() && destination != Surface::TermAttach {
-                model.drilldown = None;
+            if destination != Surface::TermAttach {
                 pty_stream.take();
             }
             if previous == Surface::WorkConfig && model.shell.surface() != Surface::WorkConfig {
@@ -980,24 +1261,12 @@ async fn handle_workspace_input(
             }
             refresh_surface(data, model).await?;
             reconcile_selection(model);
-            if destination == Surface::TermAttach && model.drilldown.is_none() {
-                if let Some(TermTarget::Session(session_id)) = model.term_selected.clone() {
-                    // A refused attach (swept host, closed lifetime, stale
-                    // generation) is a property of one row, not of the
-                    // console: land back on the list with the kernel's
-                    // reason instead of tearing the whole workspace down.
-                    if let Err(error) =
-                        open_workspace_attach(data, model, pty_stream, session_id).await
-                    {
-                        model.shell.route(Surface::TermLifetimes);
-                        model.shell.set_notice(format!("attach refused -- {error}"));
-                    }
-                } else {
-                    model.shell.route(Surface::TermLifetimes);
-                    model
-                        .shell
-                        .set_notice("select a terminal lifetime before attaching");
-                }
+            if destination == Surface::TermAttach {
+                // The navigator opens the durable workspace exactly as the
+                // kernel projects it. Binding a selected TERM row belongs to
+                // the row's drill action; doing it here would silently replace
+                // the focused pane whenever an operator revisited `:attach`.
+                restart_workspace_streams_soft(data, model, pty_stream).await?;
             }
         }
         ShellAction::MoveSelection(delta) => move_workspace_selection(model, delta),
@@ -1005,9 +1274,10 @@ async fn handle_workspace_input(
             if model.shell.surface() == Surface::TermLifetimes
                 && let Some(TermTarget::Session(session_id)) = model.term_selected.clone()
             {
-                if let Err(error) = open_workspace_attach(data, model, pty_stream, session_id).await
-                {
-                    model.shell.set_notice(format!("attach refused -- {error}"));
+                match bind_workspace_session(data, model, session_id).await {
+                    Ok(true) => restart_workspace_streams_soft(data, model, pty_stream).await?,
+                    Ok(false) => {}
+                    Err(error) => model.shell.set_notice(format!("attach refused -- {error}")),
                 }
             } else if model.shell.surface() == Surface::WorkConfig {
                 open_config_edit(terminal, input_pump, data, model).await?;
@@ -1620,7 +1890,9 @@ fn move_workspace_selection(model: &mut ConsoleModel, delta: i8) {
             );
         }
         Surface::TermAttach => {
-            if let Some(drilldown) = model.drilldown.as_mut() {
+            if let Some(pane) = model.workspace.focused_pane()
+                && let Some(drilldown) = model.workspace.attachment_mut(pane)
+            {
                 drilldown.move_viewport_rows(delta);
             }
         }
@@ -1660,88 +1932,6 @@ fn reconcile_in_order<T: Clone + PartialEq>(order: Vec<T>, selected: &mut Option
     }
 }
 
-fn attach_rail_state(model: &ConsoleModel, attached: &PtySessionId) -> AttachRailState {
-    let agents = model
-        .estate
-        .frame
-        .districts
-        .iter()
-        .flat_map(|district| &district.stations)
-        .flat_map(|station| &station.agents);
-    let mut running = 0;
-    let mut blocked = 0;
-    for agent in agents {
-        match agent.state {
-            AgentState::Running | AgentState::Starting | AgentState::Canceling => running += 1,
-            AgentState::Blocked => blocked += 1,
-            _ => {}
-        }
-    }
-    let audible_attention = model.queue.attention.iter().filter(|item| {
-        item.resolved_at.is_none()
-            && item.acked_at.is_none()
-            && !item
-                .muted_until
-                .as_ref()
-                .is_some_and(|until| until > &model.queue.now)
-    });
-    let attention_count = audible_attention.clone().count()
-        + model
-            .queue
-            .gates
-            .iter()
-            .filter(|gate| gate.verdict == GateVerdict::Pending && gate.question.is_some())
-            .count();
-    let mut queue = model
-        .queue
-        .gates
-        .iter()
-        .filter(|gate| gate.verdict == GateVerdict::Pending && gate.question.is_some())
-        .map(|gate| AttachRailItem {
-            text: format!("gate {}", gate.kind.as_deref().unwrap_or(gate.id.as_str())),
-            attention: true,
-        })
-        .collect::<Vec<_>>();
-    queue.extend(audible_attention.map(|item| AttachRailItem {
-        text: item.summary.clone(),
-        attention: true,
-    }));
-    queue.truncate(5);
-
-    // Round 7 ruling: `/` filters the estate rail — the attach screen's only
-    // list content. The match runs on the text the rail paints, nothing
-    // invisible.
-    let query = model.shell.filter().to_ascii_lowercase();
-    if !query.is_empty() {
-        queue.retain(|item| item.text.to_ascii_lowercase().contains(&query));
-    }
-    let terms = model
-        .terms
-        .sessions
-        .iter()
-        .map(|session| AttachRailTerm {
-            subject: format!("{}:{}", session.id, session.generation),
-            state: session.state.clone(),
-            attached: &session.id == attached,
-        })
-        .filter(|term| {
-            query.is_empty()
-                || term.attached
-                || term.subject.to_ascii_lowercase().contains(&query)
-                || term.state.to_ascii_lowercase().contains(&query)
-        })
-        .collect();
-
-    AttachRailState {
-        running,
-        attention: attention_count,
-        blocked,
-        cost: console::dollars(model.hall_cost_micros),
-        terms,
-        queue,
-    }
-}
-
 fn move_in_order<T: Clone + PartialEq>(order: Vec<T>, selected: &mut Option<T>, delta: i8) {
     if order.is_empty() {
         *selected = None;
@@ -1759,49 +1949,665 @@ fn move_in_order<T: Clone + PartialEq>(order: Vec<T>, selected: &mut Option<T>, 
     *selected = Some(order[next].clone());
 }
 
-async fn open_workspace_attach(
+async fn bind_workspace_session(
     data: &mut Client,
     model: &mut ConsoleModel,
-    pty_stream: &mut Option<ControlPump>,
     session_id: PtySessionId,
-) -> Result<(), Failure> {
-    let mut drilldown = DrilldownState::new(session_id.clone());
-    refresh_session_snapshot(data, &mut drilldown).await?;
-    let mut stream = connect().await?;
-    let (request_id, attached) = stream
-        .attach_pty(
-            session_id,
-            drilldown.generation().cloned(),
-            drilldown.frame_seq(),
-        )
-        .await?;
-    drilldown.begin_attach(request_id);
-    if drilldown.ingest(&attached) == IngestDisposition::Unrelated {
-        return Err(Failure::internal(
-            "PTY attach acknowledgement was unrelated",
-        ));
-    }
-    if drilldown.cells().is_none() {
-        refresh_session_snapshot(data, &mut drilldown).await?;
-    }
-    let generation = drilldown
-        .generation()
-        .map_or("?", |generation| generation.as_str());
-    let title = model
+) -> Result<bool, Failure> {
+    model.terms = refresh_terms(data).await?;
+    let selected = model
         .terms
         .sessions
         .iter()
-        .find(|session| session.id == *drilldown.session_id())
-        .and_then(|session| session.title.as_deref())
-        .unwrap_or("terminal");
-    model.shell.set_attach_subject(format!(
-        "{}:{}  {title}",
-        drilldown.session_id().as_str(),
-        generation
-    ));
-    model.drilldown = Some(drilldown);
+        .find(|session| session.id == session_id)
+        .ok_or_else(|| {
+            Failure::new(
+                KernelErrorCode::NotFound,
+                format!("no terminal lifetime {session_id}"),
+            )
+        })?;
+    if selected.state != "running" {
+        return Err(Failure::new(
+            KernelErrorCode::IllegalEdge,
+            format!("terminal lifetime {session_id} is {}", selected.state),
+        ));
+    }
+    let wire_id = selected
+        .id
+        .as_str()
+        .strip_suffix(&format!(":{}", selected.generation))
+        .map(PtySessionId::new)
+        .ok_or_else(|| {
+            Failure::new(
+                KernelErrorCode::Schema,
+                format!(
+                    "terminal lifetime {} does not end in generation {}",
+                    selected.id, selected.generation
+                ),
+            )
+        })?;
+    let mut probe = DrilldownState::new(wire_id.clone());
+    refresh_session_snapshot(data, &mut probe).await?;
+    if probe.generation() != Some(&selected.generation) {
+        return Err(Failure::new(
+            KernelErrorCode::StaleVersion,
+            format!("terminal lifetime {session_id} is no longer current"),
+        ));
+    }
+    let ids = workspace_node_ids(3);
+    if let Some(mutation) = model
+        .workspace
+        .plan_bind(selected.id.clone(), &ids)
+        .map_err(Failure::internal)?
+        && !submit_workspace_mutation(data, model, mutation, WorkspaceMutationCompletion::Attach)
+            .await?
+    {
+        return Ok(false);
+    }
     model.shell.route(Surface::TermAttach);
-    *pty_stream = Some(ControlPump::start(stream));
+    update_workspace_subject(model);
+    Ok(true)
+}
+
+async fn restart_workspace_streams(
+    data: &mut Client,
+    model: &mut ConsoleModel,
+    pty_stream: &mut Option<PtyPump>,
+) -> Result<(), Failure> {
+    let bound = match model.workspace.visible_bound_panes() {
+        Ok(bound) => bound,
+        Err(error) => {
+            pty_stream.take();
+            model.workspace.clear_requests();
+            model.shell.set_notice(error);
+            return Ok(());
+        }
+    };
+    pty_stream.take();
+    model.workspace.clear_requests();
+    if bound.is_empty() {
+        update_workspace_subject(model);
+        return Ok(());
+    }
+    model.terms = refresh_terms(data).await?;
+    let mut resolved = Vec::new();
+    let mut retired = Vec::new();
+    for (pane, lifetime) in bound {
+        let Some(session) = model
+            .terms
+            .sessions
+            .iter()
+            .find(|session| session.id == lifetime)
+            .cloned()
+        else {
+            retired.push(pane);
+            continue;
+        };
+        if session.state != "running" {
+            retired.push(pane);
+            continue;
+        }
+        let Some(wire_id) = session
+            .id
+            .as_str()
+            .strip_suffix(&format!(":{}", session.generation))
+            .map(PtySessionId::new)
+        else {
+            model.shell.set_notice(format!(
+                "terminal lifetime {} does not end in generation {}",
+                session.id, session.generation
+            ));
+            retired.push(pane);
+            continue;
+        };
+        model.workspace.ensure_attachment(pane, wire_id.clone());
+        let mut snapshot_retryable = false;
+        if let Some(state) = model.workspace.attachment_mut(pane)
+            && state.cells().is_none()
+            && let Err(error) = refresh_session_snapshot(data, state).await
+        {
+            model.shell.set_notice(format!(
+                "snapshot {} unavailable -- {error}",
+                session.id.as_str()
+            ));
+            if error.code == KernelErrorCode::NotFound {
+                retired.push(pane);
+            } else {
+                snapshot_retryable = true;
+            }
+        }
+        if snapshot_retryable {
+            resolved.push((pane, wire_id, session.generation));
+            continue;
+        }
+        if model
+            .workspace
+            .attachment(pane)
+            .and_then(DrilldownState::generation)
+            != Some(&session.generation)
+        {
+            model.shell.set_notice(format!(
+                "terminal lifetime {} changed generation; binding preserved",
+                session.id
+            ));
+            continue;
+        }
+        resolved.push((pane, wire_id, session.generation));
+    }
+    retired.sort();
+    retired.dedup();
+    for pane in retired {
+        close_retired_workspace_pane(data, model, pane).await?;
+    }
+    if resolved.is_empty() {
+        update_workspace_subject(model);
+        return Ok(());
+    }
+    let pump = PtyPump::start(connect().await?);
+    let prefix = crate::nonce();
+    let expected = resolved.len();
+    for (index, (pane, session, generation)) in resolved.into_iter().enumerate() {
+        let request_id = RequestId::new(format!("gw-mux-{prefix:x}-{index}"));
+        let cursor = model
+            .workspace
+            .attachment(pane)
+            .and_then(DrilldownState::frame_seq);
+        model
+            .workspace
+            .begin_attach(pane, request_id.clone())
+            .map_err(Failure::internal)?;
+        pump.attach(request_id, session, Some(generation), cursor)
+            .await?;
+    }
+    let mut pump = pump;
+    let mut acknowledged = 0usize;
+    while acknowledged < expected {
+        let control = tokio::time::timeout(Duration::from_secs(5), pump.receive())
+            .await
+            .map_err(|_| Failure::unreachable("timed out waiting for PTY attach acknowledgement"))??
+            .ok_or_else(|| {
+                Failure::unreachable("terminal transport closed before attach acknowledgement")
+            })?;
+        let attach_error = match &control {
+            ServerControl::Response {
+                result: KernelResult::Error { code, message, .. },
+                ..
+            } => Some(Failure::new(*code, message.clone())),
+            _ => None,
+        };
+        let effect = model.workspace.ingest(&control);
+        if matches!(control, ServerControl::Response { .. }) && effect.pane.is_some() {
+            acknowledged += 1;
+        }
+        if let Some(error) = attach_error {
+            if effect.retired
+                && let Some(pane) = effect.pane
+            {
+                close_retired_workspace_pane(data, model, pane).await?;
+            }
+            return Err(error);
+        }
+        if let Some(code) = effect.refusal {
+            return Err(Failure::new(
+                code,
+                match code {
+                    KernelErrorCode::Overloaded => {
+                        "terminal dimensions exceed the client mirror budget"
+                    }
+                    KernelErrorCode::StaleVersion => "terminal generation changed while attaching",
+                    _ => "terminal attach was refused locally",
+                },
+            ));
+        }
+        if effect.retired {
+            if let Some(pane) = effect.pane {
+                close_retired_workspace_pane(data, model, pane).await?;
+            }
+            return Err(Failure::new(
+                KernelErrorCode::NotFound,
+                "terminal lifetime ended while attaching",
+            ));
+        }
+        if effect.needs_snapshot
+            && let Some(pane) = effect.pane
+            && let Some(state) = model.workspace.attachment_mut(pane)
+            && let Err(error) = refresh_session_snapshot(data, state).await
+        {
+            return Err(error);
+        }
+        if effect.reconnect {
+            return Err(Failure::new(
+                KernelErrorCode::SlowConsumer,
+                "terminal attach refused before the stream became live",
+            ));
+        }
+    }
+    *pty_stream = Some(pump);
+    update_workspace_subject(model);
+    Ok(())
+}
+
+async fn restart_workspace_streams_soft(
+    data: &mut Client,
+    model: &mut ConsoleModel,
+    pty_stream: &mut Option<PtyPump>,
+) -> Result<(), Failure> {
+    match restart_workspace_streams(data, model, pty_stream).await {
+        Ok(()) => model.pending_workspace_stream_restart = false,
+        Err(error) => {
+            model.workspace.clear_requests();
+            pty_stream.take();
+            model.pending_workspace_stream_restart = true;
+            model
+                .shell
+                .set_notice(format!("terminal transport unavailable -- {error}"));
+        }
+    }
+    Ok(())
+}
+
+async fn mutate_workspace(
+    data: &mut Client,
+    model: &mut ConsoleModel,
+    action: WorkspaceAction,
+) -> Result<(), Failure> {
+    let ids = workspace_node_ids(match action {
+        WorkspaceAction::NewWorkspace => 3,
+        WorkspaceAction::NewTab => 2,
+        WorkspaceAction::SplitColumns | WorkspaceAction::SplitRows => 1,
+        _ => 0,
+    });
+    let mutation = model
+        .workspace
+        .plan_action(action, &ids)
+        .map_err(Failure::internal)?;
+    submit_workspace_mutation(data, model, mutation, WorkspaceMutationCompletion::Stay)
+        .await
+        .map(|_| ())
+}
+
+async fn close_workspace_pane(
+    data: &mut Client,
+    model: &mut ConsoleModel,
+    pane: workspace::PaneId,
+) -> Result<(), Failure> {
+    let mutation = model
+        .workspace
+        .plan_close_pane(pane)
+        .map_err(Failure::internal)?;
+    let _ =
+        submit_workspace_mutation(data, model, mutation, WorkspaceMutationCompletion::Stay).await?;
+    Ok(())
+}
+
+async fn close_retired_workspace_pane(
+    data: &mut Client,
+    model: &mut ConsoleModel,
+    pane: workspace::PaneId,
+) -> Result<bool, Failure> {
+    let Some(node) = model.workspace.node_for_pane(pane) else {
+        return Ok(false);
+    };
+    let Some(session) = model.workspace.session_for_pane(pane).cloned() else {
+        return Ok(false);
+    };
+    close_retired_workspace_binding(data, model, RetiredWorkspaceBinding { node, session }).await
+}
+
+async fn close_retired_workspace_binding(
+    data: &mut Client,
+    model: &mut ConsoleModel,
+    retired: RetiredWorkspaceBinding,
+) -> Result<bool, Failure> {
+    let pane = model
+        .workspace
+        .panes_for_nodes(std::slice::from_ref(&retired.node))
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            Failure::internal(format!("workspace pane node {} is absent", retired.node))
+        })?;
+    if model.workspace.session_for_pane(pane) != Some(&retired.session) {
+        model.retired_workspace_bindings.remove(&retired);
+        return Ok(false);
+    }
+    close_workspace_pane(data, model, pane).await?;
+    let current_pane = model
+        .workspace
+        .panes_for_nodes(std::slice::from_ref(&retired.node))
+        .into_iter()
+        .next();
+    if current_pane
+        .is_some_and(|pane| model.workspace.session_for_pane(pane) == Some(&retired.session))
+    {
+        model.retired_workspace_bindings.insert(retired);
+        model.shell.set_notice(
+            "retired terminal binding changed concurrently; close will retry from projection truth",
+        );
+        return Ok(false);
+    }
+    model.retired_workspace_bindings.remove(&retired);
+    Ok(true)
+}
+
+async fn submit_workspace_mutation(
+    data: &mut Client,
+    model: &mut ConsoleModel,
+    mutation: WorkspaceMutation,
+    completion: WorkspaceMutationCompletion,
+) -> Result<bool, Failure> {
+    if model.pending_workspace_mutation.is_some() {
+        model
+            .shell
+            .set_notice("a workspace mutation is awaiting a typed outcome; new action deferred");
+        return Ok(false);
+    }
+    let intent = crate::nonce();
+    let keys: Vec<_> = (0..mutation.commands().len())
+        .map(|index| format!("tui:workspace:{intent:x}:{index}"))
+        .collect();
+    let pending = PendingWorkspaceMutation {
+        mutation,
+        keys,
+        uncertain: false,
+        completion,
+    };
+    model.pending_workspace_mutation = Some(pending);
+    resume_workspace_mutation(data, model).await
+}
+
+async fn resume_workspace_mutation(
+    data: &mut Client,
+    model: &mut ConsoleModel,
+) -> Result<bool, Failure> {
+    let Some(mut pending) = model.pending_workspace_mutation.take() else {
+        return Ok(false);
+    };
+    let mutation = pending.mutation.clone();
+    let mut completed_from_projection = false;
+    for (index, command) in mutation.commands().iter().enumerate() {
+        let key = &pending.keys[index];
+        match submit_console_command(data, command, key).await {
+            Ok(()) => {}
+            Err(error)
+                if matches!(
+                    error.code,
+                    KernelErrorCode::Storage
+                        | KernelErrorCode::Overloaded
+                        | KernelErrorCode::SlowConsumer
+                ) =>
+            {
+                pending.uncertain = true;
+                model.pending_workspace_mutation = Some(pending);
+                if let Ok(client) = connect().await {
+                    *data = client;
+                }
+                model.shell.set_notice(format!(
+                    "workspace write outcome unknown; retrying the same command on the next tick -- {error}"
+                ));
+                return Ok(false);
+            }
+            Err(error) => {
+                let rows = match refresh_workspace_rows(data).await {
+                    Ok(rows) => rows,
+                    Err(refresh_error) => {
+                        model.pending_workspace_mutation = Some(pending);
+                        model.shell.set_notice(format!(
+                            "workspace reconciliation unavailable; retrying on the next tick -- {refresh_error}"
+                        ));
+                        return Ok(false);
+                    }
+                };
+                if mutation.command_satisfied(command, &rows) {
+                    completed_from_projection = true;
+                    continue;
+                }
+                if mutation.satisfied(&rows) {
+                    model.workspace.replace_projection(&rows);
+                    if pending.completion == WorkspaceMutationCompletion::Attach {
+                        model.shell.route(Surface::TermAttach);
+                    }
+                    return Ok(true);
+                }
+                model.workspace.replace_projection(&rows);
+                model
+                    .shell
+                    .set_notice(format!("workspace changed elsewhere; refreshed -- {error}"));
+                update_workspace_subject(model);
+                return Ok(false);
+            }
+        }
+    }
+    if pending.uncertain || completed_from_projection {
+        let rows = match refresh_workspace_rows(data).await {
+            Ok(rows) => rows,
+            Err(error) => {
+                model.pending_workspace_mutation = Some(pending);
+                model.shell.set_notice(format!(
+                    "workspace reconciliation unavailable; retrying on the next tick -- {error}"
+                ));
+                return Ok(false);
+            }
+        };
+        model.workspace.replace_projection(&rows);
+    } else {
+        model.workspace.apply_mutation(mutation);
+    }
+    if pending.completion == WorkspaceMutationCompletion::Attach {
+        model.shell.route(Surface::TermAttach);
+    }
+    Ok(true)
+}
+
+async fn retry_retired_workspace_bindings(
+    data: &mut Client,
+    model: &mut ConsoleModel,
+) -> Result<bool, Failure> {
+    if model.retired_workspace_bindings.is_empty() {
+        return Ok(false);
+    }
+    let rows = match refresh_workspace_rows(data).await {
+        Ok(rows) => rows,
+        Err(error) => {
+            model.shell.set_notice(format!(
+                "retired terminal reconciliation unavailable; retrying on the next tick -- {error}"
+            ));
+            return Ok(false);
+        }
+    };
+    model.workspace.replace_projection(&rows);
+    let retired: Vec<_> = model.retired_workspace_bindings.iter().cloned().collect();
+    let mut changed = false;
+    for binding in retired {
+        let Some(pane) = model
+            .workspace
+            .panes_for_nodes(std::slice::from_ref(&binding.node))
+            .into_iter()
+            .next()
+        else {
+            model.retired_workspace_bindings.remove(&binding);
+            changed = true;
+            continue;
+        };
+        if model.workspace.session_for_pane(pane) != Some(&binding.session) {
+            model.retired_workspace_bindings.remove(&binding);
+            continue;
+        }
+        changed |= close_retired_workspace_binding(data, model, binding).await?;
+    }
+    Ok(changed)
+}
+
+fn workspace_action_changes_stream_set(action: WorkspaceAction) -> bool {
+    matches!(
+        action,
+        WorkspaceAction::NextTab
+            | WorkspaceAction::PreviousTab
+            | WorkspaceAction::NextWorkspace
+            | WorkspaceAction::PreviousWorkspace
+            | WorkspaceAction::SelectTab(_)
+    )
+}
+
+async fn recover_workspace_streams(
+    data: &mut Client,
+    model: &mut ConsoleModel,
+    pty_stream: &mut Option<PtyPump>,
+    cause: &Failure,
+    first_attempt: usize,
+) -> usize {
+    let mut attempt = first_attempt.clamp(1, PTY_RECONNECT_ATTEMPTS);
+    let mut last = cause.to_string();
+    while attempt <= PTY_RECONNECT_ATTEMPTS {
+        if attempt > 1 {
+            tokio::time::sleep(Duration::from_millis(50 * attempt as u64)).await;
+        }
+        match restart_workspace_streams(data, model, pty_stream).await {
+            Ok(()) if pty_stream.is_some() => {
+                model.pending_workspace_stream_restart = false;
+                model.shell.set_notice(format!(
+                    "terminal transport resumed on attempt {attempt} after {cause}"
+                ));
+                return 0;
+            }
+            Ok(()) => {
+                model.pending_workspace_stream_restart = false;
+                model
+                    .shell
+                    .set_notice("terminal transport closed; no active panes remain");
+                return 0;
+            }
+            Err(error) => last = error.to_string(),
+        }
+        attempt = attempt.saturating_add(1);
+    }
+    model.shell.set_notice(format!(
+        "terminal transport unavailable after {PTY_RECONNECT_ATTEMPTS} attempts -- {last}"
+    ));
+    model.pending_workspace_stream_restart = true;
+    attempt
+}
+
+async fn send_workspace_key(
+    data: &mut Client,
+    pty_stream: &mut Option<PtyPump>,
+    model: &mut ConsoleModel,
+    key: crossterm::event::KeyEvent,
+) -> Result<(), Failure> {
+    let bytes = match workspace::runtime::encode_key(key) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            model.shell.set_notice(error);
+            return Ok(());
+        }
+    };
+    send_workspace_bytes(data, pty_stream, model, bytes).await
+}
+
+async fn send_workspace_bytes(
+    data: &mut Client,
+    pty_stream: &mut Option<PtyPump>,
+    model: &mut ConsoleModel,
+    bytes: Vec<u8>,
+) -> Result<(), Failure> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    if !data.supports_pty_input() {
+        model
+            .shell
+            .set_notice("kernel did not negotiate typed PTY input");
+        return Ok(());
+    }
+    let Some(pane) = model.workspace.focused_pane() else {
+        model.shell.set_notice("no focused pane receives input");
+        return Ok(());
+    };
+    let Some(state) = model.workspace.attachment(pane) else {
+        model.shell.set_notice("focused pane is not attached");
+        return Ok(());
+    };
+    let Some(generation) = state.generation().cloned() else {
+        model
+            .shell
+            .set_notice("focused pane has no live generation");
+        return Ok(());
+    };
+    let session = state.session_id().clone();
+    // The typed carrier is bounded per request. A large paste remains ordered
+    // and receipted by flushing consecutive bounded calls rather than asking
+    // the kernel to allocate or accept one oversized frame.
+    for chunk in bytes.chunks(PTY_INPUT_MAX_BYTES) {
+        let command = KernelCommand::SendPtyInput {
+            pty_session_id: session.clone(),
+            generation: generation.clone(),
+            byte_count: ByteCount::new(chunk.len() as u64),
+        };
+        let key = format!("tui:pty-input:{:x}", crate::nonce());
+        let envelope = crate::envelope(&command, &key, gwk_kernel::SYSTEM_PROJECT);
+        match data
+            .ask(KernelRequest::SendPtyInput {
+                envelope,
+                data_base64: PtyInputData::new(BASE64_STANDARD.encode(chunk)),
+            })
+            .await?
+        {
+            KernelResult::CommandApplied { .. } => {}
+            KernelResult::Error {
+                code,
+                message,
+                detail,
+            } => {
+                let committed = detail
+                    .as_ref()
+                    .and_then(|detail| detail.get("command_committed"))
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                model.shell.set_notice(if committed {
+                    format!("input committed but host delivery failed -- {message}")
+                } else {
+                    format!("input refused -- {message}")
+                });
+                if code == KernelErrorCode::StaleVersion {
+                    restart_workspace_mirrors(data, model, pty_stream).await?;
+                }
+                return Ok(());
+            }
+            other => {
+                return Err(Failure::new(
+                    KernelErrorCode::Schema,
+                    format!("send PTY input returned {other:?}"),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn workspace_node_ids(count: usize) -> Vec<WorkspaceNodeId> {
+    let nonce = crate::nonce();
+    (0..count)
+        .map(|index| WorkspaceNodeId::new(format!("ws-{nonce:x}-{index}")))
+        .collect()
+}
+
+fn update_workspace_subject(model: &mut ConsoleModel) {
+    let subject = model.workspace.focused_session().map_or_else(
+        || "workspace  unbound".to_owned(),
+        |session| format!("workspace  {session}"),
+    );
+    model.shell.set_attach_subject(subject);
+}
+
+async fn restart_workspace_mirrors(
+    data: &mut Client,
+    model: &mut ConsoleModel,
+    pty_stream: &mut Option<PtyPump>,
+) -> Result<(), Failure> {
+    let rows = refresh_workspace_rows(data).await?;
+    model.workspace.replace_projection(&rows);
+    restart_workspace_streams_soft(data, model, pty_stream).await?;
+    update_workspace_subject(model);
     Ok(())
 }
 
@@ -1895,6 +2701,105 @@ async fn refresh_terms(client: &mut Client) -> Result<TermState, Failure> {
         watermark,
         complete: true,
     })
+}
+
+async fn refresh_workspace_rows(client: &mut Client) -> Result<Vec<WorkspaceNode>, Failure> {
+    let (records, _) =
+        read_projection_records_coherent(client, ProjectionKind::WorkspaceNode).await?;
+    let rows = records
+        .into_iter()
+        .map(|record| match record {
+            ProjectionRecord::WorkspaceNode { workspace_node } => Ok(workspace_node),
+            other => Err(Failure::new(
+                KernelErrorCode::Schema,
+                format!(
+                    "workspace_node projection page carried a {} row",
+                    other.kind().as_str()
+                ),
+            )),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if rows.len() > workspace::runtime::WORKSPACE_NODE_LIMIT {
+        return Err(Failure::new(
+            KernelErrorCode::Overloaded,
+            format!(
+                "workspace projection has {} nodes; this client admits {}",
+                rows.len(),
+                workspace::runtime::WORKSPACE_NODE_LIMIT
+            ),
+        ));
+    }
+    Ok(rows)
+}
+
+async fn read_projection_records_coherent(
+    client: &mut Client,
+    kind: ProjectionKind,
+) -> Result<(Vec<ProjectionRecord>, Option<Seq>), Failure> {
+    let mut last = None;
+    for _ in 0..SNAPSHOT_ATTEMPTS {
+        match read_projection_records_once(client, kind).await? {
+            ProjectionWalk::Coherent(records, watermark) => return Ok((records, watermark)),
+            ProjectionWalk::Drift(first, second) => last = Some((first, second)),
+        }
+    }
+    Err(Failure::new(
+        KernelErrorCode::StaleVersion,
+        format!(
+            "{} projection changed across pages after {SNAPSHOT_ATTEMPTS} attempts: {last:?}",
+            kind.as_str()
+        ),
+    ))
+}
+
+enum ProjectionWalk {
+    Coherent(Vec<ProjectionRecord>, Option<Seq>),
+    Drift(Option<Seq>, Option<Seq>),
+}
+
+async fn read_projection_records_once(
+    client: &mut Client,
+    kind: ProjectionKind,
+) -> Result<ProjectionWalk, Failure> {
+    let mut records = Vec::new();
+    let mut cursor = None;
+    let mut seen = BTreeSet::new();
+    let mut watermark = None;
+    loop {
+        let result = client
+            .ask(KernelRequest::ListProjection {
+                projection: kind,
+                cursor: cursor.clone(),
+                limit: Some(PAGE_LIMIT),
+            })
+            .await?;
+        let KernelResult::ProjectionPage {
+            records: page,
+            next_cursor,
+            watermark: page_watermark,
+        } = result
+        else {
+            return result_failure(result, "read coherent projection");
+        };
+        if let Some(first) = watermark
+            && page_watermark != Some(first)
+        {
+            return Ok(ProjectionWalk::Drift(Some(first), page_watermark));
+        }
+        watermark = page_watermark.or(watermark);
+        records.extend(page);
+        let Some(next) = next_cursor else {
+            break;
+        };
+        if !seen.insert(next.clone()) {
+            return Err(Failure::internal(format!(
+                "{} projection cursor repeated {next:?}",
+                kind.as_str()
+            )));
+        }
+        cursor = Some(next);
+    }
+    Ok(ProjectionWalk::Coherent(records, watermark))
 }
 
 async fn refresh_config(
@@ -2450,6 +3355,12 @@ async fn refresh_session_snapshot(
     if state.ingest(&response) == IngestDisposition::Unrelated {
         return Err(Failure::internal(
             "TERM snapshot answered with an unrelated value",
+        ));
+    }
+    if state.cells().is_none() {
+        return Err(Failure::new(
+            KernelErrorCode::Overloaded,
+            "TERM snapshot exceeds the client mirror budget or is not a valid grid",
         ));
     }
     Ok(())

@@ -22,7 +22,7 @@
 # whatever module granularity keeps the tax off lens code. A line here is a
 # claim that the answer is no.
 
-crates/gridwork — the CLI: argument parsing, output formatting, and kernel calls over the UDS. Spawns nothing and parses no terminal bytes; `cargo tree -p gridwork` is asserted free of the PTY stack in CI.
+crates/gridwork — the CLI outside `src/tui`: argument parsing, output formatting, and request/response kernel calls over the UDS. The production TUI's PTY subscription pump and detach/reattach routing are gated separately by `crates/gridwork/src/tui`; `cargo tree -p gridwork` remains asserted free of the PTY engine stack in CI.
 crates/gwk — the namespace umbrella. It has no API and no code: a `lib.rs` of doc comments holding the published `gwk-*` root.
 crates/gwk-cert — the conformance checker: reads a recorded event stream and replays it against the domain state machines. Consumes a file, never a process.
 crates/gwk-domain — the contract: types, events, and state machines, with no I/O of any kind.

@@ -24,6 +24,9 @@ crates/gwk-pty
 crates/gwk-pty-host
 crates/gwk-adapter-
 crates/gwk-tui/src/workspace
+# The production shell adapter owns the shared PTY subscription pump and
+# detach/reattach routing. The remaining gridwork CLI stays non-engine.
+crates/gridwork/src/tui
 # The parity harness, engine-driving half only. Its runners spawn the three
 # engine CLIs, drive them, answer their approval asks and kill them; its two
 # binaries are the harness entry point and the Claude approval-relay hook the
