@@ -8,7 +8,7 @@ log as the source of truth, and a TUI as the only surface.
 [![docs.rs](https://img.shields.io/docsrs/gwk-domain)](https://docs.rs/gwk-domain)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-[gridwork.dev](https://gridwork.dev)
+[gridwork.sh](https://gridwork.sh)
 
 > **Pre-1.0 — expect breakage.** This project is being built in the open from its first
 > commit. Schemas, protocols, and the binary itself change without notice until 1.0.
@@ -61,7 +61,7 @@ real table on a TTY while a pipe still gets the wire JSON byte for byte. The
 terminal-native bullet above now describes what runs, with one named gap:
 persisted terminal recordings replay as a deterministic timeline in the
 console, but the ledger-synced, exportable-as-evidence half of replay is not
-built yet. Stage 5 — the workspace multiplexer — is next.
+built yet. Stage 5 — the workspace multiplexer — is the work now.
 
 The build order — contract → kernel → engines → console → workspace → context
 runtime — with what each

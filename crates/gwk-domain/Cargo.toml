@@ -2,7 +2,7 @@
 name = "gwk-domain"
 version = "0.0.3"
 description = "GridWork contract crate: shared domain types, events, and state machines"
-homepage = "https://gridwork.dev"
+homepage = "https://gridwork.sh"
 keywords = ["gridwork", "event-sourcing", "state-machine", "contract", "agent"]
 categories = ["data-structures", "development-tools"]
 readme = "README.md"

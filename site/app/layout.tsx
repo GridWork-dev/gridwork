@@ -1,7 +1,11 @@
 import type { Metadata } from "next";
 import { JetBrains_Mono } from "next/font/google";
+import Script from "next/script";
 import type { ReactNode } from "react";
 import { RootProvider } from "fumadocs-ui/provider/next";
+
+import { SITE_ORIGIN } from "@/lib/site-url";
+import { StructuredData } from "./structured-data";
 
 import "./globals.css";
 
@@ -16,12 +20,13 @@ const description =
   "GridWork is an open, pre-1.0 agent operating system for the terminal. Its Rust contract and event-sourced kernel ship today; engines and TUI are in progress.";
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://gridwork.dev"),
+  metadataBase: new URL(SITE_ORIGIN),
   title,
   description,
+  alternates: { canonical: "/" },
   openGraph: {
     type: "website",
-    url: "https://gridwork.dev",
+    url: SITE_ORIGIN,
     siteName: "GridWork",
     title,
     description,
@@ -43,6 +48,17 @@ export default function RootLayout({ children }: { children: ReactNode }) {
       style={{ colorScheme: "dark" }}
       suppressHydrationWarning
     >
+      <head>
+        {/* Cookieless, aggregate-only. data-domain is the canonical host;
+            gridwork.dev 301s at the edge, so the origin only ever sees this one. */}
+        <Script
+          defer
+          data-domain="gridwork.sh"
+          src="https://plausible.io/js/script.js"
+          strategy="afterInteractive"
+        />
+        <StructuredData />
+      </head>
       <body className="flex min-h-screen flex-col font-mono">
         <RootProvider theme={{ enabled: false }} search={{ enabled: false }}>
           {children}

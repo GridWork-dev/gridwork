@@ -2,7 +2,7 @@
 name = "gwk-theme"
 version = "0.0.3"
 description = "The SIGNAL design tokens: one data-only source of truth for site, TUI, and generated TypeScript"
-homepage = "https://gridwork.dev"
+homepage = "https://gridwork.sh"
 keywords = ["gridwork", "theme", "design-tokens", "palette", "tui"]
 categories = ["development-tools", "command-line-interface"]
 readme = "README.md"
