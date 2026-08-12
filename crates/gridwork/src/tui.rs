@@ -126,19 +126,28 @@ impl InputPump {
     }
 }
 
+/// Client-side buffer between the socket reader and the render loop. Kept as
+/// deep as the kernel's own batch queue so that when the loop stalls, the
+/// pump stops reading the socket and the kernel's slow-consumer accounting
+/// (BATCH_QUEUE_DEPTH + SLOW_CONSUMER_TIMEOUT_SECS) stays the binding
+/// constraint — an unbounded buffer here would absorb batches forever and
+/// make SlowConsumer structurally unreachable while memory and staleness
+/// grew without witness.
+const CONTROL_PUMP_DEPTH: usize = 8;
+
 struct ControlPump {
-    receiver: mpsc::UnboundedReceiver<Result<Option<ServerControl>, Failure>>,
+    receiver: mpsc::Receiver<Result<Option<ServerControl>, Failure>>,
     task: tokio::task::JoinHandle<()>,
 }
 
 impl ControlPump {
     fn start(mut client: Client) -> Self {
-        let (sender, receiver) = mpsc::unbounded_channel();
+        let (sender, receiver) = mpsc::channel(CONTROL_PUMP_DEPTH);
         let task = tokio::spawn(async move {
             loop {
                 let result = client.receive().await;
                 let closed = matches!(result, Ok(None) | Err(_));
-                if sender.send(result).is_err() || closed {
+                if sender.send(result).await.is_err() || closed {
                     break;
                 }
             }
@@ -148,6 +157,11 @@ impl ControlPump {
 
     async fn receive(&mut self) -> Result<Option<ServerControl>, Failure> {
         self.receiver.recv().await.unwrap_or(Ok(None))
+    }
+
+    /// Already-buffered control, if any — the coalescing drain. Never waits.
+    fn try_receive(&mut self) -> Option<Result<Option<ServerControl>, Failure>> {
+        self.receiver.try_recv().ok()
     }
 }
 
@@ -561,32 +575,45 @@ async fn workspace_loop(
                 None => return Ok(()),
             },
             control = stream.receive() => {
-                let Some(control) = control? else {
-                    return Ok(());
-                };
-                match control {
-                    ServerControl::EventBatch { request_id, events: batch, cursor }
-                        if request_id == *stream_id =>
-                    {
-                        append_event_batch(&mut model.board, batch.clone(), Some(cursor));
-                        events.ingest(batch).map_err(estate_failure)?;
-                        model.estate = refresh_estate(data, events).await?;
-                        model.queue = refresh_queue(data).await?;
-                        model.hall_cost_micros = refresh_hall_cost(data).await?;
-                        refresh_surface(data, model).await?;
-                        reconcile_selection(model);
-                        model.update_attention_marks();
-                        dirty = true;
+                // Ingest every already-buffered batch before refreshing once:
+                // each refresh cycle costs a full projection sweep, so a
+                // backlog replay (or a burst) folds N batches into one sweep
+                // instead of N.
+                let mut next = control?;
+                let mut batched = false;
+                loop {
+                    match next {
+                        None => return Ok(()),
+                        Some(ServerControl::EventBatch { request_id, events: batch, cursor })
+                            if request_id == *stream_id =>
+                        {
+                            append_event_batch(&mut model.board, batch.clone(), Some(cursor));
+                            events.ingest(batch).map_err(estate_failure)?;
+                            batched = true;
+                        }
+                        Some(ServerControl::StreamClosed { request_id, code, last_cursor })
+                            if request_id == *stream_id =>
+                        {
+                            let resume = last_cursor
+                                .map(|seq| seq.value().to_string())
+                                .unwrap_or_else(|| "the beginning".to_owned());
+                            return Err(Failure::new(code, format!("event stream closed; resume from {resume}")));
+                        }
+                        Some(_) => {}
                     }
-                    ServerControl::StreamClosed { request_id, code, last_cursor }
-                        if request_id == *stream_id =>
-                    {
-                        let resume = last_cursor
-                            .map(|seq| seq.value().to_string())
-                            .unwrap_or_else(|| "the beginning".to_owned());
-                        return Err(Failure::new(code, format!("event stream closed; resume from {resume}")));
+                    match stream.try_receive() {
+                        Some(buffered) => next = buffered?,
+                        None => break,
                     }
-                    _ => {}
+                }
+                if batched {
+                    model.estate = refresh_estate(data, events).await?;
+                    model.queue = refresh_queue(data).await?;
+                    model.hall_cost_micros = refresh_hall_cost(data).await?;
+                    refresh_surface(data, model).await?;
+                    reconcile_selection(model);
+                    model.update_attention_marks();
+                    dirty = true;
                 }
             },
             control = async {
