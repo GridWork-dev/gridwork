@@ -54,7 +54,8 @@ use std::time::Duration;
 use crossterm::QueueableCommand;
 use crossterm::clipboard::CopyToClipboard;
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, MouseButton, MouseEvent, MouseEventKind,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::layout::{Position, Rect};
@@ -84,6 +85,7 @@ pub const RETYPE_BUDGET: usize = 64;
 pub fn enter<W: Write>(out: &mut W) -> io::Result<()> {
     out.queue(EnterAlternateScreen)?;
     out.queue(EnableMouseCapture)?;
+    out.queue(EnableBracketedPaste)?;
     out.flush()
 }
 
@@ -98,6 +100,7 @@ pub fn enter<W: Write>(out: &mut W) -> io::Result<()> {
 /// capture, because ratatui never enables it. Wire it into the panic hook
 /// alongside the raw-mode restore.
 pub fn exit<W: Write>(out: &mut W) -> io::Result<()> {
+    out.queue(DisableBracketedPaste)?;
     out.queue(DisableMouseCapture)?;
     out.queue(LeaveAlternateScreen)?;
     out.flush()

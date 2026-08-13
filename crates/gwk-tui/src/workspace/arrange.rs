@@ -37,8 +37,28 @@ pub struct PaneBinding {
     /// minted only because the model refuses husk containers (see
     /// [`reproduce`]).
     pub node: Option<WorkspaceNodeId>,
+    /// Projection version used by CAS-safe rebind, move and close commands.
+    pub version: Option<u32>,
+    /// Durable parent, retained so a pane close can reparent surviving
+    /// children without deriving structure from screen geometry.
+    pub parent: Option<WorkspaceNodeId>,
     /// The session the ledger binds to this pane, when it binds one.
     pub session: Option<PtySessionId>,
+}
+
+/// Durable identity for one reproduced tab, aligned with its model position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TabBinding {
+    pub node: WorkspaceNodeId,
+    pub version: u32,
+}
+
+/// Durable identity for one reproduced workspace and its tabs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceBinding {
+    pub node: WorkspaceNodeId,
+    pub version: u32,
+    pub tabs: Vec<TabBinding>,
 }
 
 /// What a rebuild produced: the model, every pane's ledger identity, and the
@@ -47,6 +67,7 @@ pub struct PaneBinding {
 pub struct Reproduced {
     pub state: WorkspaceState,
     pub bindings: Vec<PaneBinding>,
+    pub workspaces: Vec<WorkspaceBinding>,
     /// Rows the walk from the roots never reached, or reached with an illegal
     /// kind for their position — orphans, cycles, and foreign shapes the
     /// kernel itself would have refused. Surfaced rather than dropped so a
@@ -120,6 +141,7 @@ pub fn reproduce(rows: &[WorkspaceNode]) -> Reproduced {
     };
 
     let mut workspaces = Vec::new();
+    let mut workspace_bindings = Vec::new();
     for root in &roots {
         if root.kind != WorkspaceNodeKind::Workspace {
             // A parentless tab or pane: the kernel refuses these at the
@@ -127,7 +149,9 @@ pub fn reproduce(rows: &[WorkspaceNode]) -> Reproduced {
             continue;
         }
         builder.placed.push(root.id.clone());
-        workspaces.push(builder.workspace(root, workspaces.len() + 1));
+        let (workspace, binding) = builder.workspace(root, workspaces.len() + 1);
+        workspaces.push(workspace);
+        workspace_bindings.push(binding);
     }
 
     let state = WorkspaceState {
@@ -154,6 +178,7 @@ pub fn reproduce(rows: &[WorkspaceNode]) -> Reproduced {
     Reproduced {
         state,
         bindings: builder.bindings,
+        workspaces: workspace_bindings,
         ignored,
     }
 }
@@ -172,6 +197,8 @@ impl<'a> Builder<'a> {
         self.bindings.push(PaneBinding {
             pane,
             node: node.map(|row| row.id.clone()),
+            version: node.map(|row| row.version),
+            parent: node.and_then(|row| row.parent_id.clone()),
             session: node.and_then(|row| row.session_id.clone()),
         });
         pane
@@ -190,11 +217,14 @@ impl<'a> Builder<'a> {
             .unwrap_or_default()
     }
 
-    fn workspace(&mut self, row: &WorkspaceNode, position: usize) -> Workspace {
+    fn workspace(&mut self, row: &WorkspaceNode, position: usize) -> (Workspace, WorkspaceBinding) {
         let mut tabs = Vec::new();
+        let mut tab_bindings = Vec::new();
         for tab in self.kids(row, WorkspaceNodeKind::Tab) {
             self.placed.push(tab.id.clone());
-            tabs.push(self.tab(tab, tabs.len() + 1));
+            let (model, binding) = self.tab(tab, tabs.len() + 1);
+            tabs.push(model);
+            tab_bindings.push(binding);
         }
         if tabs.is_empty() {
             // The husk rule: a workspace with no tab row yet still renders,
@@ -202,17 +232,24 @@ impl<'a> Builder<'a> {
             let pane = self.mint(None);
             tabs.push(Tab::new("1".to_owned(), pane));
         }
-        Workspace {
-            name: position.to_string(),
-            next_tab: u32::try_from(tabs.len())
-                .unwrap_or(u32::MAX)
-                .saturating_add(1),
-            tabs,
-            active: 0,
-        }
+        (
+            Workspace {
+                name: position.to_string(),
+                next_tab: u32::try_from(tabs.len())
+                    .unwrap_or(u32::MAX)
+                    .saturating_add(1),
+                tabs,
+                active: 0,
+            },
+            WorkspaceBinding {
+                node: row.id.clone(),
+                version: row.version,
+                tabs: tab_bindings,
+            },
+        )
     }
 
-    fn tab(&mut self, row: &WorkspaceNode, position: usize) -> Tab {
+    fn tab(&mut self, row: &WorkspaceNode, position: usize) -> (Tab, TabBinding) {
         let panes = self.kids(row, WorkspaceNodeKind::Pane);
         let root = match panes.as_slice() {
             [] => Node::Pane(self.mint(None)),
@@ -235,11 +272,17 @@ impl<'a> Builder<'a> {
             }),
         };
         let focus = super::first_pane(&root);
-        Tab {
-            title: position.to_string(),
-            root,
-            focus,
-        }
+        (
+            Tab {
+                title: position.to_string(),
+                root,
+                focus,
+            },
+            TabBinding {
+                node: row.id.clone(),
+                version: row.version,
+            },
+        )
     }
 
     fn pane(&mut self, row: &WorkspaceNode) -> Node {

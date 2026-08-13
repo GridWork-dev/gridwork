@@ -34,8 +34,9 @@
 //! `.github/cleanroom-paths.txt`). Its structural floor is in place: the
 //! workspace/tab/split-pane model with create/navigate/resize/close, its
 //! geometry solver, and the furniture painting that consumes [`chrome`]. The
-//! wire half — session content in panes, detach/reattach routing — is not
-//! built yet. The rest of this crate is lens code and is deliberately outside
+//! wire half holds session content in durable panes, multiplexes the active
+//! tab's attaches on one bounded socket, and routes pane input. The rest of
+//! this crate is lens code and is deliberately outside
 //! the gate: the gate follows the risk, not the directory tree.
 //!
 //! [`chrome`] is the demonstration of that sentence. It themes the workspace's
