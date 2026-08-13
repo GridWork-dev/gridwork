@@ -34,6 +34,13 @@ pub struct HallContext {
     pub running: usize,
     pub attention: usize,
     pub cost_micros: u64,
+    /// Whether the kernel supplied the day boundary this total was folded
+    /// against, or the client fell back to its own clock.
+    ///
+    /// Threaded here rather than resolved at the fold because the difference
+    /// is invisible in the number: `$4.20 today` looks identical either way,
+    /// and the one case where it is wrong is the one nobody can see.
+    pub cost_kernel_clocked: bool,
     pub load: LoadState,
 }
 
@@ -153,14 +160,16 @@ fn paint_hall_header(
         &format!("!{}", context.attention),
         style("warn", tier),
     );
-    put(
-        buf,
-        area,
-        22,
-        0,
-        &format!("{} today", dollars(context.cost_micros)),
-        style("fg", tier),
-    );
+    // "(local)" only when the kernel did not supply the boundary. The common
+    // path keeps its width; the qualifier appears exactly when the number is
+    // folded against a clock the rows never agreed to, which is the only time
+    // a reader needs to know which clock they are looking at.
+    let today = if context.cost_kernel_clocked {
+        format!("{} today", dollars(context.cost_micros))
+    } else {
+        format!("{} today (local)", dollars(context.cost_micros))
+    };
+    put(buf, area, 22, 0, &today, style("fg", tier));
 
     let badge = tier_badge(tier, glyphs);
     let clock = hhmm(&context.now);

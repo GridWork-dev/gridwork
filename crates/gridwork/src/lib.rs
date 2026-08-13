@@ -483,6 +483,7 @@ async fn load_attempt_table_state(
                 records,
                 next_cursor,
                 watermark,
+                served_at: _,
             } => (records, next_cursor, watermark),
             KernelResult::Error {
                 code,
@@ -556,6 +557,7 @@ async fn projection_page(
             records,
             next_cursor,
             watermark,
+            served_at: _,
         } => Ok((records, next_cursor, watermark)),
         KernelResult::Error {
             code,
@@ -765,6 +767,7 @@ pub(crate) async fn drain_projection(
                 records,
                 next_cursor,
                 watermark,
+                served_at: _,
             } => (records, next_cursor, watermark),
             KernelResult::Error { code, message, .. } => {
                 return Err(Failure::new(code, message));

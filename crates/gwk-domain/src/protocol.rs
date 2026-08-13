@@ -33,7 +33,7 @@ use crate::envelope::{CommandEnvelope, EventEnvelope, JsonValue};
 use crate::frame::{PtyDelta, PtyFrame};
 use crate::ids::{
     BlobUploadId, ByteCount, CommandId, EventCount, EventId, PtyFrameSeq, PtySessionGeneration,
-    PtySessionId, PtySessionTemplateName, RequestId, Seq, WriterEpoch,
+    PtySessionId, PtySessionTemplateName, RequestId, Seq, Timestamp, WriterEpoch,
 };
 use crate::inherited::OrchestratorCheckpoint;
 
@@ -1008,6 +1008,26 @@ pub enum KernelResult {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[specta(optional)]
         watermark: Option<Seq>,
+        /// The kernel's own clock when it served this page.
+        ///
+        /// Same argument as `watermark` one field up, on the other axis: that
+        /// one lets a client say how stale its view is against kernel truth
+        /// rather than against its own poll clock, and this one lets it say
+        /// WHEN against kernel truth rather than against its own wall clock.
+        /// A client folding "today's spend" from a page of cost entries was
+        /// choosing the day boundary itself, so two clients disagreeing by a
+        /// few minutes across midnight would report different totals over
+        /// identical rows, and neither would be wrong about anything it could
+        /// check.
+        ///
+        /// Optional because it is additive: a client reading from a kernel
+        /// that predates the field falls back to its own clock, which is what
+        /// it was doing anyway. A client that needs the boundary to be
+        /// authoritative must treat absence as a reason to say so, not as a
+        /// reason to assume agreement.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[specta(optional)]
+        served_at: Option<Timestamp>,
     },
     Events {
         events: Vec<EventEnvelope>,

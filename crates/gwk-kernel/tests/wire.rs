@@ -206,6 +206,7 @@ async fn a_page_at_a_time_walks_a_projection_exactly_once() {
                 records,
                 next_cursor,
                 watermark,
+                served_at,
             } => {
                 // Every page carries how far the projector had applied. The
                 // log is non-empty by construction here — these tasks were
@@ -214,6 +215,17 @@ async fn a_page_at_a_time_walks_a_projection_exactly_once() {
                 assert!(
                     watermark.is_some(),
                     "page {round} carried no watermark against a non-empty log"
+                );
+                // And the clock it was served at, from the database rather
+                // than this process — a client folding a day window against
+                // its own wall clock is comparing to a boundary the rows never
+                // agreed to. Asserted against a live kernel because that is
+                // the only place the DB clock is real.
+                let served_at =
+                    served_at.unwrap_or_else(|| panic!("page {round} carried no served_at"));
+                assert!(
+                    served_at.as_str().contains('T'),
+                    "page {round} served_at is not a timestamp: {served_at:?}"
                 );
                 seen.extend(records.iter().map(record_key));
                 match next_cursor {
