@@ -1076,7 +1076,7 @@ fn key_hints(shell: &ShellState) -> &'static str {
             Surface::FleetAgents => {
                 ": go   / filter   enter open   s stop   b budget   [/] tab   q quit"
             }
-            Surface::TermAttach => "i input   r rail   j/k scroll   / filter   : go   q back",
+            Surface::TermAttach => "Ctrl-g command   Ctrl-g q back   mouse focus   input -> pane",
             // q leaves a WORK surface for the Hall (the ruled "q back");
             // everywhere else in this arm it quits.
             Surface::WorkTasks | Surface::WorkRuns => {

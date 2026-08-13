@@ -2,13 +2,18 @@
 import { createMDX } from "fumadocs-mdx/next";
 
 const isDev = process.env.NODE_ENV === "development";
+// Plausible is the one third-party origin this site talks to: the script host
+// for script-src, and the same host again for connect-src because the script
+// POSTs its events back to /api/event. Naming the host is the mechanism here —
+// the policy carries no nonce, so there is nothing narrower to hang it on.
+const plausible = "https://plausible.io";
 const contentSecurityPolicy = [
   "default-src 'self'",
-  `script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ""}`,
+  `script-src 'self' 'unsafe-inline' ${plausible}${isDev ? " 'unsafe-eval'" : ""}`,
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data:",
   "font-src 'self'",
-  "connect-src 'self'",
+  `connect-src 'self' ${plausible}`,
   "object-src 'none'",
   "base-uri 'none'",
   "form-action 'none'",

@@ -2,7 +2,7 @@
 name = "gridwork"
 version = "0.0.3"
 description = "GridWork — an agent operating system for the terminal. The gw binary: the CLI that speaks the kernel's local protocol."
-homepage = "https://gridwork.dev"
+homepage = "https://gridwork.sh"
 keywords = ["agent", "terminal", "orchestration", "tui"]
 categories = ["command-line-utilities", "development-tools"]
 readme = "README.md"

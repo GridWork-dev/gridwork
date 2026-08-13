@@ -1,6 +1,6 @@
 # site/
 
-The public [gridwork.dev](https://gridwork.dev) surface is one Next.js app:
+The public [gridwork.sh](https://gridwork.sh) surface is one Next.js app:
 
 - `/` is the product landing page.
 - `/docs` is the curated Fumadocs documentation surface.

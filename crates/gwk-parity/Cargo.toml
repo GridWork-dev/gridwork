@@ -2,7 +2,7 @@
 name = "gwk-parity"
 version = "0.0.1"
 description = "local engine-parity harness: drives the three adapters end to end and fills docs/PARITY.md's matrix"
-homepage = "https://gridwork.dev"
+homepage = "https://gridwork.sh"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

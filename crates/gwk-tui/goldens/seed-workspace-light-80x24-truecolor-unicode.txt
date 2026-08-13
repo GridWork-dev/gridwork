@@ -1,0 +1,24 @@
+ TERM   workspace  pty-build
+
+ws 1  1
+┌>p1───────────────────────────────────────────────────────────────────────────┐
+│gw@kernel:~/gridwork$ cargo test -p gwk-tui --lib workspace                   │
+│running 53 tests                                                              │
+│test result: ok. 53 passed; 0 failed                                          │
+│gw@kernel:~/gridwork$                                                         │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│ live  SESSION pty-build  seq 7  59x4  view 0,0                               │
+└──────────────────────────────────────────────────────────────────────────────┘
+ws 1/1  tab 1/1  1 pane
+ VIEW  Ctrl-g command   Ctrl-g q back   mouse focus        + motion off  tc+uni

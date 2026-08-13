@@ -16,21 +16,33 @@ use gwk_domain::ids::{PtyFrameSeq, PtySessionGeneration, PtySessionId, RequestId
 use gwk_domain::protocol::{
     CONNECTION_EGRESS_BYTES_PER_WINDOW, CONNECTION_INGRESS_BYTES_PER_WINDOW, ClientControl,
     FRAME_BODY_MAX_BYTES, FRAME_PAYLOAD_MAX_BYTES, FrameKind, KernelErrorCode, KernelRequest,
-    KernelResult, PTY_RAW_CAPABILITY, ProtocolVersion, ServerControl,
+    KernelResult, PTY_INPUT_CAPABILITY, PTY_RAW_CAPABILITY, ProtocolVersion, ServerControl,
 };
 use gwk_kernel::wire::frame::{Budget, Incoming, read_frame, write_frame};
 use tokio::net::UnixStream;
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
 use crate::exit::Failure;
 
 /// One connection, already through the handshake.
 pub struct Client {
-    stream: UnixStream,
-    budget: Budget,
+    reader: ClientReader,
+    writer: ClientWriter,
     /// Requests are numbered rather than randomized: one connection asks one
     /// question at a time here, and a counter makes a transcript readable.
-    issued: u64,
     raw_enabled: bool,
+    input_enabled: bool,
+}
+
+pub(crate) struct ClientReader {
+    stream: OwnedReadHalf,
+    budget: Budget,
+}
+
+pub(crate) struct ClientWriter {
+    stream: OwnedWriteHalf,
+    budget: Budget,
+    issued: u64,
 }
 
 /// One item from a raw PTY attach. Snapshot/output variants carry arbitrary
@@ -72,14 +84,19 @@ impl Client {
         let stream = UnixStream::connect(path)
             .await
             .map_err(|e| Failure::unreachable(format!("connect {}: {e}", path.display())))?;
+        let (reader, writer) = stream.into_split();
         let mut client = Self {
-            stream,
-            budget: Budget::new(
-                CONNECTION_INGRESS_BYTES_PER_WINDOW,
-                CONNECTION_EGRESS_BYTES_PER_WINDOW,
-            ),
-            issued: 0,
+            reader: ClientReader {
+                stream: reader,
+                budget: Budget::new(CONNECTION_INGRESS_BYTES_PER_WINDOW, 0),
+            },
+            writer: ClientWriter {
+                stream: writer,
+                budget: Budget::new(0, CONNECTION_EGRESS_BYTES_PER_WINDOW),
+                issued: 0,
+            },
             raw_enabled: false,
+            input_enabled: false,
         };
         client
             .send(&ClientControl::Hello {
@@ -89,6 +106,8 @@ impl Client {
                 // client uses only what v1 requires of every daemon.
                 capabilities: vec![
                     gwk_domain::CapabilityName::new(PTY_RAW_CAPABILITY)
+                        .expect("the protocol's own capability name is valid"),
+                    gwk_domain::CapabilityName::new(PTY_INPUT_CAPABILITY)
                         .expect("the protocol's own capability name is valid"),
                 ],
                 client: Some("gw".to_owned()),
@@ -103,6 +122,9 @@ impl Client {
                 client.raw_enabled = capabilities
                     .iter()
                     .any(|capability| capability.as_str() == PTY_RAW_CAPABILITY);
+                client.input_enabled = capabilities
+                    .iter()
+                    .any(|capability| capability.as_str() == PTY_INPUT_CAPABILITY);
                 Ok((client, ack))
             }
             // A refusal at the handshake is the daemon's answer, reported as it
@@ -118,12 +140,7 @@ impl Client {
 
     /// Ask one question and take its answer.
     pub async fn ask(&mut self, request: KernelRequest) -> Result<KernelResult, Failure> {
-        let request_id = self.next_id();
-        self.send(&ClientControl::Request {
-            request_id: request_id.clone(),
-            request,
-        })
-        .await?;
+        let request_id = self.writer.request(request).await?;
         loop {
             let frame = self
                 .receive()
@@ -152,12 +169,10 @@ impl Client {
     /// The request id comes back because every batch carries it, and a caller
     /// following one stream still has to check.
     pub async fn subscribe(&mut self, cursor: Option<Seq>) -> Result<RequestId, Failure> {
-        let request_id = self.next_id();
-        self.send(&ClientControl::Request {
-            request_id: request_id.clone(),
-            request: KernelRequest::SubscribeEvents { cursor },
-        })
-        .await?;
+        let request_id = self
+            .writer
+            .request(KernelRequest::SubscribeEvents { cursor })
+            .await?;
         match self
             .receive()
             .await?
@@ -184,16 +199,14 @@ impl Client {
         generation: Option<PtySessionGeneration>,
         cursor: Option<PtyFrameSeq>,
     ) -> Result<(RequestId, ServerControl), Failure> {
-        let request_id = self.next_id();
-        self.send(&ClientControl::Request {
-            request_id: request_id.clone(),
-            request: KernelRequest::PtyAttach {
+        let request_id = self
+            .writer
+            .request(KernelRequest::PtyAttach {
                 session_id,
                 generation,
                 cursor,
-            },
-        })
-        .await?;
+            })
+            .await?;
         let response = self
             .receive()
             .await?
@@ -227,16 +240,14 @@ impl Client {
                 format!("{PTY_RAW_CAPABILITY} was not negotiated"),
             ));
         }
-        let request_id = self.next_id();
-        self.send(&ClientControl::Request {
-            request_id: request_id.clone(),
-            request: KernelRequest::PtyRawAttach {
+        let request_id = self
+            .writer
+            .request(KernelRequest::PtyRawAttach {
                 session_id,
                 generation,
                 cursor,
-            },
-        })
-        .await?;
+            })
+            .await?;
         let response = self
             .receive()
             .await?
@@ -259,9 +270,13 @@ impl Client {
     /// Receive one logical raw delivery. Snapshot/output headers consume the
     /// immediately following kind `0x02` frame before returning.
     pub async fn receive_pty_raw(&mut self) -> Result<Option<PtyRawMessage>, Failure> {
-        let frame = read_frame(&mut self.stream, FRAME_BODY_MAX_BYTES, &mut self.budget)
-            .await
-            .map_err(|e| Failure::new(e.code, e.message))?;
+        let frame = read_frame(
+            &mut self.reader.stream,
+            FRAME_BODY_MAX_BYTES,
+            &mut self.reader.budget,
+        )
+        .await
+        .map_err(|e| Failure::new(e.code, e.message))?;
         let Incoming::Frame(frame) = frame else {
             return Ok(None);
         };
@@ -332,31 +347,11 @@ impl Client {
 
     /// The next thing the daemon sends, or `None` when it hangs up.
     pub async fn receive(&mut self) -> Result<Option<ServerControl>, Failure> {
-        let frame = read_frame(&mut self.stream, FRAME_BODY_MAX_BYTES, &mut self.budget)
-            .await
-            .map_err(|e| Failure::new(e.code, e.message))?;
-        match frame {
-            Incoming::Closed => Ok(None),
-            Incoming::Frame(frame) => {
-                if frame.kind != FrameKind::Json {
-                    return Err(Failure::new(
-                        KernelErrorCode::Handshake,
-                        format!("kind {:?} carries no control value", frame.kind),
-                    ));
-                }
-                serde_json::from_slice(&frame.body)
-                    .map(Some)
-                    .map_err(|e| Failure::new(KernelErrorCode::Schema, format!("decode: {e}")))
-            }
-        }
+        self.reader.receive().await
     }
 
     async fn send(&mut self, control: &ClientControl) -> Result<(), Failure> {
-        let body = serde_json::to_vec(control)
-            .map_err(|e| Failure::internal(format!("serialize a request: {e}")))?;
-        write_frame(&mut self.stream, FrameKind::Json, &body, &mut self.budget)
-            .await
-            .map_err(|e| Failure::new(e.code, e.message))
+        self.writer.send(control).await
     }
 
     async fn receive_raw_payload(&mut self, byte_size: u64) -> Result<Vec<u8>, Failure> {
@@ -374,9 +369,13 @@ impl Client {
                 "raw PTY byte_size does not fit this client",
             )
         })?;
-        let frame = read_frame(&mut self.stream, FRAME_BODY_MAX_BYTES, &mut self.budget)
-            .await
-            .map_err(|e| Failure::new(e.code, e.message))?;
+        let frame = read_frame(
+            &mut self.reader.stream,
+            FRAME_BODY_MAX_BYTES,
+            &mut self.reader.budget,
+        )
+        .await
+        .map_err(|e| Failure::new(e.code, e.message))?;
         let Incoming::Frame(frame) = frame else {
             return Err(Failure::unreachable(
                 "the daemon closed before the announced raw PTY payload",
@@ -395,9 +394,63 @@ impl Client {
         Ok(frame.body)
     }
 
-    fn next_id(&mut self) -> RequestId {
-        self.issued += 1;
-        RequestId::new(format!("gw-{}", self.issued))
+    pub(crate) fn into_parts(self) -> (ClientReader, ClientWriter) {
+        (self.reader, self.writer)
+    }
+
+    pub(crate) const fn supports_pty_input(&self) -> bool {
+        self.input_enabled
+    }
+}
+
+impl ClientReader {
+    pub(crate) async fn receive(&mut self) -> Result<Option<ServerControl>, Failure> {
+        let frame = read_frame(&mut self.stream, FRAME_BODY_MAX_BYTES, &mut self.budget)
+            .await
+            .map_err(|e| Failure::new(e.code, e.message))?;
+        match frame {
+            Incoming::Closed => Ok(None),
+            Incoming::Frame(frame) => {
+                if frame.kind != FrameKind::Json {
+                    return Err(Failure::new(
+                        KernelErrorCode::Handshake,
+                        format!("kind {:?} carries no control value", frame.kind),
+                    ));
+                }
+                serde_json::from_slice(&frame.body)
+                    .map(Some)
+                    .map_err(|e| Failure::new(KernelErrorCode::Schema, format!("decode: {e}")))
+            }
+        }
+    }
+}
+
+impl ClientWriter {
+    pub(crate) async fn request_with_id(
+        &mut self,
+        request_id: RequestId,
+        request: KernelRequest,
+    ) -> Result<(), Failure> {
+        self.send(&ClientControl::Request {
+            request_id,
+            request,
+        })
+        .await
+    }
+
+    pub(crate) async fn request(&mut self, request: KernelRequest) -> Result<RequestId, Failure> {
+        self.issued = self.issued.saturating_add(1);
+        let request_id = RequestId::new(format!("gw-{}", self.issued));
+        self.request_with_id(request_id.clone(), request).await?;
+        Ok(request_id)
+    }
+
+    async fn send(&mut self, control: &ClientControl) -> Result<(), Failure> {
+        let body = serde_json::to_vec(control)
+            .map_err(|e| Failure::internal(format!("serialize a request: {e}")))?;
+        write_frame(&mut self.stream, FrameKind::Json, &body, &mut self.budget)
+            .await
+            .map_err(|e| Failure::new(e.code, e.message))
     }
 }
 
@@ -405,6 +458,8 @@ impl Client {
 mod tests {
     use super::*;
     use gwk_domain::ByteCount;
+    use gwk_domain::frame::PtyDelta;
+    use gwk_domain::ids::PtyFrameSeq;
 
     #[tokio::test]
     async fn raw_receive_pairs_the_header_with_byte_exact_payload() {
@@ -427,11 +482,19 @@ mod tests {
                 .await
                 .expect("write raw bytes");
         });
+        let (reader, writer) = client_stream.into_split();
         let mut client = Client {
-            stream: client_stream,
-            budget: Budget::new(1 << 20, 1 << 20),
-            issued: 0,
+            reader: ClientReader {
+                stream: reader,
+                budget: Budget::new(1 << 20, 0),
+            },
+            writer: ClientWriter {
+                stream: writer,
+                budget: Budget::new(0, 1 << 20),
+                issued: 0,
+            },
             raw_enabled: true,
+            input_enabled: true,
         };
 
         match client
@@ -473,11 +536,19 @@ mod tests {
         .await
         .expect("write header");
 
+        let (reader, writer) = client_stream.into_split();
         let mut client = Client {
-            stream: client_stream,
-            budget: Budget::new(1 << 20, 1 << 20),
-            issued: 0,
+            reader: ClientReader {
+                stream: reader,
+                budget: Budget::new(1 << 20, 0),
+            },
+            writer: ClientWriter {
+                stream: writer,
+                budget: Budget::new(0, 1 << 20),
+                issued: 0,
+            },
             raw_enabled: true,
+            input_enabled: true,
         };
         let result = tokio::time::timeout(
             std::time::Duration::from_millis(50),
@@ -491,5 +562,116 @@ mod tests {
         // Keep the writer alive through the assertion: success cannot come from
         // observing EOF while waiting for the absent payload.
         drop(server_stream);
+    }
+
+    #[tokio::test]
+    async fn split_client_preserves_an_interleaved_delta_between_two_attach_requests() {
+        let (client_stream, mut server_stream) = UnixStream::pair().expect("socket pair");
+        let (reader, writer) = client_stream.into_split();
+        let client = Client {
+            reader: ClientReader {
+                stream: reader,
+                budget: Budget::new(1 << 20, 0),
+            },
+            writer: ClientWriter {
+                stream: writer,
+                budget: Budget::new(0, 1 << 20),
+                issued: 0,
+            },
+            raw_enabled: true,
+            input_enabled: true,
+        };
+        let (mut reader, mut writer) = client.into_parts();
+        writer
+            .request_with_id(
+                RequestId::new("attach-a"),
+                KernelRequest::PtyAttach {
+                    session_id: PtySessionId::new("a"),
+                    generation: None,
+                    cursor: None,
+                },
+            )
+            .await
+            .expect("first request");
+        writer
+            .request_with_id(
+                RequestId::new("attach-b"),
+                KernelRequest::PtyAttach {
+                    session_id: PtySessionId::new("b"),
+                    generation: None,
+                    cursor: None,
+                },
+            )
+            .await
+            .expect("second request");
+
+        let server = tokio::spawn(async move {
+            let mut budget = Budget::new(1 << 20, 1 << 20);
+            for expected in ["attach-a", "attach-b"] {
+                let Incoming::Frame(frame) =
+                    read_frame(&mut server_stream, FRAME_BODY_MAX_BYTES, &mut budget)
+                        .await
+                        .expect("read request")
+                else {
+                    panic!("client closed before {expected}")
+                };
+                let control: ClientControl =
+                    serde_json::from_slice(&frame.body).expect("decode request");
+                assert!(matches!(
+                    control,
+                    ClientControl::Request { request_id, .. } if request_id.as_str() == expected
+                ));
+            }
+            let controls = [
+                ServerControl::Response {
+                    request_id: RequestId::new("attach-a"),
+                    result: KernelResult::PtyAttached {
+                        session_id: PtySessionId::new("a"),
+                        generation: gwk_domain::ids::PtySessionGeneration::new("life-a"),
+                        rows: 24,
+                        cols: 80,
+                        cursor: Some(PtyFrameSeq::new(1)),
+                    },
+                },
+                ServerControl::PtyDeltaBatch {
+                    request_id: RequestId::new("attach-a"),
+                    session_id: PtySessionId::new("a"),
+                    generation: gwk_domain::ids::PtySessionGeneration::new("life-a"),
+                    deltas: vec![PtyDelta::Resized { rows: 25, cols: 81 }],
+                    seq: PtyFrameSeq::new(2),
+                },
+                ServerControl::Response {
+                    request_id: RequestId::new("attach-b"),
+                    result: KernelResult::PtyAttached {
+                        session_id: PtySessionId::new("b"),
+                        generation: gwk_domain::ids::PtySessionGeneration::new("life-b"),
+                        rows: 24,
+                        cols: 80,
+                        cursor: Some(PtyFrameSeq::new(1)),
+                    },
+                },
+            ];
+            for control in controls {
+                let body = serde_json::to_vec(&control).expect("serialize response");
+                write_frame(&mut server_stream, FrameKind::Json, &body, &mut budget)
+                    .await
+                    .expect("write response");
+            }
+        });
+
+        assert!(matches!(
+            reader.receive().await.expect("ack a").expect("control"),
+            ServerControl::Response { request_id, .. } if request_id.as_str() == "attach-a"
+        ));
+        assert!(matches!(
+            reader.receive().await.expect("delta a").expect("control"),
+            ServerControl::PtyDeltaBatch { request_id, seq, .. }
+                if request_id.as_str() == "attach-a" && seq == PtyFrameSeq::new(2)
+        ));
+        assert!(matches!(
+            reader.receive().await.expect("ack b").expect("control"),
+            ServerControl::Response { request_id, .. } if request_id.as_str() == "attach-b"
+        ));
+        server.await.expect("join server");
     }
 }

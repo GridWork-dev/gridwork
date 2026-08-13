@@ -1,0 +1,62 @@
+# GridWork
+
+> An agent operating system for the terminal: one Rust binary, one append-only
+> event log as the source of truth, and a TUI as the only surface. Apache-2.0,
+> built in public from its first commit.
+
+Pre-alpha, at stage 5 of 6 (Workspace). Stages 1-4 — the contract, the kernel,
+the engines, and the console — are done. Schemas, protocols, and the binary
+change without notice until 1.0.
+
+The site at https://gridwork.sh is a curated mirror of documents in the public
+repository; the repository is canonical, and every docs page links the exact
+source files it was curated from.
+
+## What runs today
+
+- `gwk-cert` replays an exported event stream against the contract. It proves
+  contract conformance, NOT authenticity — a coherent forged stream passes.
+- `cargo install gridwork` installs the headless `gw` CLI. It needs a
+  PostgreSQL 16 and two separate database roles before it does anything.
+- `gw tui` opens five lenses — hall, work, fleet, flow, term — over the
+  kernel's live projections.
+
+Not built: the workspace multiplexer (stage 5, in progress), the
+ledger-synced exportable half of replay, and packaging for the PTY engine host.
+
+## Docs
+
+- [Quickstart](https://gridwork.sh/docs/quickstart): certify a stream, install
+  the CLI, initialize a kernel, and the current limits.
+- [Architecture](https://gridwork.sh/docs/architecture): what owns truth, what
+  the pieces are, which decisions are locked.
+- [Protocol](https://gridwork.sh/docs/protocol): the client-kernel contract —
+  framing, hello, requests, subscriptions.
+- [Contract naming](https://gridwork.sh/docs/contract): the casing and
+  wire-shape rules the contract is frozen under.
+- [Threat model](https://gridwork.sh/docs/security): every boundary labelled
+  in force, partial, or designed-not-yet-built.
+- [Engine parity](https://gridwork.sh/docs/parity): the twelve-cell matrix.
+  It runs LOCALLY, never in public CI — its tests need three logged-in engine
+  CLIs, and cells are only valid against the versions pinned at capture time.
+  Public CI proves the adapter crates build and handle recorded frames.
+- [Clean-room derivation](https://gridwork.sh/docs/derivation): the
+  independent-implementation policy for terminal-engine work.
+- [Roadmap](https://gridwork.sh/docs/roadmap): six stages and what each
+  delivers.
+
+## Repository
+
+- Source: https://github.com/GridWork-dev/gridwork
+- Crates: https://crates.io/crates/gridwork — six crates published at 0.0.2
+  (gwk-domain, gwk-cert, gwk-theme, gwk-kernel, gridwork, gwk). The PTY engine,
+  the three engine adapters, the parity harness, and the TUI are in the tree
+  and deliberately unpublished until 1.0 packaging.
+- Stable Rust, MSRV 1.94. 1,125 test functions across the workspace as of
+  2026-08-12.
+
+## Provenance
+
+Most commits are agent-authored under human direction and review. This is
+stated as a fact, not a caveat — the same gates apply regardless of who typed
+the code.

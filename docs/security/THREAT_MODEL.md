@@ -5,9 +5,10 @@ mitigation lives. Written for contributors: if your change touches one of
 these boundaries, the relevant stance is review criteria, not background
 reading. Reporting: see `SECURITY.md`.
 
-GridWork is pre-alpha, at stage 4 of 6 (see `ROADMAP.md`): the kernel and the
-engines are built — the engine crates certified by the parity matrix — while the
-console and the rest of the human surface are not, so several stances below are still
+GridWork is pre-alpha, at stage 5 of 6 (see `ROADMAP.md`): the kernel, the
+engines, and the console are built — the engine crates certified by the parity
+matrix, the console shipped as the five-lens workspace — while the workspace
+multiplexer and the context runtime are not, so several stances below are still
 design commitments whose enforcing code does not exist yet. Each stance therefore
 carries a status: **in force** (enforced at HEAD), **partial** (naming what is
 enforced versus designed), or **designed, not yet built**. A design stance is a
