@@ -450,6 +450,9 @@ struct ConsoleModel {
     chrome: ChromeTheme,
     hall_phase: usize,
     hall_cost_micros: u64,
+    /// Whether `hall_cost_micros` was folded against the kernel's day boundary
+    /// or this process's. Carried, not assumed — see `refresh_hall_cost`.
+    hall_cost_kernel_clocked: bool,
     hall_selected: Option<DistrictId>,
     board_selected: Option<BoardTarget>,
     queue_selected: Option<QueueTarget>,
@@ -550,6 +553,7 @@ async fn run_workspace(start: WorkspaceStart, requested_motion: MotionMode) -> R
     let (config, config_repository, config_evidence, config_notice) =
         refresh_config(&mut data).await;
     let hall_selected = visible_district_order(&estate.frame).first().cloned();
+    let hall_cost = refresh_hall_cost(&mut data).await?;
     let mut model = ConsoleModel {
         shell: ShellState::new(start.surface),
         estate,
@@ -566,7 +570,8 @@ async fn run_workspace(start: WorkspaceStart, requested_motion: MotionMode) -> R
         workspace: WorkspaceRuntime::from_projection(&workspace_rows),
         chrome,
         hall_phase: 0,
-        hall_cost_micros: refresh_hall_cost(&mut data).await?,
+        hall_cost_micros: hall_cost.0,
+        hall_cost_kernel_clocked: hall_cost.1,
         hall_selected,
         board_selected: None,
         queue_selected: None,
@@ -852,7 +857,9 @@ async fn workspace_loop(
                 if batched {
                     model.estate = refresh_estate(data, events).await?;
                     model.queue = refresh_queue(data).await?;
-                    model.hall_cost_micros = refresh_hall_cost(data).await?;
+                    let (micros, kernel_clocked) = refresh_hall_cost(data).await?;
+                    model.hall_cost_micros = micros;
+                    model.hall_cost_kernel_clocked = kernel_clocked;
                     refresh_surface(data, model).await?;
                     reconcile_selection(model);
                     model.update_attention_marks();
@@ -985,6 +992,7 @@ fn draw_workspace(
                                 running,
                                 attention,
                                 cost_micros: model.hall_cost_micros,
+                                cost_kernel_clocked: model.hall_cost_kernel_clocked,
                                 load: LoadState::Ready,
                             },
                             tier,
@@ -2663,7 +2671,8 @@ async fn refresh_queue(client: &mut Client) -> Result<QueueState, Failure> {
         ProjectionKind::Receipt,
         ProjectionKind::Message,
     ] {
-        let (records, watermark, _) = read_projection_records(client, kind).await?;
+        let read = read_projection_records(client, kind).await?;
+        let (records, watermark) = (read.records, read.watermark);
         state.watermark = watermark.or(state.watermark);
         for record in records {
             match (kind, record) {
@@ -2697,8 +2706,8 @@ async fn refresh_queue(client: &mut Client) -> Result<QueueState, Failure> {
 }
 
 async fn refresh_terms(client: &mut Client) -> Result<TermState, Failure> {
-    let (records, watermark, drained) =
-        read_projection_records(client, ProjectionKind::PtySession).await?;
+    let read = read_projection_records(client, ProjectionKind::PtySession).await?;
+    let (records, watermark, drained) = (read.records, read.watermark, read.drained);
     let mut sessions = Vec::with_capacity(records.len());
     for record in records {
         let ProjectionRecord::PtySession { pty_session } = record else {
@@ -2792,6 +2801,7 @@ async fn read_projection_records_once(
             records: page,
             next_cursor,
             watermark: page_watermark,
+            served_at: _,
         } = result
         else {
             return result_failure(result, "read coherent projection");
@@ -2855,7 +2865,8 @@ async fn refresh_config(
         }
     };
     let evidence = match read_projection_records(client, ProjectionKind::Evidence).await {
-        Ok((records, _, _)) => records
+        Ok(read) => read
+            .records
             .into_iter()
             .filter_map(|record| match record {
                 ProjectionRecord::Evidence { evidence } if evidence.kind == "config_change" => {
@@ -2891,9 +2902,24 @@ fn config_repository_root() -> Result<std::path::PathBuf, std::io::Error> {
         .unwrap_or(std::env::current_dir()?))
 }
 
-async fn refresh_hall_cost(client: &mut Client) -> Result<u64, Failure> {
-    let now = current_timestamp();
-    let (records, _, _) = read_projection_records(client, ProjectionKind::CostEntry).await?;
+/// Today's spend, where "today" is the KERNEL's day.
+///
+/// The boundary used to come from `current_timestamp()` — this process's
+/// clock — while every `recorded_at` it is compared against comes from the
+/// database's. Two clocks, one comparison: a client a few minutes off across
+/// midnight reports a different total over identical rows, and nothing in
+/// either number is wrong about anything it can check.
+///
+/// The page now carries the kernel's own `served_at`, so the boundary and the
+/// rows agree by construction. The local fallback survives for a kernel that
+/// predates the field, which is exactly the behavior this replaces — no worse
+/// than before, and no longer silent about which one it got: the caller is
+/// told, so a surface can say whose midnight it means.
+async fn refresh_hall_cost(client: &mut Client) -> Result<(u64, bool), Failure> {
+    let read = read_projection_records(client, ProjectionKind::CostEntry).await?;
+    let kernel_clocked = read.served_at.is_some();
+    let now = read.served_at.unwrap_or_else(current_timestamp);
+    let records = read.records;
     records
         .into_iter()
         .map(|record| match record {
@@ -2914,23 +2940,39 @@ async fn refresh_hall_cost(client: &mut Client) -> Result<u64, Failure> {
                 .filter_map(|entry| entry.cost_micros)
                 .fold(0u64, |total, value| total.saturating_add(value.value()))
         })
+        .map(|total| (total, kernel_clocked))
+}
+
+/// What a flat paged read of one projection kind produced.
+///
+/// A struct rather than a tuple because the last two fields are both answers
+/// about the read itself rather than about the rows, and a caller that mixes
+/// them up gets a plausible wrong answer instead of a type error.
+struct ProjectionRead {
+    records: Vec<ProjectionRecord>,
+    watermark: Option<Seq>,
+    /// Whether the read reached the end, or stopped at the page budget.
+    drained: bool,
+    /// The kernel's clock when it served the LAST page, or `None` from a
+    /// kernel that predates the field.
+    ///
+    /// The last page rather than the first: a multi-page walk takes real time,
+    /// and the latest stamp is the one closest to the rows a caller is about
+    /// to fold. Neither is a snapshot — that is what `watermark` is for.
+    served_at: Option<Timestamp>,
 }
 
 /// Page one projection kind into a flat record list, up to the same budget
 /// [`crate::drain_projection`] honours.
-///
-/// The third element of the tuple is whether the read actually reached the end.
-/// Most callers discard it because they fold the rows into something that makes
-/// no completeness claim; `refresh_terms` is the one that does, and it must
-/// pass it through rather than assume.
 async fn read_projection_records(
     client: &mut Client,
     kind: ProjectionKind,
-) -> Result<(Vec<ProjectionRecord>, Option<Seq>, bool), Failure> {
+) -> Result<ProjectionRead, Failure> {
     let mut records = Vec::new();
     let mut cursor = None;
     let mut seen = BTreeSet::new();
     let mut watermark = None;
+    let mut served_at = None;
     let mut pages = 0u32;
     loop {
         let result = client
@@ -2944,16 +2986,32 @@ async fn read_projection_records(
             records: page,
             next_cursor,
             watermark: page_watermark,
+            served_at: page_served_at,
         } = result
         else {
             return result_failure(result, "read workspace projection");
         };
         watermark = page_watermark.or(watermark);
+        served_at = page_served_at.or(served_at);
         records.extend(page);
         pages += 1;
         match (crate::page_step(next_cursor.is_some(), pages), next_cursor) {
-            (crate::PageStep::Drained, _) => return Ok((records, watermark, true)),
-            (crate::PageStep::Short, _) => return Ok((records, watermark, false)),
+            (crate::PageStep::Drained, _) => {
+                return Ok(ProjectionRead {
+                    records,
+                    watermark,
+                    drained: true,
+                    served_at,
+                });
+            }
+            (crate::PageStep::Short, _) => {
+                return Ok(ProjectionRead {
+                    records,
+                    watermark,
+                    drained: false,
+                    served_at,
+                });
+            }
             (crate::PageStep::Continue, Some(next)) => {
                 if !seen.insert(next.clone()) {
                     return Err(Failure::internal(format!(
@@ -3610,6 +3668,7 @@ async fn load_projection_pages(client: &mut Client) -> Result<ProjectionSnapshot
                 records,
                 next_cursor,
                 watermark,
+                served_at: _,
             } = result
             else {
                 return result_failure(result, "read estate projections");

@@ -126,6 +126,9 @@ async fn serve_empty_projection_pages(listener: UnixListener, connections: usize
                     records: Vec::new(),
                     next_cursor: None,
                     watermark: Some(gwk_domain::ids::Seq::new(221)),
+                    // Absent on purpose: this fake stands in for a kernel that
+                    // predates the field, which is the fallback path.
+                    served_at: None,
                 },
             };
             write_frame(

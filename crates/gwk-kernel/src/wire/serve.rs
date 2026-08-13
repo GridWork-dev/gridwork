@@ -494,10 +494,18 @@ impl Daemon {
                         .map(|record| cursor_key(record, key))
                         .transpose()?
                 };
+                // The database's clock, not this process's — the same rule
+                // `appended_at` follows. A page whose rows carry DB timestamps
+                // and whose `served_at` carries a process timestamp would let a
+                // client compare the two and quietly get a different answer
+                // than either clock alone would give.
+                let mut conn = self.connection().await?;
+                let served_at = crate::epoch::db_now(&mut conn).await.ok();
                 KernelResult::ProjectionPage {
                     records,
                     next_cursor,
                     watermark: readiness.watermark,
+                    served_at: served_at.map(gwk_domain::ids::Timestamp::new),
                 }
             }
 
