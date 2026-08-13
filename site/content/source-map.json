@@ -21,7 +21,7 @@
     },
     {
       "destination": "content/docs/architecture.mdx",
-      "sha256": "517315a143e60ef8267dc736e6a8d60d07b39048ffd40df2b2a3855ffa3165ce",
+      "sha256": "94059e9fa07c5cbdf4471d85ff83e2772fffae3d50bbeef8cafe864df5f367bf",
       "sources": [
         {
           "path": "docs/architecture.md"
@@ -105,7 +105,7 @@
     },
     {
       "destination": "content/docs/roadmap.mdx",
-      "sha256": "99f4396b7c3916667f8b35cdd2632e21286df35a53da5de259a11b0530967253",
+      "sha256": "f1991dabad8a64ce20651138d52adebb9a00dea3f63a6be0cfcefc40716597f2",
       "sources": [
         {
           "path": "ROADMAP.md"
