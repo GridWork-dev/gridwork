@@ -255,13 +255,29 @@ pub fn cost_table(state: &BoardState, now: &Timestamp, meta: &PageMeta, width: u
     let unpriced = entries.len().saturating_sub(priced);
     let watermark = watermark(meta);
 
+    // The same command with stdout not a terminal emits `cost_rollup`, which
+    // answers `cost_micros: null` and pins the reason under `unknowns`. Falling
+    // through to `$0.00 today` under two header-only tables would tell the
+    // machine reader the truth and the human a measured zero — the drift is
+    // between two renderings of one command, so the human gets the twin's own
+    // sentence rather than a second vocabulary for the same absence.
+    if entries.is_empty() {
+        return format!("no entries -- no spend recorded on this page · watermark {watermark}\n");
+    }
+
     let mut output = String::from("BY LANE\n");
     output.push_str(&table(&lane_columns, &lane_rows, width));
     output.push_str("\nBY HOUR\n");
     output.push_str(&table(&hour_columns, &hour_rows, width));
+    // Entries landed but none carries a price: a real state, and distinct from
+    // the empty ledger above, so it keeps its tables and loses only the total.
+    let headline = if priced == 0 {
+        "no cost reported".to_owned()
+    } else {
+        format!("{} today", dollars(total))
+    };
     output.push_str(&format!(
-        "\n{} today · {priced} priced · {unpriced} unpriced · watermark {watermark}\n",
-        dollars(total)
+        "\n{headline} · {priced} priced · {unpriced} unpriced · watermark {watermark}\n"
     ));
     output
 }

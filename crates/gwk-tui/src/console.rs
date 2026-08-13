@@ -410,7 +410,8 @@ fn paint_fleet_header(
     glyphs: GlyphSet,
 ) {
     let compact = area.width < 100;
-    let (micros, _, _) = cost_totals(state, &context.now);
+    let (micros, priced, unpriced) = cost_totals(state, &context.now);
+    let spend = spend_summary(micros, priced, unpriced);
     let live = state
         .attempts
         .iter()
@@ -428,18 +429,13 @@ fn paint_fleet_header(
         .count();
     put(buf, area, 1, 0, "FLEET", bold("fg", tier));
     let summary = if compact {
-        format!(
-            "{} attempts  {live} live  {} today",
-            state.attempts.len(),
-            dollars(micros)
-        )
+        format!("{} attempts  {live} live  {spend}", state.attempts.len())
     } else {
         format!(
-            "{} attempts  {live} live  {} sessions  {} leases ({held} held)  {} today",
+            "{} attempts  {live} live  {} sessions  {} leases ({held} held)  {spend}",
             state.attempts.len(),
             state.sessions.len(),
             state.leases.len(),
-            dollars(micros)
         )
     };
     put(buf, area, 9, 0, &summary, style("fg", tier));
@@ -669,6 +665,29 @@ fn plural_suffix(count: usize) -> &'static str {
     if count == 1 { "" } else { "s" }
 }
 
+/// The header's spend figure, or the reason there is not one.
+///
+/// `$0.00 today` is the single rendering this must never produce out of an
+/// empty fold. Nothing writes `cost_entry` yet, so a zero here does not read
+/// as "no rows" — it reads as "the estate ran eleven attempts today and cost
+/// nothing", which is a measurement that was never taken. A sum over nothing
+/// is not a sum of zero, and `dollars()` cannot tell the two apart because by
+/// the time it is called they are both `0u64`. So the count decides, not the
+/// total, exactly as the Board twin's `cost_micros: (priced > 0).then(..)`
+/// already does one module over.
+fn spend_summary(micros: u64, priced: usize, unpriced: usize) -> String {
+    match (priced, unpriced) {
+        (0, 0) => "no spend recorded".to_owned(),
+        // Rows landed and none carries a price: a real and different fact
+        // from an empty ledger, and the operator can act on the difference.
+        (0, unpriced) => format!(
+            "{unpriced} unpriced entr{} today",
+            if unpriced == 1 { "y" } else { "ies" }
+        ),
+        _ => format!("{} today", dollars(micros)),
+    }
+}
+
 fn lease_state_word(state: LeaseState) -> &'static str {
     match state {
         LeaseState::Held => "held",
@@ -769,6 +788,23 @@ fn paint_spend_chart(
         ),
         bold("fg", tier),
     );
+    // The counts above are honest — they are row counts, and zero rows is a
+    // fact. The chart below is not: with no priced entry, `peak` floors to one
+    // micro, so the scale prints `$0.00` over a `> $0` rung and the axis marks
+    // the current hour, and a reader takes all of it for a measurement that
+    // came in under the bottom rung. There is no scale without data, so none
+    // is drawn.
+    if !any {
+        put(
+            buf,
+            area,
+            2,
+            top.saturating_add(1),
+            "no priced spend in the log -- no scale to draw",
+            style("muted", tier),
+        );
+        return;
+    }
     for row in 0..ROWS {
         let y = top.saturating_add(1 + row as u16);
         let level = ROWS - row;

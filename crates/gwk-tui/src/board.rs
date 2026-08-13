@@ -2239,9 +2239,22 @@ fn cost_health_rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
             why: note.why.clone(),
         })
         .collect();
-    if health == 0 {
+    // Both halves of the ingestion block, and for the same reason: the two
+    // kinds share one absent producer, so an explanation on only one of them
+    // is worse than none on either. A reader who has just been told why
+    // `health` reads zero will take the silence beside it as a measurement.
+    // The colour alone cannot carry this — the `unknown` binding degrades to
+    // the terminal's own foreground at mono, where the row becomes
+    // indistinguishable from a counted one.
+    for (subject, empty) in [
+        ("health", health == 0),
+        ("session", session_records.is_empty()),
+    ] {
+        if !empty {
+            continue;
+        }
         unknowns.push(UnknownNote {
-            subject: "health",
+            subject,
             // "no records" is a claim about the whole ledger and this count is
             // over one page, so a partial read says so — the same distinction
             // the floor note below draws, applied where it is also true.
