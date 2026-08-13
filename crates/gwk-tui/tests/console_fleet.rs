@@ -96,3 +96,74 @@ fn fleet_age_cell_never_cuts_mid_value_at_the_design_width() {
     );
     assert!(!rendered.contains("11d2"), "{rendered}");
 }
+
+/// The empty-ledger frame, which is the live one: nothing writes `cost_entry`
+/// yet, so every money figure on this lens folds over nothing. A fold cannot
+/// tell "summed to zero" from "summed over nothing" once it has run, so the
+/// check is that neither the header nor the chart is willing to print a
+/// dollar amount when no entry was priced.
+fn render_without_costs(width: u16, height: u16, tier: ColorTier, glyphs: GlyphSet) -> String {
+    let mut state = common::estate::estate_board_state(BoardView::Fleet);
+    state.costs.clear();
+    let context = FleetContext {
+        now: Timestamp::new("2026-08-11T17:30:00Z"),
+        load: LoadState::Ready,
+    };
+    dump_frame(width, height, tier, glyphs, |area, buf, tier, glyphs| {
+        let mut hits = HitMap::<BoardTarget>::new();
+        render_fleet(area, buf, &state, &context, None, tier, glyphs, &mut hits);
+    })
+}
+
+#[test]
+fn fleet_states_an_empty_cost_ledger_rather_than_pricing_it_at_zero() {
+    // Every rung the terminal offers, because a degraded tier is where an
+    // honest rendering is most likely to collapse back into a bare number.
+    for (width, height, tier, glyphs) in [
+        (120u16, 40u16, ColorTier::Truecolor, GlyphSet::Unicode),
+        (80, 24, ColorTier::Truecolor, GlyphSet::Unicode),
+        (120, 40, ColorTier::Mono, GlyphSet::Ascii),
+    ] {
+        let rendered = render_without_costs(width, height, tier, glyphs);
+        let at = format!("at {width}x{height} {}", tier.as_str());
+
+        // The header. `$0.00 today` beside a live attempt count reads as "the
+        // estate ran and cost nothing", which is a measurement nobody took.
+        assert!(
+            !rendered.contains("$0.00"),
+            "a zero fold priced itself {at}:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("no spend recorded"),
+            "the header does not say the ledger is empty {at}:\n{rendered}"
+        );
+
+        // The chart. `peak` floors to one micro on an empty ledger, so the
+        // scale and its bottom rung are drawn over data that does not exist.
+        assert!(
+            !rendered.contains("> $0"),
+            "the spend chart drew a scale over nothing {at}:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("no scale to draw"),
+            "the chart is silent about why it is blank {at}:\n{rendered}"
+        );
+
+        // The row counts stay: zero rows is a fact, and it is the one figure
+        // here that was actually measured.
+        assert!(
+            rendered.contains("0 priced"),
+            "the honest row counts went missing {at}:\n{rendered}"
+        );
+    }
+}
+
+#[test]
+fn fleet_keeps_pricing_a_ledger_that_has_entries() {
+    // The guard above must not have bought its honesty by refusing to ever
+    // print a total: the seeded ledger is priced, and still prices.
+    let rendered = render(120, 40, ColorTier::Truecolor, GlyphSet::Unicode);
+    assert!(rendered.contains("$"), "{rendered}");
+    assert!(!rendered.contains("no spend recorded"), "{rendered}");
+    assert!(!rendered.contains("no scale to draw"), "{rendered}");
+}

@@ -1,8 +1,11 @@
 mod common;
 
 use gwk_domain::ids::{CostMicros, Seq, Timestamp};
-use gwk_tui::board::BoardView;
+use gwk_theme::marks::GlyphSet;
+use gwk_theme::tier::ColorTier;
+use gwk_tui::board::{self, BoardView};
 use gwk_tui::console::dollars;
+use gwk_tui::input::HitMap;
 use gwk_tui::tables::{PageMeta, attempt_table, cost_table, session_table, term_table};
 
 fn golden_body(name: &str) -> String {
@@ -124,4 +127,93 @@ fn cost_table_scopes_today_and_marks_unreported_tokens() {
     );
     assert!(rendered.contains("0+?/0+?"), "{rendered}");
     assert!(!rendered.contains("09:00"), "{rendered}");
+}
+
+#[test]
+fn cost_table_says_the_ledger_is_empty_rather_than_printing_a_zero_total() {
+    // The same command with stdout not a terminal emits `cost_rollup`, which
+    // answers `cost_micros: null` and pins the reason under `unknowns`. This is
+    // the human half of ONE command, so it cannot report a measured zero where
+    // the machine half reports an absence -- that drift tells two readers two
+    // different things about the same page.
+    let mut state = common::estate::estate_board_state(BoardView::CostHealth);
+    state.costs.clear();
+    let rendered = cost_table(
+        &state,
+        &Timestamp::new("2026-08-11T17:30:00Z"),
+        &complete(),
+        120,
+    );
+    assert!(
+        !rendered.contains("$0.00"),
+        "an empty ledger priced itself:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("no entries -- no spend recorded on this page"),
+        "the JSON twin own sentence is missing:\n{rendered}"
+    );
+    // And no header-only tables, which are what made the zero look surveyed.
+    assert!(!rendered.contains("BY LANE"), "{rendered}");
+    assert!(!rendered.contains("BY HOUR"), "{rendered}");
+    assert!(rendered.contains("watermark 221"), "{rendered}");
+}
+
+#[test]
+fn both_ingestion_kinds_explain_a_zero_count_not_just_the_health_one() {
+    // `health` and `session` share one absent producer, and only `health`
+    // carried a note. The asymmetry is worse than a plain omission: a reader
+    // who has just been told why `health` reads zero takes the unexplained
+    // count beside it for a measurement.
+    //
+    // Checked at mono, deliberately. The rows are marked with the `unknown`
+    // binding, which resolves to a token that degrades to the terminal's own
+    // foreground there — so colour alone leaves the row indistinguishable
+    // from a counted one, and only words survive every tier.
+    let mut state = common::estate::estate_board_state(BoardView::CostHealth);
+    state.ingested.clear();
+    for (tier, glyphs) in [
+        (ColorTier::Truecolor, GlyphSet::Unicode),
+        (ColorTier::Mono, GlyphSet::Ascii),
+    ] {
+        let rendered = common::dump_frame(120, 40, tier, glyphs, |area, buf, tier, glyphs| {
+            let mut hits = HitMap::new();
+            board::render(area, buf, &state, None, tier, glyphs, &mut hits);
+        });
+        assert_eq!(
+            rendered
+                .matches("ingestion is operator-driven, no producer")
+                .count(),
+            2,
+            "one ingestion kind explains its zero and the other does not, at {}:\n{rendered}",
+            tier.as_str()
+        );
+        assert!(
+            rendered.contains("session: no records"),
+            "the session half has no note at {}:\n{rendered}",
+            tier.as_str()
+        );
+    }
+}
+
+#[test]
+fn cost_table_keeps_its_tables_when_entries_land_without_a_price() {
+    // Entries carrying no price are a different state from no entries at all:
+    // the rows are real and stay, and only the total is withheld.
+    let mut state = common::estate::estate_board_state(BoardView::CostHealth);
+    for entry in &mut state.costs {
+        entry.cost_micros = None;
+    }
+    let rendered = cost_table(
+        &state,
+        &Timestamp::new("2026-08-11T17:30:00Z"),
+        &complete(),
+        120,
+    );
+    assert!(rendered.contains("BY LANE"), "{rendered}");
+    assert!(
+        rendered.contains("no cost reported"),
+        "an unpriced page still printed a total:\n{rendered}"
+    );
+    assert!(!rendered.contains("$0.00"), "{rendered}");
+    assert!(rendered.contains("0 priced"), "{rendered}");
 }
