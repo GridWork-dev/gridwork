@@ -50,10 +50,12 @@ parity harness that certifies them, and `gwk-pty-host` (the resident host:
 session supervision, wire-frame conversion, command origination, and a
 consumer-facing attach route — the host publishes each session's snapshots and
 deltas into the kernel's session registry, and `PtyAttach`/`PtySnapshot` answer
-consumers from there; a consumer's input now reaches the hosted session —
-authority-gated, one ledger receipt per send — while routing resize and stop is
-still open, and sessions still start from the operator's declaration
-rather than a request). Stage 4 — the console — shipped as the ruled five-lens
+consumers from there. Consumer input, resize, and stop reach the exact hosted
+session generation through authority-gated, receipted controls. Sessions start
+from either the operator's environment declaration or a name-only request
+against the kernel's declared executable catalog; catalog children receive only
+their declared environment, and all resident grids are allocation-bounded before
+spawn or resize). Stage 4 — the console — shipped as the ruled five-lens
 workspace: `gw tui` opens HALL, WORK, FLEET, FLOW, and TERM over the kernel's
 live projections and events, `gw board`, `gw event tail`, and `gw term attach`
 open the same console shell focused on a lens, and every CLI verb renders a

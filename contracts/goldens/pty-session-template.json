@@ -1,0 +1,17 @@
+{
+  "name": "review",
+  "version": 1,
+  "state": "active",
+  "command": "/usr/bin/review-agent",
+  "args": [
+    "--interactive"
+  ],
+  "cwd": "/work/gridwork",
+  "env": {
+    "TERM": "env:TERM"
+  },
+  "cols": 100,
+  "rows": 30,
+  "declared_at": "2026-08-12T12:00:00Z",
+  "updated_at": "2026-08-12T12:00:00Z"
+}

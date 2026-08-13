@@ -2,10 +2,12 @@
   {
     "type": "hello_ack",
     "protocol_major": 1,
-    "protocol_minor": 0,
+    "protocol_minor": 1,
     "capabilities": [
       "pty_raw",
-      "pty_input"
+      "pty_input",
+      "pty_control",
+      "pty_start"
     ],
     "sealed": true,
     "watermark": "9007199254740993"
@@ -329,10 +331,38 @@
   },
   {
     "type": "pty_input",
+    "delivery_id": "pty_session:pty-1:2",
     "command_id": "input-1",
     "session_id": "pty-1",
     "generation": "pty-life-1",
     "byte_size": "3",
     "data_base64": "AP8K"
+  },
+  {
+    "type": "pty_resize",
+    "delivery_id": "pty_session:pty-1:3",
+    "command_id": "resize-1",
+    "session_id": "pty-1",
+    "generation": "pty-life-1",
+    "cols": 120,
+    "rows": 40
+  },
+  {
+    "type": "pty_stop",
+    "delivery_id": "pty_session:pty-1:4",
+    "command_id": "stop-1",
+    "session_id": "pty-1",
+    "generation": "pty-life-1"
+  },
+  {
+    "type": "pty_start",
+    "delivery_id": "pty_session_start:review-7:1",
+    "command_id": "start-1",
+    "template_name": "review",
+    "session_id": "review-7"
+  },
+  {
+    "type": "pty_delivery_settled",
+    "delivery_id": "pty_session:pty-1:2"
   }
 ]

@@ -53,6 +53,32 @@ const RISK_CLASS: &[(&str, &str)] = &[
         "send_pty_input",
         gwk_domain::command::PTY_INPUT_ACTION_CLASS,
     ),
+    (
+        "resize_pty_session",
+        gwk_domain::command::PTY_CONTROL_ACTION_CLASS,
+    ),
+    (
+        "stop_pty_session",
+        gwk_domain::command::PTY_CONTROL_ACTION_CLASS,
+    ),
+    (
+        "request_pty_session_start",
+        gwk_domain::command::PTY_START_ACTION_CLASS,
+    ),
+    // Writing the executable catalog. Classified for the RECEIPT, not the gate:
+    // `check_authority_admin` refuses every actor kind but `operator` before
+    // this table is consulted, so the operator branch below is the only
+    // reachable outcome and no decision changes. What it buys is the ledger row
+    // — without a class these two would be the only PTY-family verbs whose act
+    // never lands in `gwk.receipt`.
+    (
+        "declare_pty_session_template",
+        gwk_domain::command::PTY_TEMPLATE_ACTION_CLASS,
+    ),
+    (
+        "retire_pty_session_template",
+        gwk_domain::command::PTY_TEMPLATE_ACTION_CLASS,
+    ),
 ];
 
 const MATCHING_GRANT_BASIS: &str = "matching unexpired scoped grant";
@@ -144,7 +170,7 @@ pub(crate) async fn evaluate(
     // PTY input has an explicit actor boundary: the operator is intrinsically
     // authorized on the same-EUID socket; only the orchestrator may cross it
     // under a grant. A grant accidentally issued to an engine is not enough.
-    if action_class == gwk_domain::command::PTY_INPUT_ACTION_CLASS {
+    if is_pty_action(action_class) {
         if envelope.actor.kind == "operator" {
             return Ok(Decision::Allow {
                 action_class,
@@ -159,7 +185,7 @@ pub(crate) async fn evaluate(
         }
     }
 
-    let live_expiry = action_class == gwk_domain::command::PTY_INPUT_ACTION_CLASS;
+    let live_expiry = is_pty_action(action_class);
     let allowed = matching_grant(
         conn,
         &envelope.actor,
@@ -180,6 +206,16 @@ pub(crate) async fn evaluate(
             observed_basis: UNGRANTED_BASIS,
         }
     })
+}
+
+fn is_pty_action(action_class: &str) -> bool {
+    matches!(
+        action_class,
+        gwk_domain::command::PTY_INPUT_ACTION_CLASS
+            | gwk_domain::command::PTY_CONTROL_ACTION_CLASS
+            | gwk_domain::command::PTY_START_ACTION_CLASS
+            | gwk_domain::command::PTY_TEMPLATE_ACTION_CLASS
+    )
 }
 
 /// Is there a live grant for this actor, class, and subject?
@@ -240,8 +276,14 @@ mod tests {
     fn only_the_named_commands_are_gated() {
         assert_eq!(class_of("issue_command"), Some("stop"));
         assert_eq!(class_of("send_pty_input"), Some("pty_input"));
+        assert_eq!(class_of("resize_pty_session"), Some("pty_control"));
+        assert_eq!(class_of("stop_pty_session"), Some("pty_control"));
+        assert_eq!(class_of("request_pty_session_start"), Some("pty_start"));
         assert_eq!(class_of("create_task"), None);
         assert_eq!(class_of("transition_attempt"), None);
+        assert!(is_pty_action(gwk_domain::command::PTY_INPUT_ACTION_CLASS));
+        assert!(is_pty_action(gwk_domain::command::PTY_CONTROL_ACTION_CLASS));
+        assert!(is_pty_action(gwk_domain::command::PTY_START_ACTION_CLASS));
     }
 
     #[test]

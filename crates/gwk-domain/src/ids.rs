@@ -172,6 +172,10 @@ string_id!(
     /// are never mistaken for one continuous cursor axis.
     PtySessionGeneration
 );
+string_id!(
+    /// Operator-declared name of one executable PTY session template.
+    PtySessionTemplateName
+);
 
 /// The ledger aggregate for one hosted PTY session lifetime.
 ///

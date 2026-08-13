@@ -57,6 +57,40 @@ because they are not byte-stream events. Both paths use the same session generat
 frame-revision cursor, so a reconnect either replays a retained gap or reseeds without
 claiming continuity across one.
 
+`pty_input_delivery` and `pty_control` negotiate generation-addressed reverse delivery;
+`pty_start` identifies the resident host connection that receives starts. Input, resize,
+and stop are authority-gated metadata commands, delivered only after commit through
+the bounded owner-connection control queue; resize and stop name `{session_id, generation}`
+so they cannot cross a reclaimed lifetime. These delivery-bearing commands are refused on
+the generic `submit_command` request and must use their dedicated request variants, which is
+where capability checks and post-commit host delivery run. A start carries a declared template
+name and a session id only. The host re-reads the active `pty_session_template` projection for
+program, arguments, cwd, `env:NAME` environment references, and initial geometry; the resident
+host resolves those references at spawn time, and the child inherits no host environment beyond
+that declared map. Environment values never enter the event log or projection. Arbitrary
+executable data never crosses the start request.
+The authority-gated request remains baseline JSON and does not negotiate the host-only
+`pty_start` receiving role. A replacement start-manager connection supersedes the prior route,
+and ended local sessions are reaped on a bounded resident cadence.
+
+The event append creates a durable pending-delivery row in the same transaction. An attempt
+takes a short database lease, releases the transaction before waiting on the host, and settles
+the row from the connection-checked application acknowledgement. Failure before dispatch releases
+the claim for retry; an explicit host refusal is terminal and does not reconnect the publisher
+or block a later stop. A disconnect or expired/orphaned claim after dispatch is terminally
+`indeterminate` because the host may already have applied the control; the kernel never recycles
+that claim into an unsafe duplicate side effect. Applied, failed, and indeterminate replays return
+their durable result without another control. The host keeps a bounded event-id dedup window for
+the crash interval between applying a control and committing its acknowledgement. After durable
+settlement the kernel sends `pty_delivery_settled`, which lets the host forget that event id. If
+that frame is lost, a reconnect reasserts retained applied acknowledgements: delivered rows simply
+confirm settlement, while indeterminate rows reconcile to delivered. A saturated unsettled window
+refuses new applications rather than evicting an identity that could still retry.
+
+All declared, published, and requested PTY geometries are bounded to 1,000 cells per axis and
+100,000 cells total before resident grid allocation. The compact interned wire representation
+does not relax that in-memory bound.
+
 One raw seed is accepted per session generation. A session then retains at most 1,024 raw
 events and 8 MiB; reaching either bound refuses the publisher, whose reconnect creates a
 new generation and seed rather than growing the daemon. Each connection's outbound batch

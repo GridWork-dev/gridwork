@@ -21,7 +21,12 @@ Locked decisions change only by a recorded amendment, not by drift.
 > hookup that serves its frames to a consumer — the publish/retire wire family
 > plus `PtyAttach`/`PtySnapshot` answering from the kernel's PTY hub, so the
 > resident host's sessions reach the drill-down lens across the kernel socket.
-> Spawn-over-socket, via the adapters' control halves, remains deferred.
+> Consumer input/resize/stop route back to the exact host generation, and a
+> request-driven start names a kernel-declared executable template rather than
+> carrying an arbitrary command line. Template environment entries are durable `env:NAME`
+> references resolved only inside the resident host. The host clears inherited environment before
+> applying the template map, bounds every resident grid before allocation, replaces
+> stale start-manager routes, and periodically reaps ended local sessions.
 >
 > **Built (partial):** the TUI's Queue, Board, Hall, session drill-down, and
 > Config lenses (`crates/gwk-tui`), with `gw tui` driving the Hall lens live

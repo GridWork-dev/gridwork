@@ -2,12 +2,14 @@
   {
     "type": "hello",
     "protocol_major": 1,
-    "protocol_minor": 0,
+    "protocol_minor": 1,
     "capabilities": [
       "event_subscribe",
       "blob",
       "pty_raw",
-      "pty_input"
+      "pty_input",
+      "pty_control",
+      "pty_start"
     ],
     "client": "gw"
   },
@@ -321,6 +323,96 @@
         }
       },
       "data_base64": "AP8K"
+    }
+  },
+  {
+    "type": "request",
+    "request_id": "req-16",
+    "request": {
+      "type": "resize_pty_session",
+      "envelope": {
+        "command_id": "resize_pty_session-1",
+        "project_id": "system",
+        "command_type": "resize_pty_session",
+        "schema_version": 1,
+        "issued_at": "2026-08-12T12:00:00Z",
+        "actor": {
+          "kind": "operator",
+          "id": "op-1"
+        },
+        "origin": {
+          "system": "gw"
+        },
+        "idempotency_key": "resize_pty_session-1",
+        "payload": {
+          "cols": 120,
+          "generation": "pty-life-1",
+          "pty_session_id": "pty-1",
+          "rows": 40,
+          "type": "resize_pty_session"
+        }
+      }
+    }
+  },
+  {
+    "type": "request",
+    "request_id": "req-17",
+    "request": {
+      "type": "stop_pty_session",
+      "envelope": {
+        "command_id": "stop_pty_session-1",
+        "project_id": "system",
+        "command_type": "stop_pty_session",
+        "schema_version": 1,
+        "issued_at": "2026-08-12T12:00:00Z",
+        "actor": {
+          "kind": "operator",
+          "id": "op-1"
+        },
+        "origin": {
+          "system": "gw"
+        },
+        "idempotency_key": "stop_pty_session-1",
+        "payload": {
+          "generation": "pty-life-1",
+          "pty_session_id": "pty-1",
+          "type": "stop_pty_session"
+        }
+      }
+    }
+  },
+  {
+    "type": "request",
+    "request_id": "req-18",
+    "request": {
+      "type": "start_pty_session",
+      "envelope": {
+        "command_id": "request_pty_session_start-1",
+        "project_id": "system",
+        "command_type": "request_pty_session_start",
+        "schema_version": 1,
+        "issued_at": "2026-08-12T12:00:00Z",
+        "actor": {
+          "kind": "operator",
+          "id": "op-1"
+        },
+        "origin": {
+          "system": "gw"
+        },
+        "idempotency_key": "request_pty_session_start-1",
+        "payload": {
+          "pty_session_id": "review-7",
+          "template_name": "review",
+          "type": "request_pty_session_start"
+        }
+      }
+    }
+  },
+  {
+    "type": "pty_delivery_ack",
+    "delivery_id": "pty_session:pty-1:2",
+    "result": {
+      "status": "applied"
     }
   }
 ]

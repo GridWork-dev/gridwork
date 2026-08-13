@@ -79,6 +79,7 @@ gwk-tui = { path = "crates/gwk-tui", version = "0.0.2" }
 # range would let a patch release move the C ABI under a green lockfile. Moves
 # only together with the two pins in crates/gwk-pty/pins.env.
 libghostty-vt = "=0.2.1"
+hmac = "0.13.0"
 # PTY allocation and child spawn. Chosen over `portable-pty` because it needs
 # exactly two dependencies, `rustix` and `tokio`, and this workspace already
 # pins both — where `portable-pty` brings fifteen, including a second `nix` and
