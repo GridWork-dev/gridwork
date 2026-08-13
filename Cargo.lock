@@ -1202,6 +1202,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "gwk-context"
+version = "0.0.1"
+dependencies = [
+ "gwk-domain",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "gwk-domain"
 version = "0.0.3"
 dependencies = [

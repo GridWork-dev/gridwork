@@ -17,6 +17,7 @@ default-members = [
   "crates/gridwork",
   "crates/gwk",
   "crates/gwk-cert",
+  "crates/gwk-context",
   "crates/gwk-domain",
   "crates/gwk-kernel",
   "crates/gwk-text",
