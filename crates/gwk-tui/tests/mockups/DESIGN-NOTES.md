@@ -564,3 +564,84 @@ agreement.
   artifact of record and shows `/ filter`; VIEW-mode `/` now filters the rail's
   terminal and queue rows on their painted text (the attached row always stays).
   INPUT mode is unchanged.
+
+### Round 8 - the FLEET lens's unknowns block · RULED `footer` (picker, 2026-08-13)
+
+Closes the two design items the console audit left open: **B5** (the console's FLEET
+lens has none of the Board twin's pinned-unknowns machinery, so three facts the twin
+names go unsaid) and **B6** (the `SES` column paints `ended_at.is_none()` under a name
+that claims liveness). Both are additive rather than corrective - with B1-B4 fixed the
+lens stated nothing false; it was silent where the twin speaks, and terse where the
+twin is careful.
+
+**Candidates.** `pinned` - the twin's block ported literally, directly beneath the
+column header at every rung, always fully worded. `footer` - beside UNCLAIMED, the
+lens's existing "what the rows do not cover" block, worded in full while the frame can
+spare the rows and collapsed to one subject line when it cannot.
+
+**`footer` won.** At the 80x24 floor `pinned` charged four of eleven attempt rows and
+took them off the HEAD of the list - `at-pty-impl` among them, which is the running
+attempt the engine-binding note is *about*. A caveat that displaces its own subject is
+worse than a terse one. `footer` charges one row there and four at 120x40, where they
+are free. Losing frames are in branch history at `c803a6c`; their goldens are retired.
+`pinned`'s one real argument - unknowns must never scroll away - does not bind: this
+lens is a fixed window with a `+N more` notice, not a scrolling list, so a footer is
+as pinned as a header.
+
+**Ruled details.**
+
+- **The block reads the twin, it does not re-derive it.** `render_fleet` calls
+  `board::agent_fleet` and paints its `unknowns`. One place decides what the log does
+  not carry; a console that recomputed the same three facts would be free to drift from
+  the panel that ruled them.
+- **Degradation is subject-last.** The `why` clauses drop before the subjects, and a
+  subject that will not fit drops WHOLE behind a `+N` mark. A block degraded to a bare
+  count would be stating the *number* of things it was declining to name, which is
+  worse than either full form.
+- **The block is evidence, not chrome.** No unknowns, no block - a standing disclaimer
+  on every frame is one the eye learns to skip. The note COUNT decides, never a flag.
+- **Words carry it, never colour.** Every token these rows use resolves to the
+  terminal's own foreground at Mono, so the mono/ascii goldens read identically to
+  truecolor. This is the B4 lesson applied ahead of the defect.
+- **`SES` becomes `NOEND`** on the lens and on `gw attempt list`. The cell folds
+  `ended_at.is_none()`: the old header read as "the sessions this attempt has" over a
+  number that is not that, and any liveness word would claim a reading nothing in the
+  log supports. The cell it costs comes out of SUB, whose values are small counts, and
+  both are now value cells so an over-budget count drops whole rather than shearing.
+- **`?` is not a zero.** A RUNNING attempt with no engine session on the page reads
+  `?`; sessions that exist and all ended read `-`. The SESSION count decides, never the
+  unended count - once the fold has run, "zero unended of three" and "no session at
+  all" are both `0usize`. The `?` set is exactly the set the twin's `engine binding`
+  note tallies, so the cell and the note can never describe different rows.
+- **`gw session list` stops saying `live`.** It now prints the panel's own words
+  through a shared `board::NO_END_RECORDED`, so one field cannot read two ways again.
+- **`BoardState::complete` reaches this lens.** A partial read prefixes the header's
+  count run with `at least` (the prefix `gw`'s table trailers already use) once, rather
+  than repeating on each figure, and an empty cost fold says `no spend on this page`
+  instead of `no spend recorded` - "no records at all" is a claim about the ledger and
+  only a read that reached the last page can make it.
+
+**Findings from this round:**
+
+- **The FLEET header's chrome tail painted over its own summary.** The summary goes
+  down first and the tier/watermark run is right-aligned over it, and the `width < 100`
+  threshold picked both long forms at exactly 100 columns: the collision ate the whole
+  spend figure and left a header that read as complete. A width threshold cannot decide
+  this, because the summary's length moves with the estate and with the `at least`
+  qualifier. Fixed in-round: the pair is chosen by measured fit, and the tail gives up
+  its low-priority parts (`tier` label, watermark) as one column before the summary
+  gives up anything.
+- **`agent_fleet`'s `findings` are deliberately NOT surfaced here.** Duplicate ids on a
+  projection page are a page-integrity alarm, not an absence: different class, not
+  fleet-specific, and they want a louder treatment than a muted footer. Open follow-up,
+  recorded rather than swallowed.
+- **`complete` is still structurally unreachable on the live console**, exactly as
+  §CLI records for the shipped verbs: `refresh_*` drains every projection page or hard
+  errors, so `complete` is hardcoded `true` at all three construction sites. The lens
+  now honours the field it is handed; making a paged reader that can set it false is a
+  separate sitting.
+- The Round-2 `mock_fleet` painter still prints `SES` and keeps its own copy of the
+  session fold. It is the retired artifact of the Round-2 picker and is superseded by
+  this ruling, the same way Round 7 superseded the Round-5 painter's zero-fill. The
+  Round-5 CLI painter DID move, because `console_tables` enforces its golden against
+  the shipped `tables::attempt_table` and the two cannot disagree.

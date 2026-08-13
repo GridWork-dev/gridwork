@@ -1,0 +1,40 @@
+ FLEET   at least 11 attempts  4 live  4 sessions  3 leases (2 held)  $5.30 today       tier mono+asc  as-of 221  17:30
+
+  ATTEMPT            TASK           ENGINE  ROLE      STATE        SUB NOEND LEASE         TOKENS      SPEND       AGE
+  at-ship-done       ship-0-3       codex   impl      v done       -   -     -             1.2k/300    $0.34       8h45
+  at-pty-impl        pty-lifecycle  codex   impl      - running    3   ?     ls-pty du     7.5k/1.6k   $0.09 +1u   7h50
+  at-pty-review      pty-lifecycle  claude  rev       # blocked    -   -     -             1.8k/250    $0.13       7h42
+  at-pty-start       pty-lifecycle  claude  rsrch     ^ starting   -   -     -             -           -           6h55
+  at-tui-impl        tui-harness    claude  impl      - running    2   1     ls-tui u      15.0k/3.7k  $2.10       7h30
+  at-tui-queue       tui-harness    codex   rust-pro  : queued     -   -     -             300/0       $0.01       7h23
+  at-release-lease   release-notes  codex   devrel    : leased     -   -     -             -           -           8h15
+  at-flaky-cancel    flaky-ci       claude  test-auto ~ canceling  -   1     -             2.2k/400    +1u         5h30
+  at-flaky-canceled  flaky-ci       claude  -         o canceled   -   -     -             -           -           6h30
+  at-audit-fail      audit-log      claude  audit     X failed     -   -     -             9.0k/2.2k   $2.45       5h25
+  at-audit-unknown   audit-log      codex   -         ? unknown    -   -     -             1.5k/0      $0.19       5h20
+  UNCLAIMED  1 lease  1 worktree  0 cost entries
+    ls-release expired   wt-release released
+  UNKNOWN  3 facts not in the log
+    liveness: no end stamp on 2 of 4 sessions -- unended is not alive
+    engine binding: none on this page for 1 running attempt
+    fleet size: read short of the last page -- counts are floors
+ ----------------------------------------------------------------------------------------------------------------------
+  SPEND / HOUR   10 priced   2 unpriced   0 unattributed
+  $2.47                                                 ####
+                                                        ####            ####
+  > $0  ####    ####                                    ####    ####    ####
+        09h     10h     11h     12h     13h     14h     15h     16h     17h
+
+
+
+
+
+
+
+
+
+
+
+
+
+ : go   / filter   enter open   s stop   b budget   c cost   q quit
