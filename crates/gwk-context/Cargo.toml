@@ -1,0 +1,39 @@
+[package]
+name = "gwk-context"
+version = "0.0.1"
+description = "GridWork Context Runtime: truth stages, participation, and precedence — the vocabulary the compiler and verifier both speak"
+homepage = "https://gridwork.sh"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Not published yet, and deliberately so: ADR-0032 makes Context mandatory on the
+# kernel's v2 wire, and none of these types have crossed a wire or a schema yet.
+# Publishing now would mint a version number for a surface that is still one
+# workstream from existing, and every later shape change would owe a bump for a
+# release nobody consumed. It becomes publishable when 8A's wire-v2 schema lands
+# and the surface is real.
+publish = false
+
+[dependencies]
+# For `is_sha256_hex` and nothing else so far. `Digest` deliberately does NOT
+# reuse `BlobAddress` (kickoff ruling R2 / fork F2) — same validation, different
+# meaning — but re-implementing the hex check would be two places for one rule.
+gwk-domain.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+# Serde round-trips only. The types above must survive the wire they are not on
+# yet, and `deny_unknown_fields` is worth nothing unproven.
+serde_json.workspace = true
+
+# Not yet a dependency, and the omission is the point: `specta::Type` derives
+# would export TypeScript for types that are not on any wire. These become
+# specta types when the wire-v2 grammar is ruled (F7-F9) and they are actually
+# registered as contract roots — registering a root is what generates TS, and a
+# derive without a root is dead weight that reads like a promise.
+# specta = ...
+
+[lints]
+workspace = true
