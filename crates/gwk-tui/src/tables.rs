@@ -7,9 +7,9 @@
 use gwk_domain::entity::{EngineSession, PtySession};
 use gwk_domain::ids::{Seq, TaskId, Timestamp};
 
-use crate::board::BoardState;
+use crate::board::{BoardState, NO_END_RECORDED};
 use crate::console::{
-    Spend, attempt_state_word, dollars, elapsed, same_utc_date, short_role, spend_for,
+    Spend, attempt_state_word, dollars, elapsed, same_utc_date, short_role, spend_for, unended_cell,
 };
 use crate::theme;
 
@@ -37,7 +37,9 @@ pub fn attempt_table(state: &BoardState, now: &Timestamp, meta: &PageMeta, width
         column("ROLE", 2),
         column("STATE", 0),
         column("SUB", 4),
-        column("SES", 4),
+        // The lens's column, under the lens's name: this folds
+        // `ended_at.is_none()`, which is not a liveness reading.
+        column("NOEND", 4),
         column("LEASE", 3),
         column("TOKENS", 3),
         column("SPEND", 1),
@@ -82,15 +84,7 @@ pub fn attempt_table(state: &BoardState, now: &Timestamp, meta: &PageMeta, width
                         .filter(|node| node.attempt_id.as_ref() == Some(&attempt.id))
                         .count(),
                 ),
-                count(
-                    state
-                        .sessions
-                        .iter()
-                        .filter(|session| {
-                            session.attempt_id == attempt.id && session.ended_at.is_none()
-                        })
-                        .count(),
-                ),
+                unended_cell(state, attempt),
                 lease,
                 spend.token_text(),
                 spend.text(),
@@ -153,10 +147,14 @@ pub fn session_table(sessions: &[EngineSession], meta: &PageMeta, width: usize) 
                 session.id.as_str().to_owned(),
                 session.attempt_id.as_str().to_owned(),
                 session.engine.as_str().to_owned(),
+                // `live` was this table's own word for a missing end stamp,
+                // beside a Board panel rendering the SAME field as "no end
+                // recorded" — one field, two claims, and only the panel's was
+                // supportable. The constant is the reconciliation.
                 if session.ended_at.is_some() {
                     "ended".to_owned()
                 } else {
-                    "live".to_owned()
+                    NO_END_RECORDED.to_owned()
                 },
                 clock(&session.started_at),
                 session

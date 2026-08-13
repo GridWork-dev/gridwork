@@ -14,7 +14,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 
-use crate::board::{BoardState, BoardTarget};
+use crate::board::{self, BoardState, BoardTarget, FleetUnknown};
 use crate::hall::{Agent, AgentState, District, FrameInput, HallTarget};
 use crate::input::HitMap;
 use crate::theme;
@@ -336,7 +336,14 @@ pub fn render_fleet(
             (44, "ROLE"),
             (54, "STATE"),
             (67, "SUB"),
-            (72, "SES"),
+            // Not `SES`. The cell folds `ended_at.is_none()`, and a column
+            // headed with the noun reads as "the sessions this attempt has"
+            // while a column headed `LIVE` would claim a liveness nothing in
+            // the log supports. `NOEND` names the field itself, and the
+            // liveness note beneath the rows spells it out in the twin's
+            // words. The one cell it costs comes out of SUB, whose values are
+            // small counts.
+            (71, "NOEND"),
             (77, "LEASE"),
             (91, "TOKENS"),
             (103, "SPEND"),
@@ -356,7 +363,18 @@ pub fn render_fleet(
         put(buf, area, *x, 2, label, style("muted", tier));
     }
 
-    let attempt_rows = area.height.saturating_sub(13) as usize;
+    // The twin's own notes rather than a second derivation of them:
+    // `board::agent_fleet` is where "what the log does not carry" is decided,
+    // and a console that recomputed the same three facts would be free to
+    // drift from the panel that ruled them.
+    //
+    // Its `findings` are deliberately not taken here. Those are page-integrity
+    // alarms (duplicate ids on a projection page), which is a different class
+    // from an absence, is not fleet-specific, and wants a louder treatment
+    // than a muted footer — recorded as an open follow-up, not swallowed.
+    let notes = board::agent_fleet(state).unknowns;
+    let unknown_block = unknown_rows(area.height, notes.len());
+    let attempt_rows = area.height.saturating_sub(BASE_RESERVE + unknown_block) as usize;
     let selected_index = selected.and_then(|target| {
         let BoardTarget::Attempt(id) = target else {
             return None;
@@ -396,6 +414,7 @@ pub fn render_fleet(
     }
 
     y = paint_unclaimed(area, buf, y, state, tier);
+    y = paint_unknowns(area, buf, y, &notes, unknown_block, tier);
     put_rule(buf, area, y, tier);
     paint_spend_chart(buf, area, y.saturating_add(1), tier, state, &context.now);
     fleet_keybar(area, buf, tier);
@@ -409,9 +428,8 @@ fn paint_fleet_header(
     tier: ColorTier,
     glyphs: GlyphSet,
 ) {
-    let compact = area.width < 100;
     let (micros, priced, unpriced) = cost_totals(state, &context.now);
-    let spend = spend_summary(micros, priced, unpriced);
+    let spend = spend_summary(micros, priced, unpriced, state.complete);
     let live = state
         .attempts
         .iter()
@@ -428,28 +446,55 @@ fn paint_fleet_header(
         .filter(|lease| lease.state == LeaseState::Held)
         .count();
     put(buf, area, 1, 0, "FLEET", bold("fg", tier));
-    let summary = if compact {
-        format!("{} attempts  {live} live  {spend}", state.attempts.len())
-    } else {
-        format!(
-            "{} attempts  {live} live  {} sessions  {} leases ({held} held)  {spend}",
-            state.attempts.len(),
-            state.sessions.len(),
-            state.leases.len(),
-        )
-    };
-    put(buf, area, 9, 0, &summary, style("fg", tier));
+    // A fold over a read that stopped short of the last projection page is a
+    // floor, not a total. One qualifier governs the whole run of counts rather
+    // than repeating on each figure — the same prefix `gw`'s own table
+    // trailers already use for a partial page ("at least 5 rows") — and the
+    // `fleet size` note beneath the rows says why.
+    let floor = if state.complete { "" } else { "at least " };
+    let short_summary = format!(
+        "{floor}{} attempts  {live} live  {spend}",
+        state.attempts.len()
+    );
+    let long_summary = format!(
+        "{floor}{} attempts  {live} live  {} sessions  {} leases ({held} held)  {spend}",
+        state.attempts.len(),
+        state.sessions.len(),
+        state.leases.len(),
+    );
     let badge = tier_badge(tier, glyphs);
     let clock = hhmm(&context.now);
-    let right = if compact {
-        format!("{badge}  {clock}")
-    } else {
-        let watermark = state
-            .watermark
-            .map_or_else(|| "-".to_owned(), |value| value.to_string());
-        format!("tier {badge}  as-of {watermark}  {clock}")
+    let watermark = state
+        .watermark
+        .map_or_else(|| "-".to_owned(), |value| value.to_string());
+    let short_right = format!("{badge}  {clock}");
+    let long_right = format!("tier {badge}  as-of {watermark}  {clock}");
+
+    // The summary is painted first and the chrome tail right-aligned OVER it,
+    // so a tail that does not clear the summary silently eats its last cells.
+    // A width threshold cannot decide that, because the summary's own length
+    // moves with the estate and with the `at least` qualifier: at 100 columns
+    // the old `width < 100` test picked both long forms and the collision took
+    // the whole spend figure, leaving a header that read as complete. So the
+    // pair is chosen by MEASURED fit, and the tail gives up its low-priority
+    // parts (the `tier` label, the watermark) as one column before the summary
+    // gives up anything — the ruled narrow-row behaviour, applied to chrome.
+    // The last rung is provably terminal: the short pair cannot exceed the
+    // 80-column floor.
+    let fits = |summary: &String, right: &String| {
+        9 + summary.chars().count() + 2 + right.chars().count() < area.width as usize
     };
-    put_right(buf, area, 0, &right, style("muted", tier));
+    let (summary, right) = [
+        (&long_summary, &long_right),
+        (&long_summary, &short_right),
+        (&short_summary, &short_right),
+    ]
+    .into_iter()
+    .find(|(summary, right)| fits(summary, right))
+    .unwrap_or((&short_summary, &short_right));
+
+    put(buf, area, 9, 0, summary, style("fg", tier));
+    put_right(buf, area, 0, right, style("muted", tier));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -546,22 +591,25 @@ fn paint_attempt_row(
         paint,
     );
     let (spend_x, age_x) = if wide {
-        put_cell(
+        // Machine counts, so they drop whole behind the `+` omission mark
+        // rather than shearing: `put_cell`'s width clip would paint a
+        // four-digit subtree as a plausible three-digit one.
+        put_value_cell(
             buf,
             area,
             67,
-            72,
+            71,
             y,
             &count(subtree_size(state, &attempt.id)),
             style("muted", tier),
         );
-        put_cell(
+        put_value_cell(
             buf,
             area,
-            72,
+            71,
             77,
             y,
-            &count(live_sessions(state, &attempt.id)),
+            &unended_cell(state, attempt),
             style("muted", tier),
         );
         put_cell(buf, area, 77, 91, y, &lease_text, style("muted", tier));
@@ -665,6 +713,129 @@ fn plural_suffix(count: usize) -> &'static str {
     if count == 1 { "" } else { "s" }
 }
 
+/// Rows above the keybar that are never attempt rows: the header block (3),
+/// the paging notice, UNCLAIMED (2), the rule, the spend chart (5), the
+/// keybar.
+const BASE_RESERVE: u16 = 13;
+
+/// Attempt rows the lens will not trade for caveats. Above this the unknown
+/// block words every note; at or below it the block keeps one row and states
+/// its subjects. Four rows of footnotes is a fifth of an 80x24 frame, and a
+/// lens that spends that on what it cannot say has stopped being a fleet
+/// lens — but a lens that says nothing has stopped being honest, so the floor
+/// buys the second row back rather than the block.
+const MIN_ATTEMPT_ROWS: u16 = 8;
+
+/// Rows the unknown block gets: the fully worded form while at least
+/// [`MIN_ATTEMPT_ROWS`] attempt rows survive it, one row otherwise, and none
+/// at all when the log carries every fact this lens folds.
+///
+/// The note COUNT decides, never a flag — an empty `unknowns` vector is the
+/// one state in which the block is genuinely absent rather than merely quiet.
+fn unknown_rows(height: u16, notes: usize) -> u16 {
+    if notes == 0 {
+        return 0;
+    }
+    let full = u16::try_from(notes).unwrap_or(u16::MAX).saturating_add(1);
+    if height.saturating_sub(BASE_RESERVE.saturating_add(full)) >= MIN_ATTEMPT_ROWS {
+        full
+    } else {
+        1
+    }
+}
+
+/// What the log does not carry about this fleet, in the twin's own words.
+///
+/// It sits beside UNCLAIMED because both answer the same question — what the
+/// attempt rows above do not cover — and because this lens does not scroll:
+/// its rows are a fixed window with a `+N more` notice, so a footer is as
+/// pinned as a header. The mockup round's other candidate put the block above
+/// the rows, twin-style, and at the 80x24 floor it displaced the four rows at
+/// the head of the list, `at-pty-impl` among them: the running attempt the
+/// engine-binding note is ABOUT.
+///
+/// Nothing here leans on colour. Every token these rows use resolves to the
+/// terminal's own foreground at Mono, so the words are the entire signal —
+/// the same reason the empty-ledger wording exists one function over.
+fn paint_unknowns(
+    area: Rect,
+    buf: &mut Buffer,
+    mut y: u16,
+    notes: &[FleetUnknown],
+    rows: u16,
+    tier: ColorTier,
+) -> u16 {
+    if rows == 0 {
+        return y;
+    }
+    if rows == 1 {
+        // The `why` clauses drop before the subjects do. A block that
+        // degraded to a bare count would be stating the NUMBER of things it
+        // was declining to name, which is worse than either full form.
+        let budget = area.width.saturating_sub(11) as usize;
+        put(
+            buf,
+            area,
+            2,
+            y,
+            &format!("UNKNOWN  {}", subject_line(notes, budget)),
+            bold("fg", tier),
+        );
+        return y.saturating_add(1);
+    }
+    put(
+        buf,
+        area,
+        2,
+        y,
+        &format!(
+            "UNKNOWN  {} fact{} not in the log",
+            notes.len(),
+            plural_suffix(notes.len())
+        ),
+        bold("fg", tier),
+    );
+    y = y.saturating_add(1);
+    for note in notes {
+        put(
+            buf,
+            area,
+            4,
+            y,
+            &format!("{}: {}", note.subject, note.why),
+            style("muted", tier),
+        );
+        y = y.saturating_add(1);
+    }
+    y
+}
+
+/// The subjects on one line. A name that will not fit drops WHOLE behind a
+/// `+N` mark, because the alternative is `put`'s own width clip cutting
+/// `engine binding` down to `engine bin` — a subject the reader cannot look
+/// up, presented as though it were the whole name.
+fn subject_line(notes: &[FleetUnknown], budget: usize) -> String {
+    let mut line = String::new();
+    for (index, note) in notes.iter().enumerate() {
+        let candidate = if index == 0 {
+            note.subject.to_owned()
+        } else {
+            format!("{line}, {}", note.subject)
+        };
+        let remaining = notes.len() - index - 1;
+        let mark = if remaining == 0 {
+            String::new()
+        } else {
+            format!("  +{remaining}")
+        };
+        if candidate.chars().count() + mark.chars().count() > budget {
+            return format!("{line}  +{}", notes.len() - index);
+        }
+        line = candidate;
+    }
+    line
+}
+
 /// The header's spend figure, or the reason there is not one.
 ///
 /// `$0.00 today` is the single rendering this must never produce out of an
@@ -675,9 +846,16 @@ fn plural_suffix(count: usize) -> &'static str {
 /// the time it is called they are both `0u64`. So the count decides, not the
 /// total, exactly as the Board twin's `cost_micros: (priced > 0).then(..)`
 /// already does one module over.
-fn spend_summary(micros: u64, priced: usize, unpriced: usize) -> String {
+///
+/// `complete` splits the empty case in two, which is the distinction a lens
+/// reading a paged projection cannot make from its rows: "no records at all"
+/// is a claim about the ledger, and only a read that reached the last page
+/// can make it. A read that stopped short saw an empty PAGE and knows nothing
+/// about the rest.
+fn spend_summary(micros: u64, priced: usize, unpriced: usize, complete: bool) -> String {
     match (priced, unpriced) {
-        (0, 0) => "no spend recorded".to_owned(),
+        (0, 0) if complete => "no spend recorded".to_owned(),
+        (0, 0) => "no spend on this page".to_owned(),
         // Rows landed and none carries a price: a real and different fact
         // from an empty ledger, and the operator can act on the difference.
         (0, unpriced) => format!(
@@ -1029,12 +1207,46 @@ fn subtree_size(state: &BoardState, attempt: &AttemptId) -> usize {
         .count()
 }
 
-fn live_sessions(state: &BoardState, attempt: &AttemptId) -> usize {
-    state
+/// The `NOEND` cell: this attempt's engine sessions that carry no end stamp.
+///
+/// Three readings, and only one of them is a number:
+///
+/// - `-` is a MEASURED zero. Sessions exist for this attempt and every one of
+///   them recorded an end.
+/// - `?` is not a zero at all. The page holds no engine session for a RUNNING
+///   attempt, so its engine binding is missing rather than empty, and a `-`
+///   there would read as "nothing of this attempt is still open" about an
+///   attempt nothing is watching.
+/// - a count is a count.
+///
+/// The SESSION count decides which of the first two applies, never the
+/// unended count: once the fold has run, "zero unended of three" and "zero
+/// sessions at all" are both `0usize`, and they are not the same fact. The
+/// `?` set is exactly the set `agent_fleet`'s `engine binding` note tallies,
+/// so the cell and the note can never describe different rows.
+pub fn unended_cell(state: &BoardState, attempt: &Attempt) -> String {
+    let (sessions, unended) = state
         .sessions
         .iter()
-        .filter(|session| &session.attempt_id == attempt && session.ended_at.is_none())
-        .count()
+        .filter(|session| session.attempt_id == attempt.id)
+        .fold((0usize, 0usize), |(sessions, unended), session| {
+            (
+                sessions + 1,
+                unended + usize::from(session.ended_at.is_none()),
+            )
+        });
+    if sessions == 0 {
+        return if attempt.state == AttemptState::Running {
+            "?"
+        } else {
+            "-"
+        }
+        .to_owned();
+    }
+    if unended == 0 {
+        return "-".to_owned();
+    }
+    unended.to_string()
 }
 
 fn task_label(state: &BoardState, attempt: &Attempt) -> String {

@@ -217,3 +217,55 @@ fn cost_table_keeps_its_tables_when_entries_land_without_a_price() {
     assert!(!rendered.contains("$0.00"), "{rendered}");
     assert!(rendered.contains("0 priced"), "{rendered}");
 }
+
+#[test]
+fn the_session_table_reads_a_missing_end_stamp_the_way_the_panel_does() {
+    // B6, the CLI half. `gw session list` called an absent `ended_at` "live"
+    // while the Board panel rendering the SAME field called it "no end
+    // recorded" -- one field, two claims, and only the panel's was supportable
+    // (nothing here heartbeats, probes, or watches a process). The constant
+    // both surfaces now share is the reconciliation, so the drift cannot
+    // reopen without a compiler error.
+    let state = common::estate::estate_board_state(BoardView::Fleet);
+    let rendered = session_table(&state.sessions, &complete(), 120);
+    assert!(
+        !rendered.contains("live"),
+        "the CLI still claims a liveness the log does not carry:\n{rendered}"
+    );
+    assert_eq!(
+        rendered.matches(board::NO_END_RECORDED).count(),
+        3,
+        "the seeded day's three unended sessions do not all say so:\n{rendered}"
+    );
+    // Sessions that DID record an end keep their own word -- the fix must not
+    // have bought its honesty by refusing to distinguish the two.
+    assert_eq!(rendered.matches("ended  ").count(), 2, "{rendered}");
+}
+
+#[test]
+fn the_attempt_table_column_is_the_lens_column() {
+    // One design system: the CLI table and the FLEET lens fold the same field
+    // under the same name, and the `?` for a running attempt with no session
+    // record crosses with it.
+    let mut state = common::estate::estate_board_state(BoardView::Fleet);
+    state
+        .sessions
+        .retain(|session| session.id.as_str() != "es-pty-impl");
+    let rendered = attempt_table(
+        &state,
+        &Timestamp::new("2026-08-11T17:30:00Z"),
+        &complete(),
+        120,
+    );
+    let header = rendered.lines().next().unwrap_or_default();
+    assert!(header.contains("NOEND"), "{header}");
+    assert!(!header.contains("SES"), "{header}");
+    let row = rendered
+        .lines()
+        .find(|line| line.starts_with("at-pty-impl"))
+        .unwrap_or_default();
+    assert!(
+        row.contains('?'),
+        "the CLI reads a missing engine binding as a zero:\n{row}"
+    );
+}

@@ -1834,13 +1834,22 @@ fn activity_rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
     out
 }
 
+/// What an engine session carrying no `ended_at` reads as, wherever it is
+/// rendered.
+///
+/// The log holds no end stamp. That is not the claim that the session is
+/// alive: nothing here heartbeats, probes, or watches a process, so this is
+/// the whole of what can honestly be said. It is a constant rather than a
+/// literal because three surfaces render this one field — this panel, the
+/// console's FLEET column, and `gw session list` — and three spellings of one
+/// absence is exactly how the word `live` ended up on a CLI table beside a
+/// panel that already refused to say it.
+pub const NO_END_RECORDED: &str = "no end recorded";
+
 fn session_face(session: &EngineSession) -> (&'static str, &'static StateBinding) {
     match session.ended_at {
         Some(_) => ("ended", theme::binding("done")),
-        // The log holds no end stamp. That is not the claim that the session
-        // is alive: nothing here heartbeats, probes, or watches a process,
-        // so `unended` is the whole of what can honestly be said.
-        None => ("no end recorded", theme::binding("unknown")),
+        None => (NO_END_RECORDED, theme::binding("unknown")),
     }
 }
 

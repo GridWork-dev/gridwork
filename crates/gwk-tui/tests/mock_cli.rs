@@ -39,7 +39,8 @@ use common::assert_matches_golden;
 use gwk_domain::entity::CostEntry;
 use gwk_domain::fsm::AttemptState;
 use gwk_domain::ids::AttemptId;
-use gwk_tui::board::{BoardState, BoardView};
+use gwk_tui::board::{BoardState, BoardView, NO_END_RECORDED};
+use gwk_tui::console::unended_cell;
 use shared::{dollars, short_role, tokens};
 
 const NOW_MINUTES: u32 = 17 * 60 + 30;
@@ -254,7 +255,11 @@ fn attempt_list(width: usize) -> String {
         col("ROLE", 2),
         col("STATE", 0),
         col("SUB", 4),
-        col("SES", 4),
+        // Round 8: `SES` claimed a liveness the fold does not support. The
+        // shipped `tables::attempt_table` renders this same column and this
+        // golden is the contract between the two, so the round-5 painter
+        // moves with it.
+        col("NOEND", 4),
         col("LEASE", 3),
         col("TOKENS", 3),
         col("SPEND", 1),
@@ -319,15 +324,7 @@ fn attempt_list(width: usize) -> String {
                         .filter(|node| node.attempt_id.as_ref() == Some(&attempt.id))
                         .count(),
                 ),
-                count(
-                    state
-                        .sessions
-                        .iter()
-                        .filter(|session| {
-                            session.attempt_id == attempt.id && session.ended_at.is_none()
-                        })
-                        .count(),
-                ),
+                unended_cell(&state, attempt),
                 lease_text,
                 spend.token_text(),
                 spend.text(),
@@ -406,10 +403,12 @@ fn session_list(width: usize) -> String {
                 session.id.as_str().to_owned(),
                 session.attempt_id.as_str().to_owned(),
                 session.engine.as_str().to_owned(),
+                // Round 8: one field, one word, shared with the Board panel
+                // that always refused to call this alive.
                 if session.ended_at.is_some() {
                     "ended".to_owned()
                 } else {
-                    "live".to_owned()
+                    NO_END_RECORDED.to_owned()
                 },
                 clock(session.started_at.as_str()),
                 session

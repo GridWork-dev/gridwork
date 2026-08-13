@@ -1,4 +1,4 @@
- FLEET   11 attempts  4 live  4 sessions  3 leases (2 held)  $5.30 todtier tc+uni  as-of 221  17:30
+ FLEET   at least 11 attempts  4 live  4 sessions  3 leases (2 held)  $5.30 today     tc+uni  17:30
 
   ATTEMPT            ENGINE  ROLE      STATE        SPEND        AGE
   at-ship-done       codex   impl      ✓ done       $0.34        8h45
@@ -18,13 +18,13 @@
     liveness: no end stamp on 2 of 4 sessions -- unended is not alive
     engine binding: none on this page for 1 running attempt
     fleet size: read short of the last page -- counts are floors
+ --------------------------------------------------------------------------------------------------
+  SPEND / HOUR   10 priced   2 unpriced   0 unattributed
+  $2.47                                                 ####
+                                                        ####            ####
   > $0  ####    ####                                    ####    ####    ####
         09h     10h     11h     12h     13h     14h     15h     16h     17h
 
 
 
-
-
-
-  candidate footer -- block 4 rows; attempt rows 17 -> 13
  : go   / filter   enter open   s stop   b budget   c cost   q quit

@@ -1,4 +1,4 @@
- FLEET   11 attempts  4 live  $5.30 today                         tc+uni  17:30
+ FLEET   at least 11 attempts  4 live  $5.30 today                tc+uni  17:30
 
   ATTEMPT            ENGINE  ROLE      STATE        SPEND        AGE
   at-ship-done       codex   impl      ✓ done       $0.34        8h45
@@ -10,15 +10,15 @@
   at-release-lease   codex   devrel    ⠒ leased     -            8h15
   at-flaky-cancel    claude  test-auto ⠆ canceling  +1u          5h30
   at-flaky-canceled  claude  -         ⊖ canceled   -            6h30
-  at-audit-fail      claude  audit     ✗ failed     $2.45        5h25
-  at-audit-unknown   codex   -         ? unknown    $0.19        5h20
+  +2 more
   UNCLAIMED  1 lease  1 worktree  0 cost entries
     ls-release expired   wt-release released
   UNKNOWN  liveness, engine binding, fleet size
+ ------------------------------------------------------------------------------
   SPEND / HOUR   10 priced   2 unpriced   0 unattributed
   $2.47                                     ####
                                             ####        ####
   > $0  ####  ####                          ####  ####  ####
         09h   10h   11h   12h   13h   14h   15h   16h   17h
-  candidate footer -- block 1 rows; attempt rows 11 -> 10
+
  : go   / filter   enter open   s stop   q quit
