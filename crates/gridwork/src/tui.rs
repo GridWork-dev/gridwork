@@ -2663,7 +2663,7 @@ async fn refresh_queue(client: &mut Client) -> Result<QueueState, Failure> {
         ProjectionKind::Receipt,
         ProjectionKind::Message,
     ] {
-        let (records, watermark) = read_projection_records(client, kind).await?;
+        let (records, watermark, _) = read_projection_records(client, kind).await?;
         state.watermark = watermark.or(state.watermark);
         for record in records {
             match (kind, record) {
@@ -2697,7 +2697,8 @@ async fn refresh_queue(client: &mut Client) -> Result<QueueState, Failure> {
 }
 
 async fn refresh_terms(client: &mut Client) -> Result<TermState, Failure> {
-    let (records, watermark) = read_projection_records(client, ProjectionKind::PtySession).await?;
+    let (records, watermark, drained) =
+        read_projection_records(client, ProjectionKind::PtySession).await?;
     let mut sessions = Vec::with_capacity(records.len());
     for record in records {
         let ProjectionRecord::PtySession { pty_session } = record else {
@@ -2711,7 +2712,9 @@ async fn refresh_terms(client: &mut Client) -> Result<TermState, Failure> {
     Ok(TermState {
         sessions,
         watermark,
-        complete: true,
+        // Was hardcoded `true`. The reader can now stop short, so this is the
+        // answer it gave rather than the answer we wanted.
+        complete: drained,
     })
 }
 
@@ -2852,7 +2855,7 @@ async fn refresh_config(
         }
     };
     let evidence = match read_projection_records(client, ProjectionKind::Evidence).await {
-        Ok((records, _)) => records
+        Ok((records, _, _)) => records
             .into_iter()
             .filter_map(|record| match record {
                 ProjectionRecord::Evidence { evidence } if evidence.kind == "config_change" => {
@@ -2890,7 +2893,7 @@ fn config_repository_root() -> Result<std::path::PathBuf, std::io::Error> {
 
 async fn refresh_hall_cost(client: &mut Client) -> Result<u64, Failure> {
     let now = current_timestamp();
-    let (records, _) = read_projection_records(client, ProjectionKind::CostEntry).await?;
+    let (records, _, _) = read_projection_records(client, ProjectionKind::CostEntry).await?;
     records
         .into_iter()
         .map(|record| match record {
@@ -2913,14 +2916,22 @@ async fn refresh_hall_cost(client: &mut Client) -> Result<u64, Failure> {
         })
 }
 
+/// Page one projection kind into a flat record list, up to the same budget
+/// [`crate::drain_projection`] honours.
+///
+/// The third element of the tuple is whether the read actually reached the end.
+/// Most callers discard it because they fold the rows into something that makes
+/// no completeness claim; `refresh_terms` is the one that does, and it must
+/// pass it through rather than assume.
 async fn read_projection_records(
     client: &mut Client,
     kind: ProjectionKind,
-) -> Result<(Vec<ProjectionRecord>, Option<Seq>), Failure> {
+) -> Result<(Vec<ProjectionRecord>, Option<Seq>, bool), Failure> {
     let mut records = Vec::new();
     let mut cursor = None;
     let mut seen = BTreeSet::new();
     let mut watermark = None;
+    let mut pages = 0u32;
     loop {
         let result = client
             .ask(KernelRequest::ListProjection {
@@ -2939,18 +2950,26 @@ async fn read_projection_records(
         };
         watermark = page_watermark.or(watermark);
         records.extend(page);
-        let Some(next) = next_cursor else {
-            break;
-        };
-        if !seen.insert(next.clone()) {
-            return Err(Failure::internal(format!(
-                "{} projection cursor repeated {next:?}",
-                kind.as_str()
-            )));
+        pages += 1;
+        match (crate::page_step(next_cursor.is_some(), pages), next_cursor) {
+            (crate::PageStep::Drained, _) => return Ok((records, watermark, true)),
+            (crate::PageStep::Short, _) => return Ok((records, watermark, false)),
+            (crate::PageStep::Continue, Some(next)) => {
+                if !seen.insert(next.clone()) {
+                    return Err(Failure::internal(format!(
+                        "{} projection cursor repeated {next:?}",
+                        kind.as_str()
+                    )));
+                }
+                cursor = Some(next);
+            }
+            (crate::PageStep::Continue, None) => {
+                return Err(Failure::internal(
+                    "projection paging asked to continue with no cursor",
+                ));
+            }
         }
-        cursor = Some(next);
     }
-    Ok((records, watermark))
 }
 
 fn current_timestamp() -> Timestamp {
@@ -3255,48 +3274,16 @@ async fn refresh_board_projections(
     let mut watermarks = Vec::new();
     for _ in 0..SNAPSHOT_ATTEMPTS {
         watermarks.clear();
+        // Reset per attempt, alongside the rows: a retry re-reads every kind,
+        // so a short read on a discarded attempt must not survive into the one
+        // that is kept.
+        state.complete = true;
         for &kind in view_projections(state.view) {
             clear_board_projection(state, kind);
-            let mut cursor = None;
-            let mut seen = BTreeSet::new();
-            loop {
-                let result = client
-                    .ask(KernelRequest::ListProjection {
-                        projection: kind,
-                        cursor: cursor.clone(),
-                        limit: Some(PAGE_LIMIT),
-                    })
-                    .await?;
-                let (records, next_cursor, watermark) = match result {
-                    KernelResult::ProjectionPage {
-                        records,
-                        next_cursor,
-                        watermark,
-                    } => (records, next_cursor, watermark),
-                    KernelResult::Error { code, message, .. } => {
-                        return Err(Failure::new(code, message));
-                    }
-                    other => {
-                        return Err(Failure::internal(format!(
-                            "refresh board projections: kernel answered with {other:?}"
-                        )));
-                    }
-                };
-                watermarks.push(watermark);
-                for record in records {
-                    crate::push_board_record(state, kind, record)?;
-                }
-                let Some(next) = next_cursor else {
-                    break;
-                };
-                if !seen.insert(next.clone()) {
-                    return Err(Failure::internal(format!(
-                        "{} projection cursor repeated {next:?}",
-                        kind.as_str()
-                    )));
-                }
-                cursor = Some(next);
-            }
+            let page =
+                crate::drain_projection(client, kind, state, "refresh board projections").await?;
+            watermarks.extend(page.watermarks);
+            state.complete &= page.drained;
         }
         let coherent = watermarks
             .first()

@@ -359,22 +359,26 @@ pub fn render_fleet(
             (65, "AGE"),
         ]
     };
-    for (x, label) in columns {
-        put(buf, area, *x, 2, label, style("muted", tier));
-    }
-
     // The twin's own notes rather than a second derivation of them:
     // `board::agent_fleet` is where "what the log does not carry" is decided,
     // and a console that recomputed the same three facts would be free to
-    // drift from the panel that ruled them.
-    //
-    // Its `findings` are deliberately not taken here. Those are page-integrity
-    // alarms (duplicate ids on a projection page), which is a different class
-    // from an absence, is not fleet-specific, and wants a louder treatment
-    // than a muted footer — recorded as an open follow-up, not swallowed.
-    let notes = board::agent_fleet(state).unknowns;
+    // drift from the panel that ruled them. Its `findings` come from the same
+    // call for the same reason — they are a different CLASS from the unknowns,
+    // which is why they render differently, but they are not a different
+    // SOURCE.
+    let fleet = board::agent_fleet(state);
+    let notes = fleet.unknowns;
     let unknown_block = unknown_rows(area.height, notes.len());
-    let attempt_rows = area.height.saturating_sub(BASE_RESERVE + unknown_block) as usize;
+    let integrity_block = integrity_rows(area.height, fleet.findings.len(), unknown_block);
+    let columns_y = 2u16.saturating_add(integrity_block);
+    paint_integrity(area, buf, &fleet.findings, integrity_block, tier);
+    for (x, label) in columns {
+        put(buf, area, *x, columns_y, label, style("muted", tier));
+    }
+
+    let attempt_rows =
+        area.height
+            .saturating_sub(BASE_RESERVE + unknown_block + integrity_block) as usize;
     let selected_index = selected.and_then(|target| {
         let BoardTarget::Attempt(id) = target else {
             return None;
@@ -394,7 +398,7 @@ pub fn render_fleet(
             .min(state.attempts.len().saturating_sub(visible))
     };
     let end = (start + visible).min(state.attempts.len());
-    let mut y = 3;
+    let mut y = columns_y.saturating_add(1);
     for attempt in &state.attempts[start..end] {
         paint_attempt_row(
             area, buf, y, state, context, attempt, selected, tier, glyphs, wide, hits,
@@ -713,6 +717,37 @@ fn plural_suffix(count: usize) -> &'static str {
     if count == 1 { "" } else { "s" }
 }
 
+/// The page-integrity alarm, painted above the column heads.
+///
+/// Two forms, chosen by [`integrity_rows`]. Both open with the word
+/// `INTEGRITY` and a count, because the alarm has to survive mono and ascii
+/// intact — colour is what a reader loses first and the one thing this row
+/// cannot afford to have carried it. The `fail` binding is added on top of
+/// wording that already works without it.
+fn paint_integrity(area: Rect, buf: &mut Buffer, findings: &[String], block: u16, tier: ColorTier) {
+    if block == 0 {
+        return;
+    }
+    let head = format!(
+        "INTEGRITY  {} finding{}",
+        findings.len(),
+        plural_suffix(findings.len())
+    );
+    put(buf, area, 2, 2, &head, bold("fail", tier));
+    if block == 1 {
+        // Degraded: the count and the word, nothing itemized. A reader who
+        // sees this knows to run the CLI twin, which never truncates.
+        return;
+    }
+    let mut y = 3u16;
+    for finding in findings {
+        put(buf, area, 4, y, finding, style("fail", tier));
+        y = y.saturating_add(1);
+    }
+    // The last reserved row is left blank on purpose: it separates the alarm
+    // from the column heads so the two do not read as one header.
+}
+
 /// Rows above the keybar that are never attempt rows: the header block (3),
 /// the paging notice, UNCLAIMED (2), the rule, the spend chart (5), the
 /// keybar.
@@ -738,6 +773,38 @@ fn unknown_rows(height: u16, notes: usize) -> u16 {
     }
     let full = u16::try_from(notes).unwrap_or(u16::MAX).saturating_add(1);
     if height.saturating_sub(BASE_RESERVE.saturating_add(full)) >= MIN_ATTEMPT_ROWS {
+        full
+    } else {
+        1
+    }
+}
+
+/// Rows the integrity block gets, above the columns rather than below the rows.
+///
+/// Findings are duplicate ids on a projection page — the page contradicts
+/// itself. That is a different class from [`unknown_rows`]'s absences, and it
+/// is the reason this block sits where it does: a caveat that reads AFTER the
+/// data it impeaches has already let the reader believe the rows. So the alarm
+/// goes above them, and it is the one block that outranks attempt rows for
+/// space.
+///
+/// It degrades the same way the unknown block does — full wording while
+/// [`MIN_ATTEMPT_ROWS`] survive, one summary row otherwise — because a lens
+/// that spends half an 80×24 frame on findings has stopped being a fleet lens.
+/// The full form spends one more row than it prints, on a blank rule separating
+/// the alarm from the column heads; the degraded form does not, since at that
+/// height every row is contested.
+fn integrity_rows(height: u16, findings: usize, unknown_block: u16) -> u16 {
+    if findings == 0 {
+        return 0;
+    }
+    let full = u16::try_from(findings)
+        .unwrap_or(u16::MAX)
+        .saturating_add(2);
+    let reserved = BASE_RESERVE
+        .saturating_add(unknown_block)
+        .saturating_add(full);
+    if height.saturating_sub(reserved) >= MIN_ATTEMPT_ROWS {
         full
     } else {
         1

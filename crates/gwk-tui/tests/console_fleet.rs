@@ -418,3 +418,119 @@ fn the_header_chrome_never_paints_over_the_summary_it_follows() {
         "the tail kept its low-priority parts and collided anyway:\n{header}"
     );
 }
+
+/// A page that contradicts itself: one engine session appearing twice. This is
+/// what `agent_fleet` turns into a finding, and it is a different class from
+/// every unknown the lens already names — those say the log is silent, this
+/// says the page is wrong.
+fn contradictory_page() -> gwk_tui::board::BoardState {
+    let mut state = common::estate::estate_board_state(BoardView::Fleet);
+    let duplicate = state
+        .sessions
+        .first()
+        .cloned()
+        .expect("the estate fixture carries at least one session");
+    state.sessions.push(duplicate);
+    state
+}
+
+#[test]
+fn the_alarm_reads_before_the_rows_it_impeaches() {
+    let rendered = render_state(
+        &contradictory_page(),
+        120,
+        40,
+        ColorTier::Truecolor,
+        GlyphSet::Unicode,
+    );
+    let alarm = rendered
+        .lines()
+        .position(|line| line.contains("INTEGRITY"))
+        .unwrap_or_else(|| panic!("no integrity alarm on a contradictory page:\n{rendered}"));
+    let columns = rendered
+        .lines()
+        .position(|line| line.contains("ATTEMPT") && line.contains("STATE"))
+        .unwrap_or_else(|| panic!("no column heads:\n{rendered}"));
+    // The whole ruling in one assertion. A caveat printed after the table has
+    // already let the reader believe the rows.
+    assert!(
+        alarm < columns,
+        "the alarm printed at line {alarm}, below the column heads at {columns}:\n{rendered}"
+    );
+    assert!(rendered.contains("duplicate"), "{rendered}");
+}
+
+#[test]
+fn a_clean_page_paints_no_alarm_and_loses_no_rows() {
+    let clean = common::estate::estate_board_state(BoardView::Fleet);
+    let with_alarm = render_state(
+        &contradictory_page(),
+        120,
+        40,
+        ColorTier::Truecolor,
+        GlyphSet::Unicode,
+    );
+    let without = render_state(&clean, 120, 40, ColorTier::Truecolor, GlyphSet::Unicode);
+    assert!(
+        !without.contains("INTEGRITY"),
+        "a clean page raised an alarm:\n{without}"
+    );
+    // Evidence, not chrome: the block costs nothing when there is nothing to
+    // report, so the clean frame keeps its column heads where they always were.
+    let clean_columns = without
+        .lines()
+        .position(|line| line.contains("ATTEMPT") && line.contains("STATE"));
+    let alarmed_columns = with_alarm
+        .lines()
+        .position(|line| line.contains("ATTEMPT") && line.contains("STATE"));
+    assert_eq!(clean_columns, Some(2), "{without}");
+    assert!(
+        alarmed_columns > clean_columns,
+        "the alarm did not push the table down at all — it is painting over it"
+    );
+}
+
+#[test]
+fn the_alarm_is_carried_by_words_not_colour() {
+    // The specific way B4 was worse than a plain omission. Mono and ascii lose
+    // every binding; an alarm that reads as an alarm only in truecolor is not
+    // an alarm.
+    let state = contradictory_page();
+    let colour = render_state(&state, 120, 40, ColorTier::Truecolor, GlyphSet::Unicode);
+    let mono = render_state(&state, 120, 40, ColorTier::Mono, GlyphSet::Ascii);
+    let words = |frame: &str| {
+        frame
+            .lines()
+            .filter(|line| line.contains("INTEGRITY") || line.contains("duplicate"))
+            .map(str::trim_end)
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    assert!(!words(&colour).is_empty(), "{colour}");
+    assert_eq!(
+        words(&colour),
+        words(&mono),
+        "the alarm said different things in mono:\n{mono}"
+    );
+}
+
+#[test]
+fn the_alarm_degrades_rather_than_eating_the_fleet() {
+    // At 80x24 the block gives up its itemization and keeps the count, the
+    // same trade the unknown block makes one rung lower.
+    let rendered = render_state(
+        &contradictory_page(),
+        80,
+        24,
+        ColorTier::Truecolor,
+        GlyphSet::Unicode,
+    );
+    assert!(
+        rendered.contains("INTEGRITY"),
+        "the alarm vanished at the floor — the one thing it may never do:\n{rendered}"
+    );
+    let itemized = rendered.lines().filter(|l| l.contains("duplicate")).count();
+    assert_eq!(itemized, 0, "the floor kept the itemization:\n{rendered}");
+    // And the rows it exists to impeach are still on screen.
+    assert!(rendered.contains("at-tui-impl"), "{rendered}");
+}

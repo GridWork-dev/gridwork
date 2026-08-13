@@ -631,15 +631,33 @@ as pinned as a header.
   qualifier. Fixed in-round: the pair is chosen by measured fit, and the tail gives up
   its low-priority parts (`tier` label, watermark) as one column before the summary
   gives up anything.
-- **`agent_fleet`'s `findings` are deliberately NOT surfaced here.** Duplicate ids on a
-  projection page are a page-integrity alarm, not an absence: different class, not
-  fleet-specific, and they want a louder treatment than a muted footer. Open follow-up,
-  recorded rather than swallowed.
-- **`complete` is still structurally unreachable on the live console**, exactly as
-  §CLI records for the shipped verbs: `refresh_*` drains every projection page or hard
-  errors, so `complete` is hardcoded `true` at all three construction sites. The lens
-  now honours the field it is handed; making a paged reader that can set it false is a
-  separate sitting.
+- ~~**`agent_fleet`'s `findings` are deliberately NOT surfaced here.**~~ **Closed by
+  operator picker, 2026-08-13.** Duplicate ids on a projection page are a page-integrity
+  alarm, not an absence — still a different class, which is now why they render
+  *differently* rather than why they go unrendered. The block sits **above the column
+  heads**, not in the footer beside `UNKNOWN`, and that placement is the ruling: a
+  caveat printed after the table has already let the reader believe the rows. It opens
+  with the word `INTEGRITY` and a count, carried by words rather than the `fail`
+  binding, because mono and ascii lose every binding and an alarm that only alarms in
+  truecolor is not one — the specific way B4 was worse than a plain omission. It is
+  evidence, not chrome: no findings, no block, and the clean frame keeps its column
+  heads exactly where they always were. At the 80×24 floor it gives up its itemization
+  and keeps the count, the same trade the unknown block makes one rung lower, because
+  the one thing it may never do is vanish. Findings still come from `board::agent_fleet`
+  rather than a second derivation — a different class, not a different source.
+- ~~**`complete` is still structurally unreachable on the live console.**~~ **Closed by
+  operator picker, 2026-08-13.** Both read loops now share one bounded reader
+  (`gridwork::drain_projection`), which stops after `MAX_PAGES_PER_PROJECTION` pages
+  with a cursor still in hand and reports it — so `complete` is the answer the read
+  gave rather than a constant. The bound is not busywork to make a field reachable: an
+  unbounded drain makes console startup cost a function of estate size, and the one
+  estate large enough to notice is the one where noticing is least convenient. Two
+  things fell out of merging the loops. `refresh_terms` was a fourth site hardcoding
+  `complete: true` after a real paged read, and the console inherited the schema guard
+  (rows arriving without a page watermark) that only the CLI copy had. The decision that
+  sets `complete` is extracted as `page_step` and unit-tested, because inside the loops
+  it is reachable only through a live kernel socket — and a guard that cannot be
+  exercised is indistinguishable from one that is absent.
 - The Round-2 `mock_fleet` painter still prints `SES` and keeps its own copy of the
   session fold. It is the retired artifact of the Round-2 picker and is superseded by
   this ruling, the same way Round 7 superseded the Round-5 painter's zero-fill. The
