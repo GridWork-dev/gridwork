@@ -3,7 +3,7 @@ title: Permitted specifications
 description: The public specification IDs and URLs that derivation markers may cite.
 ---
 
-{/* curated-from: docs/derivation/SPECS.md sha256=8ddcc71f2e934a96b6a8f10882dc763132f51faffbbae907765f84623f4b3356 */}
+{/* curated-from: docs/derivation/SPECS.md sha256=65651ca83c8a1660aafa0b179aa3796454742b171c5721e0aa08918b16d06141 */}
 
 Public specifications cited by clean-room derivation markers (CLEANROOM.md rule 3).
 Rule 3 admits two kinds of permitted source: a public specification, or an observation
@@ -36,6 +36,7 @@ leaked, or copyleft-licensed is a rule 1 violation.
 | `XTERM-CTLSEQS` | XTerm Control Sequences | invisible-island.net/xterm/ctlseqs/ctlseqs.html |
 | `KITTY-KBD` | Kitty keyboard protocol | sw.kovidgoyal.net/kitty/keyboard-protocol/ |
 | `KITTY-GRAPHICS` | Kitty graphics protocol | sw.kovidgoyal.net/kitty/graphics-protocol/ |
+| `KITTY-UNDERLINES` | Kitty colored and styled underlines | sw.kovidgoyal.net/kitty/underlines/ |
 | `ACP-1` | Agent Client Protocol, wire version 1 | agentclientprotocol.com |
 | `CLAUDE-STREAM-JSON` | Claude Code CLI reference: print-mode `--input-format`/`--output-format` flags, stream-json on both, stdin/stdout | code.claude.com/docs/en/cli-reference |
 | `CLAUDE-HEADLESS` | Claude Code headless mode: the stream-json message stream's shapes and semantics | code.claude.com/docs/en/headless |
@@ -49,6 +50,7 @@ leaked, or copyleft-licensed is a rule 1 violation.
 | `POSIX-TERM` | POSIX.1-2024 (Issue 8) XBD §11, General Terminal Interface | pubs.opengroup.org/onlinepubs/9799919799/basedefs/V1_chap11.html |
 | `POSIX-WINSIZE` | POSIX.1-2024 (Issue 8) XSH, `tcsetwinsize()` | pubs.opengroup.org/onlinepubs/9799919799/functions/tcsetwinsize.html |
 | `POSIX-VI` | POSIX.1-2024 (Issue 8) XCU, `vi` — screen-oriented (visual) display editor: the command-mode / text-input-mode distinction and the visual-mode command vocabulary specified in EXTENDED DESCRIPTION | pubs.opengroup.org/onlinepubs/9799919799/utilities/vi.html |
+| `PTY-PROCESS` | `pty-process` 0.5.3 public `Command` API: program, argument, working-directory, environment-clear/environment-set, and PTY child-spawn builder operations | docs.rs/pty-process/0.5.3/pty_process/struct.Command.html |
 | `UAX-11` | Unicode Standard Annex #11, East Asian Width | unicode.org/reports/tr11/ |
 | `UAX-29` | Unicode Standard Annex #29, Text Segmentation (grapheme clusters) | unicode.org/reports/tr29/ |
 | `TERM-UNICODE-CORE` | Terminal Unicode Core (grapheme-cluster processing, DEC private mode 2027). **Draft** (rev 1, 2021-09-06), in a repository declaring no license — cite it for what it requires when the mode is SET, and for its own statement that the reset state is undefined; it defines no reset-state behavior to cite | github.com/contour-terminal/terminal-unicode-core |

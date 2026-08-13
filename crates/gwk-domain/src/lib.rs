@@ -27,7 +27,10 @@ pub use blob::{
 pub use checkpoint::{
     CHECKPOINT_EVENT_INTERVAL, CHECKPOINT_INTERVAL_SECS, CHECKPOINT_SCHEMA_VERSION, Checkpoint,
 };
-pub use command::{CommandDecodeError, KernelCommand, PTY_INPUT_ACTION_CLASS};
+pub use command::{
+    CommandDecodeError, KernelCommand, PTY_CONTROL_ACTION_CLASS, PTY_INPUT_ACTION_CLASS,
+    PTY_START_ACTION_CLASS, PTY_TEMPLATE_ACTION_CLASS,
+};
 // Deliberately NOT in the generated TypeScript contract: nothing in `engine`
 // derives `specta::Type` and nothing is registered in xtask's export registry.
 // This is how the host's own components agree with each other, not something a
@@ -36,7 +39,8 @@ pub use engine::{EngineAdapter, EngineEvent, EngineStatus, LifecycleFact};
 pub use entity::{
     Attempt, AttentionItem, AuthorityGrant, Budget, Command, CostEntry,
     DISPATCH_NODE_INITIAL_STATE, DispatchNode, EngineSession, Evidence, Gate, IngestedRecord,
-    Lease, Message, Receipt, Task, WorkflowRun, WorkspaceNode, WorkspaceNodeKind, Worktree,
+    Lease, Message, PtySessionTemplate, Receipt, Task, WorkflowRun, WorkspaceNode,
+    WorkspaceNodeKind, Worktree,
 };
 pub use envelope::{
     Actor, CommandEnvelope, ENVELOPE_SCHEMA_VERSION, EventEnvelope, INLINE_PAYLOAD_MAX_BYTES,
@@ -54,8 +58,9 @@ pub use ids::{
     AggregateId, AttemptId, AttentionItemId, AuthorityGrantId, BlobUploadId, ByteCount, CommandId,
     CorrelationId, CostEntryId, CostMicros, DispatchNodeId, EngineId, EngineSessionId, EventCount,
     EventId, EvidenceId, FenceToken, GateId, IdempotencyKey, IngestedRecordId, LeaseId, MessageId,
-    ProjectId, PtyFrameSeq, PtySessionGeneration, PtySessionId, ReceiptId, RequestId, Seq, TaskId,
-    Timestamp, TokenCount, WorkflowRunId, WorkspaceNodeId, WorktreeId, WriterEpoch,
+    ProjectId, PtyFrameSeq, PtySessionGeneration, PtySessionId, PtySessionTemplateName, ReceiptId,
+    RequestId, Seq, TaskId, Timestamp, TokenCount, WorkflowRunId, WorkspaceNodeId, WorktreeId,
+    WriterEpoch,
 };
 pub use ingestion::IngestionKind;
 pub use inherited::{
@@ -67,10 +72,11 @@ pub use protocol::{
     CONNECTION_INGRESS_BYTES_PER_WINDOW, CONTRACT_VERSION, CapabilityName, CapabilityNameError,
     ClientControl, FRAME_BODY_MAX_BYTES, FRAME_BODY_MIN_BYTES, FRAME_LENGTH_PREFIX_BYTES,
     FRAME_PAYLOAD_MAX_BYTES, FrameKind, HELLO_DEADLINE_SECS, HELLO_MAX_BYTES, KernelErrorCode,
-    KernelRequest, KernelResult, MAX_CAPABILITIES, PROTOCOL_MINOR, PTY_INPUT_CAPABILITY,
-    PTY_INPUT_MAX_BASE64_BYTES, PTY_INPUT_MAX_BYTES, PTY_RAW_CAPABILITY,
-    PTY_RAW_PAYLOAD_DEADLINE_SECS, ProjectionKind, ProjectionRecord, ProtocolVersion, PtyInputData,
-    SLOW_CONSUMER_TIMEOUT_SECS, ServerControl,
+    KernelRequest, KernelResult, MAX_CAPABILITIES, PROTOCOL_MINOR, PTY_GRID_MAX_AXIS,
+    PTY_GRID_MAX_CELLS, PTY_INPUT_CAPABILITY, PTY_INPUT_MAX_BASE64_BYTES, PTY_INPUT_MAX_BYTES,
+    PTY_RAW_CAPABILITY, PTY_RAW_PAYLOAD_DEADLINE_SECS, ProjectionKind, ProjectionRecord,
+    ProtocolVersion, PtyInputData, SLOW_CONSUMER_TIMEOUT_SECS, ServerControl,
+    pty_grid_dimensions_are_bounded,
 };
 pub use transition::{
     Cursor, GuardCtx, GuardViolation, LIVENESS_PRODUCER_KIND, TransitionGuard, TransitionRequest,

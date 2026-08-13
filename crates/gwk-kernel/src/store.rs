@@ -168,6 +168,18 @@ impl PgEventStore {
         self.blobs.as_ref()
     }
 
+    /// Stable keyed binding material for ephemeral PTY input bytes. The blob
+    /// KEK already exists on every serving kernel and never enters the log;
+    /// domain-separating it here prevents low-entropy input recovery from the
+    /// durable replay binding without introducing a second deployment secret.
+    pub(crate) fn pty_input_binding_key(&self) -> Option<&[u8]> {
+        use secrecy::ExposeSecret as _;
+
+        self.blobs
+            .as_ref()
+            .map(|blobs| blobs.config().kek().expose_secret().as_slice())
+    }
+
     /// The checkpoint barrier, if either bound has tripped.
     ///
     /// Called AFTER the caller has written this batch's projections, and that

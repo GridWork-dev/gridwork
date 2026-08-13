@@ -43,7 +43,9 @@ use gwk_domain::ids::{AggregateId, EventId, ReceiptId, Seq};
 use gwk_domain::port::EventStore;
 use gwk_domain::protocol::{KernelErrorCode, KernelResult};
 use gwk_domain::transition::{self, Cursor, TransitionRequest, TransitionResult};
+use hmac::{Hmac, KeyInit as _, Mac};
 use serde::de::DeserializeOwned;
+use sha2::Sha256;
 use sqlx::{PgConnection, Row};
 
 use crate::authority;
@@ -81,6 +83,8 @@ const PTY_SESSION_VERSION: &str = "SELECT version FROM gwk.pty_session WHERE id 
 const PTY_SESSION_STATE: &str = "SELECT state FROM gwk.pty_session WHERE id = $1";
 const PTY_SESSION_CURSOR: &str =
     "SELECT state, generation, version FROM gwk.pty_session WHERE id = $1";
+const PTY_TEMPLATE_VERSION: &str = "SELECT version FROM gwk.pty_session_template WHERE name = $1";
+const PTY_TEMPLATE_STATE: &str = "SELECT state FROM gwk.pty_session_template WHERE name = $1";
 const AGGREGATE_OWNER: &str = "SELECT project_id FROM gwk.event \
      WHERE aggregate_type = $1 AND aggregate_id = $2 \
      ORDER BY aggregate_version LIMIT 1";
@@ -115,7 +119,7 @@ enum Prior {
 /// second time.
 pub(crate) struct Submission {
     pub result: KernelResult,
-    pub newly_applied: bool,
+    pub delivery_id: Option<EventId>,
 }
 
 /// The ephemeral half of one typed PTY-input request. Invalid wire encodings
@@ -195,19 +199,23 @@ impl PgEventStore {
         self.submit_inner(envelope, Some(carrier)).await
     }
 
+    pub(crate) async fn submit_inner_for_delivery(&self, envelope: &CommandEnvelope) -> Submission {
+        self.submit_inner(envelope, None).await
+    }
+
     async fn submit_inner(
         &self,
         envelope: &CommandEnvelope,
         pty_input: Option<PtyInputCarrier<'_>>,
     ) -> Submission {
         match self.try_submit(envelope, pty_input).await {
-            Ok((result, newly_applied)) => Submission {
+            Ok(result) => Submission {
+                delivery_id: delivery_id(&result),
                 result,
-                newly_applied,
             },
             Err(refusal) => Submission {
+                delivery_id: None,
                 result: refusal.into_result(),
-                newly_applied: false,
             },
         }
     }
@@ -216,7 +224,7 @@ impl PgEventStore {
         &self,
         envelope: &CommandEnvelope,
         pty_input: Option<PtyInputCarrier<'_>>,
-    ) -> Result<(KernelResult, bool), Refusal> {
+    ) -> Result<KernelResult, Refusal> {
         let _permit = self.admit().map_err(|_| {
             Refusal::new(
                 KernelErrorCode::Overloaded,
@@ -227,6 +235,13 @@ impl PgEventStore {
             .map_err(|e| Refusal::new(KernelErrorCode::Schema, e.to_string()))?;
         let command = KernelCommand::from_envelope(envelope)
             .map_err(|e| Refusal::validation(e.to_string()))?;
+        let receipted_pty_command = matches!(
+            command,
+            KernelCommand::SendPtyInput { .. }
+                | KernelCommand::ResizePtySession { .. }
+                | KernelCommand::StopPtySession { .. }
+                | KernelCommand::RequestPtySessionStart { .. }
+        );
         let pty_input_command = matches!(command, KernelCommand::SendPtyInput { .. });
         let input_preflight_refusal = if pty_input_command {
             validate_pty_input_carrier(&command, pty_input.as_ref())
@@ -249,6 +264,21 @@ impl PgEventStore {
         check_authority_admin(envelope, &command)?;
         let payload = serde_json::to_value(&command)
             .map_err(|e| Refusal::storage(format!("serialize command body: {e}")))?;
+        let input_binding = match pty_input.as_ref() {
+            Some(PtyInputCarrier::Bytes(bytes)) => {
+                let Some(key) = self.pty_input_binding_key() else {
+                    return Err(Refusal::storage(
+                        "PTY input replay binding requires the serving kernel's blob key",
+                    ));
+                };
+                let mut mac = Hmac::<Sha256>::new_from_slice(key)
+                    .map_err(|_| Refusal::storage("initialize PTY input replay binding"))?;
+                mac.update(b"gwk:pty-input-binding:v1\0");
+                mac.update(bytes);
+                Some(mac.finalize().into_bytes().to_vec())
+            }
+            Some(PtyInputCarrier::Invalid(_)) | None => None,
+        };
 
         let mut tx = self
             .pool()
@@ -269,12 +299,15 @@ impl PgEventStore {
         }
         if let Some(refusal) = input_preflight_refusal {
             return self
-                .receipted_input_refusal(
+                .receipted_pty_refusal(
                     tx,
                     envelope,
                     &command,
                     &route,
-                    "request validation",
+                    (
+                        gwk_domain::command::PTY_INPUT_ACTION_CLASS,
+                        "request validation",
+                    ),
                     refusal,
                 )
                 .await;
@@ -282,6 +315,27 @@ impl PgEventStore {
 
         let expected_version = match prior_for_key(&mut tx, envelope, &route, &payload).await? {
             Prior::Replay(events) => {
+                if pty_input_command {
+                    let stored: Option<Vec<u8>> = sqlx::query_scalar(
+                        "SELECT input_binding FROM gwk_internal.pty_delivery \
+                         WHERE project_id = $1 AND idempotency_key = $2",
+                    )
+                    .bind(envelope.project_id.as_str())
+                    .bind(envelope.idempotency_key.as_str())
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(|e| Refusal::storage(format!("read PTY input binding: {e}")))?
+                    .flatten();
+                    if stored.as_deref() != input_binding.as_deref() {
+                        return Err(Refusal::new(
+                            KernelErrorCode::IdempotencyConflict,
+                            format!(
+                                "idempotency key {:?} names different PTY input bytes",
+                                envelope.idempotency_key.as_str()
+                            ),
+                        ));
+                    }
+                }
                 // Nothing to write; the commit only releases the lock. The
                 // projections this key produced were written by the original
                 // append and re-applying them would advance a CAS version no
@@ -289,7 +343,7 @@ impl PgEventStore {
                 tx.commit()
                     .await
                     .map_err(|e| Refusal::storage(format!("commit: {e}")))?;
-                return Ok((self.applied(envelope, events).await?, false));
+                return self.applied(envelope, events).await;
             }
             Prior::Conflict(reason) => {
                 return Err(Refusal::new(KernelErrorCode::IdempotencyConflict, reason));
@@ -300,12 +354,44 @@ impl PgEventStore {
                 // answer a retrier can act on. Ownership is the question that
                 // only arises once the request is genuinely new.
                 check_aggregate_owner(&mut tx, envelope, &route).await?;
+                if receipted_pty_command
+                    && sqlx::query_scalar::<_, bool>(
+                        "SELECT true FROM gwk_internal.pty_delivery WHERE command_id = $1",
+                    )
+                    .bind(envelope.command_id.as_str())
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(|e| Refusal::storage(format!("check PTY command id: {e}")))?
+                    .is_some()
+                {
+                    return Err(Refusal::new(
+                        KernelErrorCode::IdempotencyConflict,
+                        format!(
+                            "PTY command id {:?} already names another delivery",
+                            envelope.command_id.as_str()
+                        ),
+                    ));
+                }
                 check_second_cutover(&mut tx, &command, epoch).await?;
+                // A start's aggregate id is `{session_id}:{command_id}` — both
+                // caller-minted, so it is unpredictable at grant time and no
+                // scoped grant could ever match it. Only a class-wide grant
+                // would, which would delegate the ENTIRE catalog: exactly the
+                // arbitrary-execution surface the declared-template design
+                // exists to bound. Authorize a start against its template name
+                // instead, so `scope = "review"` grants one template and
+                // nothing else. The receipt still names the start aggregate.
+                let authority_subject = match &command {
+                    KernelCommand::RequestPtySessionStart { template_name, .. } => {
+                        template_name.as_str()
+                    }
+                    _ => route.aggregate_id.as_str(),
+                };
                 let decision = authority::evaluate(
                     &mut tx,
                     envelope,
                     authority::classification_key(&envelope.command_type, &command),
-                    &route.aggregate_id,
+                    authority_subject,
                 )
                 .await?;
                 if let authority::Decision::Page {
@@ -322,8 +408,9 @@ impl PgEventStore {
                         .await;
                 }
                 let authority_result = decision.action_class().zip(decision.observed_basis());
-                let pty_input = pty_input_command;
-                if !pty_input && let Some((action_class, observed_basis)) = authority_result {
+                if !receipted_pty_command
+                    && let Some((action_class, observed_basis)) = authority_result
+                {
                     write_receipt(
                         &mut tx,
                         &receipt_for(envelope, &route, &command, action_class, observed_basis),
@@ -333,26 +420,21 @@ impl PgEventStore {
                 check_attention_dedup(&mut tx, &command).await?;
                 let expected_version = match decide(&mut tx, envelope, &command, &route).await {
                     Ok(version) => version,
-                    Err(refusal) if pty_input => {
+                    Err(refusal) if receipted_pty_command => {
                         let authority = authority_result.ok_or_else(|| {
-                            Refusal::storage("send_pty_input was not authority-classified")
+                            Refusal::storage("PTY control was not authority-classified")
                         })?;
                         return self
-                            .receipted_input_refusal(
-                                tx,
-                                envelope,
-                                &command,
-                                &route,
-                                authority.1,
-                                refusal,
+                            .receipted_pty_refusal(
+                                tx, envelope, &command, &route, authority, refusal,
                             )
                             .await;
                     }
                     Err(refusal) => return Err(refusal),
                 };
-                if pty_input {
+                if receipted_pty_command {
                     let (action_class, observed_basis) = authority_result.ok_or_else(|| {
-                        Refusal::storage("send_pty_input was not authority-classified")
+                        Refusal::storage("PTY control was not authority-classified")
                     })?;
                     write_receipt(
                         &mut tx,
@@ -379,6 +461,28 @@ impl PgEventStore {
             for event in &appended.events {
                 apply_event(&mut tx, event).await?;
             }
+            if receipted_pty_command {
+                let event = appended
+                    .events
+                    .first()
+                    .ok_or_else(|| Refusal::storage("a delivered PTY command appended no event"))?;
+                sqlx::query(
+                    "INSERT INTO gwk_internal.pty_delivery \
+                       (project_id, idempotency_key, command_id, event_id, event_seq, input_binding) \
+                     VALUES ($1, $2, $3, $4, $5::numeric, $6)",
+                )
+                .bind(envelope.project_id.as_str())
+                .bind(envelope.idempotency_key.as_str())
+                .bind(envelope.command_id.as_str())
+                .bind(event.event_id.as_str())
+                .bind(crate::numeric::to_numeric_text(
+                    event.global_sequence.value(),
+                ))
+                .bind(input_binding.as_deref())
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| Refusal::storage(format!("register PTY delivery: {e}")))?;
+            }
         }
         // After the projections, never before: a checkpoint names the sequence
         // it describes, and taking it above this loop would snapshot a state
@@ -393,7 +497,7 @@ impl PgEventStore {
             .await
             .map_err(|e| Refusal::storage(format!("commit: {e}")))?;
 
-        Ok((self.applied(envelope, appended.events).await?, true))
+        self.applied(envelope, appended.events).await
     }
 
     /// The paged answer: a refusal that commits its own trail.
@@ -410,7 +514,7 @@ impl PgEventStore {
         route: &Route,
         action_class: &'static str,
         observed_basis: &'static str,
-    ) -> Result<(KernelResult, bool), Refusal> {
+    ) -> Result<KernelResult, Refusal> {
         let actor = actor_json(envelope)?;
         let at = envelope.issued_at.as_str();
         let subject = format!("{}/{}", route.aggregate_type, route.aggregate_id);
@@ -449,25 +553,20 @@ impl PgEventStore {
 
     /// Commit the one receipt a well-formed input call owes even when its
     /// session lifetime is stale or absent. The target event is not appended.
-    async fn receipted_input_refusal(
+    async fn receipted_pty_refusal(
         &self,
         mut tx: sqlx::Transaction<'_, sqlx::Postgres>,
         envelope: &CommandEnvelope,
         command: &KernelCommand,
         route: &Route,
-        basis: &str,
+        authority: (&str, &str),
         refusal: Refusal,
-    ) -> Result<(KernelResult, bool), Refusal> {
+    ) -> Result<KernelResult, Refusal> {
+        let (action_class, basis) = authority;
         let observed_basis = format!("{basis}; refused={}", refusal.code);
         write_receipt(
             &mut tx,
-            &receipt_for(
-                envelope,
-                route,
-                command,
-                gwk_domain::command::PTY_INPUT_ACTION_CLASS,
-                &observed_basis,
-            ),
+            &receipt_for(envelope, route, command, action_class, &observed_basis),
         )
         .await?;
         tx.commit()
@@ -492,6 +591,116 @@ impl PgEventStore {
             watermark,
         })
     }
+}
+
+fn delivery_id(result: &KernelResult) -> Option<EventId> {
+    match result {
+        KernelResult::CommandApplied { events, .. } => {
+            events.first().map(|event| event.event_id.clone())
+        }
+        _ => None,
+    }
+}
+
+fn validate_pty_template(
+    name: &str,
+    command: &str,
+    args: &[String],
+    cwd: Option<&str>,
+    env: &std::collections::BTreeMap<String, String>,
+    cols: u16,
+    rows: u16,
+) -> Result<(), Refusal> {
+    const NAME_MAX: usize = 128;
+    const COMMAND_MAX: usize = 4_096;
+    const ARGS_MAX: usize = 256;
+    const ARG_MAX: usize = 16_384;
+    const ENV_MAX: usize = 256;
+    const ENV_ITEM_MAX: usize = 16_384;
+    const CWD_MAX: usize = 4_096;
+    let name = name.trim();
+    if name.is_empty()
+        || name.len() > NAME_MAX
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    {
+        return Err(Refusal::validation(
+            "a PTY template name must be 1..=128 ASCII letters, digits, '-', '_', or '.'",
+        ));
+    }
+    if command.trim().is_empty() || command.len() > COMMAND_MAX || command.as_bytes().contains(&0) {
+        return Err(Refusal::validation(
+            "a PTY template requires one bounded non-NUL command",
+        ));
+    }
+    if args.len() > ARGS_MAX
+        || args
+            .iter()
+            .any(|arg| arg.len() > ARG_MAX || arg.as_bytes().contains(&0))
+    {
+        return Err(Refusal::validation(
+            "PTY template arguments exceed their bounded non-NUL shape",
+        ));
+    }
+    if cwd.is_some_and(|cwd| cwd.is_empty() || cwd.len() > CWD_MAX || cwd.as_bytes().contains(&0)) {
+        return Err(Refusal::validation(
+            "a PTY template cwd must be bounded and non-NUL",
+        ));
+    }
+    if env.len() > ENV_MAX
+        || env.iter().any(|(key, value)| {
+            key.is_empty()
+                || key.contains('=')
+                || key.len() > ENV_ITEM_MAX
+                || value.len() > ENV_ITEM_MAX
+                || key.as_bytes().contains(&0)
+                || value.as_bytes().contains(&0)
+        })
+    {
+        return Err(Refusal::validation(
+            "PTY template environment exceeds its bounded non-NUL shape",
+        ));
+    }
+    // The reference discipline covers env VALUES and only them. `command`,
+    // `args`, and `cwd` above get shape validation and are then persisted
+    // verbatim and permanently — the event log is append-only and the runtime
+    // role holds no UPDATE or DELETE on it, so a secret written there can never
+    // be redacted. The refusal says so, because the operator meets this rule at
+    // the point of use and nowhere else.
+    if env.values().any(|value| {
+        value
+            .strip_prefix("env:")
+            .is_none_or(|name| !valid_environment_name(name))
+    }) {
+        return Err(Refusal::validation(
+            "PTY template environment values must be env:NAME references, not persisted values \
+             — note that command, args, and cwd are persisted verbatim and unredactably, so a \
+             credential must travel as an env:NAME reference, never as an argument",
+        ));
+    }
+    validate_pty_grid(cols, rows, "a PTY template")?;
+    Ok(())
+}
+
+fn valid_environment_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        && name.len() <= 256
+}
+
+fn validate_pty_grid(cols: u16, rows: u16, subject: &str) -> Result<(), Refusal> {
+    if !gwk_domain::pty_grid_dimensions_are_bounded(cols, rows) {
+        return Err(Refusal::validation(format!(
+            "{subject} requires non-zero dimensions no larger than {} per axis and {} cells; got {cols}x{rows}",
+            gwk_domain::PTY_GRID_MAX_AXIS,
+            gwk_domain::PTY_GRID_MAX_CELLS,
+        )));
+    }
+    Ok(())
 }
 
 /// Which aggregate a command addresses, and the event it produces there.
@@ -750,11 +959,78 @@ fn route_of(envelope: &CommandEnvelope, command: &KernelCommand) -> Result<Route
                 .to_owned(),
             "pty_input_requested",
         ),
+        C::ResizePtySession {
+            pty_session_id,
+            generation,
+            cols,
+            rows,
+        } => {
+            validate_pty_grid(*cols, *rows, "a PTY resize")?;
+            (
+                "pty_session",
+                gwk_domain::ids::pty_session_lifetime_id(pty_session_id, generation)
+                    .as_str()
+                    .to_owned(),
+                "pty_resize_requested",
+            )
+        }
+        C::StopPtySession {
+            pty_session_id,
+            generation,
+        } => (
+            "pty_session",
+            gwk_domain::ids::pty_session_lifetime_id(pty_session_id, generation)
+                .as_str()
+                .to_owned(),
+            "pty_stop_requested",
+        ),
         C::ClosePtySession { pty_session_id, .. } => (
             "pty_session",
             pty_session_id.as_str().to_owned(),
             "pty_session_closed",
         ),
+        C::DeclarePtySessionTemplate {
+            template_name,
+            command,
+            args,
+            cwd,
+            env,
+            cols,
+            rows,
+        } => {
+            validate_pty_template(
+                template_name.as_str(),
+                command,
+                args,
+                cwd.as_deref(),
+                env,
+                *cols,
+                *rows,
+            )?;
+            (
+                "pty_session_template",
+                template_name.as_str().to_owned(),
+                "pty_session_template_declared",
+            )
+        }
+        C::RetirePtySessionTemplate { template_name, .. } => (
+            "pty_session_template",
+            template_name.as_str().to_owned(),
+            "pty_session_template_retired",
+        ),
+        C::RequestPtySessionStart {
+            template_name,
+            pty_session_id,
+        } => {
+            if template_name.as_str().trim().is_empty() {
+                return Err(Refusal::validation("a PTY start names no template"));
+            }
+            (
+                "pty_session_start",
+                format!("{pty_session_id}:{}", envelope.command_id),
+                "pty_session_start_requested",
+            )
+        }
 
         C::RegisterDispatchNode {
             dispatch_node_id, ..
@@ -978,6 +1254,13 @@ fn receipt_for(
         KernelCommand::SendPtyInput { byte_count, .. } => {
             format!("{observed_basis}; byte_count={byte_count}")
         }
+        KernelCommand::ResizePtySession { cols, rows, .. } => {
+            format!("{observed_basis}; cols={cols}; rows={rows}")
+        }
+        KernelCommand::StopPtySession { .. } => format!("{observed_basis}; stop=true"),
+        KernelCommand::RequestPtySessionStart { template_name, .. } => {
+            format!("{observed_basis}; template={template_name}")
+        }
         _ => observed_basis.to_owned(),
     };
     gwk_domain::entity::Receipt {
@@ -1116,7 +1399,10 @@ fn check_authority_admin(
 ) -> Result<(), Refusal> {
     if matches!(
         command,
-        KernelCommand::GrantAuthority { .. } | KernelCommand::RevokeAuthority { .. }
+        KernelCommand::GrantAuthority { .. }
+            | KernelCommand::RevokeAuthority { .. }
+            | KernelCommand::DeclarePtySessionTemplate { .. }
+            | KernelCommand::RetirePtySessionTemplate { .. }
     ) && envelope.actor.kind != "operator"
     {
         return Err(Refusal::new(
@@ -1418,6 +1704,7 @@ async fn decide(
         | C::RecordCostEntry { .. }
         | C::OpenWorkflowRun { .. }
         | C::OpenPtySession { .. }
+        | C::DeclarePtySessionTemplate { .. }
         | C::GrantAuthority { .. }
         | C::RaiseAttention { .. } => 0,
 
@@ -1465,8 +1752,30 @@ async fn decide(
         C::RecordPtyAttach {
             pty_session_id,
             expected_version,
+        } => {
+            match pty_session_state(conn, pty_session_id.as_str()).await? {
+                None => {
+                    return Err(Refusal::not_found(format!(
+                        "no pty_session {pty_session_id}"
+                    )));
+                }
+                Some(state) if state != "running" => {
+                    return Err(Refusal::validation(format!(
+                        "pty_session {pty_session_id} is {state} and cannot be attached"
+                    )));
+                }
+                Some(_) => {}
+            }
+            decide_cas(
+                conn,
+                PTY_SESSION_VERSION,
+                &route.aggregate_id,
+                "pty_session",
+                *expected_version,
+            )
+            .await?
         }
-        | C::ClosePtySession {
+        C::ClosePtySession {
             pty_session_id,
             expected_version,
         } => {
@@ -1476,7 +1785,7 @@ async fn decide(
                         "no pty_session {pty_session_id}"
                     )));
                 }
-                Some(state) if state != "running" => {
+                Some(state) if !matches!(state.as_str(), "running" | "stopping") => {
                     return Err(Refusal::validation(format!(
                         "pty_session {pty_session_id} already closed as {state}"
                     )));
@@ -1500,6 +1809,15 @@ async fn decide(
             pty_session_id,
             generation,
             ..
+        }
+        | C::ResizePtySession {
+            pty_session_id,
+            generation,
+            ..
+        }
+        | C::StopPtySession {
+            pty_session_id,
+            generation,
         } => {
             let Some((state, stored_generation, version)) =
                 pty_session_cursor(conn, &route.aggregate_id).await?
@@ -1508,7 +1826,9 @@ async fn decide(
                     "no live pty_session {pty_session_id}:{generation}"
                 )));
             };
-            if stored_generation != generation.as_str() || state != "running" {
+            let state_is_admissible = state == "running"
+                || (matches!(command, C::StopPtySession { .. }) && state == "stopping");
+            if stored_generation != generation.as_str() || !state_is_admissible {
                 return Err(Refusal::new(
                     KernelErrorCode::StaleVersion,
                     format!(
@@ -1522,6 +1842,49 @@ async fn decide(
                 })));
             }
             version
+        }
+
+        C::RetirePtySessionTemplate {
+            template_name,
+            expected_version,
+        } => {
+            match pty_template_state(conn, template_name.as_str()).await? {
+                None => {
+                    return Err(Refusal::not_found(format!(
+                        "no pty_session_template {template_name}"
+                    )));
+                }
+                Some(state) if state != "active" => {
+                    return Err(Refusal::validation(format!(
+                        "pty_session_template {template_name} already retired"
+                    )));
+                }
+                Some(_) => {}
+            }
+            decide_cas(
+                conn,
+                PTY_TEMPLATE_VERSION,
+                &route.aggregate_id,
+                "pty_session_template",
+                *expected_version,
+            )
+            .await?
+        }
+
+        C::RequestPtySessionStart { template_name, .. } => {
+            match pty_template_state(conn, template_name.as_str()).await? {
+                None => {
+                    return Err(Refusal::not_found(format!(
+                        "no pty_session_template {template_name}"
+                    )));
+                }
+                Some(state) if state != "active" => {
+                    return Err(Refusal::validation(format!(
+                        "pty_session_template {template_name} is retired"
+                    )));
+                }
+                Some(_) => 0,
+            }
         }
 
         // A detach is TRUE HISTORY even on a closed row: a retire drops the
@@ -1795,6 +2158,17 @@ async fn pty_session_state(conn: &mut PgConnection, id: &str) -> Result<Option<S
         .fetch_optional(&mut *conn)
         .await
         .map_err(|e| Refusal::storage(format!("read pty_session state: {e}")))
+}
+
+async fn pty_template_state(
+    conn: &mut PgConnection,
+    name: &str,
+) -> Result<Option<String>, Refusal> {
+    sqlx::query_scalar::<_, String>(PTY_TEMPLATE_STATE)
+        .bind(name)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(|e| Refusal::storage(format!("read pty_session_template state: {e}")))
 }
 
 /// State, generation, and CAS version for one PTY lifetime row.

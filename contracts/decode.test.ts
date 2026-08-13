@@ -230,6 +230,18 @@ test("pty session: lifecycle counters and a terminal close that keeps the row", 
   await reemit("pty-session.json", session);
 });
 
+test("pty session template: executable data lives in the catalog", async () => {
+  const raw = await golden("pty-session-template.json");
+  if (!isRecord(raw)) throw new Error("golden is not an object");
+  const template = raw as B.PtySessionTemplate_Serialize;
+  expect(template.name).toBe("review");
+  expect(template.command).toBe("/usr/bin/review-agent");
+  expect(template.args).toEqual(["--interactive"]);
+  expect(template.env).toEqual({ TERM: "env:TERM" });
+  expect([template.cols, template.rows]).toEqual([100, 30]);
+  await reemit("pty-session-template.json", template);
+});
+
 test("transition results: tagged snake_case kinds, exhaustive", async () => {
   const raw = await golden("transition-results.json");
   if (!Array.isArray(raw)) throw new Error("golden is not an array");
@@ -293,6 +305,10 @@ test("client control: tagged frames, number major, decimal-string cursor", async
     "pty_raw_publish_output",
     "request",
     "request",
+    "request",
+    "request",
+    "request",
+    "pty_delivery_ack",
   ]);
 
   for (const frame of frames) {
@@ -303,7 +319,14 @@ test("client control: tagged frames, number major, decimal-string cursor", async
         // for 64-bit counters, not for this.
         const major: number = frame.protocol_major;
         expect(major).toBe(1);
-        expect(frame.capabilities).toEqual(["event_subscribe", "blob", "pty_raw", "pty_input"]);
+        expect(frame.capabilities).toEqual([
+          "event_subscribe",
+          "blob",
+          "pty_raw",
+          "pty_input",
+          "pty_control",
+          "pty_start",
+        ]);
         for (const name of frame.capabilities) expect(name).toMatch(/^[a-z][a-z0-9_]*$/);
         break;
       }
@@ -315,6 +338,11 @@ test("client control: tagged frames, number major, decimal-string cursor", async
       case "pty_raw_publish_output": {
         expect(typeof frame.request_id).toBe("string");
         expect(frame.byte_size).toMatch(DECIMAL);
+        break;
+      }
+      case "pty_delivery_ack": {
+        expect(typeof frame.delivery_id).toBe("string");
+        expect(frame.result.status).toBe("applied");
         break;
       }
       default: {
@@ -439,6 +467,19 @@ test("client control: tagged frames, number major, decimal-string cursor", async
   expect(ptyInputPayload["byte_count"]).toBe("3");
   expect("data_base64" in ptyInputPayload).toBe(false);
 
+  for (const [index, type] of [
+    [16, "resize_pty_session"],
+    [17, "stop_pty_session"],
+    [18, "start_pty_session"],
+  ] as const) {
+    const frame = raw[index];
+    if (!isRecord(frame) || !isRecord(frame["request"])) throw new Error(`frame ${index} missing`);
+    expect(frame["request"]["type"]).toBe(type);
+    const envelope = frame["request"]["envelope"];
+    if (!isRecord(envelope) || !isRecord(envelope["payload"])) throw new Error("control envelope missing");
+    expect(envelope["payload"]["command"]).toBeUndefined();
+  }
+
   await reemit("kernel-client-control.json", frames);
 });
 
@@ -467,6 +508,10 @@ test("server control: refusals are values, cursors survive a disconnect", async 
     "pty_raw_stream_closed",
     "response",
     "pty_input",
+    "pty_resize",
+    "pty_stop",
+    "pty_start",
+    "pty_delivery_settled",
   ]);
 
   for (const frame of frames) {
@@ -475,7 +520,12 @@ test("server control: refusals are values, cursors survive a disconnect", async 
       case "hello_ack": {
         // The INTERSECTION: the client asked for three capabilities and was
         // granted one. A client must not assume either absent capability.
-        expect(frame.capabilities).toEqual(["pty_raw", "pty_input"]);
+        expect(frame.capabilities).toEqual([
+          "pty_raw",
+          "pty_input",
+          "pty_control",
+          "pty_start",
+        ]);
         expect(frame.sealed).toBe(true);
         break;
       }
@@ -492,6 +542,23 @@ test("server control: refusals are values, cursors survive a disconnect", async 
         expect(frame.generation).toBe("pty-life-1");
         expect(frame.byte_size).toMatch(DECIMAL);
         expect(frame.data_base64).toBe("AP8K");
+        break;
+      }
+      case "pty_resize": {
+        expect([frame.cols, frame.rows]).toEqual([120, 40]);
+        break;
+      }
+      case "pty_stop": {
+        expect(frame.generation).toBe("pty-life-1");
+        break;
+      }
+      case "pty_start": {
+        expect(frame.template_name).toBe("review");
+        expect(frame.session_id).toBe("review-7");
+        break;
+      }
+      case "pty_delivery_settled": {
+        expect(frame.delivery_id).toBe("pty_session:pty-1:2");
         break;
       }
       case "event_batch": {

@@ -2,8 +2,8 @@
 //! routed to them — spawn, input, resize, snapshot, attach, stop. Attach
 //! reaches the kernel socket today through [`crate::publish`] (a fresh
 //! attach carries the snapshot seed, so the kernel's own snapshot verb is
-//! served without this registry's ever crossing the wire); the rest stay
-//! local until the lifecycle follow-up the crate root doc scopes.
+//! served without this registry's ever crossing the wire); input, resize, and
+//! stop also arrive through the publisher connection's bounded control queue.
 //!
 //! Ids are host-minted [`PtySessionId`]s per that type's own contract ("a
 //! caller only echoes an id an earlier spawn handed back"); the registry is
@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use gwk_domain::ids::PtySessionId;
+use gwk_domain::ids::{EventId, PtySessionId};
 use gwk_pty::SpawnError;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
@@ -50,12 +50,21 @@ pub enum RegistryError {
     },
     #[error("input write to session {0} exceeded the delivery deadline")]
     InputTimeout(PtySessionId),
+    #[error("control delivery to session {0} exceeded the delivery deadline")]
+    ControlTimeout(PtySessionId),
+    #[error("application by session {0} was not confirmed before the delivery deadline")]
+    ApplicationIndeterminate(PtySessionId),
+    #[error("the host already holds {0} PTY sessions")]
+    Overloaded(usize),
+    #[error("the PTY delivery deduplication window is full of unsettled commands")]
+    DedupCapacity,
 }
 
 /// One live session's handles.
 struct Entry {
     commands: mpsc::Sender<SessionCommand>,
     task: JoinHandle<SessionExit>,
+    delivered: std::sync::Arc<tokio::sync::Mutex<DeliveredCommands>>,
 }
 
 /// One session's attach handle, detached from the registry — see
@@ -64,6 +73,38 @@ struct Entry {
 pub struct Attacher {
     id: PtySessionId,
     commands: mpsc::Sender<SessionCommand>,
+    delivered: std::sync::Arc<tokio::sync::Mutex<DeliveredCommands>>,
+}
+
+const DELIVERED_COMMANDS: usize = 1_024;
+
+#[derive(Debug, Default)]
+struct DeliveredCommands {
+    order: std::collections::VecDeque<EventId>,
+    ids: std::collections::HashSet<EventId>,
+}
+
+impl DeliveredCommands {
+    fn contains(&self, id: &EventId) -> bool {
+        self.ids.contains(id)
+    }
+
+    fn insert(&mut self, id: EventId) {
+        if !self.ids.insert(id.clone()) {
+            return;
+        }
+        self.order.push_back(id);
+    }
+
+    fn ids(&self) -> Vec<EventId> {
+        self.order.iter().cloned().collect()
+    }
+
+    fn settle(&mut self, id: &EventId) {
+        if self.ids.remove(id) {
+            self.order.retain(|candidate| candidate != id);
+        }
+    }
 }
 
 impl Attacher {
@@ -74,39 +115,122 @@ impl Attacher {
     /// Send one raw input batch without reacquiring the registry lock.
     pub async fn input(&self, bytes: Vec<u8>) -> Result<(), RegistryError> {
         let id = self.id.clone();
-        let operation = async {
-            let (reply, answer) = oneshot::channel();
-            self.commands
-                .send(SessionCommand::Input { bytes, reply })
-                .await
-                .map_err(|_| RegistryError::Ended(id.clone()))?;
-            match answer.await {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(message)) => Err(RegistryError::Input {
-                    session_id: id.clone(),
-                    message,
-                }),
-                Err(_) => Err(RegistryError::Ended(id.clone())),
-            }
-        };
+        let (reply, answer) = oneshot::channel();
         tokio::time::timeout(
             Duration::from_secs(gwk_domain::protocol::SLOW_CONSUMER_TIMEOUT_SECS),
-            operation,
+            self.commands.send(SessionCommand::Input { bytes, reply }),
         )
         .await
         .map_err(|_| RegistryError::InputTimeout(self.id.clone()))?
+        .map_err(|_| RegistryError::Ended(id.clone()))?;
+        match tokio::time::timeout(
+            Duration::from_secs(gwk_domain::protocol::SLOW_CONSUMER_TIMEOUT_SECS),
+            answer,
+        )
+        .await
+        .map_err(|_| RegistryError::ApplicationIndeterminate(id.clone()))?
+        {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(message)) => Err(RegistryError::Input {
+                session_id: id.clone(),
+                message,
+            }),
+            Err(_) => Err(RegistryError::Ended(id)),
+        }
+    }
+
+    pub async fn resize(&self, cols: u16, rows: u16) -> Result<(), RegistryError> {
+        let (reply, answer) = oneshot::channel();
+        self.control(SessionCommand::Resize { cols, rows, reply }, answer)
+            .await
+    }
+
+    pub async fn stop(&self) -> Result<(), RegistryError> {
+        let (reply, answer) = oneshot::channel();
+        self.control(SessionCommand::Stop { reply }, answer).await?;
+        tokio::time::timeout(
+            Duration::from_secs(gwk_domain::protocol::SLOW_CONSUMER_TIMEOUT_SECS),
+            self.commands.closed(),
+        )
+        .await
+        .map_err(|_| RegistryError::ApplicationIndeterminate(self.id.clone()))?;
+        Ok(())
+    }
+
+    pub async fn apply_once<F, Fut>(
+        &self,
+        delivery_id: &EventId,
+        operation: F,
+    ) -> Result<(), RegistryError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<(), RegistryError>>,
+    {
+        let mut delivered = self.delivered.lock().await;
+        if delivered.contains(delivery_id) {
+            return Ok(());
+        }
+        if delivered.order.len() >= DELIVERED_COMMANDS {
+            return Err(RegistryError::DedupCapacity);
+        }
+        operation().await?;
+        delivered.insert(delivery_id.clone());
+        Ok(())
+    }
+
+    pub async fn applied_deliveries(&self) -> Vec<EventId> {
+        self.delivered.lock().await.ids()
+    }
+
+    pub async fn settle_delivery(&self, delivery_id: &EventId) {
+        self.delivered.lock().await.settle(delivery_id);
+    }
+
+    async fn control(
+        &self,
+        command: SessionCommand,
+        answer: oneshot::Receiver<Result<(), String>>,
+    ) -> Result<(), RegistryError> {
+        tokio::time::timeout(
+            Duration::from_secs(gwk_domain::protocol::SLOW_CONSUMER_TIMEOUT_SECS),
+            self.commands.send(command),
+        )
+        .await
+        .map_err(|_| RegistryError::ApplicationIndeterminate(self.id.clone()))?
+        .map_err(|_| RegistryError::Ended(self.id.clone()))?;
+        match tokio::time::timeout(
+            Duration::from_secs(gwk_domain::protocol::SLOW_CONSUMER_TIMEOUT_SECS),
+            answer,
+        )
+        .await
+        .map_err(|_| RegistryError::ControlTimeout(self.id.clone()))?
+        {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(message)) => Err(RegistryError::Input {
+                session_id: self.id.clone(),
+                message,
+            }),
+            Err(_) => Err(RegistryError::Ended(self.id.clone())),
+        }
     }
 
     /// Exactly [`SessionRegistry::attach`], without the registry.
     pub async fn attach(&self, cursor: Option<u64>) -> Result<Attached, RegistryError> {
         let (reply, answer) = oneshot::channel();
-        self.commands
-            .send(SessionCommand::Attach { cursor, reply })
-            .await
-            .map_err(|_| RegistryError::Ended(self.id.clone()))?;
-        answer
-            .await
-            .map_err(|_| RegistryError::Ended(self.id.clone()))
+        tokio::time::timeout(
+            Duration::from_secs(gwk_domain::protocol::SLOW_CONSUMER_TIMEOUT_SECS),
+            self.commands.send(SessionCommand::Attach { cursor, reply }),
+        )
+        .await
+        .map_err(|_| RegistryError::ControlTimeout(self.id.clone()))?
+        .map_err(|_| RegistryError::Ended(self.id.clone()))?;
+        tokio::time::timeout(
+            Duration::from_secs(gwk_domain::protocol::SLOW_CONSUMER_TIMEOUT_SECS),
+            answer,
+        )
+        .await
+        .map_err(|_| RegistryError::ControlTimeout(self.id.clone()))?
+        .map_err(|_| RegistryError::Ended(self.id.clone()))
     }
 }
 
@@ -137,13 +261,34 @@ impl SessionRegistry {
         spawn: SpawnFn,
         config: SessionConfig,
     ) -> Result<(), RegistryError> {
+        for (ended_id, _) in self.reap() {
+            tracing::debug!(session = %ended_id, "reaped ended session before spawn");
+        }
+        if self
+            .sessions
+            .get(&id)
+            .is_some_and(|entry| entry.commands.is_closed())
+        {
+            // A routed stop waits for the session receiver to close only after
+            // the child has been killed and reaped. The thread may still be in
+            // its final runtime teardown, but it owns no live session state;
+            // detach that spent handle so this id can start its next lifetime
+            // without waiting for the resident reaper tick.
+            self.sessions.remove(&id);
+        }
         if self.sessions.contains_key(&id) {
             return Err(RegistryError::AlreadyExists(id));
+        }
+        if self.sessions.len() >= gwk_domain::protocol::PTY_SESSION_MAX_COUNT {
+            return Err(RegistryError::Overloaded(
+                gwk_domain::protocol::PTY_SESSION_MAX_COUNT,
+            ));
         }
         let (commands, receiver) = mpsc::channel(DELTA_CHANNEL_CAPACITY);
         let (deltas_tx, _) = broadcast::channel(DELTA_CHANNEL_CAPACITY);
         let (raw_tx, _) = broadcast::channel(DELTA_CHANNEL_CAPACITY);
         let (ready_tx, ready_rx) = oneshot::channel::<Result<(), SpawnError>>();
+        let delivered = std::sync::Arc::new(tokio::sync::Mutex::new(DeliveredCommands::default()));
 
         let task = std::thread::Builder::new()
             .name(format!("gwk-pty-{id}"))
@@ -179,9 +324,22 @@ impl SessionRegistry {
             })
             .map_err(|e| RegistryError::Thread(e.to_string()))?;
 
-        match ready_rx.await {
+        match tokio::time::timeout(
+            Duration::from_secs(gwk_domain::protocol::SLOW_CONSUMER_TIMEOUT_SECS),
+            ready_rx,
+        )
+        .await
+        .map_err(|_| RegistryError::ControlTimeout(id.clone()))?
+        {
             Ok(Ok(())) => {
-                self.sessions.insert(id, Entry { commands, task });
+                self.sessions.insert(
+                    id,
+                    Entry {
+                        commands,
+                        task,
+                        delivered,
+                    },
+                );
                 Ok(())
             }
             Ok(Err(spawn_error)) => {
@@ -211,14 +369,20 @@ impl SessionRegistry {
         cols: u16,
         rows: u16,
     ) -> Result<(), RegistryError> {
-        self.send(id, SessionCommand::Resize { cols, rows }).await
+        self.attacher(id)?.resize(cols, rows).await
     }
 
     /// The full screen at its current revision.
     pub async fn snapshot(&self, id: &PtySessionId) -> Result<Snapshot, RegistryError> {
         let (reply, answer) = oneshot::channel();
         self.send(id, SessionCommand::Snapshot { reply }).await?;
-        answer.await.map_err(|_| RegistryError::Ended(id.clone()))
+        tokio::time::timeout(
+            Duration::from_secs(gwk_domain::protocol::SLOW_CONSUMER_TIMEOUT_SECS),
+            answer,
+        )
+        .await
+        .map_err(|_| RegistryError::ApplicationIndeterminate(id.clone()))?
+        .map_err(|_| RegistryError::Ended(id.clone()))
     }
 
     /// Attach to a session's live output: `None` for a fresh consumer,
@@ -262,6 +426,7 @@ impl SessionRegistry {
         Ok(Attacher {
             id: id.clone(),
             commands: entry.commands.clone(),
+            delivered: std::sync::Arc::clone(&entry.delivered),
         })
     }
 
@@ -273,18 +438,30 @@ impl SessionRegistry {
             .remove(id)
             .ok_or_else(|| RegistryError::NotFound(id.clone()))?;
         // An already-ended task ignores the command; joining still yields
-        // its real exit. The join is a blocking thread join, so it moves to
-        // the blocking pool rather than stalling the runtime.
-        let _ = entry.commands.send(SessionCommand::Stop).await;
-        let exit = tokio::task::spawn_blocking(move || {
-            entry
-                .task
-                .join()
-                .unwrap_or_else(|_| SessionExit::Failed("the session thread panicked".to_owned()))
-        })
+        // its real exit. Never hand a possibly permanent join to Tokio's
+        // uncancellable blocking pool: wait on the nonblocking completion bit,
+        // then join only after completion is certain.
+        let (reply, _answer) = oneshot::channel();
+        let _ = tokio::time::timeout(
+            Duration::from_secs(gwk_domain::protocol::SLOW_CONSUMER_TIMEOUT_SECS),
+            entry.commands.send(SessionCommand::Stop { reply }),
+        )
         .await
-        .unwrap_or_else(|e| SessionExit::Failed(format!("joining the session thread: {e}")));
-        Ok(exit)
+        .map_err(|_| RegistryError::ControlTimeout(id.clone()))?;
+        tokio::time::timeout(
+            Duration::from_secs(gwk_domain::protocol::SLOW_CONSUMER_TIMEOUT_SECS),
+            async {
+                while !entry.task.is_finished() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            },
+        )
+        .await
+        .map_err(|_| RegistryError::ApplicationIndeterminate(id.clone()))?;
+        Ok(entry
+            .task
+            .join()
+            .unwrap_or_else(|_| SessionExit::Failed("the session thread panicked".to_owned())))
     }
 
     /// Remove every session whose task has already ended, returning each
@@ -318,11 +495,13 @@ impl SessionRegistry {
             .sessions
             .get(id)
             .ok_or_else(|| RegistryError::NotFound(id.clone()))?;
-        entry
-            .commands
-            .send(command)
-            .await
-            .map_err(|_| RegistryError::Ended(id.clone()))
+        tokio::time::timeout(
+            Duration::from_secs(gwk_domain::protocol::SLOW_CONSUMER_TIMEOUT_SECS),
+            entry.commands.send(command),
+        )
+        .await
+        .map_err(|_| RegistryError::ControlTimeout(id.clone()))?
+        .map_err(|_| RegistryError::Ended(id.clone()))
     }
 }
 
@@ -719,6 +898,170 @@ mod tests {
         assert!(cells.iter().all(|row| row.len() == 100));
 
         registry.stop(&id("s1")).await.expect("stop");
+    }
+
+    #[tokio::test]
+    async fn the_resident_reaper_removes_an_attacher_stopped_session() {
+        let registry = Arc::new(tokio::sync::Mutex::new(SessionRegistry::new()));
+        registry
+            .lock()
+            .await
+            .spawn(id("s1"), cat(), config())
+            .await
+            .expect("spawn");
+        registry
+            .lock()
+            .await
+            .attacher(&id("s1"))
+            .expect("attacher")
+            .stop()
+            .await
+            .expect("stop through the publisher handle");
+
+        let publishers = Arc::new(tokio::sync::Mutex::new(tokio::task::JoinSet::new()));
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        let reaper = tokio::spawn(crate::control::serve_reaper(
+            Arc::clone(&registry),
+            Arc::clone(&publishers),
+            stopped,
+        ));
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if !registry.lock().await.ids().contains(&id("s1")) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("stopped session is reaped");
+        let _ = stop.send(true);
+        reaper.await.expect("join reaper");
+    }
+
+    #[tokio::test]
+    async fn a_stopped_session_id_can_restart_without_waiting_for_the_reaper_tick() {
+        let mut registry = SessionRegistry::new();
+        let session = id("restart-after-stop");
+        registry
+            .spawn(session.clone(), cat(), config())
+            .await
+            .expect("initial spawn");
+        registry
+            .attacher(&session)
+            .expect("attacher")
+            .stop()
+            .await
+            .expect("stop");
+
+        registry
+            .spawn(session.clone(), cat(), config())
+            .await
+            .expect("spawn reaps the ended predecessor first");
+        registry.stop(&session).await.expect("stop replacement");
+    }
+
+    #[tokio::test]
+    async fn the_registry_refuses_a_sixty_fifth_session_before_spawning_its_child() {
+        let mut registry = SessionRegistry::new();
+        let mut releases = Vec::new();
+        for n in 0..gwk_domain::protocol::PTY_SESSION_MAX_COUNT {
+            let (commands, _receiver) = mpsc::channel(1);
+            let (release, wait) = std::sync::mpsc::channel();
+            registry.sessions.insert(
+                id(&format!("resident-{n}")),
+                Entry {
+                    commands,
+                    task: std::thread::spawn(move || {
+                        let _ = wait.recv();
+                        SessionExit::Stopped
+                    }),
+                    delivered: Arc::new(tokio::sync::Mutex::new(DeliveredCommands::default())),
+                },
+            );
+            releases.push(release);
+        }
+        let spawned = Arc::new(AtomicU32::new(0));
+        let observed = Arc::clone(&spawned);
+        let spawn: SpawnFn = Box::new(move |cols, rows| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            gwk_pty::Session::spawn(pty_process::Command::new("/bin/cat"), cols, rows)
+        });
+
+        assert!(matches!(
+            registry.spawn(id("overflow"), spawn, config()).await,
+            Err(RegistryError::Overloaded(_))
+        ));
+        assert_eq!(
+            spawned.load(Ordering::SeqCst),
+            0,
+            "no child may start past the cap"
+        );
+        for release in releases {
+            let _ = release.send(());
+        }
+        let _ = registry.reap();
+    }
+
+    #[tokio::test]
+    async fn one_command_id_is_applied_once_per_session_entry() {
+        let mut registry = SessionRegistry::new();
+        registry
+            .spawn(id("dedup"), cat(), config())
+            .await
+            .expect("spawn");
+        let first = registry.attacher(&id("dedup")).expect("first handle");
+        let second = registry.attacher(&id("dedup")).expect("second handle");
+        let applied = Arc::new(AtomicU32::new(0));
+
+        for (handle, command) in [
+            (&first, EventId::new("same")),
+            (&second, EventId::new("same")),
+            (&second, EventId::new("different")),
+        ] {
+            let applied = Arc::clone(&applied);
+            handle
+                .apply_once(&command, move || async move {
+                    applied.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+                .await
+                .expect("apply");
+        }
+
+        assert_eq!(applied.load(Ordering::SeqCst), 2);
+        registry.stop(&id("dedup")).await.expect("stop");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn admitted_input_that_never_answers_is_indeterminate_at_the_deadline() {
+        let (commands, mut receiver) = mpsc::channel(1);
+        let attacher = Attacher {
+            id: id("definitive-input"),
+            commands,
+            delivered: Arc::new(tokio::sync::Mutex::new(DeliveredCommands::default())),
+        };
+        let input = tokio::spawn(async move { attacher.input(b"x".to_vec()).await });
+        let command = receiver.recv().await.expect("input is admitted");
+        let SessionCommand::Input { reply, .. } = command else {
+            panic!("unexpected command");
+        };
+
+        tokio::time::advance(Duration::from_secs(
+            gwk_domain::protocol::SLOW_CONSUMER_TIMEOUT_SECS + 1,
+        ))
+        .await;
+        tokio::task::yield_now().await;
+        assert!(input.is_finished(), "the application wait must be bounded");
+        assert!(matches!(
+            input.await.expect("join input"),
+            Err(RegistryError::ApplicationIndeterminate(_))
+        ));
+        assert!(
+            reply.send(Ok(())).is_err(),
+            "a late result cannot turn an indeterminate outcome into success"
+        );
     }
 
     #[tokio::test]

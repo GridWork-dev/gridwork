@@ -166,6 +166,7 @@ async fn init_applies_the_contract_is_idempotent_and_refuses_a_stranger() {
             "message",
             "orchestrator_checkpoint",
             "pty_session",
+            "pty_session_template",
             "task",
             "workflow_run",
             "worktree",
@@ -184,7 +185,7 @@ async fn init_applies_the_contract_is_idempotent_and_refuses_a_stranger() {
         .fetch_all(&mut conn)
         .await
         .expect("query the grant matrix");
-        assert_eq!(rows.len(), 21, "the contract schema changed shape");
+        assert_eq!(rows.len(), 22, "the contract schema changed shape");
         for row in &rows {
             let table: String = row.try_get("relname").expect("relname");
             let get = |col| -> bool { row.try_get(col).expect("bool") };
@@ -223,6 +224,21 @@ async fn init_applies_the_contract_is_idempotent_and_refuses_a_stranger() {
                 }
             }
         }
+        let delivery = sqlx::query(
+            "SELECT has_table_privilege('gwk_internal.pty_delivery', 'SELECT') AS sel, \
+                    has_table_privilege('gwk_internal.pty_delivery', 'INSERT') AS ins, \
+                    has_table_privilege('gwk_internal.pty_delivery', 'UPDATE') AS upd, \
+                    has_table_privilege('gwk_internal.pty_delivery', 'DELETE') AS del, \
+                    has_table_privilege('gwk_internal.pty_delivery', 'TRUNCATE') AS trunc",
+        )
+        .fetch_one(&mut conn)
+        .await
+        .expect("query PTY delivery grants");
+        assert!(delivery.try_get::<bool, _>("sel").expect("select"));
+        assert!(delivery.try_get::<bool, _>("ins").expect("insert"));
+        assert!(delivery.try_get::<bool, _>("upd").expect("update"));
+        assert!(!delivery.try_get::<bool, _>("del").expect("delete"));
+        assert!(!delivery.try_get::<bool, _>("trunc").expect("truncate"));
         conn.close().await.expect("close");
     }
 

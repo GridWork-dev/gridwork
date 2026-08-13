@@ -30,6 +30,7 @@
 
 use std::sync::Arc;
 
+use aead::consts::U16;
 use base64::prelude::{BASE64_STANDARD, Engine as _};
 use gwk_domain::blob::BLOB_CHUNK_BYTES;
 use gwk_domain::command::KernelCommand;
@@ -41,9 +42,10 @@ use gwk_domain::port::{BlobError, BlobStore, EventStore, MAX_READ_LIMIT};
 use gwk_domain::protocol::{
     CONNECTION_EGRESS_BYTES_PER_WINDOW, CONNECTION_INGRESS_BYTES_PER_WINDOW, CONTRACT_VERSION,
     FRAME_BODY_MAX_BYTES, FRAME_PAYLOAD_MAX_BYTES, FrameKind, KernelErrorCode, KernelRequest,
-    KernelResult, MAX_SUBSCRIPTIONS_PER_CONNECTION, PTY_INPUT_CAPABILITY,
-    PTY_INPUT_MAX_BASE64_BYTES, PTY_RAW_CAPABILITY, PTY_RAW_PAYLOAD_DEADLINE_SECS, ProjectionKind,
-    ProjectionRecord, PtyInputData, ServerControl,
+    KernelResult, MAX_SUBSCRIPTIONS_PER_CONNECTION, PTY_CONTROL_CAPABILITY, PTY_INPUT_CAPABILITY,
+    PTY_INPUT_MAX_BASE64_BYTES, PTY_RAW_CAPABILITY, PTY_RAW_PAYLOAD_DEADLINE_SECS,
+    PTY_START_CAPABILITY, ProjectionKind, ProjectionRecord, PtyDeliveryResult, PtyInputData,
+    ServerControl,
 };
 use sqlx::Row;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -92,6 +94,27 @@ const BATCH_QUEUE_DEPTH: usize = MAX_SUBSCRIPTIONS_PER_CONNECTION;
 /// reads a request, answers it, and does not read the next until that answer is
 /// queued, so a deeper queue would buffer responses that cannot exist.
 const RESPONSE_QUEUE_DEPTH: usize = 1;
+
+/// A delivery attempt may spend one slow-consumer window waiting for queue
+/// capacity and another waiting for the host's application acknowledgement.
+/// The durable lease outlives both, while remaining recoverable after a crash.
+const PTY_DELIVERY_LEASE_SECS: u64 = gwk_domain::protocol::SLOW_CONSUMER_TIMEOUT_SECS * 2 + 5;
+const PTY_DELIVERY_FAILURE_MAX_BYTES: usize = 4 * 1024;
+
+#[derive(Clone, Copy)]
+enum ControlKind {
+    Resize,
+    Stop,
+}
+
+impl ControlKind {
+    const fn request_name(self) -> &'static str {
+        match self {
+            Self::Resize => "resize_pty_session",
+            Self::Stop => "stop_pty_session",
+        }
+    }
+}
 
 /// One frame on its way out, and what its departure proves.
 ///
@@ -248,6 +271,30 @@ impl Daemon {
         ));
     }
 
+    /// A fresh daemon has no in-memory host attempt corresponding to ANY
+    /// delivery left pending by an earlier process. Conservatively quarantine
+    /// every such row before accepting a connection; recycling it could repeat
+    /// an already applied terminal side effect.
+    ///
+    /// Unclaimed rows are swept too, not just claimed ones. An unclaimed row at
+    /// boot is a delivery whose process died between committing the event and
+    /// taking the claim — every bit as orphaned as an expired claim, and
+    /// nothing else in the running kernel ever clears one.
+    async fn quarantine_orphaned_pty_deliveries(&self) -> Result<()> {
+        sqlx::query(
+            "UPDATE gwk_internal.pty_delivery \
+             SET indeterminate_at = now(), claim_token = NULL, claimed_until = NULL \
+             WHERE delivered_at IS NULL AND failed_at IS NULL \
+               AND indeterminate_at IS NULL",
+        )
+        .execute(self.store.pool())
+        .await
+        .map_err(|error| {
+            KernelError::Config(format!("quarantine orphaned PTY deliveries: {error}"))
+        })?;
+        Ok(())
+    }
+
     /// The blob store, whose presence [`Daemon::new`] has already established.
     fn blobs(&self) -> &PgBlobStore {
         self.store
@@ -349,7 +396,23 @@ impl Daemon {
             // instant than the one that matters — it could only ever refuse a
             // command the transaction would have allowed, or wave one through
             // that it then refuses anyway.
-            KernelRequest::SubmitCommand { envelope } => self.store.submit(envelope).await,
+            KernelRequest::SubmitCommand { envelope } => {
+                match KernelCommand::from_envelope(envelope) {
+                    Ok(
+                        KernelCommand::ResizePtySession { .. }
+                        | KernelCommand::StopPtySession { .. }
+                        | KernelCommand::RequestPtySessionStart { .. },
+                    ) => KernelResult::Error {
+                        code: KernelErrorCode::Validation,
+                        message: format!(
+                            "{} must use its dedicated PTY request so negotiated capabilities and host delivery cannot be skipped",
+                            envelope.command_type
+                        ),
+                        detail: None,
+                    },
+                    _ => self.store.submit(envelope).await,
+                }
+            }
             KernelRequest::SendPtyInput {
                 envelope,
                 data_base64,
@@ -361,8 +424,27 @@ impl Daemon {
                         detail: None,
                     }
                 } else {
-                    self.send_pty_input(envelope, data_base64).await
+                    self.send_pty_input(connection, envelope, data_base64).await
                 }
+            }
+            KernelRequest::ResizePtySession { envelope } => {
+                if !subs.control_enabled {
+                    capability_refusal(PTY_CONTROL_CAPABILITY)
+                } else {
+                    self.send_pty_control(connection, envelope, ControlKind::Resize)
+                        .await
+                }
+            }
+            KernelRequest::StopPtySession { envelope } => {
+                if !subs.control_enabled {
+                    capability_refusal(PTY_CONTROL_CAPABILITY)
+                } else {
+                    self.send_pty_control(connection, envelope, ControlKind::Stop)
+                        .await
+                }
+            }
+            KernelRequest::StartPtySession { envelope } => {
+                self.send_pty_start(connection, envelope).await
             }
 
             KernelRequest::GetProjection { projection, id } => {
@@ -649,10 +731,12 @@ impl Daemon {
     }
 
     /// Commit one metadata-only input command, then enqueue its bytes on the
-    /// owning host's existing connection. Replays return the original command
-    /// result without delivering twice.
+    /// owning host's existing connection. A retry redelivers only while its
+    /// durable delivery row is pending; a settled replay returns the original
+    /// result without typing twice.
     async fn send_pty_input(
         &self,
+        connection: pty::ConnectionId,
         envelope: &gwk_domain::CommandEnvelope,
         data_base64: &PtyInputData,
     ) -> KernelResult {
@@ -698,9 +782,6 @@ impl Daemon {
             .store
             .submit_pty_input_for_delivery(envelope, carrier)
             .await;
-        if !submission.newly_applied {
-            return submission.result;
-        }
         if !matches!(&submission.result, KernelResult::CommandApplied { .. }) {
             return submission.result;
         }
@@ -713,32 +794,506 @@ impl Daemon {
         };
 
         let canonical = BASE64_STANDARD.encode(&bytes);
-        match self
-            .pty
-            .deliver_input(
+        let Some(delivery_id) = submission.delivery_id.clone() else {
+            return delivery_storage_error(
+                envelope,
+                "resolve delivery id",
+                "the applied command returned no event",
+            );
+        };
+        self.deliver_submission(connection, submission, envelope, |claim_token| {
+            self.pty.deliver_input(
                 &session_id,
                 &generation,
+                claim_token,
+                delivery_id,
                 envelope.command_id.clone(),
                 byte_count,
                 PtyInputData::new(canonical),
             )
-            .await
-        {
-            Ok(()) => submission.result,
-            Err(refusal) => KernelResult::Error {
-                code: refusal.code,
+        })
+        .await
+    }
+
+    async fn send_pty_control(
+        &self,
+        connection: pty::ConnectionId,
+        envelope: &gwk_domain::CommandEnvelope,
+        kind: ControlKind,
+    ) -> KernelResult {
+        let (session_id, generation, dimensions) =
+            match (kind, KernelCommand::from_envelope(envelope)) {
+                (
+                    ControlKind::Resize,
+                    Ok(KernelCommand::ResizePtySession {
+                        pty_session_id,
+                        generation,
+                        cols,
+                        rows,
+                    }),
+                ) => (pty_session_id, generation, Some((cols, rows))),
+                (
+                    ControlKind::Stop,
+                    Ok(KernelCommand::StopPtySession {
+                        pty_session_id,
+                        generation,
+                    }),
+                ) => (pty_session_id, generation, None),
+                (_, Ok(other)) => return wrong_pty_command(kind.request_name(), &other),
+                (_, Err(error)) => return command_decode_refusal(error),
+            };
+        let submission = self.store.submit_inner_for_delivery(envelope).await;
+        let Some(delivery_id) = submission.delivery_id.clone() else {
+            return submission.result;
+        };
+        let control = match dimensions {
+            Some((cols, rows)) => ServerControl::PtyResize {
+                delivery_id,
+                command_id: envelope.command_id.clone(),
+                session_id: session_id.clone(),
+                generation: generation.clone(),
+                cols,
+                rows,
+            },
+            None => ServerControl::PtyStop {
+                delivery_id,
+                command_id: envelope.command_id.clone(),
+                session_id: session_id.clone(),
+                generation: generation.clone(),
+            },
+        };
+        self.deliver_submission(connection, submission, envelope, |claim_token| {
+            self.pty
+                .deliver_control(&session_id, &generation, claim_token, control)
+        })
+        .await
+    }
+
+    async fn send_pty_start(
+        &self,
+        connection: pty::ConnectionId,
+        envelope: &gwk_domain::CommandEnvelope,
+    ) -> KernelResult {
+        let (template_name, session_id) = match KernelCommand::from_envelope(envelope) {
+            Ok(KernelCommand::RequestPtySessionStart {
+                template_name,
+                pty_session_id,
+            }) => (template_name, pty_session_id),
+            Ok(other) => return wrong_pty_command("start_pty_session", &other),
+            Err(error) => return command_decode_refusal(error),
+        };
+        let submission = self.store.submit_inner_for_delivery(envelope).await;
+        let Some(delivery_id) = submission.delivery_id.clone() else {
+            return submission.result;
+        };
+        let control = ServerControl::PtyStart {
+            delivery_id,
+            command_id: envelope.command_id.clone(),
+            template_name,
+            session_id,
+        };
+        self.deliver_submission(connection, submission, envelope, |claim_token| {
+            self.pty.deliver_start(claim_token, control)
+        })
+        .await
+    }
+
+    async fn deliver_submission<F, Fut>(
+        &self,
+        connection: pty::ConnectionId,
+        submission: crate::submit::Submission,
+        envelope: &gwk_domain::CommandEnvelope,
+        delivery: F,
+    ) -> KernelResult
+    where
+        F: FnOnce(String) -> Fut,
+        Fut: std::future::Future<Output = std::result::Result<(), pty::PtyRefusal>>,
+    {
+        if !matches!(&submission.result, KernelResult::CommandApplied { .. }) {
+            return submission.result;
+        }
+        let Some(delivery_id) = submission.delivery_id.as_ref() else {
+            return delivery_storage_error(
+                envelope,
+                "resolve delivery id",
+                "the applied command returned no event",
+            );
+        };
+        if self.pty.delivery_pending(delivery_id) {
+            return KernelResult::Error {
+                code: KernelErrorCode::Overloaded,
                 message: format!(
-                    "input command {} committed, but host delivery failed: {}",
-                    envelope.command_id, refusal.message
+                    "PTY command {} committed, and another host attempt is still active",
+                    envelope.command_id
                 ),
                 detail: Some(serde_json::json!({
                     "command_committed": true,
                     "command_id": envelope.command_id.as_str(),
-                    "session_id": session_id.as_str(),
-                    "generation": generation.as_str(),
-                    "delivery_detail": refusal.detail,
                 })),
-            },
+            };
+        }
+        let nonce = match crate::blob::container::generate::<U16>() {
+            Ok(nonce) => crate::blob::container::hex_lower(&nonce),
+            Err(error) => return delivery_storage_error(envelope, "mint delivery claim", error),
+        };
+        let claim_token = format!("{}:{connection}:{nonce}", self.writer_epoch);
+        let mut tx = match self.store.pool().begin().await {
+            Ok(tx) => tx,
+            Err(error) => return delivery_storage_error(envelope, "begin delivery", error),
+        };
+        let row = match sqlx::query(
+            "SELECT delivered_at IS NOT NULL AS delivered, \
+                    failed_at IS NOT NULL AS failed, \
+                    indeterminate_at IS NOT NULL AS indeterminate, \
+                    claim_token IS NOT NULL AS claimed, failure_code, failure_message, \
+                    COALESCE(claimed_until > now(), false) AS actively_claimed \
+             FROM gwk_internal.pty_delivery \
+             WHERE project_id = $1 AND idempotency_key = $2 FOR UPDATE",
+        )
+        .bind(envelope.project_id.as_str())
+        .bind(envelope.idempotency_key.as_str())
+        .fetch_optional(&mut *tx)
+        .await
+        {
+            Ok(row) => row,
+            Err(error) => return delivery_storage_error(envelope, "lock delivery", error),
+        };
+        let Some(row) = row else {
+            return delivery_storage_error(
+                envelope,
+                "lock delivery",
+                "the committed command has no delivery row",
+            );
+        };
+        let delivered: bool = row.get("delivered");
+        if delivered {
+            return match tx.commit().await {
+                Ok(()) => submission.result,
+                Err(error) => delivery_storage_error(envelope, "commit replay", error),
+            };
+        }
+        let failed: bool = row.get("failed");
+        if failed {
+            let failure_code: String = row.get("failure_code");
+            let code = KernelErrorCode::ALL
+                .iter()
+                .copied()
+                .find(|candidate| candidate.as_str() == failure_code)
+                .unwrap_or(KernelErrorCode::Storage);
+            let message: String = row.get("failure_message");
+            if let Err(error) = tx.commit().await {
+                return delivery_storage_error(envelope, "commit failed replay", error);
+            }
+            return KernelResult::Error {
+                code,
+                message: format!(
+                    "PTY command {} committed, but host delivery was terminally refused: {message}",
+                    envelope.command_id
+                ),
+                detail: Some(serde_json::json!({
+                    "command_committed": true,
+                    "command_id": envelope.command_id.as_str(),
+                })),
+            };
+        }
+        let indeterminate: bool = row.get("indeterminate");
+        if indeterminate {
+            if let Err(error) = tx.commit().await {
+                return delivery_storage_error(envelope, "commit indeterminate replay", error);
+            }
+            return indeterminate_delivery_result(envelope);
+        }
+        let actively_claimed: bool = row.get("actively_claimed");
+        if actively_claimed {
+            if let Err(error) = tx.commit().await {
+                return delivery_storage_error(envelope, "commit active claim read", error);
+            }
+            return KernelResult::Error {
+                code: KernelErrorCode::Overloaded,
+                message: format!(
+                    "PTY command {} committed, and another delivery attempt is still active",
+                    envelope.command_id
+                ),
+                detail: Some(serde_json::json!({
+                    "command_committed": true,
+                    "command_id": envelope.command_id.as_str(),
+                })),
+            };
+        }
+        let claimed: bool = row.get("claimed");
+        if claimed {
+            let updated = match sqlx::query(
+                "UPDATE gwk_internal.pty_delivery \
+                 SET indeterminate_at = now(), claim_token = NULL, claimed_until = NULL \
+                 WHERE project_id = $1 AND idempotency_key = $2 \
+                   AND delivered_at IS NULL AND failed_at IS NULL \
+                   AND indeterminate_at IS NULL AND claim_token IS NOT NULL",
+            )
+            .bind(envelope.project_id.as_str())
+            .bind(envelope.idempotency_key.as_str())
+            .execute(&mut *tx)
+            .await
+            {
+                Ok(updated) => updated,
+                Err(error) => {
+                    return delivery_storage_error(
+                        envelope,
+                        "quarantine expired delivery claim",
+                        error,
+                    );
+                }
+            };
+            if updated.rows_affected() != 1 {
+                return delivery_storage_error(
+                    envelope,
+                    "quarantine expired delivery claim",
+                    "the durable claim changed while locked",
+                );
+            }
+            if let Err(error) = tx.commit().await {
+                return delivery_storage_error(envelope, "commit indeterminate claim", error);
+            }
+            return indeterminate_delivery_result(envelope);
+        }
+        let earlier_pending: bool = match sqlx::query_scalar(
+            "SELECT EXISTS (\
+               SELECT 1 FROM gwk_internal.pty_delivery d \
+               JOIN gwk.event e ON e.event_id = d.event_id \
+               JOIN gwk.event current ON current.event_id = (\
+                 SELECT event_id FROM gwk_internal.pty_delivery \
+                 WHERE project_id = $1 AND idempotency_key = $2\
+               ) \
+                WHERE d.delivered_at IS NULL AND d.failed_at IS NULL \
+                  AND d.indeterminate_at IS NULL \
+                 AND d.event_seq < (\
+                   SELECT event_seq FROM gwk_internal.pty_delivery \
+                   WHERE project_id = $1 AND idempotency_key = $2\
+                 ) \
+                 AND (\
+                   d.claimed_until > now() \
+                   OR e.appended_at > now() - make_interval(secs => $3)\
+                 ) \
+                 AND e.aggregate_type = current.aggregate_type \
+                 AND e.aggregate_id = current.aggregate_id\
+             )",
+        )
+        .bind(envelope.project_id.as_str())
+        .bind(envelope.idempotency_key.as_str())
+        .bind(PTY_DELIVERY_LEASE_SECS as f64)
+        .fetch_one(&mut *tx)
+        .await
+        {
+            Ok(pending) => pending,
+            Err(error) => return delivery_storage_error(envelope, "check delivery order", error),
+        };
+        // Only a DELIVERABLE earlier row orders this one. A live claim is an
+        // attempt in flight; a freshly appended row is one whose claim is
+        // microseconds away in its own request. Anything older with no live
+        // claim is abandoned — the process died between the commit and the
+        // claim — and ordering against a delivery that will never happen would
+        // wedge every later control, keystroke included, for the whole lifetime.
+        if earlier_pending {
+            return KernelResult::Error {
+                code: KernelErrorCode::StaleVersion,
+                message: format!(
+                    "PTY command {} committed, but an earlier command for the same lifetime is still pending",
+                    envelope.command_id
+                ),
+                detail: Some(serde_json::json!({
+                    "command_committed": true,
+                    "command_id": envelope.command_id.as_str(),
+                })),
+            };
+        }
+        if let Err(error) = sqlx::query(
+            "UPDATE gwk_internal.pty_delivery \
+             SET claim_token = $3, claimed_until = now() + make_interval(secs => $4) \
+              WHERE project_id = $1 AND idempotency_key = $2 \
+                AND delivered_at IS NULL AND failed_at IS NULL \
+                AND indeterminate_at IS NULL AND claim_token IS NULL",
+        )
+        .bind(envelope.project_id.as_str())
+        .bind(envelope.idempotency_key.as_str())
+        .bind(&claim_token)
+        .bind(PTY_DELIVERY_LEASE_SECS as f64)
+        .execute(&mut *tx)
+        .await
+        {
+            return delivery_storage_error(envelope, "claim delivery", error);
+        }
+        if let Err(error) = tx.commit().await {
+            return delivery_storage_error(envelope, "commit delivery claim", error);
+        }
+        match delivery(claim_token.clone()).await {
+            Ok(()) => submission.result,
+            Err(refusal) => {
+                if refusal.indeterminate {
+                    if let Err(error) =
+                        abandon_pty_delivery(&self.store, delivery_id, &claim_token).await
+                    {
+                        return delivery_storage_error(
+                            envelope,
+                            "settle indeterminate delivery",
+                            error,
+                        );
+                    }
+                    return KernelResult::Error {
+                        code: refusal.code,
+                        message: format!(
+                            "PTY command {} committed, but host application was indeterminate: {}",
+                            envelope.command_id, refusal.message
+                        ),
+                        detail: Some(serde_json::json!({
+                            "command_committed": true,
+                            "command_id": envelope.command_id.as_str(),
+                        })),
+                    };
+                }
+                if let Err(error) = sqlx::query(
+                    "UPDATE gwk_internal.pty_delivery \
+                     SET claim_token = NULL, claimed_until = NULL \
+                      WHERE project_id = $1 AND idempotency_key = $2 \
+                        AND claim_token = $3 AND delivered_at IS NULL AND failed_at IS NULL \
+                        AND indeterminate_at IS NULL",
+                )
+                .bind(envelope.project_id.as_str())
+                .bind(envelope.idempotency_key.as_str())
+                .bind(&claim_token)
+                .execute(self.store.pool())
+                .await
+                {
+                    return delivery_storage_error(envelope, "release delivery claim", error);
+                }
+                KernelResult::Error {
+                    code: refusal.code,
+                    message: format!(
+                        "PTY command {} committed, but host delivery failed: {}",
+                        envelope.command_id, refusal.message
+                    ),
+                    detail: Some(serde_json::json!({
+                        "command_committed": true,
+                        "command_id": envelope.command_id.as_str(),
+                        "delivery_detail": refusal.detail,
+                    })),
+                }
+            }
+        }
+    }
+
+    async fn settle_pty_delivery(
+        &self,
+        delivery_id: &EventId,
+        claim_token: &str,
+        result: &PtyDeliveryResult,
+    ) -> Result<()> {
+        let updated = match result {
+            PtyDeliveryResult::Applied => {
+                sqlx::query(
+                    "UPDATE gwk_internal.pty_delivery \
+                 SET delivered_at = now(), claim_token = NULL, claimed_until = NULL \
+                  WHERE event_id = $1 AND delivered_at IS NULL AND failed_at IS NULL \
+                     AND indeterminate_at IS NULL \
+                     AND claim_token = $2",
+                )
+                .bind(delivery_id.as_str())
+                .bind(claim_token)
+                .execute(self.store.pool())
+                .await
+            }
+            PtyDeliveryResult::Refused { code, message } => {
+                sqlx::query(
+                    "UPDATE gwk_internal.pty_delivery \
+                 SET failed_at = now(), failure_code = $3, failure_message = $4, \
+                      claim_token = NULL, claimed_until = NULL \
+                  WHERE event_id = $1 AND delivered_at IS NULL AND failed_at IS NULL \
+                     AND indeterminate_at IS NULL \
+                     AND claim_token = $2",
+                )
+                .bind(delivery_id.as_str())
+                .bind(claim_token)
+                .bind(code.as_str())
+                .bind(message)
+                .execute(self.store.pool())
+                .await
+            }
+        }
+        .map_err(|error| {
+            KernelError::Config(format!("settle PTY delivery {delivery_id}: {error}"))
+        })?;
+        if updated.rows_affected() != 1 {
+            return Err(KernelError::Config(format!(
+                "PTY delivery {delivery_id} has no active durable claim"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Reconcile an applied acknowledgement retained by a host across a lost
+    /// settlement frame or reconnect. Only an already-delivered or terminally
+    /// indeterminate row can accept this evidence without racing a live claim.
+    async fn reconcile_pty_delivery(
+        &self,
+        delivery_id: &EventId,
+        result: &PtyDeliveryResult,
+    ) -> Result<()> {
+        if !matches!(result, PtyDeliveryResult::Applied) {
+            return Err(KernelError::Config(format!(
+                "PTY delivery {delivery_id} has no live attempt for a refusal acknowledgement"
+            )));
+        }
+        let mut tx =
+            self.store.pool().begin().await.map_err(|error| {
+                KernelError::Config(format!("begin PTY reconciliation: {error}"))
+            })?;
+        let row = sqlx::query(
+            "SELECT delivered_at IS NOT NULL AS delivered, \
+                    failed_at IS NOT NULL AS failed, \
+                    indeterminate_at IS NOT NULL AS indeterminate, \
+                    claim_token IS NOT NULL AS claimed \
+             FROM gwk_internal.pty_delivery WHERE event_id = $1 FOR UPDATE",
+        )
+        .bind(delivery_id.as_str())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| KernelError::Config(format!("read PTY reconciliation: {error}")))?
+        .ok_or_else(|| KernelError::Config(format!("no PTY delivery {delivery_id}")))?;
+        let delivered: bool = row.get("delivered");
+        let failed: bool = row.get("failed");
+        let indeterminate: bool = row.get("indeterminate");
+        let claimed: bool = row.get("claimed");
+        if failed || (!delivered && !indeterminate) || claimed {
+            return Err(KernelError::Config(format!(
+                "PTY delivery {delivery_id} cannot reconcile applied evidence from its current state"
+            )));
+        }
+        if indeterminate {
+            let updated = sqlx::query(
+                "UPDATE gwk_internal.pty_delivery \
+                 SET delivered_at = now(), indeterminate_at = NULL \
+                 WHERE event_id = $1 AND indeterminate_at IS NOT NULL \
+                   AND delivered_at IS NULL AND failed_at IS NULL AND claim_token IS NULL",
+            )
+            .bind(delivery_id.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| KernelError::Config(format!("write PTY reconciliation: {error}")))?;
+            if updated.rows_affected() != 1 {
+                return Err(KernelError::Config(format!(
+                    "PTY delivery {delivery_id} changed during reconciliation"
+                )));
+            }
+        }
+        tx.commit()
+            .await
+            .map_err(|error| KernelError::Config(format!("commit PTY reconciliation: {error}")))
+    }
+
+    async fn abandon_pty_deliveries(&self, deliveries: Vec<(EventId, String)>) {
+        for (delivery_id, claim_token) in deliveries {
+            if let Err(error) = abandon_pty_delivery(&self.store, &delivery_id, &claim_token).await
+            {
+                eprintln!("gwk-kernel: abandon PTY delivery {delivery_id}: {error}");
+            }
         }
     }
 
@@ -916,29 +1471,10 @@ struct Subscriptions<'a> {
     admitted: Option<Admitted>,
     raw_enabled: bool,
     input_enabled: bool,
+    control_enabled: bool,
 }
 
 impl<'a> Subscriptions<'a> {
-    fn new(
-        daemon: &'a Daemon,
-        connection: pty::ConnectionId,
-        responses: mpsc::Sender<ServerControl>,
-        batches: mpsc::Sender<Outgoing>,
-        raw_enabled: bool,
-        input_enabled: bool,
-    ) -> Self {
-        Self {
-            daemon,
-            connection,
-            live: tokio::task::JoinSet::new(),
-            batches,
-            responses,
-            admitted: None,
-            raw_enabled,
-            input_enabled,
-        }
-    }
-
     /// Take a subscription request, without starting it.
     ///
     /// Starting is [`Self::start`]'s, one step later, because a subscription's
@@ -1155,6 +1691,113 @@ fn blob_refusal(error: &BlobError) -> KernelResult {
     }
 }
 
+fn capability_refusal(capability: &str) -> KernelResult {
+    KernelResult::Error {
+        code: KernelErrorCode::Capability,
+        message: format!("{capability} was not negotiated"),
+        detail: None,
+    }
+}
+
+fn wrong_pty_command(request: &str, command: &KernelCommand) -> KernelResult {
+    KernelResult::Error {
+        code: KernelErrorCode::Validation,
+        message: format!(
+            "the {request} request carries a {} command",
+            command.command_type()
+        ),
+        detail: None,
+    }
+}
+
+fn command_decode_refusal(error: gwk_domain::CommandDecodeError) -> KernelResult {
+    KernelResult::Error {
+        code: KernelErrorCode::Validation,
+        message: error.to_string(),
+        detail: None,
+    }
+}
+
+fn delivery_storage_error(
+    envelope: &gwk_domain::CommandEnvelope,
+    context: &str,
+    error: impl std::fmt::Display,
+) -> KernelResult {
+    KernelResult::Error {
+        code: KernelErrorCode::Storage,
+        message: format!(
+            "PTY command {} committed, but {context} failed: {error}",
+            envelope.command_id
+        ),
+        detail: Some(serde_json::json!({
+            "command_committed": true,
+            "command_id": envelope.command_id.as_str(),
+        })),
+    }
+}
+
+fn indeterminate_delivery_result(envelope: &gwk_domain::CommandEnvelope) -> KernelResult {
+    KernelResult::Error {
+        code: KernelErrorCode::Indeterminate,
+        message: format!(
+            "PTY command {} committed, but host application could not be determined; refusing unsafe redelivery",
+            envelope.command_id
+        ),
+        detail: Some(serde_json::json!({
+            "command_committed": true,
+            "command_id": envelope.command_id.as_str(),
+        })),
+    }
+}
+
+fn delivery_ack_result(
+    result: &PtyDeliveryResult,
+) -> std::result::Result<std::result::Result<(), pty::PtyRefusal>, WireError> {
+    Ok(match result {
+        PtyDeliveryResult::Applied => Ok(()),
+        PtyDeliveryResult::Refused { code, message } => {
+            if message.len() > PTY_DELIVERY_FAILURE_MAX_BYTES {
+                return Err(WireError::new(
+                    KernelErrorCode::FrameSize,
+                    format!(
+                        "a PTY delivery refusal message is {} bytes; maximum is {PTY_DELIVERY_FAILURE_MAX_BYTES}",
+                        message.len()
+                    ),
+                ));
+            }
+            Err(pty::PtyRefusal {
+                code: *code,
+                message: message.clone(),
+                detail: None,
+                indeterminate: false,
+            })
+        }
+    })
+}
+
+async fn abandon_pty_delivery(
+    store: &PgEventStore,
+    delivery_id: &EventId,
+    claim_token: &str,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE gwk_internal.pty_delivery \
+         SET indeterminate_at = now(), claim_token = NULL, claimed_until = NULL \
+         WHERE event_id = $1 AND delivered_at IS NULL AND failed_at IS NULL \
+           AND indeterminate_at IS NULL AND claim_token = $2",
+    )
+    .bind(delivery_id.as_str())
+    .bind(claim_token)
+    .execute(store.pool())
+    .await
+    .map_err(|error| {
+        KernelError::Config(format!(
+            "settle abandoned PTY delivery {delivery_id}: {error}"
+        ))
+    })?;
+    Ok(())
+}
+
 /// Drive one connection: handshake, then requests until the peer hangs up.
 ///
 /// After the handshake the two directions are driven by two loops, and the first
@@ -1188,6 +1831,14 @@ where
         .capabilities
         .iter()
         .any(|capability| capability.as_str() == PTY_INPUT_CAPABILITY);
+    let control_enabled = negotiated
+        .capabilities
+        .iter()
+        .any(|capability| capability.as_str() == PTY_CONTROL_CAPABILITY);
+    let start_enabled = negotiated
+        .capabilities
+        .iter()
+        .any(|capability| capability.as_str() == PTY_START_CAPABILITY);
 
     // One allowance per direction, now that a direction is a loop. They were
     // never coupled — a `spend` only ever touches the counter for the direction
@@ -1204,17 +1855,24 @@ where
     // released below whichever way the connection ends, so a host's sessions
     // never outlive the socket that was publishing them.
     let connection = daemon.pty.connection();
-    daemon
-        .pty
-        .register_connection(connection, inputs_tx, input_enabled);
-    let mut subs = Subscriptions::new(
+    let mut forced_disconnect = daemon.pty.register_connection(
+        connection,
+        inputs_tx,
+        input_enabled,
+        control_enabled,
+        start_enabled,
+    );
+    let mut subs = Subscriptions {
         daemon,
         connection,
-        responses_tx,
-        batches_tx,
+        live: tokio::task::JoinSet::new(),
+        batches: batches_tx,
+        responses: responses_tx,
+        admitted: None,
         raw_enabled,
         input_enabled,
-    );
+        control_enabled,
+    };
     // Armed BEFORE the request loops: daemon shutdown aborts this whole task,
     // and an aborted future never reaches the inline sweep below — which is
     // how the estate lost a resident session's hangup close at the first
@@ -1227,9 +1885,18 @@ where
     let served = tokio::select! {
         read = read_requests(daemon, connection, reader, &mut ingress, &mut subs) => read,
         written = write_frames(writer, responses_rx, inputs_rx, batches_rx, &mut egress) => written,
+        changed = forced_disconnect.changed() => {
+            let _ = changed;
+            Err(WireError::new(
+                KernelErrorCode::SlowConsumer,
+                "a PTY host did not acknowledge an applied control within the delivery deadline",
+            ))
+        },
     };
     sweep.armed = false;
-    for (id, generation) in daemon.pty.disconnect(connection) {
+    let pty::DisconnectOutcome { retired, abandoned } = daemon.pty.disconnect(connection);
+    daemon.abandon_pty_deliveries(abandoned).await;
+    for (id, generation) in retired {
         // The hangup sweep — the `:hangup` provenance is what tells a crash
         // from a typed retire in the cutover receipt.
         receipts::closed(&daemon.store, &id, &generation, true).await;
@@ -1254,20 +1921,35 @@ impl Drop for DisconnectSweep<'_> {
         if !self.armed {
             return;
         }
-        let swept = self.daemon.pty.disconnect(self.connection);
-        if swept.is_empty() {
+        let pty::DisconnectOutcome {
+            retired: swept,
+            abandoned,
+        } = self.daemon.pty.disconnect(self.connection);
+        if swept.is_empty() && abandoned.is_empty() {
             return;
         }
         let store = Arc::clone(&self.daemon.store);
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => {
                 handle.spawn(async move {
+                    for (delivery_id, claim_token) in abandoned {
+                        if let Err(error) =
+                            abandon_pty_delivery(&store, &delivery_id, &claim_token).await
+                        {
+                            eprintln!("gwk-kernel: abandon PTY delivery {delivery_id}: {error}");
+                        }
+                    }
                     for (id, generation) in swept {
                         receipts::closed(&store, &id, &generation, true).await;
                     }
                 });
             }
             Err(_) => {
+                for (delivery_id, _) in abandoned {
+                    eprintln!(
+                        "gwk-kernel: PTY delivery {delivery_id} disconnected before acknowledgement outside a runtime"
+                    );
+                }
                 for (id, generation) in swept {
                     eprintln!(
                         "gwk-kernel: pty receipt pty-close:{id}:{generation}:hangup: \
@@ -1418,6 +2100,47 @@ where
         }
         let control: gwk_domain::protocol::ClientControl = strict::decode(&frame.body)?;
         let (request_id, request) = match control {
+            gwk_domain::protocol::ClientControl::PtyDeliveryAck {
+                delivery_id,
+                result,
+            } => {
+                let ack_result = delivery_ack_result(&result)?;
+                match daemon.pty.delivery_ack_claim(connection, &delivery_id) {
+                    Ok(claim_token) => {
+                        daemon
+                            .settle_pty_delivery(&delivery_id, &claim_token, &result)
+                            .await
+                            .map_err(|error| {
+                                WireError::new(KernelErrorCode::Storage, error.to_string())
+                            })?;
+                        let sender = daemon
+                            .pty
+                            .take_delivery_ack(connection, &delivery_id, &claim_token)
+                            .map_err(|refusal| WireError::new(refusal.code, refusal.message))?;
+                        let _ = sender.send(ack_result);
+                    }
+                    Err(refusal) if refusal.code == KernelErrorCode::NotFound => {
+                        daemon
+                            .reconcile_pty_delivery(&delivery_id, &result)
+                            .await
+                            .map_err(|error| {
+                                WireError::new(KernelErrorCode::Storage, error.to_string())
+                            })?;
+                    }
+                    Err(refusal) => {
+                        return Err(WireError::new(refusal.code, refusal.message));
+                    }
+                }
+                if subs
+                    .responses
+                    .send(ServerControl::PtyDeliverySettled { delivery_id })
+                    .await
+                    .is_err()
+                {
+                    return Ok(());
+                }
+                continue;
+            }
             gwk_domain::protocol::ClientControl::Request {
                 request_id,
                 request,
@@ -1543,7 +2266,7 @@ where
 async fn write_frames<W>(
     writer: &mut W,
     mut responses: mpsc::Receiver<ServerControl>,
-    mut inputs: mpsc::Receiver<pty::InputControl>,
+    mut inputs: mpsc::Receiver<pty::PtyControl>,
     mut batches: mpsc::Receiver<Outgoing>,
     budget: &mut Budget,
 ) -> std::result::Result<(), WireError>
@@ -1551,21 +2274,21 @@ where
     W: AsyncWrite + Unpin,
 {
     loop {
-        let (outgoing, mut input_written) = tokio::select! {
+        let outgoing = tokio::select! {
             biased;
-            Some(control) = responses.recv() => (Outgoing {
+            Some(control) = responses.recv() => Outgoing {
                     control,
                     raw: None,
                     delivered: None,
                     active: None,
-                }, None),
-            Some(input) = inputs.recv() => (Outgoing {
+                },
+            Some(input) = inputs.recv() => Outgoing {
                     control: input.control,
                     raw: None,
                     delivered: None,
                     active: None,
-                }, Some(input.written)),
-            Some(outgoing) = batches.recv() => (outgoing, None),
+                },
+            Some(outgoing) = batches.recv() => outgoing,
             // All queues closed: the reader is done and no subscription is
             // left to produce anything.
             else => return Ok(()),
@@ -1577,7 +2300,14 @@ where
         {
             continue;
         }
-        let bounded_write = outgoing.active.is_some() || input_written.is_some();
+        let bounded_write = outgoing.active.is_some()
+            || matches!(
+                outgoing.control,
+                ServerControl::PtyInput { .. }
+                    | ServerControl::PtyResize { .. }
+                    | ServerControl::PtyStop { .. }
+                    | ServerControl::PtyStart { .. }
+            );
         let written = if bounded_write {
             match tokio::time::timeout(
                 std::time::Duration::from_secs(gwk_domain::protocol::SLOW_CONSUMER_TIMEOUT_SECS),
@@ -1594,13 +2324,6 @@ where
                         KernelErrorCode::SlowConsumer,
                         "a PTY control delivery blocked on the client beyond the slow-consumer timeout",
                     );
-                    if let Some(written) = input_written.take() {
-                        let _ = written.send(Err(pty::PtyRefusal {
-                            code: error.code,
-                            message: error.message.clone(),
-                            detail: None,
-                        }));
-                    }
                     return Err(error);
                 }
             }
@@ -1610,19 +2333,7 @@ where
             // with a length prefix and only part of its body.
             write_outgoing(writer, &outgoing.control, outgoing.raw.as_deref(), budget).await
         };
-        if let Err(error) = written {
-            if let Some(written) = input_written.take() {
-                let _ = written.send(Err(pty::PtyRefusal {
-                    code: error.code,
-                    message: error.message.clone(),
-                    detail: None,
-                }));
-            }
-            return Err(error);
-        }
-        if let Some(written) = input_written {
-            let _ = written.send(Ok(()));
-        }
+        written?;
         // AFTER the write, and only on success — the whole value of this number
         // is that nothing is claimed delivered before it left.
         if let Some((cell, seq)) = outgoing.delivered {
@@ -1677,6 +2388,7 @@ pub async fn run<S>(listener: Listener, daemon: Arc<Daemon>, shutdown: S) -> Res
 where
     S: std::future::Future<Output = ()> + Send,
 {
+    daemon.quarantine_orphaned_pty_deliveries().await?;
     // Before the first connection, so a subscription opened on it is on the
     // notified path rather than the poll path from its first read.
     daemon.notify_on_append();
@@ -1778,6 +2490,17 @@ mod tests {
             .expect_err("the kind byte leaves less than the full frame maximum for payload");
         assert_eq!(error.code, KernelErrorCode::FrameSize);
         assert!(error.message.contains("payload maximum"));
+    }
+
+    #[test]
+    fn a_delivery_refusal_message_is_bounded_before_persistence() {
+        let result = PtyDeliveryResult::Refused {
+            code: KernelErrorCode::Validation,
+            message: "x".repeat(PTY_DELIVERY_FAILURE_MAX_BYTES + 1),
+        };
+        let error = delivery_ack_result(&result)
+            .expect_err("oversized host prose must not reach durable state");
+        assert_eq!(error.code, KernelErrorCode::FrameSize);
     }
 
     #[test]

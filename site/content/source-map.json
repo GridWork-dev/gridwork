@@ -3,7 +3,7 @@
   "pages": [
     {
       "destination": "content/docs/index.mdx",
-      "sha256": "171a801921db64ab9350ffd866e6ed2eb30f6b536d44f16164b5541907077340",
+      "sha256": "f892f34d82e795f2d251492c9479e80c0531e75f852e579a042cd35616ac4ee5",
       "sources": [
         {
           "path": "README.md"
@@ -12,7 +12,7 @@
     },
     {
       "destination": "content/docs/quickstart.mdx",
-      "sha256": "cdf5f94ae39d1b40e70eb64342bd2fd62453cb2fd3b969334906256bfe1c401e",
+      "sha256": "5f7c6d2bdb976acc3e4a48603104baa025e928bb622b6a03f6812aa1ffa092ca",
       "sources": [
         {
           "path": "README.md"
@@ -21,7 +21,7 @@
     },
     {
       "destination": "content/docs/architecture.mdx",
-      "sha256": "e83a307f152fd3ff54cadbe8bc3b73430fbc46d259db8fb914d9b0a0b8618b25",
+      "sha256": "517315a143e60ef8267dc736e6a8d60d07b39048ffd40df2b2a3855ffa3165ce",
       "sources": [
         {
           "path": "docs/architecture.md"
@@ -30,7 +30,7 @@
     },
     {
       "destination": "content/docs/protocol.mdx",
-      "sha256": "a44a5233e24ff361896c71b22b5799bf09bc01d3cd684770bc650e72f34a6b35",
+      "sha256": "267818fef5c7b2e22248bae5c769d7bec1dfcba140ddbd53b0050d0b1a1d8e18",
       "sources": [
         {
           "path": "docs/protocol.md"
@@ -57,7 +57,7 @@
     },
     {
       "destination": "content/docs/security/index.mdx",
-      "sha256": "7ff0df4f2307c40ce799f9450827e4a60a2491f579180dae9ef0eecc32cc8d04",
+      "sha256": "bf707df2dec077193a95ca8dbee8ec091d01bc8faacb7fc3efdc1231b81718d6",
       "sources": [
         {
           "path": "docs/security/THREAT_MODEL.md"
@@ -78,7 +78,7 @@
     },
     {
       "destination": "content/docs/derivation/specifications.mdx",
-      "sha256": "403d4c5396bd794ed345bc3cd7a3657a9892ea4c679b14af8b4aa3bcf7e730c1",
+      "sha256": "9b202d4faca9809cdfb7666c8796e27ba62a19360204f8a3af048eeea80d69f0",
       "sources": [
         {
           "path": "docs/derivation/SPECS.md"
@@ -96,7 +96,7 @@
     },
     {
       "destination": "content/docs/derivation/reviews.mdx",
-      "sha256": "a1a84398fb87b91fbad3133de9c23e23e5d45de5b45ab775303bba10e9d04eed",
+      "sha256": "091706d70289ea3577888a94354746ebe946f5a8f73069e478089a4239c44e43",
       "sources": [
         {
           "path": "docs/derivation/reviews"

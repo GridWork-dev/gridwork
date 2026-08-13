@@ -24,9 +24,10 @@ use gwk_domain::frame::{PtyDelta, PtyFrame};
 use gwk_domain::ids::{ByteCount, DispatchNodeId, PtyFrameSeq, PtySessionId, RequestId};
 use gwk_domain::protocol::{
     CONNECTION_EGRESS_BYTES_PER_WINDOW, CONNECTION_INGRESS_BYTES_PER_WINDOW, ClientControl,
-    FRAME_BODY_MAX_BYTES, FRAME_PAYLOAD_MAX_BYTES, FrameKind, KernelRequest, PTY_INPUT_CAPABILITY,
-    PTY_INPUT_MAX_BASE64_BYTES, PTY_INPUT_MAX_BYTES, PTY_RAW_CAPABILITY, ProjectionKind,
-    ProjectionRecord, ProtocolVersion, ServerControl,
+    FRAME_BODY_MAX_BYTES, FRAME_PAYLOAD_MAX_BYTES, FrameKind, KernelRequest,
+    PTY_CONTROL_CAPABILITY, PTY_INPUT_CAPABILITY, PTY_INPUT_MAX_BASE64_BYTES, PTY_INPUT_MAX_BYTES,
+    PTY_RAW_CAPABILITY, PTY_START_CAPABILITY, ProjectionKind, ProjectionRecord, ProtocolVersion,
+    PtyDeliveryResult, ServerControl,
 };
 use gwk_domain::{CommandEnvelope, KernelErrorCode, KernelResult};
 use gwk_kernel::wire::frame::{Budget, Incoming, read_frame, write_frame};
@@ -43,6 +44,8 @@ pub const CLIENT_LABEL: &str = "gwk-pty-host";
 /// Controls decoded ahead of the publisher loop. Bounded independently of the
 /// kernel's queue so a host that stops servicing input cannot grow without end.
 const INCOMING_QUEUE_DEPTH: usize = 64;
+const OPERATION_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(gwk_domain::protocol::SLOW_CONSUMER_TIMEOUT_SECS);
 
 /// Why a kernel connection or request could not be completed.
 #[derive(Debug, thiserror::Error)]
@@ -57,6 +60,8 @@ pub enum KernelClientError {
     Wire(#[from] gwk_kernel::WireError),
     #[error("the daemon closed the connection during {0}")]
     ClosedDuring(&'static str),
+    #[error("the kernel operation exceeded its deadline during {0}")]
+    Timeout(&'static str),
     #[error("the kernel refused the hello: {code:?} {message}")]
     HelloRefused {
         code: KernelErrorCode,
@@ -78,8 +83,17 @@ pub enum KernelClientError {
         code: KernelErrorCode,
         message: String,
     },
-    #[error("could not apply input command {command_id} to {session_id}:{generation}: {message}")]
+    #[error("could not apply PTY command {command_id} to {session_id}:{generation}: {message}")]
     Input {
+        command_id: gwk_domain::ids::CommandId,
+        session_id: PtySessionId,
+        generation: gwk_domain::ids::PtySessionGeneration,
+        message: String,
+    },
+    #[error(
+        "application of PTY command {command_id} to {session_id}:{generation} is indeterminate: {message}"
+    )]
+    ApplicationIndeterminate {
         command_id: gwk_domain::ids::CommandId,
         session_id: PtySessionId,
         generation: gwk_domain::ids::PtySessionGeneration,
@@ -103,11 +117,22 @@ pub struct KernelClient {
     input: Option<Attacher>,
 }
 
+#[derive(Clone, Copy)]
+enum ClientRole {
+    Reader,
+    Publisher,
+    StartManager,
+}
+
 impl KernelClient {
     /// Connect to the kernel's Unix socket at `path` and complete the
     /// handshake.
     pub async fn connect(path: &Path) -> Result<Self, KernelClientError> {
-        Self::connect_inner(path, None).await
+        Self::connect_inner(path, None, ClientRole::Reader).await
+    }
+
+    pub async fn connect_start_manager(path: &Path) -> Result<Self, KernelClientError> {
+        Self::connect_inner(path, None, ClientRole::StartManager).await
     }
 
     /// Connect the publisher for one local session. Reverse input controls on
@@ -116,20 +141,21 @@ impl KernelClient {
         path: &Path,
         input: Attacher,
     ) -> Result<Self, KernelClientError> {
-        Self::connect_inner(path, Some(input)).await
+        Self::connect_inner(path, Some(input), ClientRole::Publisher).await
     }
 
     async fn connect_inner(
         path: &Path,
         input: Option<Attacher>,
+        role: ClientRole,
     ) -> Result<Self, KernelClientError> {
-        let stream =
-            UnixStream::connect(path)
-                .await
-                .map_err(|source| KernelClientError::Connect {
-                    path: path.display().to_string(),
-                    source,
-                })?;
+        let stream = tokio::time::timeout(OPERATION_TIMEOUT, UnixStream::connect(path))
+            .await
+            .map_err(|_| KernelClientError::Timeout("connect"))?
+            .map_err(|source| KernelClientError::Connect {
+                path: path.display().to_string(),
+                source,
+            })?;
         let (reader, writer) = stream.into_split();
         let (incoming_tx, incoming) = mpsc::channel(INCOMING_QUEUE_DEPTH);
         let reader = tokio::spawn(read_controls(reader, incoming_tx));
@@ -148,20 +174,15 @@ impl KernelClient {
         client
             .send(&ClientControl::Hello {
                 protocol_major: ProtocolVersion::V1,
-                protocol_minor: 0,
+                protocol_minor: gwk_domain::PROTOCOL_MINOR,
                 // Nothing asked for: this client uses only what v1 requires
                 // of every daemon, the same posture `gridwork`'s own client
                 // takes.
-                capabilities: vec![
-                    gwk_domain::CapabilityName::new(PTY_RAW_CAPABILITY)
-                        .expect("the protocol's own capability name is valid"),
-                    gwk_domain::CapabilityName::new(PTY_INPUT_CAPABILITY)
-                        .expect("the protocol's own capability name is valid"),
-                ],
+                capabilities: capabilities(role),
                 client: Some(CLIENT_LABEL.to_owned()),
             })
             .await?;
-        match client.receive().await? {
+        match client.receive_with_timeout("the hello").await? {
             Some(ServerControl::HelloAck { capabilities, .. }) => {
                 client.raw_enabled = capabilities
                     .iter()
@@ -177,6 +198,33 @@ impl KernelClient {
             }),
             None => Err(KernelClientError::ClosedDuring("the hello")),
         }
+    }
+
+    pub async fn acknowledge_delivery(
+        &mut self,
+        delivery_id: gwk_domain::ids::EventId,
+        result: PtyDeliveryResult,
+    ) -> Result<(), KernelClientError> {
+        self.send(&ClientControl::PtyDeliveryAck {
+            delivery_id,
+            result,
+        })
+        .await
+    }
+
+    /// Reassert locally applied deliveries after reconnect. The acknowledgement
+    /// is deliberately not awaited here: ordinary request/control processing
+    /// consumes each durable `pty_delivery_settled` confirmation in wire order,
+    /// while a new reverse control may legitimately be interleaved.
+    pub async fn reconcile_applied_deliveries(
+        &mut self,
+        delivery_ids: Vec<gwk_domain::ids::EventId>,
+    ) -> Result<(), KernelClientError> {
+        for delivery_id in delivery_ids {
+            self.acknowledge_delivery(delivery_id, PtyDeliveryResult::Applied)
+                .await?;
+        }
+        Ok(())
     }
 
     /// Submit one command envelope and take the kernel's answer as a VALUE.
@@ -213,6 +261,34 @@ impl KernelClient {
             } => Ok(None),
             other => Err(KernelClientError::Unexpected {
                 waited_on: "a dispatch-node projection",
+                found: format!("{other:?}"),
+            }),
+        }
+    }
+
+    pub async fn pty_template(
+        &mut self,
+        name: &gwk_domain::PtySessionTemplateName,
+    ) -> Result<Option<gwk_domain::PtySessionTemplate>, KernelClientError> {
+        match self
+            .ask(KernelRequest::GetProjection {
+                projection: ProjectionKind::PtySessionTemplate,
+                id: name.as_str().to_owned(),
+            })
+            .await?
+        {
+            KernelResult::Projection {
+                record:
+                    ProjectionRecord::PtySessionTemplate {
+                        pty_session_template,
+                    },
+            } => Ok(Some(pty_session_template)),
+            KernelResult::Error {
+                code: KernelErrorCode::NotFound,
+                ..
+            } => Ok(None),
+            other => Err(KernelClientError::Unexpected {
+                waited_on: "a PTY template projection",
                 found: format!("{other:?}"),
             }),
         }
@@ -398,12 +474,17 @@ impl KernelClient {
             .into());
         }
         self.send(&header).await?;
-        write_frame(&mut self.writer, FrameKind::PtyRaw, bytes, &mut self.egress).await?;
+        tokio::time::timeout(
+            OPERATION_TIMEOUT,
+            write_frame(&mut self.writer, FrameKind::PtyRaw, bytes, &mut self.egress),
+        )
+        .await
+        .map_err(|_| KernelClientError::Timeout("the raw publish write"))??;
         loop {
-            let Some(control) = self.receive().await? else {
+            let Some(control) = self.receive_with_timeout("the raw publish").await? else {
                 return Err(KernelClientError::ClosedDuring("the raw publish"));
             };
-            let Some(control) = Self::consume_input(self.input.as_ref(), control).await? else {
+            let Some(control) = self.consume_interleaved_control(control).await? else {
                 continue;
             };
             match control {
@@ -444,31 +525,99 @@ impl KernelClient {
     /// input happens after the surrounding `tokio::select!` chooses this arm,
     /// so cancellation can never discard a command mid-write.
     pub async fn wait_for_control(&mut self) -> Result<ServerControl, KernelClientError> {
-        let Some(control) = self.receive().await? else {
-            return Err(KernelClientError::ClosedDuring("PTY input wait"));
-        };
-        Ok(control)
+        loop {
+            let Some(control) = self.receive().await? else {
+                return Err(KernelClientError::ClosedDuring("PTY input wait"));
+            };
+            // A settlement is swallowed only when this connection owns an input
+            // sink that can absorb it. A start manager has no sink — it prunes
+            // its own dedup window from the returned control — so swallowing
+            // here would drop the settlement on the floor and let that window
+            // fill until every further start is refused as `Overloaded`, which
+            // the kernel settles TERMINALLY. Route what we can, return the rest.
+            if let ServerControl::PtyDeliverySettled { delivery_id } = &control
+                && let Some(input) = &self.input
+            {
+                input.settle_delivery(delivery_id).await;
+                continue;
+            }
+            return Ok(control);
+        }
     }
 
-    pub async fn apply_input_control(
-        &self,
+    pub async fn apply_session_control(
+        &mut self,
         control: ServerControl,
     ) -> Result<(), KernelClientError> {
-        match Self::consume_input(self.input.as_ref(), control).await? {
-            None => Ok(()),
-            Some(other) => Err(KernelClientError::Unexpected {
+        let delivery_id = delivery_id(&control).cloned();
+        match Self::consume_session_control(self.input.as_ref(), control).await {
+            Ok(None) => {
+                if let Some(delivery_id) = delivery_id {
+                    self.send(&ClientControl::PtyDeliveryAck {
+                        delivery_id,
+                        result: PtyDeliveryResult::Applied,
+                    })
+                    .await?;
+                }
+                Ok(())
+            }
+            Ok(Some(other)) => Err(KernelClientError::Unexpected {
                 waited_on: "PTY input",
                 found: format!("{other:?}"),
             }),
+            Err(error) => {
+                if matches!(error, KernelClientError::ApplicationIndeterminate { .. }) {
+                    return Err(error);
+                }
+                if let Some(delivery_id) = delivery_id {
+                    self.send(&ClientControl::PtyDeliveryAck {
+                        delivery_id,
+                        result: PtyDeliveryResult::Refused {
+                            code: KernelErrorCode::Validation,
+                            message: error.to_string(),
+                        },
+                    })
+                    .await?;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Apply and acknowledge a reverse delivery that arrived while this same
+    /// connection was waiting for an unrelated publish response. A local
+    /// refusal is already terminally acknowledged, so it does not invalidate
+    /// the transport or the publish request still in flight.
+    async fn consume_interleaved_control(
+        &mut self,
+        control: ServerControl,
+    ) -> Result<Option<ServerControl>, KernelClientError> {
+        if let ServerControl::PtyDeliverySettled { delivery_id } = &control {
+            if let Some(input) = &self.input {
+                input.settle_delivery(delivery_id).await;
+            }
+            return Ok(None);
+        }
+        if delivery_id(&control).is_none() {
+            return Ok(Some(control));
+        }
+        match self.apply_session_control(control).await {
+            Ok(()) => Ok(None),
+            Err(error @ KernelClientError::Input { .. }) => {
+                tracing::warn!(%error, "interleaved PTY control was terminally refused locally");
+                Ok(None)
+            }
+            Err(error) => Err(error),
         }
     }
 
     /// Consume a reverse input control, returning non-input controls unchanged.
-    async fn consume_input(
+    async fn consume_session_control(
         input: Option<&Attacher>,
         control: ServerControl,
     ) -> Result<Option<ServerControl>, KernelClientError> {
         let ServerControl::PtyInput {
+            delivery_id,
             command_id,
             session_id,
             generation,
@@ -476,7 +625,7 @@ impl KernelClient {
             data_base64,
         } = control
         else {
-            return Ok(Some(control));
+            return Self::consume_lifecycle_control(input, control).await;
         };
         let Some(input) = input else {
             return Err(KernelClientError::Input {
@@ -530,14 +679,62 @@ impl KernelClient {
             });
         }
         input
-            .input(bytes)
+            .apply_once(&delivery_id, || input.input(bytes))
             .await
-            .map_err(|error| KernelClientError::Input {
+            .map_err(|error| application_error(command_id, session_id, generation, error))?;
+        Ok(None)
+    }
+
+    async fn consume_lifecycle_control(
+        input: Option<&Attacher>,
+        control: ServerControl,
+    ) -> Result<Option<ServerControl>, KernelClientError> {
+        let (delivery_id, command_id, session_id, generation, operation) = match control {
+            ServerControl::PtyResize {
+                delivery_id,
                 command_id,
                 session_id,
                 generation,
-                message: error.to_string(),
-            })?;
+                cols,
+                rows,
+            } => (
+                delivery_id,
+                command_id,
+                session_id,
+                generation,
+                Some((cols, rows)),
+            ),
+            ServerControl::PtyStop {
+                delivery_id,
+                command_id,
+                session_id,
+                generation,
+            } => (delivery_id, command_id, session_id, generation, None),
+            other => return Ok(Some(other)),
+        };
+        let input = input.ok_or_else(|| KernelClientError::Input {
+            command_id: command_id.clone(),
+            session_id: session_id.clone(),
+            generation: generation.clone(),
+            message: "this connection has no local session control route".to_owned(),
+        })?;
+        if input.id() != &session_id {
+            return Err(KernelClientError::Input {
+                command_id,
+                session_id,
+                generation,
+                message: format!("this publisher owns local session {}", input.id()),
+            });
+        }
+        let applied = input
+            .apply_once(&delivery_id, || async {
+                match operation {
+                    Some((cols, rows)) => input.resize(cols, rows).await,
+                    None => input.stop().await,
+                }
+            })
+            .await;
+        applied.map_err(|error| application_error(command_id, session_id, generation, error))?;
         Ok(None)
     }
 
@@ -560,10 +757,10 @@ impl KernelClient {
         })
         .await?;
         loop {
-            let Some(control) = self.receive().await? else {
+            let Some(control) = self.receive_with_timeout("the request").await? else {
                 return Err(KernelClientError::ClosedDuring("the request"));
             };
-            let Some(control) = Self::consume_input(self.input.as_ref(), control).await? else {
+            let Some(control) = self.consume_interleaved_control(control).await? else {
                 continue;
             };
             match control {
@@ -597,11 +794,25 @@ impl KernelClient {
         }
     }
 
+    async fn receive_with_timeout(
+        &mut self,
+        operation: &'static str,
+    ) -> Result<Option<ServerControl>, KernelClientError> {
+        tokio::time::timeout(OPERATION_TIMEOUT, self.receive())
+            .await
+            .map_err(|_| KernelClientError::Timeout(operation))?
+    }
+
     async fn send(&mut self, control: &ClientControl) -> Result<(), KernelClientError> {
         let body = serde_json::to_vec(control).map_err(|e| {
             gwk_kernel::WireError::new(KernelErrorCode::Schema, format!("serialize a request: {e}"))
         })?;
-        write_frame(&mut self.writer, FrameKind::Json, &body, &mut self.egress).await?;
+        tokio::time::timeout(
+            OPERATION_TIMEOUT,
+            write_frame(&mut self.writer, FrameKind::Json, &body, &mut self.egress),
+        )
+        .await
+        .map_err(|_| KernelClientError::Timeout("write"))??;
         Ok(())
     }
 
@@ -609,6 +820,61 @@ impl KernelClient {
         self.issued += 1;
         RequestId::new(format!("{CLIENT_LABEL}-{}", self.issued))
     }
+}
+
+fn delivery_id(control: &ServerControl) -> Option<&gwk_domain::ids::EventId> {
+    match control {
+        ServerControl::PtyInput { delivery_id, .. }
+        | ServerControl::PtyResize { delivery_id, .. }
+        | ServerControl::PtyStop { delivery_id, .. }
+        | ServerControl::PtyStart { delivery_id, .. } => Some(delivery_id),
+        _ => None,
+    }
+}
+
+fn application_error(
+    command_id: gwk_domain::ids::CommandId,
+    session_id: PtySessionId,
+    generation: gwk_domain::ids::PtySessionGeneration,
+    error: crate::registry::RegistryError,
+) -> KernelClientError {
+    if matches!(
+        error,
+        crate::registry::RegistryError::ApplicationIndeterminate(_)
+    ) {
+        KernelClientError::ApplicationIndeterminate {
+            command_id,
+            session_id,
+            generation,
+            message: error.to_string(),
+        }
+    } else {
+        KernelClientError::Input {
+            command_id,
+            session_id,
+            generation,
+            message: error.to_string(),
+        }
+    }
+}
+
+fn capabilities(role: ClientRole) -> Vec<gwk_domain::CapabilityName> {
+    let names: &[&str] = match role {
+        ClientRole::Reader => &[],
+        ClientRole::Publisher => &[
+            PTY_RAW_CAPABILITY,
+            PTY_INPUT_CAPABILITY,
+            PTY_CONTROL_CAPABILITY,
+        ],
+        ClientRole::StartManager => &[PTY_START_CAPABILITY],
+    };
+    names
+        .iter()
+        .map(|name| {
+            gwk_domain::CapabilityName::new(*name)
+                .expect("the protocol's own capability name is valid")
+        })
+        .collect()
 }
 
 impl Drop for KernelClient {
@@ -708,9 +974,10 @@ mod tests {
             .expect("spawn cat");
         let input = registry.attacher(&id).expect("attacher");
         let bytes = b"hello\n";
-        let consumed = KernelClient::consume_input(
+        let consumed = KernelClient::consume_session_control(
             Some(&input),
             ServerControl::PtyInput {
+                delivery_id: gwk_domain::ids::EventId::new("pty_session:input-control:2"),
                 command_id: CommandId::new("input-1"),
                 session_id: id.clone(),
                 generation: PtySessionGeneration::new("life-1"),
@@ -739,9 +1006,10 @@ mod tests {
         .await
         .expect("cat echoed the input");
 
-        let invalid = KernelClient::consume_input(
+        let invalid = KernelClient::consume_session_control(
             Some(&input),
             ServerControl::PtyInput {
+                delivery_id: gwk_domain::ids::EventId::new("pty_session:input-control:3"),
                 command_id: CommandId::new("input-2"),
                 session_id: id.clone(),
                 generation: PtySessionGeneration::new("life-1"),
@@ -754,5 +1022,83 @@ mod tests {
         assert!(matches!(invalid, KernelClientError::Input { .. }));
 
         registry.stop(&id).await.expect("stop cat");
+    }
+
+    #[tokio::test]
+    async fn reverse_resize_and_stop_controls_reach_the_exact_local_session() {
+        let id = PtySessionId::new("lifecycle-control");
+        let mut registry = SessionRegistry::new();
+        registry
+            .spawn(
+                id.clone(),
+                Box::new(|cols, rows| {
+                    gwk_pty::Session::spawn(pty_process::Command::new("/bin/cat"), cols, rows)
+                }),
+                SessionConfig {
+                    cols: 40,
+                    rows: 6,
+                    recording_cap: 1024,
+                    retained_batches: 1024,
+                    restart: RestartPolicy::Never,
+                },
+            )
+            .await
+            .expect("spawn cat");
+        let target = registry.attacher(&id).expect("attacher");
+        let generation = PtySessionGeneration::new("life-1");
+
+        let resize = ServerControl::PtyResize {
+            delivery_id: gwk_domain::ids::EventId::new("pty_session:lifecycle-control:2"),
+            command_id: CommandId::new("resize-1"),
+            session_id: id.clone(),
+            generation: generation.clone(),
+            cols: 100,
+            rows: 30,
+        };
+        assert!(
+            KernelClient::consume_session_control(Some(&target), resize.clone())
+                .await
+                .expect("consume resize")
+                .is_none()
+        );
+        let snapshot = registry.snapshot(&id).await.expect("resized snapshot");
+        let cells = snapshot.frame.cells().expect("snapshot expands");
+        assert_eq!((cells[0].len(), cells.len()), (100, 30));
+        assert!(
+            KernelClient::consume_session_control(Some(&target), resize)
+                .await
+                .expect("a duplicate resize is already applied")
+                .is_none()
+        );
+
+        let stop = ServerControl::PtyStop {
+            delivery_id: gwk_domain::ids::EventId::new("pty_session:lifecycle-control:3"),
+            command_id: CommandId::new("stop-1"),
+            session_id: id.clone(),
+            generation,
+        };
+        assert!(
+            KernelClient::consume_session_control(Some(&target), stop.clone())
+                .await
+                .expect("consume stop")
+                .is_none()
+        );
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if registry.snapshot(&id).await.is_err() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("stop reaches the session task");
+        assert!(
+            KernelClient::consume_session_control(Some(&target), stop)
+                .await
+                .expect("a duplicate stop is already applied")
+                .is_none()
+        );
+        registry.stop(&id).await.expect("reap stopped cat");
     }
 }

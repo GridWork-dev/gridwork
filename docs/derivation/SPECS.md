@@ -45,6 +45,7 @@ leaked, or copyleft-licensed is a rule 1 violation.
 | `POSIX-TERM` | POSIX.1-2024 (Issue 8) XBD §11, General Terminal Interface | pubs.opengroup.org/onlinepubs/9799919799/basedefs/V1_chap11.html |
 | `POSIX-WINSIZE` | POSIX.1-2024 (Issue 8) XSH, `tcsetwinsize()` | pubs.opengroup.org/onlinepubs/9799919799/functions/tcsetwinsize.html |
 | `POSIX-VI` | POSIX.1-2024 (Issue 8) XCU, `vi` — screen-oriented (visual) display editor: the command-mode / text-input-mode distinction and the visual-mode command vocabulary specified in EXTENDED DESCRIPTION | pubs.opengroup.org/onlinepubs/9799919799/utilities/vi.html |
+| `PTY-PROCESS` | `pty-process` 0.5.3 public `Command` API: program, argument, working-directory, environment-clear/environment-set, and PTY child-spawn builder operations | docs.rs/pty-process/0.5.3/pty_process/struct.Command.html |
 | `UAX-11` | Unicode Standard Annex #11, East Asian Width | unicode.org/reports/tr11/ |
 | `UAX-29` | Unicode Standard Annex #29, Text Segmentation (grapheme clusters) | unicode.org/reports/tr29/ |
 | `TERM-UNICODE-CORE` | Terminal Unicode Core (grapheme-cluster processing, DEC private mode 2027). **Draft** (rev 1, 2021-09-06), in a repository declaring no license — cite it for what it requires when the mode is SET, and for its own statement that the reset state is undefined; it defines no reset-state behavior to cite | github.com/contour-terminal/terminal-unicode-core |

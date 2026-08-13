@@ -817,7 +817,7 @@ ALTER TABLE gwk.workflow_run ENABLE ALWAYS TRIGGER workflow_run_no_truncate;
 CREATE TABLE gwk.pty_session (
   id           text PRIMARY KEY,
   version      bigint NOT NULL DEFAULT 1 CHECK (version BETWEEN 1 AND 4294967295),
-  state        text NOT NULL DEFAULT 'running' CHECK (state IN ('running', 'closed')),
+  state        text NOT NULL DEFAULT 'running' CHECK (state IN ('running', 'stopping', 'closed')),
   generation   text NOT NULL,
   -- Child-side join: an engine session may be headless or own successive PTY
   -- generations, so opening a terminal never rewrites the parent row.
@@ -831,7 +831,7 @@ CREATE TABLE gwk.pty_session (
   -- A session is closed exactly when it left `running`; half-closed rows are
   -- the bug this pins down.
   CONSTRAINT pty_session_closed_iff_terminal
-    CHECK ((state = 'running') = (closed_at IS NULL))
+    CHECK ((state = 'closed') = (closed_at IS NOT NULL))
 );
 
 CREATE TRIGGER pty_session_cas
@@ -850,6 +850,40 @@ CREATE TRIGGER pty_session_no_truncate
 ALTER TABLE gwk.pty_session ENABLE ALWAYS TRIGGER pty_session_cas;
 ALTER TABLE gwk.pty_session ENABLE ALWAYS TRIGGER pty_session_no_delete;
 ALTER TABLE gwk.pty_session ENABLE ALWAYS TRIGGER pty_session_no_truncate;
+
+-- Operator-declared executable catalog. Starts carry only this name and a
+-- caller-minted session id; command/cwd/env never ride the start request.
+CREATE TABLE gwk.pty_session_template (
+  name         text PRIMARY KEY,
+  version      bigint NOT NULL DEFAULT 1 CHECK (version BETWEEN 1 AND 4294967295),
+  state        text NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'retired')),
+  command      text NOT NULL CHECK (length(command) BETWEEN 1 AND 4096),
+  args         jsonb NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(args) = 'array'),
+  cwd          text,
+  env          jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(env) = 'object'),
+  cols         integer NOT NULL CHECK (cols BETWEEN 1 AND 1000),
+  rows         integer NOT NULL CHECK (rows BETWEEN 1 AND 1000),
+  declared_at  timestamptz NOT NULL DEFAULT now(),
+  updated_at   timestamptz NOT NULL DEFAULT now(),
+  retired_at   timestamptz,
+  CONSTRAINT pty_template_retired_iff_terminal
+    CHECK ((state = 'active') = (retired_at IS NULL)),
+  CONSTRAINT pty_template_grid_cell_bound CHECK (cols * rows <= 100000)
+);
+
+CREATE TRIGGER pty_session_template_cas
+  BEFORE UPDATE ON gwk.pty_session_template
+  FOR EACH ROW EXECUTE FUNCTION gwk.assert_version_cas('pty_session_template');
+CREATE TRIGGER pty_session_template_no_delete
+  BEFORE DELETE ON gwk.pty_session_template
+  FOR EACH ROW EXECUTE FUNCTION gwk.forbid_state_row_delete('pty_session_template');
+CREATE TRIGGER pty_session_template_no_truncate
+  BEFORE TRUNCATE ON gwk.pty_session_template
+  FOR EACH STATEMENT EXECUTE FUNCTION gwk.forbid_state_row_delete('pty_session_template');
+
+ALTER TABLE gwk.pty_session_template ENABLE ALWAYS TRIGGER pty_session_template_cas;
+ALTER TABLE gwk.pty_session_template ENABLE ALWAYS TRIGGER pty_session_template_no_delete;
+ALTER TABLE gwk.pty_session_template ENABLE ALWAYS TRIGGER pty_session_template_no_truncate;
 
 -- The orchestrator's crash-recovery snapshot, latest-per-orchestrator.
 --
@@ -1011,4 +1045,4 @@ COMMIT;
 // unwrapped 64-hex line lands past 100 columns — the generator and
 // rustfmt would then fight, showing up as permanent contract drift.
 pub const CONTRACT_SQL_SHA256: &str =
-    "7d80f97c8021eb52015f7effce2746912a3e313e80476f561defd797a1e57d55";
+    "4f6e2d2aa3b1b8cbd6fb5e558a50af6be4dd7d45e2e3912c725dc3485dce6959";
