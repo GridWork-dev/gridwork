@@ -32,6 +32,7 @@ use gwk_domain::protocol::{
 use gwk_theme::marks::GlyphSet;
 use gwk_theme::tier::{ColorChoice, ColorTier, TerminalEnv};
 use gwk_tui::board::{self, BoardState, BoardTarget, BoardView, EventTail};
+use gwk_tui::chrome::ChromeTheme;
 use gwk_tui::config::{self, ConfigForm, ConfigRepository, ConfigState, ConfigTarget};
 use gwk_tui::console::{self, FleetContext, HallContext, LoadState};
 use gwk_tui::drilldown::{self, DrilldownState, IngestDisposition};
@@ -443,6 +444,10 @@ struct ConsoleModel {
     confirmation_target: Option<ConfirmationTarget>,
     terms: TermState,
     workspace: WorkspaceRuntime,
+    /// Resolved once at startup, never per frame: resolving it in `draw` would
+    /// read the operator's file on every tick, and a theme that changed
+    /// mid-session would repaint the chrome under a hosted pane's output.
+    chrome: ChromeTheme,
     hall_phase: usize,
     hall_cost_micros: u64,
     hall_selected: Option<DistrictId>,
@@ -519,6 +524,12 @@ async fn run_workspace(start: WorkspaceStart, requested_motion: MotionMode) -> R
     let attach_started = Instant::now();
     let subscribe_from_estate = start.subscribe_from_estate;
     let requested_event_cursor = start.event_cursor;
+    // Before the socket, so a theme typo costs a refusal rather than a
+    // connected console that silently paints Signal. `gw theme` refuses the
+    // same file for the same reason: a workspace that quietly reverts is
+    // indistinguishable from one that never read the file at all.
+    let chrome = ChromeTheme::from_env()
+        .map_err(|why| Failure::new(KernelErrorCode::Schema, why.to_string()))?;
     let mut data = connect().await?;
     let mut events = EventIndex::default();
     let estate = refresh_estate(&mut data, &mut events).await?;
@@ -553,6 +564,7 @@ async fn run_workspace(start: WorkspaceStart, requested_motion: MotionMode) -> R
         confirmation_target: None,
         terms,
         workspace: WorkspaceRuntime::from_projection(&workspace_rows),
+        chrome,
         hall_phase: 0,
         hall_cost_micros: refresh_hall_cost(&mut data).await?,
         hall_selected,
@@ -1072,7 +1084,7 @@ fn draw_workspace(
                             &model.workspace.state,
                             tier,
                             glyphs,
-                            &gwk_tui::chrome::ChromeTheme::signal(),
+                            &model.chrome,
                             &mut hits.workspace,
                         );
                         workspace::runtime::render_panes(
@@ -1087,7 +1099,7 @@ fn draw_workspace(
                             &model.workspace.input,
                             tier,
                             glyphs,
-                            &gwk_tui::chrome::ChromeTheme::signal(),
+                            &model.chrome,
                         );
                     }
                     surface => {
@@ -3703,6 +3715,35 @@ mod tests {
     use gwk_domain::envelope::{Actor, Origin};
     use gwk_domain::ids::{AggregateId, EventId, ProjectId};
     use gwk_tui::hall::{Agent, AgentId, Attention, AttentionId, District, Station, StationId};
+
+    #[test]
+    fn the_console_paints_the_operators_chrome_and_never_a_fresh_default() {
+        // The regression this exists for is silent by construction: a
+        // `ChromeTheme::signal()` at the render call site compiles, renders,
+        // and looks correct to anyone whose theme file is absent -- which is
+        // everyone except the one operator the slot was built for. `gw theme`
+        // would go on reporting bindings the workspace does not use.
+        // The console half only: this test's own needles are written below,
+        // and a scan that matched them would pass no matter what the console
+        // does.
+        let source = include_str!("tui.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("split yields the text before the test module");
+        assert!(
+            !source.contains("ChromeTheme::signal()"),
+            "the console constructs a fresh Signal theme somewhere -- the \
+             workspace must paint the theme resolved once at startup"
+        );
+        // A scan for an absent string proves nothing on its own: it passes
+        // just as happily if the render moved somewhere this file cannot see.
+        assert_eq!(
+            source.matches("&model.chrome").count(),
+            2,
+            "the two workspace render call sites are where the resolved theme \
+             is spent; a change in that count is a moved render, not a typo"
+        );
+    }
 
     fn event(seq: u64) -> EventEnvelope {
         EventEnvelope {

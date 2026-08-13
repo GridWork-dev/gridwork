@@ -786,6 +786,11 @@ fn emit_serialized(value: &impl serde::Serialize, pretty: bool) -> Result<(), Fa
 /// would not use. It answers `signal: true` when nothing was remapped, which
 /// is the difference between "my file did nothing" and "my file was never
 /// found" — two states an operator otherwise cannot tell apart.
+///
+/// "Same resolver" is the literal claim: the console calls this same
+/// [`ChromeTheme::from_env`](gwk_tui::chrome::ChromeTheme::from_env) once at
+/// startup and paints the workspace through the result, so the two cannot
+/// drift without one of them failing to build.
 fn chrome_theme() -> Result<Value, Failure> {
     let theme = gwk_tui::chrome::ChromeTheme::from_env()
         .map_err(|why| Failure::new(KernelErrorCode::Schema, why.to_string()))?;
