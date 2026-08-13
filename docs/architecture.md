@@ -28,11 +28,10 @@ Locked decisions change only by a recorded amendment, not by drift.
 > applying the template map, bounds every resident grid before allocation, replaces
 > stale start-manager routes, and periodically reaps ended local sessions.
 >
-> **Built (partial):** the TUI's Queue, Board, Hall, session drill-down, and
-> Config lenses (`crates/gwk-tui`), with `gw tui` driving the Hall lens live
-> from the kernel's projections and events (`crates/gridwork/src/tui.rs`).
-> **Not built:** the workspace — the real multiplexer (`ROADMAP.md` stage 5);
-> anything this file says about that surface is specification.
+> **Built:** the TUI's Queue, Board, Hall, session drill-down, and Config
+> lenses (`crates/gwk-tui`), with `gw tui` driving the Hall lens live from the
+> kernel's projections and events (`crates/gridwork/src/tui.rs`), and the
+> workspace — the real multiplexer (`crates/gwk-tui/src/workspace`).
 >
 > `docs/security/THREAT_MODEL.md` labels each security stance **in force** /
 > **partial** / **designed, not yet built**; when this file and that one disagree

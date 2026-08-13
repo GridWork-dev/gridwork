@@ -70,8 +70,8 @@ the engine crates stay in-tree, unpublished until 1.0 packaging.
 - Replay of persisted terminal recordings as a deterministic timeline in the console
 
 Shipped with named residue: the ledger-synced, exportable-as-evidence half of
-replay is not built, and two stage-3 leftovers — consumer-routed resize/stop and
-request-driven session starts — are still open.
+replay is not built. The two stage-3 leftovers named here — consumer-routed
+resize/stop and request-driven session starts — closed during stage 5.
 
 ## 5 · Workspace *(current)*
 
