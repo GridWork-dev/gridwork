@@ -77,11 +77,60 @@ const VENDORED: readonly (readonly [string, string])[] = [
   // plugin loads and both security rules fire against THIS repo's oxlint build.
 ] as const;
 
+/** The vendored bytes as of the commit that recorded them, keyed by the same repo-relative
+ *  path as VENDORED.
+ *
+ *  These exist because the comparison below cannot run on a CI runner — there is no
+ *  canonical checkout to compare against — and CI is the only place a merge is actually
+ *  gated. Without them the whole of D3 is a local courtesy: a vendored config edited on a
+ *  branch reaches main with every check green.
+ *
+ *  The two halves catch different things and neither subsumes the other. A digest catches
+ *  an edit made HERE, anywhere it runs. The canonical comparison catches this repo falling
+ *  behind an upstream change, which a digest recorded from these same bytes never can.
+ *
+ *  Changing a vendored config is therefore two edits — the file and its digest — and the
+ *  second is the one a reviewer sees. That is the point, not an inconvenience. */
+const RECORDED: Readonly<Record<string, string>> = {
+  "tools/oxlint-config/base.oxlintrc.json":
+    "8ba8a84c4d77d26b631b98c2e553fb649fb18d881951f35efa47d48d163b0026",
+  "tools/oxlint-config/react.oxlintrc.json":
+    "2baac8b48862d86183c422aca30966e60236d652a7ecd62b20aca60da5c97ac1",
+  "tools/oxlint-config/plugin.js":
+    "c1f050b5b2b4ce9586776163f6d519e15cff51c85bd5b73762e2cfdb9ce045a0",
+  ".oxfmtrc.json": "e02c4a19a29b71af404771d5d57f10f4f97f42cbbdfc4256c831ff1832a5eb80",
+};
+
 /** SHA-256 of the file's raw bytes. Byte-for-byte, not parsed-and-compared: a reordered
  *  key or a reworded comment is still drift from a shared floor. */
 function sha256(path: string): string {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
+
+// Runs everywhere, including CI. Deliberately a separate describe from the canonical
+// comparison below, which skips when there is nothing to compare against: one of these two
+// blocks always executes, so "all green" can never mean "nothing ran".
+describe("vendored house configs match their recorded bytes (SPEC D3)", () => {
+  // Asserted against VENDORED rather than a literal, so a file added to one list and
+  // forgotten in the other fails here instead of going unwatched by the half that runs in
+  // CI. `expect(...).toHaveLength` on an empty VENDORED would pass a `for` loop silently.
+  it("records a digest for every vendored file", () => {
+    expect(Object.keys(RECORDED).sort()).toEqual(VENDORED.map(([local]) => local).sort());
+    expect(VENDORED.length).toBeGreaterThan(0);
+  });
+
+  for (const [local] of VENDORED) {
+    it(`${local} matches its recorded digest`, () => {
+      const localPath = join(REPO_ROOT, local);
+      expect(existsSync(localPath), `${local} missing from this repo`).toBe(true);
+      expect(
+        sha256(localPath),
+        `${local} was edited here — re-vendor from canonical, or record the new bytes if ` +
+          `the change already landed upstream`,
+      ).toBe(RECORDED[local]);
+    });
+  }
+});
 
 const CANONICAL_ROOT = findCanonical();
 

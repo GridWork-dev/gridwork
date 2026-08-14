@@ -42,6 +42,12 @@ function lint(name: string, source: string): string[] {
   const run = spawnSync(OXLINT, ["-c", CONFIG, "--no-ignore", "--format=json", file], {
     encoding: "utf8",
   });
+  // A binary that never launched leaves `status` undefined and `stderr` null, and the
+  // message that reports it says "oxlint exited undefined: null" — which is what it said
+  // the first time site/node_modules was absent. The reason is in `error`; check it first.
+  if (run.error) {
+    throw new Error(`could not run ${OXLINT}: ${run.error.message}`);
+  }
   // oxlint exits 1 when it finds anything; only a crash (>1, or unparseable stdout) is a
   // harness failure. Surfacing stderr turns "the binary moved" into a readable error
   // instead of a JSON.parse stack.
