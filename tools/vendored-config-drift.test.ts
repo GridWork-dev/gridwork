@@ -93,7 +93,7 @@ const VENDORED: readonly (readonly [string, string])[] = [
  *  second is the one a reviewer sees. That is the point, not an inconvenience. */
 const RECORDED: Readonly<Record<string, string>> = {
   "tools/oxlint-config/base.oxlintrc.json":
-    "8ba8a84c4d77d26b631b98c2e553fb649fb18d881951f35efa47d48d163b0026",
+    "50702202ed9ba3721c520c2f540077429afc722269ef3cd49a186b35c1d0a563",
   "tools/oxlint-config/react.oxlintrc.json":
     "2baac8b48862d86183c422aca30966e60236d652a7ecd62b20aca60da5c97ac1",
   "tools/oxlint-config/plugin.js":
