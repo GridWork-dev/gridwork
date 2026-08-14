@@ -62,14 +62,11 @@ export function CopyCommand() {
       >
         <span aria-hidden="true">{status}</span>
       </button>
-      <span
-        className="landing-sr-only"
-        role="status"
-        aria-live="polite"
-        aria-atomic="true"
-      >
+      {/* `output` carries role=status implicitly. aria-live stays explicit — it is
+          the announcement that matters here, and not every screen reader infers it. */}
+      <output className="landing-sr-only" aria-live="polite" aria-atomic="true">
         {status}
-      </span>
+      </output>
     </span>
   );
 }

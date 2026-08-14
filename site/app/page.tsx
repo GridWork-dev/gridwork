@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 import { CopyCommand } from "@/components/copy-command";
 
 const sourceUrl = "https://github.com/GridWork-dev/gridwork";
@@ -104,25 +106,25 @@ export default function HomePage() {
 
       <header className="landing-status-bar">
         <div className="landing-status-inner">
-          <a className="landing-brand" href="/" aria-label="GridWork home">
+          <Link className="landing-brand" href="/" aria-label="GridWork home">
             <span aria-hidden="true">▌</span> gridwork
-          </a>
+          </Link>
 
           <span className="landing-status-segment landing-status-optional">
             apache-2.0
           </span>
-          <a className="landing-stage" href="/docs/roadmap">
+          <Link className="landing-stage" href="/docs/roadmap">
             stage 5/6 · workspace
-          </a>
+          </Link>
           <span className="landing-status-segment landing-status-optional">
             pre-1.0
           </span>
 
           <nav className="landing-nav" aria-label="Primary navigation">
-            <a href="/docs">Docs</a>
-            <a className="landing-nav-optional" href="/docs/roadmap">
+            <Link href="/docs">Docs</Link>
+            <Link className="landing-nav-optional" href="/docs/roadmap">
               Roadmap
-            </a>
+            </Link>
             <a
               className="landing-nav-optional"
               href={sourceUrl}
@@ -149,9 +151,9 @@ export default function HomePage() {
               </p>
 
               <div className="landing-actions">
-                <a className="landing-button landing-button--primary" href="/docs">
+                <Link className="landing-button landing-button--primary" href="/docs">
                   Read the docs
-                </a>
+                </Link>
                 <a
                   className="landing-button"
                   href={sourceUrl}
@@ -190,6 +192,9 @@ export default function HomePage() {
               className="landing-terminal"
               aria-label="Certified stream and kernel health command transcript"
             >
+              {/* Same reason as the crates table: the transcript scrolls, so it has to
+                  be reachable by keyboard. */}
+              {/* oxlint-disable-next-line jsx-a11y/no-noninteractive-tabindex */}
               <pre tabIndex={0}>
                 <code>{`$ cargo run -p gwk-cert -- crates/gwk-cert/fixtures/valid-stream.json
 []
@@ -215,7 +220,7 @@ $ gw kernel health
               <strong>Pre-1.0: expect breakage.</strong> Schemas, protocols, and
               the binary change without notice until 1.0. The headless CLI needs
               PostgreSQL 16 and separate admin and runtime roles. {" "}
-              <a href="/docs/quickstart">Review the prerequisites</a>.
+              <Link href="/docs/quickstart">Review the prerequisites</Link>.
             </p>
           </div>
         </section>
@@ -268,7 +273,7 @@ $ gw kernel health
           </div>
 
           <p className="landing-section-route">
-            <a href="/docs/roadmap">Read the six-stage roadmap</a>
+            <Link href="/docs/roadmap">Read the six-stage roadmap</Link>
           </p>
         </section>
 
@@ -287,17 +292,17 @@ $ gw kernel health
           <ul className="landing-architecture-ledger">
             {architecture.map(([title, description, href]) => (
               <li key={title}>
-                <a href={href}>
+                <Link href={href}>
                   <h3>{title}</h3>
                   <p>{description}</p>
                   <span>Read the boundary</span>
-                </a>
+                </Link>
               </li>
             ))}
           </ul>
 
           <p className="landing-section-route">
-            <a href="/docs/architecture">Read the architecture</a>
+            <Link href="/docs/architecture">Read the architecture</Link>
           </p>
         </section>
 
@@ -342,7 +347,7 @@ $ gw kernel health
           </div>
 
           <p className="landing-section-route">
-            <a href="/docs/roadmap">Full roadmap</a>
+            <Link href="/docs/roadmap">Full roadmap</Link>
           </p>
         </section>
 
@@ -432,7 +437,7 @@ $ gw kernel health
           </div>
 
           <p className="landing-section-route">
-            <a href="/docs/derivation">Read the derivation trail</a>
+            <Link href="/docs/derivation">Read the derivation trail</Link>
           </p>
         </section>
 
@@ -448,10 +453,15 @@ $ gw kernel health
             </p>
           </div>
 
-          <div
+          {/* A horizontally scrollable region has to be focusable or a keyboard user
+              cannot reach the overflow. The rule cannot see that; this is the pattern
+              it is meant to allow. The directive sits on the attribute, not on the
+              opening tag: `disable-next-line` matches the line the attribute is on,
+              and this tag spans several. */}
+          <section
             className="landing-crates-scroll"
-            role="region"
             aria-labelledby="crates-title"
+            // oxlint-disable-next-line jsx-a11y/no-noninteractive-tabindex
             tabIndex={0}
           >
             <table>
@@ -487,7 +497,7 @@ $ gw kernel health
                 </tr>
               </tfoot>
             </table>
-          </div>
+          </section>
         </section>
       </main>
 
@@ -505,12 +515,12 @@ $ gw kernel health
             <nav aria-labelledby="footer-docs-title">
               <h2 id="footer-docs-title">Docs</h2>
               <ul>
-                <li><a href="/docs/architecture">Architecture</a></li>
-                <li><a href="/docs/protocol">Protocol</a></li>
-                <li><a href="/docs/parity">Parity</a></li>
-                <li><a href="/docs/contract">Contract</a></li>
-                <li><a href="/docs/security">Threat model</a></li>
-                <li><a href="/docs/derivation">Derivation</a></li>
+                <li><Link href="/docs/architecture">Architecture</Link></li>
+                <li><Link href="/docs/protocol">Protocol</Link></li>
+                <li><Link href="/docs/parity">Parity</Link></li>
+                <li><Link href="/docs/contract">Contract</Link></li>
+                <li><Link href="/docs/security">Threat model</Link></li>
+                <li><Link href="/docs/derivation">Derivation</Link></li>
               </ul>
             </nav>
 
@@ -518,7 +528,7 @@ $ gw kernel health
               <h2 id="footer-project-title">Project</h2>
               <ul>
                 <li><a href={sourceUrl} rel="noreferrer">GitHub</a></li>
-                <li><a href="/docs/roadmap">Roadmap</a></li>
+                <li><Link href="/docs/roadmap">Roadmap</Link></li>
                 <li>
                   <a href={`${sourceFilesUrl}/CONTRIBUTING.md`} rel="noreferrer">
                     Contributing
@@ -539,7 +549,7 @@ $ gw kernel health
                     SECURITY.md
                   </a>
                 </li>
-                <li><a href="/privacy">Privacy</a></li>
+                <li><Link href="/privacy">Privacy</Link></li>
               </ul>
             </nav>
           </div>
