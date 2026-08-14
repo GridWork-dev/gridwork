@@ -58,8 +58,8 @@ deliberate exception, with explicit `--exclude`s.)
 same commit — `cargo run -p xtask -- contract`. `bun test` in `contracts/` rewriting
 `goldens-ts/` is the test working, not a mess to revert.
 
-**One required check.** Branch protection requires `verify`, which aggregates 17 of the
-20 jobs in `ci.yml`. If your PR is red, open `verify`'s log — it names the gate. The
+**One required check.** Branch protection requires `verify`, which aggregates 18 of the
+21 jobs in `ci.yml`. If your PR is red, open `verify`'s log — it names the gate. The
 other three jobs are `continue-on-error` by design and cannot fail anything;
 `advisories` in particular can be red on an unchanged PR.
 
