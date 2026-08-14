@@ -1035,6 +1035,216 @@ CREATE TRIGGER cost_entry_no_truncate
 ALTER TABLE gwk.cost_entry ENABLE ALWAYS TRIGGER cost_entry_append_only;
 ALTER TABLE gwk.cost_entry ENABLE ALWAYS TRIGGER cost_entry_no_truncate;
 
+-- Context truth records. Their concrete table is their truth stage: no shared
+-- `stage` or `kind` discriminator exists. All payload-like content stays out of
+-- these rows; the records carry bounded metadata and content digests only.
+CREATE FUNCTION gwk.context_evidence_ids_are_valid(ids text[]) RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+STRICT
+AS $$
+SELECT
+  COALESCE(array_ndims(ids), 1) = 1
+  AND (cardinality(ids) = 0 OR array_lower(ids, 1) = 1)
+  AND cardinality(ids) <= 64
+  AND NOT EXISTS (
+    SELECT 1
+    FROM unnest(ids) AS evidence(id)
+    WHERE id IS NULL OR id !~ '^[A-Za-z0-9._:-]{1,128}$'
+  );
+$$;
+
+CREATE FUNCTION gwk.context_participations_are_valid(value jsonb) RETURNS boolean
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+AS $$
+DECLARE
+  participation jsonb;
+  participation_state text;
+BEGIN
+  IF jsonb_typeof(value) <> 'array' OR jsonb_array_length(value) > 4096 THEN
+    RETURN false;
+  END IF;
+
+  FOR participation IN
+    SELECT element FROM jsonb_array_elements(value) AS entry(element)
+  LOOP
+    IF jsonb_typeof(participation) <> 'object' THEN
+      RETURN false;
+    END IF;
+    IF EXISTS (
+      SELECT 1
+      FROM jsonb_object_keys(participation) AS field(name)
+      WHERE name NOT IN ('digest', 'state', 'reason', 'detail')
+    ) THEN
+      RETURN false;
+    END IF;
+    IF jsonb_typeof(participation -> 'digest') IS DISTINCT FROM 'string'
+       OR participation ->> 'digest' !~ '^sha256:[0-9a-f]{64}$' THEN
+      RETURN false;
+    END IF;
+
+    participation_state := participation ->> 'state';
+    IF jsonb_typeof(participation -> 'state') IS DISTINCT FROM 'string'
+       OR participation_state NOT IN
+          ('available', 'selectable', 'active', 'excluded', 'unavailable') THEN
+      RETURN false;
+    END IF;
+
+    IF participation_state IN ('excluded', 'unavailable') THEN
+      IF jsonb_typeof(participation -> 'reason') IS DISTINCT FROM 'string'
+         OR participation ->> 'reason' NOT IN
+            ('precedence_loss', 'permission_denied', 'budget_cut', 'quarantined',
+             'rejected', 'pin_drift', 'not_eligible', 'unavailable') THEN
+        RETURN false;
+      END IF;
+    ELSIF participation ? 'reason'
+          AND participation -> 'reason' <> 'null'::jsonb THEN
+      RETURN false;
+    END IF;
+
+    IF participation ? 'detail'
+       AND participation -> 'detail' <> 'null'::jsonb
+       AND (participation_state NOT IN ('excluded', 'unavailable')
+            OR jsonb_typeof(participation -> 'detail') IS DISTINCT FROM 'string'
+            OR octet_length(participation ->> 'detail') > 1024) THEN
+      RETURN false;
+    END IF;
+  END LOOP;
+
+  RETURN true;
+END;
+$$;
+
+CREATE TABLE gwk.context_manifest (
+  id                text PRIMARY KEY
+                      CHECK (id ~ '^[A-Za-z0-9._:-]{1,128}$'),
+  attempt_id        text NOT NULL REFERENCES gwk.attempt(id),
+  manifest_digest   text NOT NULL
+                      CHECK (manifest_digest ~ '^sha256:[0-9a-f]{64}$'),
+  route_digest      text NOT NULL
+                      CHECK (route_digest ~ '^sha256:[0-9a-f]{64}$'),
+  authority_digest  text NOT NULL
+                      CHECK (authority_digest ~ '^sha256:[0-9a-f]{64}$'),
+  source_count      integer NOT NULL
+                      CHECK (source_count BETWEEN 0 AND 65535),
+  source_bytes      numeric(20,0) NOT NULL
+                      CHECK (source_bytes >= 0 AND source_bytes <= 18446744073709551615),
+  participations    jsonb NOT NULL
+                      CHECK (gwk.context_participations_are_valid(participations)),
+  evidence_ids      text[] NOT NULL
+                      CHECK (gwk.context_evidence_ids_are_valid(evidence_ids)),
+  resolved_at       timestamptz NOT NULL,
+  CONSTRAINT context_manifest_one_per_attempt UNIQUE (attempt_id)
+);
+
+CREATE TABLE gwk.context_release (
+  id                  text PRIMARY KEY
+                        CHECK (id ~ '^[A-Za-z0-9._:-]{1,128}$'),
+  manifest_id         text NOT NULL REFERENCES gwk.context_manifest(id),
+  rendered_digest     text NOT NULL
+                        CHECK (rendered_digest ~ '^sha256:[0-9a-f]{64}$'),
+  tool_schema_digest  text NOT NULL
+                        CHECK (tool_schema_digest ~ '^sha256:[0-9a-f]{64}$'),
+  rendered_bytes      numeric(20,0) NOT NULL
+                        CHECK (rendered_bytes >= 0
+                               AND rendered_bytes <= 18446744073709551615),
+  tool_schema_count   integer NOT NULL
+                        CHECK (tool_schema_count BETWEEN 0 AND 65535),
+  evidence_ids        text[] NOT NULL
+                        CHECK (gwk.context_evidence_ids_are_valid(evidence_ids)),
+  released_at         timestamptz NOT NULL,
+  CONSTRAINT context_release_one_per_manifest UNIQUE (manifest_id)
+);
+
+CREATE TABLE gwk.context_observation (
+  id                    text PRIMARY KEY
+                          CHECK (id ~ '^[A-Za-z0-9._:-]{1,128}$'),
+  manifest_id           text NOT NULL REFERENCES gwk.context_manifest(id),
+  observation_index     integer NOT NULL
+                          CHECK (observation_index BETWEEN 1 AND 65535),
+  fact_digest           text NOT NULL
+                          CHECK (fact_digest ~ '^sha256:[0-9a-f]{64}$'),
+  observed_bytes        numeric(20,0) NOT NULL
+                          CHECK (observed_bytes >= 0
+                                 AND observed_bytes <= 18446744073709551615),
+  visible_source_count  integer NOT NULL
+                          CHECK (visible_source_count BETWEEN 0 AND 65535),
+  truncated             boolean NOT NULL,
+  evidence_ids          text[] NOT NULL
+                          CHECK (gwk.context_evidence_ids_are_valid(evidence_ids)),
+  observed_at           timestamptz NOT NULL,
+  CONSTRAINT context_observation_stable_order
+    UNIQUE (manifest_id, observation_index)
+);
+
+CREATE TABLE gwk.context_finalization (
+  id                    text PRIMARY KEY
+                          CHECK (id ~ '^[A-Za-z0-9._:-]{1,128}$'),
+  manifest_id           text NOT NULL REFERENCES gwk.context_manifest(id),
+  output_digest         text NOT NULL
+                          CHECK (output_digest ~ '^sha256:[0-9a-f]{64}$'),
+  verification_digest   text NOT NULL
+                          CHECK (verification_digest ~ '^sha256:[0-9a-f]{64}$'),
+  approval_count        integer NOT NULL
+                          CHECK (approval_count BETWEEN 0 AND 65535),
+  observation_count     integer NOT NULL
+                          CHECK (observation_count BETWEEN 0 AND 65535),
+  final_event_root      text NOT NULL
+                          CHECK (final_event_root ~ '^sha256:[0-9a-f]{64}$'),
+  lifecycle_complete    boolean NOT NULL,
+  assurance             text NOT NULL
+                          CHECK (assurance IN ('trace', 'deterministic')),
+  evidence_ids          text[] NOT NULL
+                          CHECK (gwk.context_evidence_ids_are_valid(evidence_ids)),
+  finalized_at          timestamptz NOT NULL,
+  CONSTRAINT context_finalization_one_per_manifest UNIQUE (manifest_id)
+);
+
+CREATE FUNCTION gwk.forbid_context_truth_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'gwk.% is append-only (% refused)', TG_TABLE_NAME, TG_OP;
+END $$;
+
+CREATE TRIGGER context_manifest_append_only
+  BEFORE UPDATE OR DELETE ON gwk.context_manifest
+  FOR EACH ROW EXECUTE FUNCTION gwk.forbid_context_truth_mutation();
+CREATE TRIGGER context_manifest_no_truncate
+  BEFORE TRUNCATE ON gwk.context_manifest
+  FOR EACH STATEMENT EXECUTE FUNCTION gwk.forbid_context_truth_mutation();
+
+CREATE TRIGGER context_release_append_only
+  BEFORE UPDATE OR DELETE ON gwk.context_release
+  FOR EACH ROW EXECUTE FUNCTION gwk.forbid_context_truth_mutation();
+CREATE TRIGGER context_release_no_truncate
+  BEFORE TRUNCATE ON gwk.context_release
+  FOR EACH STATEMENT EXECUTE FUNCTION gwk.forbid_context_truth_mutation();
+
+CREATE TRIGGER context_observation_append_only
+  BEFORE UPDATE OR DELETE ON gwk.context_observation
+  FOR EACH ROW EXECUTE FUNCTION gwk.forbid_context_truth_mutation();
+CREATE TRIGGER context_observation_no_truncate
+  BEFORE TRUNCATE ON gwk.context_observation
+  FOR EACH STATEMENT EXECUTE FUNCTION gwk.forbid_context_truth_mutation();
+
+CREATE TRIGGER context_finalization_append_only
+  BEFORE UPDATE OR DELETE ON gwk.context_finalization
+  FOR EACH ROW EXECUTE FUNCTION gwk.forbid_context_truth_mutation();
+CREATE TRIGGER context_finalization_no_truncate
+  BEFORE TRUNCATE ON gwk.context_finalization
+  FOR EACH STATEMENT EXECUTE FUNCTION gwk.forbid_context_truth_mutation();
+
+ALTER TABLE gwk.context_manifest ENABLE ALWAYS TRIGGER context_manifest_append_only;
+ALTER TABLE gwk.context_manifest ENABLE ALWAYS TRIGGER context_manifest_no_truncate;
+ALTER TABLE gwk.context_release ENABLE ALWAYS TRIGGER context_release_append_only;
+ALTER TABLE gwk.context_release ENABLE ALWAYS TRIGGER context_release_no_truncate;
+ALTER TABLE gwk.context_observation ENABLE ALWAYS TRIGGER context_observation_append_only;
+ALTER TABLE gwk.context_observation ENABLE ALWAYS TRIGGER context_observation_no_truncate;
+ALTER TABLE gwk.context_finalization ENABLE ALWAYS TRIGGER context_finalization_append_only;
+ALTER TABLE gwk.context_finalization ENABLE ALWAYS TRIGGER context_finalization_no_truncate;
+
 COMMIT;
 "#;
 
@@ -1045,4 +1255,4 @@ COMMIT;
 // unwrapped 64-hex line lands past 100 columns — the generator and
 // rustfmt would then fight, showing up as permanent contract drift.
 pub const CONTRACT_SQL_SHA256: &str =
-    "4f6e2d2aa3b1b8cbd6fb5e558a50af6be4dd7d45e2e3912c725dc3485dce6959";
+    "7ebb2adaad295c28c60f1e789030ceef87d6fdd607b37a1186f173dc22647142";

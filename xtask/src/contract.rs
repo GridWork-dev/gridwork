@@ -1,7 +1,7 @@
 //! `cargo run -p xtask -- contract [--check]` — the contract codegen gate.
 //!
 //! Generates, deterministically (no timestamps, no local paths):
-//!   * `contracts/bindings.ts` — the TypeScript contract from gwk-domain + gwk-theme
+//!   * `contracts/bindings.ts` — the TypeScript contract from gwk-context + gwk-domain + gwk-theme
 //!   * `contracts/signal-theme.json` — the SIGNAL tokens as data
 //!   * `contracts/goldens/*.json` — Rust-serialized fixtures the bun tests decode
 //!
@@ -13,6 +13,12 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+use gwk_context::{
+    Assurance, Digest as ContextDigest, EvidenceRefs, FinalizationSupplement,
+    FinalizationSupplementId, ManifestId, ObservationIndex, ObservationSupplement,
+    ObservationSupplementId, Participation, ParticipationReason, ParticipationRecords, RecordCount,
+    ReleaseSupplement, ReleaseSupplementId, ResolvedManifest,
+};
 use gwk_domain::blob::{BlobAddress, BlobDescriptor};
 use gwk_domain::checkpoint::{CHECKPOINT_SCHEMA_VERSION, Checkpoint};
 use gwk_domain::command::KernelCommand;
@@ -28,9 +34,9 @@ use gwk_domain::frame::{
 use gwk_domain::fsm::{AttemptState, CommandState, MessageState, Outcome, TaskState};
 use gwk_domain::ids::{
     AggregateId, AttemptId, BlobUploadId, ByteCount, CommandId, CorrelationId, CostMicros,
-    EngineId, EngineSessionId, EventCount, EventId, IdempotencyKey, LeaseId, MessageId, ProjectId,
-    PtyFrameSeq, PtySessionGeneration, PtySessionId, PtySessionTemplateName, RequestId, Seq,
-    TaskId, Timestamp, WorkflowRunId, WorkspaceNodeId,
+    EngineId, EngineSessionId, EventCount, EventId, EvidenceId, IdempotencyKey, LeaseId, MessageId,
+    ProjectId, PtyFrameSeq, PtySessionGeneration, PtySessionId, PtySessionTemplateName, RequestId,
+    Seq, TaskId, Timestamp, WorkflowRunId, WorkspaceNodeId,
 };
 use gwk_domain::inherited::{BudgetCursor, OrchestratorCheckpoint, PendingApproval};
 use gwk_domain::protocol::{
@@ -41,7 +47,7 @@ use gwk_domain::transition::TransitionResult;
 
 const HEADER: &str = "\
 // GridWork contract bindings.
-// Generated from gwk-domain + gwk-theme by `cargo run -p xtask -- contract`.
+// Generated from gwk-context + gwk-domain + gwk-theme by `cargo run -p xtask -- contract`.
 // DO NOT EDIT — regenerate instead; CI diffs this file against the source.
 ";
 
@@ -51,6 +57,156 @@ fn repo_root() -> PathBuf {
         .parent()
         .expect("xtask has a parent dir")
         .to_path_buf()
+}
+
+const CONTEXT_TRUTH_ROOTS: [&str; 4] = [
+    "ResolvedManifest",
+    "ReleaseSupplement",
+    "ObservationSupplement",
+    "FinalizationSupplement",
+];
+
+const CONTEXT_TRUTH_TABLES: [&str; 4] = [
+    "gwk.context_manifest",
+    "gwk.context_release",
+    "gwk.context_observation",
+    "gwk.context_finalization",
+];
+
+const CONTEXT_CARDINALITY_CONSTRAINTS: [&str; 4] = [
+    "context_manifest_one_per_attempt",
+    "context_release_one_per_manifest",
+    "context_observation_stable_order",
+    "context_finalization_one_per_manifest",
+];
+
+const CONTEXT_VALUE_VALIDATORS: [&str; 2] = [
+    "gwk.context_evidence_ids_are_valid",
+    "gwk.context_participations_are_valid",
+];
+
+const CONTEXT_EVIDENCE_GUARD: &str = "CHECK (gwk.context_evidence_ids_are_valid(evidence_ids))";
+const CONTEXT_PARTICIPATION_GUARD: &str =
+    "CHECK (gwk.context_participations_are_valid(participations))";
+const CONTEXT_VALUE_GUARD_COUNT: usize = 5;
+
+const CONTEXT_MUTATION_TRIGGERS: [&str; 8] = [
+    "context_manifest_append_only",
+    "context_manifest_no_truncate",
+    "context_release_append_only",
+    "context_release_no_truncate",
+    "context_observation_append_only",
+    "context_observation_no_truncate",
+    "context_finalization_append_only",
+    "context_finalization_no_truncate",
+];
+
+fn bindings_body(source: &str) -> Result<&str, String> {
+    // Include real newlines so this search cannot match this string literal.
+    let signature = "\nfn bindings() -> String {\n";
+    let start = source
+        .find(signature)
+        .ok_or_else(|| "bindings() signature is missing".to_owned())?;
+    let close = source[start..]
+        .find("\n}\n")
+        .ok_or_else(|| "bindings() closing brace is missing".to_owned())?;
+    Ok(&source[start..start + close])
+}
+
+fn inspect_context_truth_registry(source: &str) -> Result<usize, String> {
+    assert!(
+        !CONTEXT_TRUTH_ROOTS.is_empty(),
+        "context truth-root expectation set must not be empty"
+    );
+    let body = bindings_body(source)?;
+    let present = CONTEXT_TRUTH_ROOTS
+        .iter()
+        .filter(|name| body.contains(&format!(".register::<{name}>()")))
+        .count();
+    if present != CONTEXT_TRUTH_ROOTS.len() {
+        return Err(format!(
+            "inspected {present} registered context truth roots; expected {}",
+            CONTEXT_TRUTH_ROOTS.len()
+        ));
+    }
+    Ok(present)
+}
+
+fn inspect_context_truth_roots(exported: &str) -> Result<usize, String> {
+    assert!(
+        !CONTEXT_TRUTH_ROOTS.is_empty(),
+        "context truth-root expectation set must not be empty"
+    );
+    let present = CONTEXT_TRUTH_ROOTS
+        .iter()
+        .filter(|name| exported.contains(&format!("export type {name} =")))
+        .count();
+    if present != CONTEXT_TRUTH_ROOTS.len() {
+        let missing = CONTEXT_TRUTH_ROOTS
+            .iter()
+            .filter(|name| !exported.contains(&format!("export type {name} =")))
+            .copied()
+            .collect::<Vec<_>>();
+        return Err(format!(
+            "inspected {present} context truth roots; expected {}; missing {}",
+            CONTEXT_TRUTH_ROOTS.len(),
+            missing.join(", ")
+        ));
+    }
+    Ok(present)
+}
+
+fn inspect_context_truth_schema(sql: &str) -> Result<(), String> {
+    assert!(
+        !CONTEXT_TRUTH_TABLES.is_empty()
+            && !CONTEXT_CARDINALITY_CONSTRAINTS.is_empty()
+            && !CONTEXT_VALUE_VALIDATORS.is_empty()
+            && !CONTEXT_MUTATION_TRIGGERS.is_empty(),
+        "context schema expectation sets must not be empty"
+    );
+
+    let table_count = CONTEXT_TRUTH_TABLES
+        .iter()
+        .filter(|table| sql.contains(&format!("CREATE TABLE {table} (")))
+        .count();
+    let constraint_count = CONTEXT_CARDINALITY_CONSTRAINTS
+        .iter()
+        .filter(|constraint| sql.contains(&format!("CONSTRAINT {constraint}")))
+        .count();
+    let validator_count = CONTEXT_VALUE_VALIDATORS
+        .iter()
+        .filter(|validator| {
+            sql.matches(&format!("CREATE FUNCTION {validator}("))
+                .count()
+                == 1
+        })
+        .count();
+    let value_guard_count = sql.matches(CONTEXT_EVIDENCE_GUARD).count()
+        + sql.matches(CONTEXT_PARTICIPATION_GUARD).count();
+    let trigger_count = CONTEXT_MUTATION_TRIGGERS
+        .iter()
+        .filter(|trigger| {
+            sql.contains(&format!("CREATE TRIGGER {trigger}"))
+                && sql.contains(&format!("ENABLE ALWAYS TRIGGER {trigger}"))
+        })
+        .count();
+
+    if table_count != CONTEXT_TRUTH_TABLES.len()
+        || constraint_count != CONTEXT_CARDINALITY_CONSTRAINTS.len()
+        || validator_count != CONTEXT_VALUE_VALIDATORS.len()
+        || value_guard_count != CONTEXT_VALUE_GUARD_COUNT
+        || trigger_count != CONTEXT_MUTATION_TRIGGERS.len()
+    {
+        return Err(format!(
+            "inspected {table_count} context table declarations, {constraint_count} cardinality constraints, {validator_count} value-validator functions, {value_guard_count} value-validation constraints, and {trigger_count} enabled mutation guards; expected {}/{}/{}/{}/{}",
+            CONTEXT_TRUTH_TABLES.len(),
+            CONTEXT_CARDINALITY_CONSTRAINTS.len(),
+            CONTEXT_VALUE_VALIDATORS.len(),
+            CONTEXT_VALUE_GUARD_COUNT,
+            CONTEXT_MUTATION_TRIGGERS.len()
+        ));
+    }
+    Ok(())
 }
 
 /// The generated TypeScript contract.
@@ -66,6 +222,8 @@ fn repo_root() -> PathBuf {
 /// only pins the registry against silent drift, it does not prove
 /// completeness.
 fn bindings() -> String {
+    inspect_context_truth_registry(include_str!("contract.rs"))
+        .unwrap_or_else(|message| panic!("{message}"));
     let types = specta::Types::default()
         .register::<EventEnvelope>()
         .register::<CommandEnvelope>()
@@ -100,6 +258,10 @@ fn bindings() -> String {
         .register::<ServerControl>()
         .register::<KernelCommand>()
         .register::<Checkpoint>()
+        .register::<ResolvedManifest>()
+        .register::<ReleaseSupplement>()
+        .register::<ObservationSupplement>()
+        .register::<FinalizationSupplement>()
         .register::<gwk_theme::Token>();
     // PhasesFormat, not the unified Format: `skip_serializing_if` (the
     // tri-state omission) is direction-dependent, which unified mode refuses
@@ -110,11 +272,13 @@ fn bindings() -> String {
         .expect("typescript export");
     // The exporter leaves a separator space at the end of multiline unions.
     // Generated output is still source: keep it clean under `git diff --check`.
-    exported
+    let normalized = exported
         .split('\n')
         .map(str::trim_end)
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+    inspect_context_truth_roots(&normalized).unwrap_or_else(|message| panic!("{message}"));
+    normalized
 }
 
 fn signal_theme_json() -> String {
@@ -131,6 +295,83 @@ fn actor(kind: &str, id: Option<&str>) -> Actor {
     Actor {
         kind: kind.into(),
         id: id.map(Into::into),
+    }
+}
+
+fn context_digest(nibble: char) -> ContextDigest {
+    ContextDigest::from_hex(&nibble.to_string().repeat(64)).expect("golden context digest is valid")
+}
+
+fn context_evidence() -> EvidenceRefs {
+    EvidenceRefs::new(vec![
+        EvidenceId::new("evidence-context-1"),
+        EvidenceId::new("evidence-context-2"),
+    ])
+    .expect("golden context evidence is bounded")
+}
+
+fn golden_resolved_manifest() -> ResolvedManifest {
+    ResolvedManifest {
+        id: ManifestId::parse("manifest-0001").expect("golden manifest id is valid"),
+        attempt_id: AttemptId::new("att-context-0001"),
+        manifest_digest: context_digest('1'),
+        route_digest: context_digest('2'),
+        authority_digest: context_digest('3'),
+        source_count: RecordCount::new(2).expect("golden source count is bounded"),
+        source_bytes: ByteCount::new(768),
+        participations: ParticipationRecords::new(vec![
+            Participation::active(context_digest('4')),
+            Participation::excluded(context_digest('5'), ParticipationReason::BudgetCut)
+                .with_detail("excluded after deterministic budget ordering"),
+        ])
+        .expect("golden participations are valid"),
+        evidence_ids: context_evidence(),
+        resolved_at: Timestamp::new("2026-08-14T12:00:00Z"),
+    }
+}
+
+fn golden_release_supplement() -> ReleaseSupplement {
+    ReleaseSupplement {
+        id: ReleaseSupplementId::parse("release-0001").expect("golden release id is valid"),
+        manifest_id: ManifestId::parse("manifest-0001").expect("golden manifest id is valid"),
+        rendered_digest: context_digest('6'),
+        tool_schema_digest: context_digest('7'),
+        rendered_bytes: ByteCount::new(512),
+        tool_schema_count: RecordCount::new(3).expect("golden tool count is bounded"),
+        evidence_ids: context_evidence(),
+        released_at: Timestamp::new("2026-08-14T12:00:01Z"),
+    }
+}
+
+fn golden_observation_supplement() -> ObservationSupplement {
+    ObservationSupplement {
+        id: ObservationSupplementId::parse("observation-0001")
+            .expect("golden observation id is valid"),
+        manifest_id: ManifestId::parse("manifest-0001").expect("golden manifest id is valid"),
+        observation_index: ObservationIndex::new(1).expect("golden observation index is valid"),
+        fact_digest: context_digest('8'),
+        observed_bytes: ByteCount::new(96),
+        visible_source_count: RecordCount::new(1).expect("golden visible-source count is bounded"),
+        truncated: false,
+        evidence_ids: context_evidence(),
+        observed_at: Timestamp::new("2026-08-14T12:00:02Z"),
+    }
+}
+
+fn golden_finalization_supplement() -> FinalizationSupplement {
+    FinalizationSupplement {
+        id: FinalizationSupplementId::parse("finalization-0001")
+            .expect("golden finalization id is valid"),
+        manifest_id: ManifestId::parse("manifest-0001").expect("golden manifest id is valid"),
+        output_digest: context_digest('9'),
+        verification_digest: context_digest('a'),
+        approval_count: RecordCount::new(1).expect("golden approval count is bounded"),
+        observation_count: RecordCount::new(1).expect("golden observation count is bounded"),
+        final_event_root: context_digest('b'),
+        lifecycle_complete: true,
+        assurance: Assurance::Trace,
+        evidence_ids: context_evidence(),
+        finalized_at: Timestamp::new("2026-08-14T12:00:03Z"),
     }
 }
 
@@ -1055,6 +1296,22 @@ fn goldens() -> Vec<(&'static str, String)> {
             "event-envelope-minimal.json",
             pretty(&golden_event_envelope_minimal()),
         ),
+        (
+            "context-resolved-manifest.json",
+            pretty(&golden_resolved_manifest()),
+        ),
+        (
+            "context-release-supplement.json",
+            pretty(&golden_release_supplement()),
+        ),
+        (
+            "context-observation-supplement.json",
+            pretty(&golden_observation_supplement()),
+        ),
+        (
+            "context-finalization-supplement.json",
+            pretty(&golden_finalization_supplement()),
+        ),
         ("command-envelope.json", pretty(&golden_command_envelope())),
         ("task.json", pretty(&golden_task())),
         ("attempt.json", pretty(&golden_attempt())),
@@ -1162,6 +1419,7 @@ pub fn run(check: bool) {
     let contract_sql_path = root.join(crate::schema::GENERATED_PATH);
     let contract_sql = std::fs::read_to_string(root.join("schema/0001_contract.sql"))
         .expect("read schema/0001_contract.sql");
+    inspect_context_truth_schema(&contract_sql).unwrap_or_else(|message| panic!("{message}"));
     let contract_sql_rs = crate::schema::contract_sql_rs(&contract_sql);
 
     if !check {
@@ -1215,6 +1473,26 @@ pub fn run(check: bool) {
             "event-envelope-minimal.json",
             &ts_goldens_dir,
             find("event-envelope-minimal.json"),
+        ),
+        round_trip::<ResolvedManifest>(
+            "context-resolved-manifest.json",
+            &ts_goldens_dir,
+            find("context-resolved-manifest.json"),
+        ),
+        round_trip::<ReleaseSupplement>(
+            "context-release-supplement.json",
+            &ts_goldens_dir,
+            find("context-release-supplement.json"),
+        ),
+        round_trip::<ObservationSupplement>(
+            "context-observation-supplement.json",
+            &ts_goldens_dir,
+            find("context-observation-supplement.json"),
+        ),
+        round_trip::<FinalizationSupplement>(
+            "context-finalization-supplement.json",
+            &ts_goldens_dir,
+            find("context-finalization-supplement.json"),
         ),
         round_trip::<CommandEnvelope>(
             "command-envelope.json",
@@ -1304,7 +1582,7 @@ mod tests {
     /// manual root registry described in its doc comment. Update this
     /// constant AND the `.register()` chain together in the same change;
     /// a mismatch means one moved without the other.
-    const REGISTERED_ROOT_COUNT: usize = 28;
+    const REGISTERED_ROOT_COUNT: usize = 32;
 
     #[test]
     fn bindings_registry_matches_its_pin() {
@@ -1316,14 +1594,7 @@ mod tests {
         // so a stray `}` inside a string or comment in the body — a future
         // `format!("... }}")`, a lone `}` in a literal — can't underflow a
         // usize (panic) or mis-scope: it is indented, never column-0.
-        let source = include_str!("contract.rs");
-        let sig_at = source
-            .find("fn bindings() -> String {")
-            .expect("bindings() signature present");
-        let close_rel = source[sig_at..]
-            .find("\n}\n")
-            .expect("bindings() closing brace");
-        let body = &source[sig_at..sig_at + close_rel];
+        let body = bindings_body(include_str!("contract.rs")).expect("bindings body present");
         let actual = body.matches(".register::<").count();
         assert_eq!(
             actual, REGISTERED_ROOT_COUNT,
@@ -1333,6 +1604,89 @@ mod tests {
              type you added or removed actually needed a manual root (see \
              bindings()'s doc comment)"
         );
+    }
+
+    #[test]
+    fn context_root_guard_rejects_a_removed_registration_after_counting() {
+        let source = include_str!("contract.rs");
+        assert_eq!(
+            inspect_context_truth_registry(source).expect("real registry is complete"),
+            CONTEXT_TRUTH_ROOTS.len()
+        );
+        let target = format!(".register::<{}>()", "ReleaseSupplement");
+        assert_eq!(
+            source.matches(&target).count(),
+            1,
+            "mutation target drifted"
+        );
+        let mutated = source.replacen(&target, ".register::<RemovedReleaseSupplement>()", 1);
+        let error = inspect_context_truth_registry(&mutated)
+            .expect_err("a removed Context root must fail the registry guard");
+        assert!(
+            error.contains("inspected 3 registered context truth roots"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn context_schema_guard_rejects_a_removed_cardinality_constraint_after_counting() {
+        let schema = include_str!("../../schema/0001_contract.sql");
+        inspect_context_truth_schema(schema).expect("real Context schema is complete");
+        let target = "CONSTRAINT context_release_one_per_manifest UNIQUE (manifest_id)";
+        assert_eq!(schema.matches(target).count(), 1, "mutation target drifted");
+        let mutated = schema.replacen(target, "", 1);
+        let error = inspect_context_truth_schema(&mutated)
+            .expect_err("a removed uniqueness constraint must fail the schema guard");
+        assert!(
+            error.contains("inspected 4 context table declarations, 3 cardinality constraints"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn context_schema_guard_rejects_a_removed_value_validator_after_counting() {
+        let schema = include_str!("../../schema/0001_contract.sql");
+        inspect_context_truth_schema(schema).expect("real Context schema is complete");
+        let target = "CREATE FUNCTION gwk.context_evidence_ids_are_valid(";
+        assert_eq!(schema.matches(target).count(), 1, "mutation target drifted");
+        let mutated = schema.replacen(
+            target,
+            "CREATE FUNCTION gwk.removed_evidence_ids_validator(",
+            1,
+        );
+        let error = inspect_context_truth_schema(&mutated)
+            .expect_err("a removed value validator must fail the schema guard");
+        assert!(error.contains("1 value-validator functions"), "{error}");
+    }
+
+    #[test]
+    fn context_schema_guard_rejects_a_removed_evidence_check_after_counting() {
+        let schema = include_str!("../../schema/0001_contract.sql");
+        inspect_context_truth_schema(schema).expect("real Context schema is complete");
+        assert_eq!(
+            schema.matches(CONTEXT_EVIDENCE_GUARD).count(),
+            CONTEXT_TRUTH_TABLES.len(),
+            "mutation target drifted"
+        );
+        let mutated = schema.replacen(CONTEXT_EVIDENCE_GUARD, "CHECK (true)", 1);
+        let error = inspect_context_truth_schema(&mutated)
+            .expect_err("a removed evidence check must fail the schema guard");
+        assert!(error.contains("4 value-validation constraints"), "{error}");
+    }
+
+    #[test]
+    fn context_schema_guard_rejects_a_removed_participation_check_after_counting() {
+        let schema = include_str!("../../schema/0001_contract.sql");
+        inspect_context_truth_schema(schema).expect("real Context schema is complete");
+        assert_eq!(
+            schema.matches(CONTEXT_PARTICIPATION_GUARD).count(),
+            1,
+            "mutation target drifted"
+        );
+        let mutated = schema.replacen(CONTEXT_PARTICIPATION_GUARD, "CHECK (true)", 1);
+        let error = inspect_context_truth_schema(&mutated)
+            .expect_err("a removed participation check must fail the schema guard");
+        assert!(error.contains("4 value-validation constraints"), "{error}");
     }
 
     #[test]

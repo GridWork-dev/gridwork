@@ -99,6 +99,13 @@ impl<'de> serde::Deserialize<'de> for Digest {
     }
 }
 
+// The validated wire form is a string, not a structural object.
+impl specta::Type for Digest {
+    fn definition(types: &mut specta::Types) -> specta::datatype::DataType {
+        <String as specta::Type>::definition(types)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

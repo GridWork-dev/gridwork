@@ -4,12 +4,12 @@
 //! the compiler resolves one immutable manifest per spawn attempt, an
 //! independent verifier checks it, and Explain/Compare reconstruct what
 //! happened from immutable projections. This crate holds the words all of that
-//! agrees on — stages, participation, precedence, and content digests.
+//! agrees on — stages, truth records, participation, precedence, and content
+//! digests.
 //!
-//! What is here is deliberately narrow. The compiler, the verifier, the CAS
-//! layer, the supplement entities, and the wire-v2 grammar are the rest of 8A
-//! and 8B. This is the vocabulary they will be written in, landed first so
-//! they cannot each invent their own.
+//! What is here is deliberately narrow. The compiler, verifier, CAS layer, and
+//! wire-v2 grammar remain later 8A/8B work. This is the vocabulary and immutable
+//! truth-record spine they will be written against.
 //!
 //! ## Rulings this crate encodes
 //!
@@ -31,19 +31,25 @@
 //!   it across thousands of manifests; open strings work for `Gate.kind` only
 //!   because nothing branches on that.
 //!
-//! ## Not here yet
-//!
-//! No `specta::Type` derives and no contract-root registration: these types
-//! have not crossed a wire, and generating TypeScript for them would publish a
-//! shape as settled when its grammar (F7–F9) is still open. They join the
-//! generated contract when the wire does.
+//! The four truth records are generated public contract roots now. Publishing
+//! those data shapes does not activate the wire-v2 grammar or change the kernel's
+//! accepted protocol major.
 
 pub mod digest;
+pub mod manifest;
 pub mod participation;
 pub mod precedence;
 pub mod stage;
 
 pub use digest::{DIGEST_SCHEME, Digest, DigestError};
+pub use manifest::{
+    Assurance, CONTEXT_EVIDENCE_MAX_COUNT, CONTEXT_ID_MAX_BYTES,
+    CONTEXT_PARTICIPATION_DETAIL_MAX_BYTES, CONTEXT_PARTICIPATION_MAX_COUNT,
+    CONTEXT_RECORD_COUNT_MAX, EvidenceRefs, FinalizationSupplement, FinalizationSupplementId,
+    ManifestId, ObservationIndex, ObservationSupplement, ObservationSupplementId,
+    ParticipationRecords, RecordCount, ReleaseSupplement, ReleaseSupplementId, ResolvedManifest,
+    TruthRecordError,
+};
 pub use participation::{
     Participation, ParticipationError, ParticipationReason, ParticipationState,
 };

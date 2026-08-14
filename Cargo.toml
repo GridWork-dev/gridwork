@@ -65,6 +65,7 @@ gwk-adapter-claude = { path = "crates/gwk-adapter-claude" }
 gwk-adapter-codex = { path = "crates/gwk-adapter-codex" }
 gwk-adapter-opencode = { path = "crates/gwk-adapter-opencode" }
 gwk-cert = { path = "crates/gwk-cert", version = "0.0.3" }
+gwk-context = { path = "crates/gwk-context", version = "0.0.1" }
 gwk-domain = { path = "crates/gwk-domain", version = "0.0.3" }
 gwk-kernel = { path = "crates/gwk-kernel", version = "0.0.3" }
 # Path-only, no version: unpublished (`publish = false`), like the adapter
