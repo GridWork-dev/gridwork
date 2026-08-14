@@ -974,6 +974,14 @@ jobs:
             echo "typecheck: only ${checked} project files reached tsc — it is checking nothing" >&2
             exit 1
           fi
+      # Dead files, dead exports, dead dependencies. Wired here rather than
+      # left as a config file someone runs by hand, which is the state
+      # `typecheck` above was in. Its first run found a real dead export.
+      - name: knip
+        working-directory: site
+        run: |
+          set -euo pipefail
+          bun run knip
       - name: prove the freshness gate can fail (seeded violations)
         working-directory: site
         run: |
