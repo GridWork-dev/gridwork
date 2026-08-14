@@ -196,6 +196,19 @@ else
     echo "check-claims: published-version disagreement — README=[$(echo "$readme_versions" | tr '\n' ' ')] site=[$(echo "$site_versions" | tr '\n' ' ')]" >&2
     fail=1
   fi
+
+  # The THIRD surface, and the last one found: JSON-LD softwareVersion. It sat
+  # at 0.0.2 straight through the 0.0.3 release and neither the README nor the
+  # landing array could see it, because it is machine-readable metadata nobody
+  # reads by eye. It is also the surface where being wrong costs most — a
+  # crawler ingests it as a fact rather than weighing it as prose.
+  binver=$(grep -m1 -oE '^version = "[0-9]+\.[0-9]+\.[0-9]+"' crates/gridwork/Cargo.toml | grep -oE '[0-9.]+' || true)
+  if [ -z "$binver" ]; then
+    echo "check-claims: no version in crates/gridwork/Cargo.toml — cannot pin structured data" >&2
+    fail=1
+  else
+    need site/app/structured-data.tsx "softwareVersion: \"${binver//./\\.}\"" "JSON-LD softwareVersion $binver"
+  fi
 fi
 
 if [ "$fail" -ne 0 ]; then
