@@ -606,7 +606,7 @@ pub fn render(
     if is_selected && matches!(tier, ColorTier::Truecolor | ColorTier::Xterm256) {
         status_style = gwk_theme::SIGNAL
             .iter()
-            .find(|token| token.name == "selection")
+            .find(|token| token.name == "gws_selection")
             .map_or(status_style, |token| theme::token_style(token, tier));
     }
     let seq = state

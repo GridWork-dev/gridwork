@@ -166,7 +166,7 @@ pub fn put_columns(buf: &mut Buffer, area: Rect, y: u16, columns: &[(u16, &str)]
 /// are never-a-colour, so a rule is how a mock expresses a boundary.
 pub fn put_rule(buf: &mut Buffer, area: Rect, y: u16, tier: ColorTier) {
     let rule: String = "-".repeat(area.width.saturating_sub(2) as usize);
-    put(buf, area, 1, y, &rule, style("faint", tier));
+    put(buf, area, 1, y, &rule, style("gws_faint", tier));
 }
 
 /// The keybar shortens rather than vanishing — the one behaviour the
@@ -175,5 +175,12 @@ pub fn put_rule(buf: &mut Buffer, area: Rect, y: u16, tier: ColorTier) {
 pub fn put_keybar(buf: &mut Buffer, area: Rect, tier: ColorTier, wide: &str, narrow: &str) {
     let compact = area.width < 100;
     let keys = if compact { narrow } else { wide };
-    put(buf, area, 0, area.height - 1, keys, style("muted", tier));
+    put(
+        buf,
+        area,
+        0,
+        area.height - 1,
+        keys,
+        style("gws_muted", tier),
+    );
 }

@@ -71,7 +71,7 @@ gwk-kernel = { path = "crates/gwk-kernel", version = "0.0.3" }
 # crates that depend on it.
 gwk-pty = { path = "crates/gwk-pty" }
 gwk-text = { path = "crates/gwk-text" }
-gwk-theme = { path = "crates/gwk-theme", version = "0.0.3" }
+gwk-theme = { path = "crates/gwk-theme", version = "0.0.4" }
 # The installed `gw` binary carries the production terminal loop.
 gwk-tui = { path = "crates/gwk-tui", version = "0.0.2" }
 # The SAFE wrapper, not the raw `-sys` bindings: this workspace forbids

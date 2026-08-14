@@ -5,6 +5,12 @@
 //! (checked by `tools/check-theme-sync.sh` — token `name` maps to
 //! `--kebab-case`), the TUI theme, and the generated TypeScript contract.
 //!
+//! Every name carries the [`CSS_PREFIX`] namespace, because one of those three
+//! consumers is a stylesheet sharing a document with libraries that declare
+//! their own `--bg` and `--fg`. The prefix lives in the name rather than in the
+//! consumer that needs it, so all three read the same string and no consumer
+//! re-derives the mapping.
+//!
 //! These values are the ratified SIGNAL contract. A change here is a design
 //! decision, never drift.
 //!
@@ -82,30 +88,39 @@ pub struct Token {
     pub tier16: tier::Tier16,
 }
 
+/// The namespace every token name carries.
+///
+/// A token name is also a CSS custom-property name — `gws_hue_bright` is
+/// `--gws-hue-bright` — and the stylesheet that consumes them imports Fumadocs
+/// and Tailwind, both of which declare bare colour roles of their own. A bare
+/// `--bg` in that document is not this palette's `--bg`; it is whichever
+/// stylesheet loaded last.
+pub const CSS_PREFIX: &str = "gws";
+
 /// The SIGNAL palette.
 ///
 /// Twelve ratified tokens plus the three minted by ADR-0028 for the console's
-/// structural roles. `focus` carries `hue`'s value on purpose — it is minted as
-/// a distinct ROLE, not a distinct hex, and stays pinned there until a rendered
-/// console proves it must diverge. Names are unique; values are not required to
-/// be, because the contract is the role.
+/// structural roles. `gws_focus` carries `gws_hue`'s value on purpose — it is
+/// minted as a distinct ROLE, not a distinct hex, and stays pinned there until
+/// a rendered console proves it must diverge. Names are unique; values are not
+/// required to be, because the contract is the role.
 #[rustfmt::skip]
 pub const SIGNAL: &[Token] = &[
-    Token { name: "bg", value: "#070B10", role: "canvas background", index256: 232, tier16: Tier16::NotAColor },
-    Token { name: "surface", value: "#121A24", role: "raised surface", index256: 234, tier16: Tier16::NotAColor },
-    Token { name: "surface_2", value: "#1F2B3A", role: "second elevation", index256: 235, tier16: Tier16::NotAColor },
-    Token { name: "hue", value: "#6BDBFF", role: "accent", index256: 81, tier16: Tier16::Slot(AnsiSlot::BrightCyan) },
-    Token { name: "hue_dim", value: "#3FA8CC", role: "accent, dimmed", index256: 38, tier16: Tier16::Slot(AnsiSlot::Cyan) },
-    Token { name: "hue_bright", value: "#9AE8FF", role: "accent, bright", index256: 117, tier16: Tier16::BoldSlot(AnsiSlot::BrightCyan) },
-    Token { name: "fg", value: "#E4EDF5", role: "foreground text", index256: 255, tier16: Tier16::Reset },
-    Token { name: "faint", value: "#526274", role: "faint structure (decorative/hairline only — never text or essential UI)", index256: 59, tier16: Tier16::Dropped },
-    Token { name: "muted", value: "#9AA5AF", role: "muted text", index256: 248, tier16: Tier16::Slot(AnsiSlot::BrightBlack) },
-    Token { name: "warn", value: "#F2C14E", role: "warning", index256: 221, tier16: Tier16::Slot(AnsiSlot::BrightYellow) },
-    Token { name: "fail", value: "#FF6E6E", role: "failure", index256: 203, tier16: Tier16::Slot(AnsiSlot::BrightRed) },
-    Token { name: "ok", value: "#6EE7A8", role: "success", index256: 78, tier16: Tier16::Slot(AnsiSlot::BrightGreen) },
-    Token { name: "border", value: "#748496", role: "solid structural boundary", index256: 244, tier16: Tier16::Slot(AnsiSlot::White) },
-    Token { name: "focus", value: "#6BDBFF", role: "focused-pane / control indicator", index256: 81, tier16: Tier16::ReverseVideo },
-    Token { name: "selection", value: "#F5F9FD", role: "selected-row foreground", index256: 231, tier16: Tier16::ReverseVideo },
+    Token { name: "gws_bg", value: "#070B10", role: "canvas background", index256: 232, tier16: Tier16::NotAColor },
+    Token { name: "gws_surface", value: "#121A24", role: "raised surface", index256: 234, tier16: Tier16::NotAColor },
+    Token { name: "gws_surface_2", value: "#1F2B3A", role: "second elevation", index256: 235, tier16: Tier16::NotAColor },
+    Token { name: "gws_hue", value: "#6BDBFF", role: "accent", index256: 81, tier16: Tier16::Slot(AnsiSlot::BrightCyan) },
+    Token { name: "gws_hue_dim", value: "#3FA8CC", role: "accent, dimmed", index256: 38, tier16: Tier16::Slot(AnsiSlot::Cyan) },
+    Token { name: "gws_hue_bright", value: "#9AE8FF", role: "accent, bright", index256: 117, tier16: Tier16::BoldSlot(AnsiSlot::BrightCyan) },
+    Token { name: "gws_fg", value: "#E4EDF5", role: "foreground text", index256: 255, tier16: Tier16::Reset },
+    Token { name: "gws_faint", value: "#526274", role: "faint structure (decorative/hairline only — never text or essential UI)", index256: 59, tier16: Tier16::Dropped },
+    Token { name: "gws_muted", value: "#9AA5AF", role: "muted text", index256: 248, tier16: Tier16::Slot(AnsiSlot::BrightBlack) },
+    Token { name: "gws_warn", value: "#F2C14E", role: "warning", index256: 221, tier16: Tier16::Slot(AnsiSlot::BrightYellow) },
+    Token { name: "gws_fail", value: "#FF6E6E", role: "failure", index256: 203, tier16: Tier16::Slot(AnsiSlot::BrightRed) },
+    Token { name: "gws_ok", value: "#6EE7A8", role: "success", index256: 78, tier16: Tier16::Slot(AnsiSlot::BrightGreen) },
+    Token { name: "gws_border", value: "#748496", role: "solid structural boundary", index256: 244, tier16: Tier16::Slot(AnsiSlot::White) },
+    Token { name: "gws_focus", value: "#6BDBFF", role: "focused-pane / control indicator", index256: 81, tier16: Tier16::ReverseVideo },
+    Token { name: "gws_selection", value: "#F5F9FD", role: "selected-row foreground", index256: 231, tier16: Tier16::ReverseVideo },
 ];
 
 #[cfg(test)]
@@ -140,10 +155,34 @@ mod tests {
     }
 
     #[test]
+    fn every_name_carries_the_css_namespace() {
+        // The reason this is a test and not a convention: the collision it
+        // prevents is invisible from Rust. A token added as `link` compiles,
+        // renders correctly in every TUI tier, passes the swatch goldens, and
+        // then resolves in the browser to whatever Fumadocs or Tailwind last
+        // wrote to `--link`. The stylesheet is the only consumer that can be
+        // wrong about a name, and it is the one consumer with no compiler.
+        for token in SIGNAL {
+            let bare = token
+                .name
+                .strip_prefix(CSS_PREFIX)
+                // `gws_hue` yes, `gwsomething` no — the separator is the check.
+                .and_then(|rest| rest.strip_prefix('_'));
+            assert!(
+                bare.is_some_and(|name| !name.is_empty()),
+                "token {:?} is not namespaced: every name must be `{}_<role>`, \
+                 because the name IS the CSS custom property",
+                token.name,
+                CSS_PREFIX
+            );
+        }
+    }
+
+    #[test]
     fn faint_role_forbids_text_and_essential_ui() {
         let faint = SIGNAL
             .iter()
-            .find(|token| token.name == "faint")
+            .find(|token| token.name == "gws_faint")
             .expect("faint token");
         assert_eq!(
             faint.role,
@@ -166,7 +205,7 @@ mod tests {
                 .map(|token| token.value)
                 .expect("token")
         };
-        assert_eq!(value("focus"), value("hue"));
+        assert_eq!(value("gws_focus"), value("gws_hue"));
     }
 
     #[test]
@@ -175,7 +214,7 @@ mod tests {
         assert_eq!(
             json,
             serde_json::json!({
-                "name": "bg",
+                "name": "gws_bg",
                 "value": "#070B10",
                 "role": "canvas background",
                 "index256": 232,

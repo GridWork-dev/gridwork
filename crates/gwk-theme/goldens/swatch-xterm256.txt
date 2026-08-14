@@ -4,36 +4,36 @@ This file is the public mirror of the tier tables in the design record.
 Editing it by hand records a decision nobody made.
 
 TOKENS (15)
-  token        value     256  tier 16                     this tier
-  bg           #070B10   232  not a colour                unpainted
-  surface      #121A24   234  not a colour                unpainted
-  surface_2    #1F2B3A   235  not a colour                unpainted
-  hue          #6BDBFF    81  slot 14 bright_cyan         index 81
-  hue_dim      #3FA8CC    38  slot 6 cyan                 index 38
-  hue_bright   #9AE8FF   117  slot 14 bright_cyan + bold  index 117
-  fg           #E4EDF5   255  reset                       index 255
-  faint        #526274    59  dropped                     index 59
-  muted        #9AA5AF   248  slot 8 bright_black         index 248
-  warn         #F2C14E   221  slot 11 bright_yellow       index 221
-  fail         #FF6E6E   203  slot 9 bright_red           index 203
-  ok           #6EE7A8    78  slot 10 bright_green        index 78
-  border       #748496   244  slot 7 white                index 244
-  focus        #6BDBFF    81  reverse video               index 81
-  selection    #F5F9FD   231  reverse video               index 231
+  token           value     256  tier 16                     this tier
+  gws_bg          #070B10   232  not a colour                unpainted
+  gws_surface     #121A24   234  not a colour                unpainted
+  gws_surface_2   #1F2B3A   235  not a colour                unpainted
+  gws_hue         #6BDBFF    81  slot 14 bright_cyan         index 81
+  gws_hue_dim     #3FA8CC    38  slot 6 cyan                 index 38
+  gws_hue_bright  #9AE8FF   117  slot 14 bright_cyan + bold  index 117
+  gws_fg          #E4EDF5   255  reset                       index 255
+  gws_faint       #526274    59  dropped                     index 59
+  gws_muted       #9AA5AF   248  slot 8 bright_black         index 248
+  gws_warn        #F2C14E   221  slot 11 bright_yellow       index 221
+  gws_fail        #FF6E6E   203  slot 9 bright_red           index 203
+  gws_ok          #6EE7A8    78  slot 10 bright_green        index 78
+  gws_border      #748496   244  slot 7 white                index 244
+  gws_focus       #6BDBFF    81  reverse video               index 81
+  gws_selection   #F5F9FD   231  reverse video               index 231
 
 STATES (11)
-  state            mark              glyph  ascii  token       this tier
-  idle             idle              ⠄      .      muted       index 248
-  queued           queued            ⠒      :      muted       index 248
-  starting         starting          ⠉      ^      hue_dim     index 38
-  running          spinner           ⠋      -      hue         index 81
-  canceling        spinner_reversed  ⠆      ~      muted       index 248
-  needs_attention  attention         !      !      warn        index 221
-  blocked          blocked           ⊘      #      warn        index 221
-  failed           failed            ✗      X      fail        index 203
-  done             done              ✓      v      ok          index 78
-  canceled         canceled          ⊖      o      muted       index 248
-  unknown          unknown           ?      ?      warn        index 221
+  state            mark              glyph  ascii  token           this tier
+  idle             idle              ⠄      .      gws_muted       index 248
+  queued           queued            ⠒      :      gws_muted       index 248
+  starting         starting          ⠉      ^      gws_hue_dim     index 38
+  running          spinner           ⠋      -      gws_hue         index 81
+  canceling        spinner_reversed  ⠆      ~      gws_muted       index 248
+  needs_attention  attention         !      !      gws_warn        index 221
+  blocked          blocked           ⊘      #      gws_warn        index 221
+  failed           failed            ✗      X      gws_fail        index 203
+  done             done              ✓      v      gws_ok          index 78
+  canceled         canceled          ⊖      o      gws_muted       index 248
+  unknown          unknown           ?      ?      gws_warn        index 221
 
 IDENTITY MARKS (7)
   mark             glyph  ascii

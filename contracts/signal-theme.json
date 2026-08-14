@@ -1,27 +1,27 @@
 [
   {
-    "name": "bg",
+    "name": "gws_bg",
     "value": "#070B10",
     "role": "canvas background",
     "index256": 232,
     "tier16": "NotAColor"
   },
   {
-    "name": "surface",
+    "name": "gws_surface",
     "value": "#121A24",
     "role": "raised surface",
     "index256": 234,
     "tier16": "NotAColor"
   },
   {
-    "name": "surface_2",
+    "name": "gws_surface_2",
     "value": "#1F2B3A",
     "role": "second elevation",
     "index256": 235,
     "tier16": "NotAColor"
   },
   {
-    "name": "hue",
+    "name": "gws_hue",
     "value": "#6BDBFF",
     "role": "accent",
     "index256": 81,
@@ -30,7 +30,7 @@
     }
   },
   {
-    "name": "hue_dim",
+    "name": "gws_hue_dim",
     "value": "#3FA8CC",
     "role": "accent, dimmed",
     "index256": 38,
@@ -39,7 +39,7 @@
     }
   },
   {
-    "name": "hue_bright",
+    "name": "gws_hue_bright",
     "value": "#9AE8FF",
     "role": "accent, bright",
     "index256": 117,
@@ -48,21 +48,21 @@
     }
   },
   {
-    "name": "fg",
+    "name": "gws_fg",
     "value": "#E4EDF5",
     "role": "foreground text",
     "index256": 255,
     "tier16": "Reset"
   },
   {
-    "name": "faint",
+    "name": "gws_faint",
     "value": "#526274",
     "role": "faint structure (decorative/hairline only — never text or essential UI)",
     "index256": 59,
     "tier16": "Dropped"
   },
   {
-    "name": "muted",
+    "name": "gws_muted",
     "value": "#9AA5AF",
     "role": "muted text",
     "index256": 248,
@@ -71,7 +71,7 @@
     }
   },
   {
-    "name": "warn",
+    "name": "gws_warn",
     "value": "#F2C14E",
     "role": "warning",
     "index256": 221,
@@ -80,7 +80,7 @@
     }
   },
   {
-    "name": "fail",
+    "name": "gws_fail",
     "value": "#FF6E6E",
     "role": "failure",
     "index256": 203,
@@ -89,7 +89,7 @@
     }
   },
   {
-    "name": "ok",
+    "name": "gws_ok",
     "value": "#6EE7A8",
     "role": "success",
     "index256": 78,
@@ -98,7 +98,7 @@
     }
   },
   {
-    "name": "border",
+    "name": "gws_border",
     "value": "#748496",
     "role": "solid structural boundary",
     "index256": 244,
@@ -107,14 +107,14 @@
     }
   },
   {
-    "name": "focus",
+    "name": "gws_focus",
     "value": "#6BDBFF",
     "role": "focused-pane / control indicator",
     "index256": 81,
     "tier16": "ReverseVideo"
   },
   {
-    "name": "selection",
+    "name": "gws_selection",
     "value": "#F5F9FD",
     "role": "selected-row foreground",
     "index256": 231,

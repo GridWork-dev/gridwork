@@ -120,13 +120,13 @@ impl ChromeRole {
             // A hairline between panes is exactly the decorative structure
             // `border` names, and `faint` is the one step quieter for the
             // unfocused case if an operator wants it.
-            Self::PaneBorder => "border",
-            Self::PaneBorderFocused => "focus",
-            Self::PaneTitle => "fg",
-            Self::TabActive => "hue_bright",
-            Self::TabInactive => "muted",
-            Self::WorkspaceLabel => "hue",
-            Self::StatusBar => "muted",
+            Self::PaneBorder => "gws_border",
+            Self::PaneBorderFocused => "gws_focus",
+            Self::PaneTitle => "gws_fg",
+            Self::TabActive => "gws_hue_bright",
+            Self::TabInactive => "gws_muted",
+            Self::WorkspaceLabel => "gws_hue",
+            Self::StatusBar => "gws_muted",
         }
     }
 
@@ -384,8 +384,8 @@ mod tests {
 
     #[test]
     fn chrome_a_file_names_only_what_it_changes() {
-        let theme = ChromeTheme::parse_toml("tab_active = \"ok\"\n").expect("theme");
-        assert_eq!(theme.token(ChromeRole::TabActive).name, "ok");
+        let theme = ChromeTheme::parse_toml("tab_active = \"gws_ok\"\n").expect("theme");
+        assert_eq!(theme.token(ChromeRole::TabActive).name, "gws_ok");
         assert_eq!(
             theme.token(ChromeRole::PaneBorder).name,
             ChromeRole::PaneBorder.default_token(),
@@ -401,9 +401,14 @@ mod tests {
         // tokens — the property the whole slot rests on.
         for (text, expected) in [
             ("pane_border = \"#FF00FF\"", "no such Signal token"),
-            ("pane_border = \"bg\"", "elevation step"),
-            ("pane_border = \"surface_2\"", "elevation step"),
-            ("pane_edge = \"ok\"", "no such role"),
+            // An unprefixed name is now exactly as unknown as a hex literal.
+            // Worth pinning: the file is operator-written, so the rename made
+            // every existing chrome.toml refuse, and refusing loudly is the
+            // behaviour being relied on.
+            ("pane_border = \"hue\"", "no such Signal token"),
+            ("pane_border = \"gws_bg\"", "elevation step"),
+            ("pane_border = \"gws_surface_2\"", "elevation step"),
+            ("pane_edge = \"gws_ok\"", "no such role"),
             ("pane_border = 7", "must be given a token name"),
             ("pane_border = ", "not valid TOML"),
         ] {
@@ -433,15 +438,15 @@ mod tests {
     #[test]
     fn chrome_a_remapped_role_degrades_like_the_token_it_now_names() {
         let mut theme = ChromeTheme::signal();
-        theme.bind(ChromeRole::PaneTitle, "ok").expect("bind");
+        theme.bind(ChromeRole::PaneTitle, "gws_ok").expect("bind");
         for tier in ColorTier::ALL {
             assert_eq!(
                 theme.style(ChromeRole::PaneTitle, *tier),
                 theme::token_style(
                     gwk_theme::SIGNAL
                         .iter()
-                        .find(|token| token.name == "ok")
-                        .expect("ok"),
+                        .find(|token| token.name == "gws_ok")
+                        .expect("gws_ok"),
                     *tier
                 ),
                 "the remap diverged from the token at {}",

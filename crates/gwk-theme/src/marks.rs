@@ -186,20 +186,20 @@ pub struct StateBinding {
 /// The eleven states over ten expression marks.
 #[rustfmt::skip]
 pub const STATES: &[StateBinding] = &[
-    StateBinding { name: "idle",            mark: "idle",             token: "muted" },
-    StateBinding { name: "queued",          mark: "queued",           token: "muted" },
+    StateBinding { name: "idle",            mark: "idle",             token: "gws_muted" },
+    StateBinding { name: "queued",          mark: "queued",           token: "gws_muted" },
     // `starting` keeps `hue_dim` — it is still a live-but-not-yet-running
     // state and the dimmer accent reads correctly. What changed is that the
     // accent is no longer the ONLY thing separating it from `running`.
-    StateBinding { name: "starting",        mark: "starting",         token: "hue_dim" },
-    StateBinding { name: "running",         mark: "spinner",          token: "hue" },
-    StateBinding { name: "canceling",       mark: "spinner_reversed", token: "muted" },
-    StateBinding { name: "needs_attention", mark: "attention",        token: "warn" },
-    StateBinding { name: "blocked",         mark: "blocked",          token: "warn" },
-    StateBinding { name: "failed",          mark: "failed",           token: "fail" },
-    StateBinding { name: "done",            mark: "done",             token: "ok" },
-    StateBinding { name: "canceled",        mark: "canceled",         token: "muted" },
-    StateBinding { name: "unknown",         mark: "unknown",          token: "warn" },
+    StateBinding { name: "starting",        mark: "starting",         token: "gws_hue_dim" },
+    StateBinding { name: "running",         mark: "spinner",          token: "gws_hue" },
+    StateBinding { name: "canceling",       mark: "spinner_reversed", token: "gws_muted" },
+    StateBinding { name: "needs_attention", mark: "attention",        token: "gws_warn" },
+    StateBinding { name: "blocked",         mark: "blocked",          token: "gws_warn" },
+    StateBinding { name: "failed",          mark: "failed",           token: "gws_fail" },
+    StateBinding { name: "done",            mark: "done",             token: "gws_ok" },
+    StateBinding { name: "canceled",        mark: "canceled",         token: "gws_muted" },
+    StateBinding { name: "unknown",         mark: "unknown",          token: "gws_warn" },
 ];
 
 /// The mark named `name`, or `None`.

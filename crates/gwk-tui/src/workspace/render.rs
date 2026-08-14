@@ -655,7 +655,7 @@ mod tests {
     fn render_a_user_remap_reaches_the_furniture() {
         let mut chrome = ChromeTheme::signal();
         chrome
-            .bind(ChromeRole::PaneBorderFocused, "warn")
+            .bind(ChromeRole::PaneBorderFocused, "gws_warn")
             .expect("bind");
         let state = WorkspaceState::new();
         let mut buf = Buffer::empty(AREA);

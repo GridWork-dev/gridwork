@@ -783,7 +783,7 @@ test("signal theme: 15 tokens, crate order, hex values", async () => {
   const tokens = raw as B.Token[];
   expect(tokens).toHaveLength(15);
   expect(tokens[0]).toEqual({
-    name: "bg",
+    name: "gws_bg",
     value: "#070B10",
     role: "canvas background",
     index256: 232,

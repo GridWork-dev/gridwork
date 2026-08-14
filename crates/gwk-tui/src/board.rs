@@ -3166,7 +3166,7 @@ fn render_with_status(
     let selection_fg = match tier {
         ColorTier::Truecolor | ColorTier::Xterm256 => gwk_theme::SIGNAL
             .iter()
-            .find(|t| t.name == "selection")
+            .find(|t| t.name == "gws_selection")
             .map(|t| theme::token_style(t, tier)),
         ColorTier::Ansi16 | ColorTier::Mono => None,
     };
@@ -3174,7 +3174,7 @@ fn render_with_status(
     // of it: reverse video is the expression 16-colour and mono can carry.
     let accent_style = gwk_theme::SIGNAL
         .iter()
-        .find(|t| t.name == "selection")
+        .find(|t| t.name == "gws_selection")
         .map(|t| theme::token_style(t, tier))
         .unwrap_or_default()
         .add_modifier(Modifier::BOLD);
@@ -5246,7 +5246,7 @@ mod tests {
         let running_fg = theme::state_style(theme::binding("running"), ColorTier::Truecolor).fg;
         let selection_fg = gwk_theme::SIGNAL
             .iter()
-            .find(|t| t.name == "selection")
+            .find(|t| t.name == "gws_selection")
             .and_then(|t| theme::token_style(t, ColorTier::Truecolor).fg);
         assert!(
             running_fg.is_some() && selection_fg.is_some(),
