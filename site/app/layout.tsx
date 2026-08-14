@@ -54,8 +54,11 @@ export default function RootLayout({ children }: { children: ReactNode }) {
     // and the case where the script never runs.
     <html lang="en" className={mono.variable} suppressHydrationWarning>
       <head>
-        {/* Cookieless, aggregate-only. data-domain is the canonical host;
-            gridwork.dev 301s at the edge, so the origin only ever sees this one.
+        {/* Cookieless, aggregate-only. data-domain is the canonical host, and
+            it is the only host this app is served from — gridwork.dev is a
+            separate application, not a redirect here. The earlier version of
+            this comment claimed a 301 that does not exist; the tag was right
+            for a reason that was not.
 
             A plain tag, not next/script: afterInteractive injects the script
             client-side after hydration, so it never appears in the served HTML
