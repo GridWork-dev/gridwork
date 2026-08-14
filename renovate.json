@@ -1,0 +1,56 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Vendored copy of the house Renovate policy. The sibling repositories consume it as a shared preset; this one cannot — the preset lives in a private repository, and a public repo can neither name it (the leak scanner rejects private repo names, correctly) nor resolve it at Renovate runtime without credentials it will never have. Vendoring is the same call SPEC D3 already makes for the shared lint configs. Keep it in step by hand; the drift test belongs on the private side, which can name both repositories.",
+  "extends": ["config:recommended", ":semanticCommits", "helpers:pinGitHubActionDigests"],
+  "schedule": ["before 6am on monday"],
+  "timezone": "America/New_York",
+  "prConcurrentLimit": 5,
+  "prHourlyLimit": 0,
+  "rangeStrategy": "bump",
+  "labels": ["dependencies"],
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 6am on the first day of the month"]
+  },
+  "packageRules": [
+    {
+      "description": "Patch and minor bumps ride in automatically once CI is green. Here that means the single required context, verify, which aggregates 17 jobs.",
+      "matchUpdateTypes": ["patch", "minor"],
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": true
+    },
+    {
+      "description": "Majors are always a human decision.",
+      "matchUpdateTypes": ["major"],
+      "automerge": false,
+      "addLabels": ["major-bump"]
+    },
+    {
+      "description": "React and its types move together or the JSX types desync.",
+      "groupName": "react",
+      "matchPackageNames": ["react", "react-dom", "@types/react", "@types/react-dom"]
+    },
+    {
+      "description": "Next and its first-party plugins.",
+      "groupName": "next",
+      "matchPackageNames": ["next", "@next/**", "eslint-config-next"]
+    },
+    {
+      "description": "Action digest bumps are noisy individually and identical in risk.",
+      "groupName": "github actions",
+      "matchManagers": ["github-actions"]
+    },
+    {
+      "description": "The compiler pin is never automerged. site/ is scheduled to move to TypeScript 7, where installing a package named typescript at 7.x silently retargets JS-API consumers — a change that can pass every gate while checking nothing.",
+      "matchPackageNames": ["typescript", "tsc-native"],
+      "automerge": false,
+      "addLabels": ["major-bump"]
+    },
+    {
+      "description": "Rust dependency and MSRV changes stay human. The workspace pins its dependencies centrally and six crates sit outside default-members with their own CI jobs, so a cargo bump's blast radius is not visible from the diff.",
+      "matchManagers": ["cargo"],
+      "automerge": false
+    }
+  ]
+}

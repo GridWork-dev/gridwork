@@ -7,6 +7,7 @@
     "dev": "bun run assets:sync && next dev",
     "build": "bun run assets:sync && bun run check:docs && next build",
     "check:docs": "bun scripts/check-doc-freshness.ts",
+    "knip": "knip",
     "start": "node .next/standalone/server.js",
     "typecheck": "next typegen && tsc --noEmit",
     "postinstall": "fumadocs-mdx"
@@ -26,6 +27,7 @@
     "@types/node": "22.20.1",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.4",
+    "knip": "6.32.2",
     "postcss": "8.5.25",
     "tailwindcss": "4.3.3",
     "typescript": "5.9.3",
