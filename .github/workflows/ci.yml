@@ -961,11 +961,11 @@ jobs:
           # A green `tsc` is not evidence it read anything. An empty project
           # exits 0, and `site/` now runs TypeScript 7 — the Go port, which
           # ships no JavaScript compiler API, so every consumer that imported
-          # `typescript` as a library is retargeted by the bump alone. On
-          # next@16.2.12 that surfaced as a flat refusal, which is the good
-          # case; the same removal took another project's module graph from 151
-          # to 0 with exit 0 and no message. So count the files, and let the
-          # count decide.
+          # `typescript` as a library is retargeted by the bump alone. Next
+          # refused outright and needed `experimental.useTypeScriptCli`, which
+          # is the good case; the same removal took another project's module
+          # graph from 151 to 0 with exit 0 and no message. So count the files,
+          # and let the count decide.
           checked="$(bunx tsc --noEmit --listFiles |
             grep -v '/node_modules/' | grep -cv '/\.next/' || true)"
           # 21 today. The floor is deliberately far below that rather than
