@@ -3,7 +3,7 @@
   "pages": [
     {
       "destination": "content/docs/index.mdx",
-      "sha256": "32bab76c991f5f49fdf13927f74e78fded1b39b3a6c5ee7a192c2085554e029a",
+      "sha256": "dbb467b83a418699a27fa2d07cca2c9e547c118dfc719e7bfe8f9050cbd2698b",
       "sources": [
         {
           "path": "README.md"
@@ -12,7 +12,7 @@
     },
     {
       "destination": "content/docs/quickstart.mdx",
-      "sha256": "dad889402abee958129f19d7c734e25559c7099dd15f12665e11fb2ce67edfdf",
+      "sha256": "6911515d0d5a075957e3534cf0a91f17545cbe2eb3b831f43967ad8c49f60c9a",
       "sources": [
         {
           "path": "README.md"
@@ -105,7 +105,7 @@
     },
     {
       "destination": "content/docs/roadmap.mdx",
-      "sha256": "f1991dabad8a64ce20651138d52adebb9a00dea3f63a6be0cfcefc40716597f2",
+      "sha256": "8e3380d3f02714cefb74476fa1af9cdbab64ba163d973b7e0ab240aee947bb17",
       "sources": [
         {
           "path": "ROADMAP.md"
