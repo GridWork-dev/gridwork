@@ -54,7 +54,17 @@ export function StructuredData() {
     programmingLanguage: "Rust",
     license: "https://www.apache.org/licenses/LICENSE-2.0",
     isAccessibleForFree: true,
-    softwareVersion: "0.0.2",
+    // Pinned by tools/check-claims.sh C10 against crates/gridwork/Cargo.toml.
+    // This is the third surface to state the published version and the last one
+    // to be found: it sat at 0.0.2 through the 0.0.3 release because it is
+    // machine-readable metadata nobody reads by eye. It is also the surface
+    // where being wrong costs most — search engines and crawlers ingest it as
+    // fact, not as prose to be weighed.
+    softwareVersion: "0.0.3",
+    // datePublished is first publication, not this release — schema.org means
+    // the date the thing first existed, and it stays at gwk-domain 0.0.1's
+    // crates.io timestamp while softwareVersion moves. They look like a pair
+    // and are not one.
     datePublished: "2026-07-28",
     downloadUrl: "https://crates.io/crates/gridwork",
     documentation: absolute("/docs"),
