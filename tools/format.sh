@@ -29,4 +29,36 @@ if [ ! -x "$OXFMT" ]; then
   exit 2
 fi
 
-exec "$OXFMT" "$@" site contracts
+TREES=(site contracts)
+
+# The trees are named positionally, which is the kind of argument a rename breaks in
+# silence: oxfmt does not fail on a pattern that matches nothing, so a moved tree just
+# stops being formatted. Assert they are there rather than inferring it from a count —
+# dropping `contracts` costs 3 of 25 files, which no honest floor would catch.
+for tree in "${TREES[@]}"; do
+  if [ ! -d "$tree" ]; then
+    echo "format: '$tree' does not exist — the formatter is aimed at a tree that moved" >&2
+    exit 1
+  fi
+done
+
+# HOW MANY FILES DID IT ACTUALLY READ. `oxfmt --check` over a path matching nothing prints
+# "0 files" and exits 0 — measured, not assumed. So a green `--check` says either
+# "everything is formatted" or "the formatter was pointed at nothing", and the exit code
+# cannot tell them apart. This catches the other half: both trees present but emptied of
+# formattable files by a widened ignore list. The floor sits far below today's 25 because
+# the failure being guarded lands near zero.
+#
+# Not `exec`, therefore: the output has to be read before it is passed on. It is re-emitted
+# whole, and the real exit code is preserved.
+FMT_FLOOR="${FMT_FLOOR:-15}"
+out="$("$OXFMT" "$@" "${TREES[@]}" 2>&1)" && rc=0 || rc=$?
+printf '%s\n' "$out"
+
+read_files="$(printf '%s' "$out" | grep -o 'on [0-9]* files' | grep -o '[0-9]*' || true)"
+if [ "${read_files:-0}" -lt "$FMT_FLOOR" ]; then
+  echo "format: only ${read_files:-0} files reached oxfmt — it is checking nothing" >&2
+  exit 1
+fi
+
+exit "$rc"

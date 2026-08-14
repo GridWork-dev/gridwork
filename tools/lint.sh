@@ -21,14 +21,25 @@ if [ ! -x "$OXLINT" ]; then
   exit 2
 fi
 
-# House tooling assumes the conventional layout, where a repo root is itself a Bun project
-# and its binaries sit in <repo>/node_modules/.bin. This repo has no root package.json —
-# three independent projects share the checkout (.gridwork/project.toml) and oxlint is
-# pinned once, under site/. Link the conventional path at the real binary so shared tooling
-# resolves it without each copy being edited to look somewhere else, which is the fork D3
-# exists to prevent. `/node_modules/` is gitignored at the root for exactly this.
-mkdir -p node_modules/.bin
-ln -sfn ../../site/node_modules/.bin/oxlint node_modules/.bin/oxlint
+# HOW MANY FILES DID IT ACTUALLY READ. A clean exit is not evidence: oxlint over an empty
+# set exits 0 having linted nothing, and every way this gate rots — a widened
+# `ignorePatterns`, a moved tree, a config that fails to resolve — arrives disguised as a
+# green run. So the count is checked before the findings are, and the count decides.
+#
+# The probe is scoped to `.` regardless of the arguments below. The hole being guarded is
+# the gate case, where nobody passes a path; a developer linting one file already knows
+# what they aimed at.
+#
+# The floor is far below today's 20 rather than just under it: the failure being guarded
+# lands at zero or a handful, so a tight floor buys nothing and reds on ordinary churn.
+LINT_FLOOR="${LINT_FLOOR:-10}"
+read_files="$("$OXLINT" --format=json . | grep -o '"number_of_files": *[0-9]*' |
+  grep -o '[0-9]*$' || true)"
+echo "lint: oxlint read ${read_files:-0} files"
+if [ "${read_files:-0}" -lt "$LINT_FLOOR" ]; then
+  echo "lint: only ${read_files:-0} files reached oxlint — it is linting nothing" >&2
+  exit 1
+fi
 
 # `--report-unused-disable-directives` is what keeps the two `oxlint-disable-next-line`
 # directives in site/app/page.tsx honest. Both suppress jsx-a11y/no-noninteractive-tabindex
