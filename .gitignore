@@ -6,6 +6,10 @@
 /tools/leak-scan.local
 /docs/session-logs/
 /contracts/node_modules/
+# Not a Bun project — there is no root package.json. tools/lint.sh links
+# node_modules/.bin/oxlint here so that tooling expecting the conventional
+# repo-root layout resolves the binary that is actually installed under site/.
+/node_modules/
 # The pinned ghostty tree and its Zig package graph, materialized by the `pty`
 # CI job and by `just pty-toolchain` locally. Both are derived from
 # crates/gwk-pty/pins.env and never committed: 71 MB of source plus ~560 MB of

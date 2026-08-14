@@ -1,0 +1,50 @@
+{
+  // The house formatter floor (SPEC house-standards D2c). This file is COPIED VERBATIM
+  // into every repo — oxfmt has no `extends`, so uniformity is by identical bytes, not by
+  // inheritance. Changing it here means changing it in five places.
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+
+  // These ARE oxfmt's upstream defaults, pinned explicitly on purpose. oxfmt is beta; an
+  // upstream default change would otherwise reflow every file in the estate in whatever
+  // PR happened to bump it. Pinned, that shows up as a diff in this file instead.
+  "printWidth": 100,
+  "tabWidth": 2,
+  "useTabs": false,
+  "semi": true,
+  "singleQuote": false,
+  "trailingComma": "all",
+  "bracketSpacing": true,
+  "insertFinalNewline": true,
+
+  // On by default. Kept on — it is the one opinion here that touches non-source files,
+  // and turning it off later is a smaller diff than turning it on later.
+  "sortPackageJson": true,
+
+  // `sortImports` is off by default and stays off. Turning it on rewrites the import
+  // block of every file in the estate for zero correctness gain, and it churns the
+  // module-graph gate's diffs.
+  //
+  // Native Rust covers JS/JSX/TS/TSX/JSON/JSONC/JSON5/CSS/SCSS/Less/GraphQL/TOML.
+  // HTML/Vue/Svelte/Markdown/MDX/YAML are handed to a bundled Prettier — correct output,
+  // no speed win. Markdown is excluded below outright: the docs here are hand-wrapped
+  // prose and reflowing them is churn.
+  // `**/*.generated.*` and `tools/gwk-cutover/**` are LOAD-BEARING, not tidiness: the
+  // vendored public binding is SHA-256-pinned byte-for-byte against its upstream copy
+  // (tests/lint/gwk-public-rev-pin.test.ts). The adoption reflow rewrote it and the guard
+  // went red — which is the guard working. A formatter must never touch a file whose
+  // bytes are the contract.
+  "ignorePatterns": [
+    "**/*.md",
+    "**/*.generated.ts",
+    "**/*.generated.json",
+    "tools/gwk-cutover/**",
+    "**/dist/**",
+    "**/.next/**",
+    "**/node_modules/**",
+    "archive/**",
+    "spikes/*/vendor/**",
+    "knowledge/**",
+    "outputs/**",
+    "docs/**"
+  ]
+}

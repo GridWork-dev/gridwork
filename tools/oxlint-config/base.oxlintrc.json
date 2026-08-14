@@ -1,0 +1,78 @@
+{
+  // @gridwork/oxlint-config — the house lint floor (SPEC house-standards D2b).
+  //
+  // oxlint rejects unknown top-level fields, so annotation goes in comments, not in
+  // "//" keys. It parses comments in .json as well as .jsonc.
+  "$schema": "../../node_modules/oxlint/configuration_schema.json",
+
+  // TRAP: setting `plugins` OVERRIDES oxlint's defaults entirely. `unicorn`,
+  // `typescript`, and `oxc` are on by default and vanish the moment this key exists, so
+  // all three are re-listed here. Never trim this array to "just what we add".
+  "plugins": ["unicorn", "typescript", "oxc"],
+
+  // Resolved relative to THIS file, so a consumer repo can `extends` it from
+  // node_modules and the plugin still loads.
+  "jsPlugins": ["./plugin.js"],
+
+  // `correctness` is oxlint's default category and the only one the house floor enables.
+  // The deep type-safety gate is `tsc --strict`, which every repo already runs;
+  // pedantic/style are per-repo taste, not a house rule.
+  "categories": { "correctness": "error" },
+
+  "rules": {
+    // The security floor (identity/security.md), as plugin rules — oxlint has no native
+    // no-restricted-syntax / no-restricted-properties.
+    "gridwork/no-interpolated-exec": "error",
+    "gridwork/no-abortsignal-timeout": "error",
+    // Opt-in: a repo that must also run on Node turns this on locally.
+    "gridwork/no-bun-runtime-only-apis": "off",
+
+    // The coding-discipline floor (identity/coding-discipline.md) — what tsc misses.
+    "no-console": "error",
+    "typescript/no-explicit-any": "error",
+    "typescript/consistent-type-imports": "error",
+    "no-unused-vars": [
+      "error",
+      {
+        "argsIgnorePattern": "^_",
+        "varsIgnorePattern": "^_",
+        "caughtErrorsIgnorePattern": "^_"
+      }
+    ]
+  },
+
+  "overrides": [
+    {
+      // Test harnesses print diagnostics and construct deliberately unsafe input — a
+      // security eval's golden fixture is REQUIRED to contain the violation it grades.
+      // `identity/security.md` already names this carve-out ("test files exercising
+      // deliberately unsafe input").
+      "files": [
+        "**/*.test.ts",
+        "**/*.test.tsx",
+        "**/__fixtures__/**",
+        "**/__golden__/**",
+        "**/fixtures/**",
+        "**/tests/**"
+      ],
+      "rules": {
+        "no-console": "off",
+        "gridwork/no-interpolated-exec": "off",
+        "gridwork/no-abortsignal-timeout": "off",
+        // A malformed request is the subject of the assertion, not a defect.
+        "unicorn/no-invalid-fetch-options": "off",
+        // `(init?.signal as AbortSignal)` in a mock: the test IS the null check.
+        "no-unsafe-optional-chaining": "off",
+        // Common in stdout-capture helpers; the executor's rejection path is unused.
+        "no-async-promise-executor": "off"
+      }
+    },
+    {
+      // CLI entrypoints and generators legitimately write to stdout.
+      "files": ["**/bin/**", "**/scripts/**", "**/*.cli.ts", "**/cli.ts", "**/gate.ts"],
+      "rules": { "no-console": "off" }
+    }
+  ],
+
+  "ignorePatterns": ["**/dist/**", "**/.next/**", "**/*.d.ts", "**/node_modules/**"]
+}
