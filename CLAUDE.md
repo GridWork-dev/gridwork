@@ -31,11 +31,14 @@ the two permitted sources, and `docs/derivation/SPECS.md` is the registry of the
 
 ## Gates that fail in ways you will misread
 
-**`./tools/cleanroom-gate.sh` reads a diff on stdin.** Run bare, it inspects nothing
-and prints a clean verdict for any change at all. Give it the real thing:
+**`./tools/cleanroom-gate.sh` reads a changed-path list on stdin** — one path per line,
+not a diff. Run bare it inspects nothing and prints a clean verdict for any change at
+all, and piping it a full unified diff fails the same way for the same reason: not one
+line of that is a path it can match, so it reports `clean — no engine-adjacent paths
+touched` for a change that touches them. Give it the real thing:
 
 ```bash
-git diff --cached --no-renames | ./tools/cleanroom-gate.sh
+git diff --cached --no-renames --name-only | ./tools/cleanroom-gate.sh
 ```
 
 **Never `--workspace` or `--all-features` on cargo.** Six crates are outside
