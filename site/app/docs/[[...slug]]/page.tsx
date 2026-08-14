@@ -1,12 +1,7 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { createRelativeLink } from "fumadocs-ui/mdx";
-import {
-  DocsBody,
-  DocsDescription,
-  DocsPage,
-  DocsTitle,
-} from "fumadocs-ui/layouts/docs/page";
+import { DocsBody, DocsDescription, DocsPage, DocsTitle } from "fumadocs-ui/layouts/docs/page";
 
 import { getMDXComponents } from "@/components/mdx";
 import sourceMap from "@/content/source-map.json";
@@ -14,8 +9,7 @@ import { source } from "@/lib/source";
 
 export const dynamicParams = false;
 
-const canonicalSourceBase =
-  "https://github.com/GridWork-dev/gridwork/blob/main/";
+const canonicalSourceBase = "https://github.com/GridWork-dev/gridwork/blob/main/";
 
 function canonicalSourceHref(path: string): string {
   const encodedPath = path.split("/").map(encodeURIComponent).join("/");
@@ -29,9 +23,7 @@ export default async function Page(props: PageProps<"/docs/[[...slug]]">) {
 
   const MDX = page.data.body;
   const destination = `content/docs/${page.path}`;
-  const provenance = sourceMap.pages.find(
-    (entry) => entry.destination === destination,
-  );
+  const provenance = sourceMap.pages.find((entry) => entry.destination === destination);
   if (!provenance) {
     throw new Error(`missing canonical sources for ${destination}`);
   }
@@ -52,9 +44,7 @@ export default async function Page(props: PageProps<"/docs/[[...slug]]">) {
         <ul>
           {provenance.sources.map((canonicalSource) => (
             <li key={canonicalSource.path}>
-              <a href={canonicalSourceHref(canonicalSource.path)}>
-                {canonicalSource.path}
-              </a>
+              <a href={canonicalSourceHref(canonicalSource.path)}>{canonicalSource.path}</a>
             </li>
           ))}
         </ul>
@@ -67,9 +57,7 @@ export function generateStaticParams() {
   return source.generateParams();
 }
 
-export async function generateMetadata(
-  props: PageProps<"/docs/[[...slug]]">,
-): Promise<Metadata> {
+export async function generateMetadata(props: PageProps<"/docs/[[...slug]]">): Promise<Metadata> {
   const params = await props.params;
   const page = source.getPage(params.slug);
   if (!page) notFound();

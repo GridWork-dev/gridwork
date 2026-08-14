@@ -1,7 +1,6 @@
 {
   "name": "@gridwork/site",
   "private": true,
-  "packageManager": "bun@1.3.14",
   "scripts": {
     "assets:sync": "bun scripts/sync-public-assets.ts",
     "dev": "bun run assets:sync && next dev",
@@ -34,5 +33,6 @@
     "tailwindcss": "4.3.3",
     "typescript": "5.9.3",
     "vite": "8.1.5"
-  }
+  },
+  "packageManager": "bun@1.3.14"
 }

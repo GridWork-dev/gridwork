@@ -3,28 +3,29 @@
 @import "fumadocs-ui/css/preset.css";
 
 :root {
-  --bg:#070B10;
-  --surface:#121A24;
-  --surface-2:#1F2B3A;
-  --hue:#6BDBFF;
-  --hue-dim:#3FA8CC;
-  --hue-bright:#9AE8FF;
-  --fg:#E4EDF5;
-  --faint:#526274;
-  --muted:#9AA5AF;
-  --warn:#F2C14E;
-  --fail:#FF6E6E;
-  --ok:#6EE7A8;
-  --border:#748496;
-  --focus:#6BDBFF;
-  --selection:#F5F9FD;
+  --bg: #070b10;
+  --surface: #121a24;
+  --surface-2: #1f2b3a;
+  --hue: #6bdbff;
+  --hue-dim: #3fa8cc;
+  --hue-bright: #9ae8ff;
+  --fg: #e4edf5;
+  --faint: #526274;
+  --muted: #9aa5af;
+  --warn: #f2c14e;
+  --fail: #ff6e6e;
+  --ok: #6ee7a8;
+  --border: #748496;
+  --focus: #6bdbff;
+  --selection: #f5f9fd;
 
   --line: rgba(82, 98, 116, 0.34);
   --line-hi: rgba(82, 98, 116, 0.58);
   --lift: inset 0 1px 0 rgba(154, 232, 255, 0.055);
-  --mono: var(--font-signal), ui-monospace, SFMono-Regular, "SF Mono", Menlo,
-    Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-  --ease: cubic-bezier(.44, 0, .56, 1);
+  --mono:
+    var(--font-signal), ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas,
+    "Liberation Mono", "Courier New", monospace;
+  --ease: cubic-bezier(0.44, 0, 0.56, 1);
   --r: 6px;
   --r-sm: 4px;
   --r-xs: 3px;
@@ -184,11 +185,13 @@ samp {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
+  *,
+  *::before,
+  *::after {
     scroll-behavior: auto !important;
-    animation-duration: .01ms !important;
+    animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
-    transition-duration: .01ms !important;
+    transition-duration: 0.01ms !important;
   }
 }
 

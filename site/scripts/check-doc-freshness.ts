@@ -42,27 +42,36 @@ const siteRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = resolve(siteRoot, "..");
 const docsRoot = resolve(siteRoot, "content/docs");
 
-const safeRelativePath = z.string().trim().min(1).max(240).refine(
-  (value) =>
-    !isAbsolute(value) &&
-    !value.includes("\0") &&
-    !value.split(/[\\/]/).includes(".."),
-  "path must be a bounded relative path without parent traversal",
-);
+const safeRelativePath = z
+  .string()
+  .trim()
+  .min(1)
+  .max(240)
+  .refine(
+    (value) => !isAbsolute(value) && !value.includes("\0") && !value.split(/[\\/]/).includes(".."),
+    "path must be a bounded relative path without parent traversal",
+  );
 
-const sourceMapSchema = z.object({
-  version: z.literal(2),
-  pages: z.array(z.object({
-    destination: safeRelativePath.regex(/^content\/docs\/.+\.mdx$/),
-    sha256: z.string().regex(/^[a-f0-9]{64}$/),
-    sources: z.array(z.object({ path: safeRelativePath }).strict()).min(1),
-  }).strict()).min(1),
-}).strict();
+const sourceMapSchema = z
+  .object({
+    version: z.literal(2),
+    pages: z
+      .array(
+        z
+          .object({
+            destination: safeRelativePath.regex(/^content\/docs\/.+\.mdx$/),
+            sha256: z.string().regex(/^[a-f0-9]{64}$/),
+            sources: z.array(z.object({ path: safeRelativePath }).strict()).min(1),
+          })
+          .strict(),
+      )
+      .min(1),
+  })
+  .strict();
 
 // One binding per line, anywhere in the page (curation puts them right after
 // the frontmatter). MDX renders the comment as nothing.
-const bindingPattern =
-  /\{\/\*\s*curated-from:\s+(\S+)\s+sha256=([a-f0-9]{64})\s*\*\/\}/g;
+const bindingPattern = /\{\/\*\s*curated-from:\s+(\S+)\s+sha256=([a-f0-9]{64})\s*\*\/\}/g;
 
 function resolveInside(root: string, relativePath: string): string {
   const absolutePath = resolve(root, relativePath);
@@ -116,9 +125,7 @@ async function main(): Promise<void> {
     }
     mappedDestinations.add(page.destination);
 
-    const destinationBytes = await readFile(
-      resolveInside(siteRoot, page.destination),
-    );
+    const destinationBytes = await readFile(resolveInside(siteRoot, page.destination));
     const destinationHash = sha256Bytes(destinationBytes);
     if (destinationHash !== page.sha256) {
       throw new Error(
@@ -129,11 +136,12 @@ async function main(): Promise<void> {
       );
     }
 
-    const bindings = [...destinationBytes.toString("utf8").matchAll(bindingPattern)]
-      .map((match) => ({
+    const bindings = [...destinationBytes.toString("utf8").matchAll(bindingPattern)].map(
+      (match) => ({
         path: safeRelativePath.parse(match[1]),
         sha256: match[2] as string,
-      }));
+      }),
+    );
     if (bindings.length === 0) {
       throw new Error(
         `${page.destination} declares no curated-from binding — every mirror ` +
