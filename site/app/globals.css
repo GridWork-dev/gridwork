@@ -58,6 +58,75 @@
   --shadow-2xl: none;
 }
 
+/* SIGNAL at light polarity — `gwk_theme::SIGNAL_LIGHT`, same fifteen roles, and
+   also crate-owned. Declared twice on purpose, and both are load-bearing:
+
+     @media   honours the reader's OS setting with no JavaScript, which is what
+              renders before hydration and what a reader with JS off ever sees.
+     [data-theme]  honours an explicit choice, which the media query cannot —
+              a reader who wants dark on a light laptop has no other way in.
+
+   The `:not([data-theme="dark"])` guard is what keeps them from fighting: an
+   explicit dark choice must survive a light OS.
+
+   `gws-hue-bright` is the DARKEST cyan here. The role is `accent, bright`,
+   meaning most emphasis — on a near-white ground that is darker, not lighter.
+   `gwk-theme`'s `emphasis_runs_the_same_direction_in_both_polarities` pins it.
+
+   The derived three keep their dark alphas: over the light `faint` those same
+   0.34/0.58 land within 0.03 of dark's hairline weight, measured. `lift` is the
+   exception and inverts — a raised edge catches light, so on a light ground the
+   highlight is near-white rather than cyan. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --gws-bg: #f7f9fc;
+    --gws-surface: #ecf1f6;
+    --gws-surface-2: #dee6ee;
+    --gws-hue: #08657d;
+    --gws-hue-dim: #2c6b7e;
+    --gws-hue-bright: #054c60;
+    --gws-fg: #0a1018;
+    --gws-faint: #97a5b4;
+    --gws-muted: #45525f;
+    --gws-warn: #7f5300;
+    --gws-fail: #a0201b;
+    --gws-ok: #0a6338;
+    --gws-border: #6e7e8f;
+    --gws-focus: #08657d;
+    --gws-selection: #04090e;
+
+    --gws-line: rgba(151, 165, 180, 0.34);
+    --gws-line-hi: rgba(151, 165, 180, 0.58);
+    --gws-lift: inset 0 1px 0 rgba(247, 249, 252, 0.9);
+
+    color-scheme: light;
+  }
+}
+
+:root[data-theme="light"] {
+  --gws-bg: #f7f9fc;
+  --gws-surface: #ecf1f6;
+  --gws-surface-2: #dee6ee;
+  --gws-hue: #08657d;
+  --gws-hue-dim: #2c6b7e;
+  --gws-hue-bright: #054c60;
+  --gws-fg: #0a1018;
+  --gws-faint: #97a5b4;
+  --gws-muted: #45525f;
+  --gws-warn: #7f5300;
+  --gws-fail: #a0201b;
+  --gws-ok: #0a6338;
+  --gws-border: #6e7e8f;
+  --gws-focus: #08657d;
+  --gws-selection: #04090e;
+
+  --gws-line: rgba(151, 165, 180, 0.34);
+  --gws-line-hi: rgba(151, 165, 180, 0.58);
+  --gws-lift: inset 0 1px 0 rgba(247, 249, 252, 0.9);
+
+  color-scheme: light;
+}
+
 @theme inline {
   --color-background: var(--gws-bg);
   --color-foreground: var(--gws-fg);
@@ -68,7 +137,13 @@
   --font-mono: var(--gws-mono);
 }
 
-/* Keep every Fumadocs color role inside the approved SIGNAL bridge. */
+/* Keep every Fumadocs color role inside the approved SIGNAL bridge.
+   Every mapping is a token reference rather than a hex, so this one block
+   re-bridges both polarities — Fumadocs' own light palette in `default-colors.css`
+   sits on `@theme` (which compiles to `:root`) and its dark palette on `.dark`,
+   and both are shadowed here. `html.dark` is kept alongside `:root` because
+   `.dark` from the vendor beats a bare `:root` on source order alone; the
+   class selector settles it in the one case that matters. */
 :root,
 html.dark {
   --color-fd-background: var(--gws-bg);
@@ -99,7 +174,11 @@ html.dark {
   --color-fd-diff-add-symbol: var(--gws-hue);
 }
 
-/* neutral.css gives this region a more specific local palette. */
+/* neutral.css gives this region a more specific local palette, but only under
+   `.dark`. Both selectors are needed and neither is redundant: the vendor's
+   `.dark #nd-sidebar` outranks a bare `#nd-sidebar` on specificity, so dark
+   needs the class; light has no vendor rule at all, so it needs the bare one. */
+#nd-sidebar,
 html.dark #nd-sidebar {
   --color-fd-muted: var(--gws-surface);
   --color-fd-secondary: var(--gws-surface-2);
@@ -110,7 +189,6 @@ html,
 body {
   background-color: var(--gws-bg);
   color: var(--gws-fg);
-  color-scheme: dark;
 }
 
 html {
@@ -1157,7 +1235,11 @@ samp {
   position: absolute;
   inset-block-start: -0.25em;
   inset-inline: 0;
-  color: rgba(82, 98, 116, 0.18);
+  /* The one hardcoded colour this file had left, and it was the DARK `faint`
+     literal — invisible while there was only one theme, wrong the moment there
+     were two. `check-theme-sync.sh` cannot see it: it reads custom-property
+     declarations, and this was a value inside a rule. */
+  color: color-mix(in srgb, var(--gws-faint) 18%, transparent);
   font-size: clamp(2.5rem, 9vw, 6.5rem);
   line-height: 1;
   letter-spacing: 0.14em;
