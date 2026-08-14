@@ -3,7 +3,7 @@
   "pages": [
     {
       "destination": "content/docs/index.mdx",
-      "sha256": "f892f34d82e795f2d251492c9479e80c0531e75f852e579a042cd35616ac4ee5",
+      "sha256": "32bab76c991f5f49fdf13927f74e78fded1b39b3a6c5ee7a192c2085554e029a",
       "sources": [
         {
           "path": "README.md"
@@ -12,7 +12,7 @@
     },
     {
       "destination": "content/docs/quickstart.mdx",
-      "sha256": "5f7c6d2bdb976acc3e4a48603104baa025e928bb622b6a03f6812aa1ffa092ca",
+      "sha256": "dad889402abee958129f19d7c734e25559c7099dd15f12665e11fb2ce67edfdf",
       "sources": [
         {
           "path": "README.md"
@@ -39,7 +39,7 @@
     },
     {
       "destination": "content/docs/parity.mdx",
-      "sha256": "bc358c507018380a4aaa435bcf83514e0616ac6187bded7c193f113ad203b0c2",
+      "sha256": "5933339bbf02e1d582ad2e590b8d01e818de15aad0f5f1fe18d2ed1f5133d897",
       "sources": [
         {
           "path": "docs/PARITY.md"

@@ -193,6 +193,20 @@ and opencode 1.18.3. The runner reported `all_green: true`:
 | claude | pass | pass | pass | pass |
 | codex | pass | pass | pass | pass |
 
+**One green cell contains a declared gap, and the table cannot show it.** Cells
+are engine × axis, so `claude / lifecycle` is a single verdict over four facts:
+start, idle, error, end. Three are observed. The fourth is the known gap in Axis
+1 above — `gwk-adapter-claude` models the `PreToolUse` hook and not `Stop`, so
+idle is never reported, and `a_result_is_the_end_and_not_also_idle` pins it so
+the gap cannot be closed by conflating two different facts.
+
+The runner's `all_green: true` stays quoted verbatim: this section is the record
+of a run, and editing a record to reflect a later reading is how a record stops
+being one. What the record cannot carry on its own is that a cell's granularity
+is coarser than its axis, so it is written beside it instead. The matrix should
+not be cited as twelve-for-twelve without this paragraph arriving in the same
+breath — which is the whole reason it sits here rather than in a footnote.
+
 ## What the matrix does not measure
 
 Style truth — colors, attributes, animation cadence, wide-glyph rendering. The
