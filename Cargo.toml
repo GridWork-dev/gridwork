@@ -8,6 +8,18 @@ members = ["crates/*", "xtask"]
 # in. The `pty` CI job runs clippy and tests for it explicitly, so it loses no
 # coverage — it just gets its own lane.
 #
+# Four more crates are excluded for the same reason one step removed, and until
+# now that reason lived only in a ci.yml step comment — which is the wrong place
+# for it, because this list is where someone looks to find out why their crate
+# is not building. `gwk-adapter-claude`, `gwk-adapter-codex` and
+# `gwk-adapter-opencode` each take `gwk-pty.workspace = true`, so they inherit
+# the Zig toolchain transitively; `gwk-parity` depends on all three. Adding any
+# of them here would drag the 71 MB tree back into every default build, which is
+# exactly what excluding `gwk-pty` was for. Each has its own CI lane.
+#
+# So the excluded set is six: `gwk-pty` (Zig directly), `gwk-pty-host` (policy),
+# and those four (Zig transitively).
+#
 # Consequence to know before adding a crate: a new `crates/*` entry is a member
 # but NOT a default member unless it is listed here. `gwk-pty-host` is the
 # newest crate absent from this list — no Zig requirement itself yet, kept out
@@ -72,9 +84,9 @@ gwk-kernel = { path = "crates/gwk-kernel", version = "0.0.3" }
 # crates that depend on it.
 gwk-pty = { path = "crates/gwk-pty" }
 gwk-text = { path = "crates/gwk-text" }
-gwk-theme = { path = "crates/gwk-theme", version = "0.0.5" }
+gwk-theme = { path = "crates/gwk-theme", version = "0.0.3" }
 # The installed `gw` binary carries the production terminal loop.
-gwk-tui = { path = "crates/gwk-tui", version = "0.0.2" }
+gwk-tui = { path = "crates/gwk-tui", version = "0.0.3" }
 # The SAFE wrapper, not the raw `-sys` bindings: this workspace forbids
 # `unsafe_code`, so raw FFI would not compile here at all. Exact-pinned because
 # libghostty-vt is pre-1.0 and its own docs promise breaking changes — a caret

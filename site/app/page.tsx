@@ -47,33 +47,39 @@ const crates = [
     "gwk-domain",
     "https://docs.rs/gwk-domain",
     "Shared types, events, state machines — the contract",
-    "0.0.2",
+    "0.0.3",
   ],
   [
     "gwk-cert",
     "https://docs.rs/gwk-cert",
     "Stream checker, plus the storage suite a backend runs against its own event store",
-    "0.0.2",
+    "0.0.3",
   ],
   [
     "gwk-theme",
     "https://docs.rs/gwk-theme",
     "The 15 SIGNAL design tokens — one source for the site, the TUI, and the generated TypeScript",
-    "0.0.2",
+    "0.0.3",
   ],
   [
     "gwk-kernel",
     "https://docs.rs/gwk-kernel",
     "Daemon: event store, projections, blobs, attention, authority, the wire",
-    "0.0.2",
+    "0.0.3",
+  ],
+  [
+    "gwk-tui",
+    "https://docs.rs/gwk-tui",
+    "The client: modes, five lenses, palette — the console the installed binary renders",
+    "0.0.3",
   ],
   [
     "gridwork",
     "https://docs.rs/gridwork",
     "Ships the gw binary — the CLI that speaks the kernel's protocol",
-    "0.0.2",
+    "0.0.3",
   ],
-  ["gwk", "https://docs.rs/gwk", "Namespace root for the gwk-* crates. No API", "0.0.2, name only"],
+  ["gwk", "https://docs.rs/gwk", "Namespace root for the gwk-* crates. No API", "0.0.3, name only"],
   ["xtask", null, "Codegen and release glue. Not published", "in-tree"],
   [
     "gwk-pty",
@@ -99,12 +105,6 @@ const crates = [
     null,
     "Pure column arithmetic and extended grapheme boundaries",
     "in tree, unpublished",
-  ],
-  [
-    "gwk-tui",
-    null,
-    "The client: modes, lenses, palette",
-    "in tree, unpublished — five lenses and the live estate runtime",
   ],
 ] as const;
 

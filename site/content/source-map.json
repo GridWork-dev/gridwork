@@ -3,7 +3,7 @@
   "pages": [
     {
       "destination": "content/docs/index.mdx",
-      "sha256": "f892f34d82e795f2d251492c9479e80c0531e75f852e579a042cd35616ac4ee5",
+      "sha256": "dbb467b83a418699a27fa2d07cca2c9e547c118dfc719e7bfe8f9050cbd2698b",
       "sources": [
         {
           "path": "README.md"
@@ -12,7 +12,7 @@
     },
     {
       "destination": "content/docs/quickstart.mdx",
-      "sha256": "5f7c6d2bdb976acc3e4a48603104baa025e928bb622b6a03f6812aa1ffa092ca",
+      "sha256": "6911515d0d5a075957e3534cf0a91f17545cbe2eb3b831f43967ad8c49f60c9a",
       "sources": [
         {
           "path": "README.md"
@@ -39,7 +39,7 @@
     },
     {
       "destination": "content/docs/parity.mdx",
-      "sha256": "bc358c507018380a4aaa435bcf83514e0616ac6187bded7c193f113ad203b0c2",
+      "sha256": "5933339bbf02e1d582ad2e590b8d01e818de15aad0f5f1fe18d2ed1f5133d897",
       "sources": [
         {
           "path": "docs/PARITY.md"
@@ -105,7 +105,7 @@
     },
     {
       "destination": "content/docs/roadmap.mdx",
-      "sha256": "f1991dabad8a64ce20651138d52adebb9a00dea3f63a6be0cfcefc40716597f2",
+      "sha256": "8e3380d3f02714cefb74476fa1af9cdbab64ba163d973b7e0ab240aee947bb17",
       "sources": [
         {
           "path": "ROADMAP.md"

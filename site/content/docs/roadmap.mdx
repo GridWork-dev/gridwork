@@ -3,7 +3,7 @@ title: Roadmap
 description: Six ordered stages to GridWork 1.0, with shipped, current, and planned work stated separately.
 ---
 
-{/* curated-from: ROADMAP.md sha256=ad2f87feb9f1e160da9649a1545d3d901e45fb4953425520e06666fd65fa1ac6 */}
+{/* curated-from: ROADMAP.md sha256=840a1ea2b8402eb055a82adf150be3c010505b25fb4a46d5b06ed3a517c23645 */}
 
 GridWork is built in public, pre-1.0. Stages land in order, and each stage exits with
 working, tested code — there are no aspirational branches.
@@ -14,7 +14,8 @@ No dates. A stage is done when its gates are green, not when a calendar says so.
 
 The shared language everything else speaks. Published to crates.io under Apache-2.0 with
 live docs.rs pages — five crates at 0.0.1, six at 0.0.2 once the kernel itself went up,
-which is what made `cargo install gridwork` work.
+which is what made `cargo install gridwork` work, and seven at 0.0.3 once `gwk-tui` went
+up, which is what made that command deliver the console as well as the CLI.
 
 - Domain types, event schemas, and four state machines in `gwk-domain`. Each machine is
   an enum plus a fixed edge table, and the table *is* the contract: terminality is

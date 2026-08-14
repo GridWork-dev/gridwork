@@ -37,7 +37,9 @@ allowed to do that. GridWork is an operating layer for a fleet of terminal agent
 
 Pre-alpha, at stage 5 of 6. **Stages 1–4 — the contract, the kernel, the
 engines, and the console — are done**: the first two published on crates.io, stage 3
-exiting with its twelve-cell parity matrix certified green at pinned engine versions
+exiting with its twelve-cell parity matrix certified green at pinned engine versions —
+green with one declared gap inside a green cell, because the matrix's cells are engine
+× axis and Claude's idle fact is not adapted
 ([docs/PARITY.md](docs/PARITY.md)). The kernel is a daemon owning an append-only event store,
 projections written in the same transaction as their events, content-addressed
 encrypted blobs, authority evaluation that leaves a receipt, event subscriptions, and
@@ -153,19 +155,19 @@ code.
 
 | Crate | What | Status |
 |---|---|---|
-| [`gwk-domain`](https://docs.rs/gwk-domain) | Shared types, events, state machines — the contract | 0.0.2 |
-| [`gwk-cert`](https://docs.rs/gwk-cert) | Stream checker, plus the storage suite a backend runs against its own event store | 0.0.2 |
-| [`gwk-theme`](https://docs.rs/gwk-theme) | The 15 SIGNAL design tokens — one source for the site, the TUI, and the generated TypeScript | 0.0.2 |
-| [`gwk-kernel`](https://docs.rs/gwk-kernel) | Daemon: event store, projections, blobs, attention, authority, the wire | 0.0.2 |
-| [`gridwork`](https://docs.rs/gridwork) | Ships the `gw` binary — the CLI that speaks the kernel's protocol | 0.0.2 |
-| [`gwk`](https://docs.rs/gwk) | Namespace root for the `gwk-*` crates. **No API** | 0.0.2, name only |
+| [`gwk-domain`](https://docs.rs/gwk-domain) | Shared types, events, state machines — the contract | 0.0.3 |
+| [`gwk-cert`](https://docs.rs/gwk-cert) | Stream checker, plus the storage suite a backend runs against its own event store | 0.0.3 |
+| [`gwk-theme`](https://docs.rs/gwk-theme) | The 15 SIGNAL design tokens — one source for the site, the TUI, and the generated TypeScript | 0.0.3 |
+| [`gwk-kernel`](https://docs.rs/gwk-kernel) | Daemon: event store, projections, blobs, attention, authority, the wire | 0.0.3 |
+| [`gwk-tui`](https://docs.rs/gwk-tui) | The client: modes, five lenses, palette — the console the installed binary renders | 0.0.3 |
+| [`gridwork`](https://docs.rs/gridwork) | Ships the `gw` binary — the CLI that speaks the kernel's protocol | 0.0.3 |
+| [`gwk`](https://docs.rs/gwk) | Namespace root for the `gwk-*` crates. **No API** | 0.0.3, name only |
 | `xtask` | Codegen and release glue. Not published | in-tree |
 | `gwk-pty` | PTY engine: server-side VT, render-state deltas, reattach | in tree, unpublished |
 | `gwk-pty-host` | Resident PTY engine host: session registry, spawn, detach/reattach routing | in tree, unpublished — not part of `cargo install gridwork` until its own release |
 | `gwk-adapter-*` | Per-engine ACP + hooks adapters | in tree, unpublished |
 | `gwk-parity` | The engine parity matrix harness — runs locally against logged-in engines, never in CI | in tree, unpublished |
 | `gwk-text` | Pure column arithmetic and extended grapheme boundaries | in tree, unpublished |
-| `gwk-tui` | The client: modes, lenses, palette | in tree, unpublished — five lenses and the live estate runtime; publish-flagged, ships with a future `gridwork` release |
 
 `gwk` is published deliberately as a **name reservation with no API** — a module doc
 block pointing at the crates that do the work. It is not a library and is not padded
@@ -174,12 +176,19 @@ into looking like one.
 `cargo install gridwork` started working at 0.0.2. Through 0.0.1 that command got you
 nothing, because the `gw` binary and the `gwk-kernel` behind it were in this tree and
 not on crates.io; publishing the kernel is what changed, exactly as the 0.0.1 README
-said it would. What you get is the headless CLI — it still needs a PostgreSQL 16 and
-the two roles above before it does anything. Through the Console stage, that command
-stays scoped to the kernel, the CLI, and the TUI's lenses: the PTY engine host is a
-separate, unpublished process the installed binary never links (`gwk-tui` never
-depends on `gwk-pty`, asserted in CI) and does not ship until packaging catches up to
-it, at 1.0.
+said it would. What it got you was the headless CLI, and it still needs a PostgreSQL
+16 and the two roles above before it does anything.
+
+**At 0.0.3 it also gets you the console.** Both of the sentences above this one, and
+the one in `ROADMAP.md` about the TUI's lenses, described that as already true while
+`gwk-tui` had never been published at all — published `gridwork` 0.0.2 depended on
+`gwk-domain` and `gwk-kernel` and nothing else. Publishing `gwk-tui` and `gwk-theme`
+is what closed the gap; the claim was written ahead of the artifact and has now
+caught up to it.
+
+The PTY engine host stays out: a separate, unpublished process the installed binary
+never links (`gwk-tui` never depends on `gwk-pty`, asserted in CI), and it does not
+ship until packaging catches up to it, at 1.0.
 
 Library crates are prefixed `gwk-` (the crates.io name `gw` belongs to an unrelated
 tool). **The binary is `gw`** — from the first build, permanently.

@@ -30,24 +30,130 @@
   --gws-line: rgba(82, 98, 116, 0.34);
   --gws-line-hi: rgba(82, 98, 116, 0.58);
   --gws-lift: inset 0 1px 0 rgba(154, 232, 255, 0.055);
-  --gws-mono:
-    var(--font-signal), ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas,
+  --gws-font-mono:
+    var(--gws-font-signal), ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas,
     "Liberation Mono", "Courier New", monospace;
+  --gws-mono: var(--gws-font-mono);
   --gws-ease: cubic-bezier(0.44, 0, 0.56, 1);
-  --gws-r: 6px;
-  --gws-r-sm: 4px;
-  --gws-r-xs: 3px;
+
+  /* ── scale families ───────────────────────────────────────────────────────
+     Four families the house contract requires, each at least three steps.
+     Values are not invented: every step below is a number this stylesheet
+     already used as a literal, promoted to a name.
+
+     `radius` is a pure rename of the former `--gws-r` / `-sm` / `-xs`, whose
+     head segment `r` named no family and so registered as three unrelated
+     one-off tokens. Same three pixel values, 23 call sites, no visual change.
+
+     `duration` had exactly one real value, 150 milliseconds, at 13 sites. Its
+     neighbours are added so the family is a scale rather than a single step
+     wearing a scale's name, and those 13 sites now read the `base` step.
+
+     `space` and `size` are declared from the values the sheet measurably uses
+     but their call sites are NOT migrated here: that is ~80 literals across 158
+     rule blocks, each needing a both-polarity regression check, and it does not
+     belong in the same diff as a token contract. Recorded as follow-up. */
+  --gws-radius-xs: 3px;
+  --gws-radius-sm: 4px;
+  --gws-radius-md: 6px;
+
+  --gws-duration-fast: 90ms;
+  --gws-duration-base: 150ms;
+  --gws-duration-slow: 260ms;
+
+  --gws-space-xs: 0.5rem;
+  --gws-space-sm: 0.75rem;
+  --gws-space-md: 1rem;
+  --gws-space-lg: 1.5rem;
+  --gws-space-xl: 2.5rem;
+
+  --gws-size-xs: 0.6875rem;
+  --gws-size-sm: 0.75rem;
+  --gws-size-md: 0.8125rem;
+  --gws-size-lg: 0.875rem;
+  --gws-size-xl: 1rem;
+
+  /* ── the role layer ───────────────────────────────────────────────────────
+     The 24 roles of the house token contract, bound to the SIGNAL tokens above.
+     This layer is indirection on purpose. SIGNAL is the crate's vocabulary and
+     is bound bidirectionally to `gwk_theme` by tools/check-theme-sync.sh; the
+     role names are the estate's vocabulary, shared with sites that have no
+     crate at all. Keeping them separate is what lets both stay true: a role can
+     be re-pointed here without touching a published crate, and the crate can
+     add a token without inventing a role for it.
+
+     A binding is only written once per scope where it means something. Most
+     resolve identically in both polarities and are still declared three times,
+     because the contract's check is per-scope and an inherited value is exactly
+     the bug it exists to catch — `--gws-text` falling through to the dark `fg`
+     on a light page is invisible until someone reads it.
+
+     FOUR ROLES ARE NOT ALIASED AT ALL: `bg`, `surface`, `border` and `focus`
+     are spelled identically in both vocabularies, so the SIGNAL declarations
+     above already satisfy them and an alias would be a property assigning to
+     itself. They are absent here because they are present there — the one place
+     in this block where a missing line is the correct line.
+
+     Two bindings are not one-to-one and are worth naming:
+
+       surface-sunken  ->  the only role here that genuinely inverts. Recessed
+                           means darker than `surface` in both themes, which is
+                           `bg` on dark and `surface-2` on light.
+       font-sans       ->  the mono stack. This site has one face by design;
+                           `body` carries `font-mono`. Binding a sans role to a
+                           face that does not exist would be a more
+                           honest-looking lie than this.
+
+     `border-strong` binds to `line-hi` rather than to a second crate colour
+     because that is what the sheet actually draws with — measured, 24 sites
+     against zero for `var(--gws-border)`. The crate's `border` token is the
+     TUI's and is declared here only to keep the two vocabularies in sync. */
+  --gws-surface-raised: var(--gws-surface-2);
+  --gws-surface-sunken: var(--gws-bg);
+
+  --gws-text: var(--gws-fg);
+  --gws-text-muted: var(--gws-muted);
+  --gws-text-faint: var(--gws-faint);
+
+  --gws-border-strong: var(--gws-line-hi);
+
+  --gws-accent: var(--gws-hue);
+  --gws-accent-hover: var(--gws-hue-bright);
+  --gws-accent-contrast: var(--gws-bg);
+  --gws-link: var(--gws-hue);
+
+  --gws-scrim: rgba(7, 11, 16, 0.72);
+
+  --gws-danger: var(--gws-fail);
+  --gws-warning: var(--gws-warn);
+  --gws-success: var(--gws-ok);
+  --gws-info: var(--gws-hue);
+
+  /* Flat by decision, in both polarities. Elevation here is carried by surface
+     tier and hairline weight, which is why every Tailwind `--shadow-*` below is
+     `none` too. `--gws-lift` — an inset top highlight — is the one elevation
+     cue this design uses, and it is an edge treatment rather than a drop
+     shadow, so it is an extension rather than one of these three. Declared
+     anyway, because the contract wants the names to resolve. */
+  --gws-shadow-sm: none;
+  --gws-shadow-md: none;
+  --gws-shadow-lg: none;
+
+  /* The two polarity-independent roles. A typeface is the same face on either
+     ground, so the contract exempts exactly these from the alternate blocks —
+     which is why the light scopes below carry 22 roles, not 24. */
+  --gws-font-sans: var(--gws-font-mono);
 
   color-scheme: dark;
 
-  --radius-xs: var(--gws-r-xs);
-  --radius-sm: var(--gws-r-xs);
-  --radius-md: var(--gws-r-sm);
-  --radius-lg: var(--gws-r-sm);
-  --radius-xl: var(--gws-r);
-  --radius-2xl: var(--gws-r);
-  --radius-3xl: var(--gws-r);
-  --radius-4xl: var(--gws-r);
+  --radius-xs: var(--gws-radius-xs);
+  --radius-sm: var(--gws-radius-xs);
+  --radius-md: var(--gws-radius-sm);
+  --radius-lg: var(--gws-radius-sm);
+  --radius-xl: var(--gws-radius-md);
+  --radius-2xl: var(--gws-radius-md);
+  --radius-3xl: var(--gws-radius-md);
+  --radius-4xl: var(--gws-radius-md);
 
   --shadow-2xs: none;
   --shadow-xs: none;
@@ -99,6 +205,46 @@
     --gws-line-hi: rgba(151, 165, 180, 0.58);
     --gws-lift: inset 0 1px 0 rgba(247, 249, 252, 0.9);
 
+    /* The role layer, restated. Read the note on `:root` first — this block is
+       the cost that note describes, and it is worth being plain about: at
+       runtime almost every line here is redundant. `var()` resolves lazily in
+       the scope it is used from, so `--gws-text: var(--gws-fg)` declared once on
+       `:root` already yields the light `fg` on a light page.
+
+       They are written anyway because the validator checks per scope and cannot
+       see through the indirection, and the operator ruled literal conformance
+       over relaxing the check. That keeps the vendored validator byte-identical
+       to the canonical one, which is what makes its drift test a plain equality
+       — a fork of the validator would have cost more than these lines do.
+
+       Only `surface-sunken` and `scrim` carry values that actually differ.
+       `bg`, `surface`, `border` and `focus` are absent for the same reason as
+       on `:root`: the SIGNAL declarations above already are those roles. */
+    --gws-surface-raised: var(--gws-surface-2);
+    --gws-surface-sunken: var(--gws-surface-2);
+
+    --gws-text: var(--gws-fg);
+    --gws-text-muted: var(--gws-muted);
+    --gws-text-faint: var(--gws-faint);
+
+    --gws-border-strong: var(--gws-line-hi);
+
+    --gws-accent: var(--gws-hue);
+    --gws-accent-hover: var(--gws-hue-bright);
+    --gws-accent-contrast: var(--gws-bg);
+    --gws-link: var(--gws-hue);
+
+    --gws-scrim: rgba(10, 16, 24, 0.42);
+
+    --gws-danger: var(--gws-fail);
+    --gws-warning: var(--gws-warn);
+    --gws-success: var(--gws-ok);
+    --gws-info: var(--gws-hue);
+
+    --gws-shadow-sm: none;
+    --gws-shadow-md: none;
+    --gws-shadow-lg: none;
+
     color-scheme: light;
   }
 }
@@ -123,6 +269,35 @@
   --gws-line: rgba(151, 165, 180, 0.34);
   --gws-line-hi: rgba(151, 165, 180, 0.58);
   --gws-lift: inset 0 1px 0 rgba(247, 249, 252, 0.9);
+
+  /* The same role layer as the media block above, for the explicit-choice path.
+     Both are required by the contract and neither substitutes for the other:
+     the media query cannot honour a reader who wants light on a dark OS, and
+     the attribute cannot paint before the theme script runs. */
+  --gws-surface-raised: var(--gws-surface-2);
+  --gws-surface-sunken: var(--gws-surface-2);
+
+  --gws-text: var(--gws-fg);
+  --gws-text-muted: var(--gws-muted);
+  --gws-text-faint: var(--gws-faint);
+
+  --gws-border-strong: var(--gws-line-hi);
+
+  --gws-accent: var(--gws-hue);
+  --gws-accent-hover: var(--gws-hue-bright);
+  --gws-accent-contrast: var(--gws-bg);
+  --gws-link: var(--gws-hue);
+
+  --gws-scrim: rgba(10, 16, 24, 0.42);
+
+  --gws-danger: var(--gws-fail);
+  --gws-warning: var(--gws-warn);
+  --gws-success: var(--gws-ok);
+  --gws-info: var(--gws-hue);
+
+  --gws-shadow-sm: none;
+  --gws-shadow-md: none;
+  --gws-shadow-lg: none;
 
   color-scheme: light;
 }
@@ -247,7 +422,7 @@ samp {
 }
 
 :focus-visible {
-  border-radius: var(--gws-r-xs);
+  border-radius: var(--gws-radius-xs);
   outline: 2px solid var(--gws-hue) !important;
   outline-offset: 3px !important;
 }
@@ -302,7 +477,7 @@ samp {
   padding: 8px 12px;
   color: var(--gws-bg);
   background: var(--gws-hue-bright);
-  border-radius: var(--gws-r-sm);
+  border-radius: var(--gws-radius-sm);
   font-size: 0.75rem;
   font-weight: 700;
   text-decoration: none;
@@ -353,7 +528,7 @@ samp {
   position: relative;
   color: inherit;
   text-decoration: none;
-  transition: color 150ms var(--gws-ease);
+  transition: color var(--gws-duration-base) var(--gws-ease);
 }
 
 .landing-status-inner a::after {
@@ -427,7 +602,7 @@ samp {
   color: var(--gws-hue-bright);
   background: var(--gws-surface);
   border: 1px solid var(--gws-line-hi);
-  border-radius: var(--gws-r-xs);
+  border-radius: var(--gws-radius-xs);
   font-size: 0.6875rem;
   line-height: 1.35;
   letter-spacing: 0.06em;
@@ -471,16 +646,16 @@ samp {
   color: var(--gws-fg);
   background: var(--gws-surface);
   border: 1px solid var(--gws-line-hi);
-  border-radius: var(--gws-r-sm);
+  border-radius: var(--gws-radius-sm);
   box-shadow: var(--gws-lift);
   font-size: 0.8125rem;
   font-weight: 600;
   line-height: 1;
   text-decoration: none;
   transition:
-    color 150ms var(--gws-ease),
-    background-color 150ms var(--gws-ease),
-    border-color 150ms var(--gws-ease);
+    color var(--gws-duration-base) var(--gws-ease),
+    background-color var(--gws-duration-base) var(--gws-ease),
+    border-color var(--gws-duration-base) var(--gws-ease);
 }
 
 .landing-button::before {
@@ -550,7 +725,7 @@ samp {
   overflow: hidden;
   background: var(--gws-surface);
   border: 1px solid var(--gws-line-hi);
-  border-radius: var(--gws-r);
+  border-radius: var(--gws-radius-md);
   box-shadow: var(--gws-lift);
 }
 
@@ -583,7 +758,7 @@ samp {
   overflow: hidden;
   background: var(--gws-surface);
   border: 1px solid var(--gws-line-hi);
-  border-radius: var(--gws-r);
+  border-radius: var(--gws-radius-md);
   box-shadow: var(--gws-lift);
 }
 
@@ -624,15 +799,15 @@ samp {
   color: var(--gws-hue-bright);
   background: var(--gws-surface);
   border: 1px solid var(--gws-hue-dim);
-  border-radius: var(--gws-r-sm);
+  border-radius: var(--gws-radius-sm);
   cursor: pointer;
   font-size: 0.6875rem;
   font-weight: 600;
   line-height: 1;
   transition:
-    color 150ms var(--gws-ease),
-    background-color 150ms var(--gws-ease),
-    border-color 150ms var(--gws-ease);
+    color var(--gws-duration-base) var(--gws-ease),
+    background-color var(--gws-duration-base) var(--gws-ease),
+    border-color var(--gws-duration-base) var(--gws-ease);
 }
 
 .copy-command__button:hover,
@@ -663,8 +838,8 @@ samp {
   text-decoration-color: var(--gws-hue-dim);
   text-underline-offset: 0.2em;
   transition:
-    color 150ms var(--gws-ease),
-    text-decoration-color 150ms var(--gws-ease);
+    color var(--gws-duration-base) var(--gws-ease),
+    text-decoration-color var(--gws-duration-base) var(--gws-ease);
 }
 
 .landing-install-warning a:hover,
@@ -712,7 +887,7 @@ samp {
 
 .landing-truth-ledger {
   border: 1px solid var(--gws-line-hi);
-  border-radius: var(--gws-r);
+  border-radius: var(--gws-radius-md);
   box-shadow: var(--gws-lift);
 }
 
@@ -859,8 +1034,8 @@ samp {
   text-decoration-thickness: 1px;
   text-underline-offset: 0.2em;
   transition:
-    color 150ms var(--gws-ease),
-    text-decoration-color 150ms var(--gws-ease);
+    color var(--gws-duration-base) var(--gws-ease),
+    text-decoration-color var(--gws-duration-base) var(--gws-ease);
 }
 
 .landing-section-route a,
@@ -923,8 +1098,8 @@ samp {
   text-decoration-color: var(--gws-hue-dim);
   text-underline-offset: 0.2em;
   transition:
-    color 150ms var(--gws-ease),
-    text-decoration-color 150ms var(--gws-ease);
+    color var(--gws-duration-base) var(--gws-ease),
+    text-decoration-color var(--gws-duration-base) var(--gws-ease);
 }
 
 .landing-architecture-ledger a:hover span {
@@ -973,7 +1148,7 @@ samp {
   padding: 2px 6px;
   color: var(--gws-muted);
   border: 1px solid var(--gws-line-hi);
-  border-radius: var(--gws-r-xs);
+  border-radius: var(--gws-radius-xs);
   font-size: 0.625rem;
   line-height: 1.4;
 }
@@ -1001,7 +1176,7 @@ samp {
   padding: clamp(1.25rem, 4vw, 2rem);
   background: var(--gws-surface-2);
   border: 1px solid var(--gws-line-hi);
-  border-radius: var(--gws-r);
+  border-radius: var(--gws-radius-md);
   box-shadow: var(--gws-lift);
 }
 
@@ -1078,7 +1253,7 @@ samp {
   overflow: hidden;
   background: var(--gws-surface);
   border: 1px solid var(--gws-line-hi);
-  border-radius: var(--gws-r);
+  border-radius: var(--gws-radius-md);
   box-shadow: var(--gws-lift);
 }
 
@@ -1154,7 +1329,7 @@ samp {
 .landing-crates-scroll {
   overflow-x: auto;
   border: 1px solid var(--gws-line-hi);
-  border-radius: var(--gws-r);
+  border-radius: var(--gws-radius-md);
   box-shadow: var(--gws-lift);
   scrollbar-color: var(--gws-faint) var(--gws-surface);
 }
