@@ -55,11 +55,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
             client-side after hydration, so it never appears in the served HTML
             and a reader auditing the page source cannot see what is measuring
             them. The literal tag is also what Plausible documents. */}
-        <script
-          defer
-          data-domain="gridwork.sh"
-          src="https://plausible.io/js/script.js"
-        />
+        <script defer data-domain="gridwork.sh" src="https://plausible.io/js/script.js" />
         <StructuredData />
       </head>
       <body className="flex min-h-screen flex-col font-mono">

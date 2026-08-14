@@ -34,7 +34,10 @@ function readWireFrame(
   offset: number,
 ): { kind: number; body: Uint8Array; next: number } {
   if (wire.length - offset < 5) throw new Error("truncated frame header");
-  const length = new DataView(wire.buffer, wire.byteOffset, wire.byteLength).getUint32(offset, false);
+  const length = new DataView(wire.buffer, wire.byteOffset, wire.byteLength).getUint32(
+    offset,
+    false,
+  );
   if (length < 1) throw new Error("frame length omitted the kind byte");
   const next = offset + 4 + length;
   if (next > wire.length) throw new Error("truncated frame body");
@@ -476,7 +479,8 @@ test("client control: tagged frames, number major, decimal-string cursor", async
     if (!isRecord(frame) || !isRecord(frame["request"])) throw new Error(`frame ${index} missing`);
     expect(frame["request"]["type"]).toBe(type);
     const envelope = frame["request"]["envelope"];
-    if (!isRecord(envelope) || !isRecord(envelope["payload"])) throw new Error("control envelope missing");
+    if (!isRecord(envelope) || !isRecord(envelope["payload"]))
+      throw new Error("control envelope missing");
     expect(envelope["payload"]["command"]).toBeUndefined();
   }
 
@@ -520,12 +524,7 @@ test("server control: refusals are values, cursors survive a disconnect", async 
       case "hello_ack": {
         // The INTERSECTION: the client asked for three capabilities and was
         // granted one. A client must not assume either absent capability.
-        expect(frame.capabilities).toEqual([
-          "pty_raw",
-          "pty_input",
-          "pty_control",
-          "pty_start",
-        ]);
+        expect(frame.capabilities).toEqual(["pty_raw", "pty_input", "pty_control", "pty_start"]);
         expect(frame.sealed).toBe(true);
         break;
       }

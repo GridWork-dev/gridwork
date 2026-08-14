@@ -1090,6 +1090,119 @@ jobs:
           check_response /docs 200
           check_response /this-path-does-not-exist 404
 
+  # The house lint and format floor (SPEC house-standards D2b/D2c/D3). Wired here
+  # rather than left as scripts someone runs by hand, which is the state `typecheck`
+  # sat in until #120 — configured, documented, and never once invoked by CI.
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3.14"
+      # oxlint and oxfmt are pinned once, in site/package.json. There is no root
+      # package.json — three independent projects share this checkout — so both
+      # scripts resolve the binaries under site/ and run from the repo root, which
+      # is the only cwd where the configs and .prettierignore are discovered.
+      - name: install pinned tooling
+        working-directory: site
+        run: bun install --frozen-lockfile
+      - name: lint
+        run: ./tools/lint.sh .
+      - name: format
+        run: ./tools/format.sh --check
+      # Two tests, neither of which the linter stands in for. The drift gate proves
+      # the vendored house configs still match their recorded bytes; the load test
+      # proves the vendored jsPlugin actually loads under this repo's oxlint build
+      # and that its rules fire.
+      - name: vendored-config and plugin-load tests
+        run: bun test tools/
+      - name: prove the gates can fail (seeded violations)
+        run: |
+          set -euo pipefail
+          trap 'git checkout -- .oxfmtrc.json site/app/layout.tsx; [ -d contracts ] || mv ../contracts-moved contracts' EXIT
+
+          # A lint finding from the VENDORED PLUGIN's own rules, not a built-in one.
+          # A built-in seed would go red whether or not plugin.js loaded, and a
+          # jsPlugin that fails to load is silent — oxlint reports nothing and exits
+          # 0. This is the one seed that would catch that through the real gate.
+          printf '\nexport const seeded = AbortSignal.timeout(1);\n' >> site/app/layout.tsx
+          out=""
+          if out="$(./tools/lint.sh . 2>&1)"; then
+            echo 'lint accepted a seeded finding — the gate is broken' >&2
+            exit 1
+          fi
+          grep -q 'no-abortsignal-timeout' <<<"$out" || {
+            echo "the seed was rejected, but not by the vendored plugin's rule:" >&2
+            printf '%s\n' "$out" >&2
+            exit 1
+          }
+          git checkout -- site/app/layout.tsx
+          echo "lint: a vendored-plugin finding correctly rejected"
+
+          # Unformatted source. `--check` is the only thing standing between this
+          # repo and a formatter nobody runs.
+          printf '\nexport const seeded  =   1\n' >> site/app/layout.tsx
+          if ./tools/format.sh --check >/dev/null 2>&1; then
+            echo 'format accepted unformatted source — the gate is broken' >&2
+            exit 1
+          fi
+          git checkout -- site/app/layout.tsx
+          echo "format: unformatted source correctly rejected"
+
+          # A tree that moved. oxfmt does not fail on a path matching nothing, so a
+          # renamed directory otherwise just stops being formatted — silently, and
+          # green. The count cannot cover this: dropping `contracts` costs 3 of 25
+          # files, which no floor low enough to survive churn would ever catch. So
+          # the trees are asserted to exist by name, and this moves one to prove it.
+          mv contracts ../contracts-moved
+          if out="$(./tools/format.sh --check 2>&1)"; then
+            echo 'format accepted a missing tree — the gate is broken' >&2
+            exit 1
+          fi
+          grep -q 'aimed at a tree that moved' <<<"$out" || {
+            echo "the missing tree was rejected, but not by the existence check:" >&2
+            printf '%s\n' "$out" >&2
+            exit 1
+          }
+          mv ../contracts-moved contracts
+          echo "format: a moved tree correctly rejected"
+
+          # An empty scan. Both tools exit 0 having read nothing, so neither exit
+          # code is evidence on its own and the file count has to decide. Raising
+          # the floor above the real count stands in for the tree emptying out.
+          if LINT_FLOOR=9999 ./tools/lint.sh . >/dev/null 2>&1; then
+            echo 'lint accepted a count below its floor — the gate is broken' >&2
+            exit 1
+          fi
+          if FMT_FLOOR=9999 ./tools/format.sh --check >/dev/null 2>&1; then
+            echo 'format accepted a count below its floor — the gate is broken' >&2
+            exit 1
+          fi
+          echo "lint/format: an empty scan correctly rejected"
+
+          # Drift in a vendored config, proven under the conditions this runner has:
+          # no canonical checkout exists here, so the recorded digests are the only
+          # half of the drift gate that runs. Before they existed the whole suite
+          # skipped, and a vendored config edited on a branch reached main green.
+          printf '\n' >> .oxfmtrc.json
+          if bun test tools/vendored-config-drift.test.ts >/dev/null 2>&1; then
+            echo 'drift gate accepted an edited vendored config — the gate is broken' >&2
+            exit 1
+          fi
+          git checkout -- .oxfmtrc.json
+          echo "drift: an edited vendored config correctly rejected"
+
+          # Positive control: six seeds that can only fail would also pass with every
+          # script here replaced by `exit 1`.
+          ./tools/lint.sh .
+          ./tools/format.sh --check
+          bun test tools/
+          echo "lint: the live tree is clean"
+
   # bans/licenses/sources block merges; advisories run separately below so a
   # newly published advisory can't redden an unchanged PR.
   deny:
@@ -1840,6 +1953,7 @@ jobs:
       - deny
       - kernel-integration
       - leak-scan
+      - lint
       - macos
       - msrv
       - package

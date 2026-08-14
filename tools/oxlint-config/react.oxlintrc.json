@@ -1,0 +1,26 @@
+{
+  // @gridwork/oxlint-config/react — the base plus the JSX floor. Separate entry so
+  // repos with no JSX do not pay for the plugins.
+  //
+  // Named no repo on purpose. These files are vendored verbatim into every consumer,
+  // one of which is public, and its leak-scan gate rejects any tracked file naming a
+  // private repo — which it did, on this line. A canonical file that cannot be copied
+  // byte-for-byte into all five repos cannot carry D3's byte-exact drift test either,
+  // so the house configs stay free of repo names.
+  "$schema": "../../node_modules/oxlint/configuration_schema.json",
+
+  "extends": ["./base.oxlintrc.json"],
+
+  // Re-listed IN FULL, not appended: the same override trap that applies to a bare config
+  // applies across `extends`. Trimming this to ["jsx-a11y","react"] silently drops
+  // unicorn/typescript/oxc.
+  //
+  // The `nextjs` plugin is deliberately absent. It is Next's to own, and pinning it in
+  // the house config couples every repo to one Next major — a Next app enables it in its
+  // own config.
+  //
+  // Severities are the plugins' own. A repo mid-remediation downgrades locally with a
+  // comment naming the tree and the reconcile date (caisson's ADR-0334 "RAMP" override is
+  // exactly this) — the house floor never ships pre-relaxed.
+  "plugins": ["unicorn", "typescript", "oxc", "jsx-a11y", "react", "react-perf"]
+}

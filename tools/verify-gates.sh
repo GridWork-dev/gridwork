@@ -19,7 +19,7 @@ set -euo pipefail
 # is the guard against the failure this whole gate exists to prevent, one level
 # up: deleting a `needs:` entry would otherwise shrink coverage silently, and
 # with only one required context there is no second place that would notice.
-EXPECTED_GATES="${EXPECTED_GATES:-17}"
+EXPECTED_GATES="${EXPECTED_GATES:-18}"
 
 payload="$(cat)"
 
