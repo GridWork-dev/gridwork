@@ -37,20 +37,6 @@ const config = {
   output: "standalone",
   poweredByHeader: false,
   reactStrictMode: true,
-  experimental: {
-    // TypeScript 7 is the Go port. It ships no JavaScript compiler API, so every
-    // consumer that imported `typescript` as a library — Next included — has to be
-    // told to shell out to the CLI instead. Without this, `next typegen` refuses
-    // outright: "TypeScript 7.0.2 does not provide the compiler API required by
-    // Next.js".
-    //
-    // Refusing is the good case. The same removal is what silently took another
-    // project's module graph from 151 modules to 0 with exit 0 and no message,
-    // which is why the typecheck gate counts the files it read rather than
-    // trusting the exit code. `tsc --noEmit` itself is unaffected — the CLI is
-    // exactly what the Go port still provides.
-    useTypeScriptCli: true,
-  },
   async headers() {
     return [{ source: "/:path*", headers: securityHeaders }];
   },
