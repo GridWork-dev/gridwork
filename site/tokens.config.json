@@ -1,0 +1,24 @@
+{
+  "prefix": "gws",
+  "css": ["app/globals.css"],
+  "defaultTheme": "dark",
+  "extensions": [
+    "surface-2",
+    "hue",
+    "hue-dim",
+    "hue-bright",
+    "fg",
+    "faint",
+    "muted",
+    "warn",
+    "fail",
+    "ok",
+    "selection",
+    "line",
+    "line-hi",
+    "lift",
+    "mono",
+    "ease",
+    "font-signal"
+  ]
+}

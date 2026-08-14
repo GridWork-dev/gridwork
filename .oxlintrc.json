@@ -29,6 +29,16 @@
   // copy by tools/vendored-config-drift.test.ts. Linting it can only produce findings that are
   // unfixable here by construction: the fix belongs upstream, and applying it locally is
   // the exact fork D3 exists to prevent.
+  //
+  // `site/tools/design-tokens/` is the same class — the vendored token contract and its
+  // validator, byte-pinned by the same test. It lands under site/ rather than tools/ only
+  // because it imports postcss and Bun resolves that from the importing file's tree.
+  // Listed on the structural argument alone: a finding there is unfixable here without
+  // forking the byte-pin, whether or not one exists today. Deliberately NOT justified as
+  // "it lints clean now" — the file count `lint.sh` reports did not move when this line
+  // was added, so oxlint was not reaching these paths anyway, and an attempt to probe them
+  // returned silence rather than a verdict. An unverified claim in a config comment is
+  // worse than no claim: the next reader inherits it as measured.
   "ignorePatterns": [
     "**/node_modules/**",
     "**/.next/**",
@@ -37,6 +47,7 @@
     "contracts/bindings.ts",
     "contracts/goldens-ts/**",
     "tools/oxlint-config/**",
+    "site/tools/design-tokens/**",
     "target/**",
     ".zig-packages/**"
   ]
