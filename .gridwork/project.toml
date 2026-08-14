@@ -49,14 +49,31 @@ branch_prefix = "feature/"
 #
 #   repo-wide      ./tools/leak-scan.sh
 #                  ./tools/check-claims.sh
-#                  ./tools/cleanroom-gate.sh   (reads a diff on STDIN — a bare
-#                                               run reports clean for any change)
+#                  ./tools/cleanroom-gate.sh   (reads a changed-path LIST on
+#                                               stdin, one path per line — see
+#                                               below)
 #                  ./tools/verify-gates.sh     (the CI aggregator's assertion)
 #
-# CI is `.github/workflows/ci.yml` — 20 jobs, plus 4 CodeQL checks from GitHub's
-# default setup that live outside the file. Branch protection requires exactly
-# one context, `verify`, which aggregates 17 of the 20 (the other three are
-# `continue-on-error` by design and cannot fail anything).
+# The cleanroom gate is the one entry here that can report a clean verdict on a
+# change it never inspected, so its input shape is not a detail. Run bare it
+# reads nothing and passes anything; piped a unified diff it fails the same way
+# for the same reason, because not one line of that is a path it can match.
+# Both spellings print `clean — no engine-adjacent paths touched` for a change
+# that touches them. Feed it the real thing:
+#
+#     git diff --cached --no-renames --name-only | ./tools/cleanroom-gate.sh
+#
+# CI is `.github/workflows/ci.yml` — 21 jobs plus the `verify` aggregator, and 3
+# CodeQL checks from GitHub's default setup that live outside the file (its five
+# configured languages collapse to three `Analyze` runs). Branch protection
+# requires exactly one context, `verify`, which aggregates 18 of the 21; the
+# other three — `perf-attempt`, `perf-retry`, `advisories` — are
+# `continue-on-error` and cannot fail anything.
+#
+# Counted from the file and from main's check runs, not carried forward. These
+# numbers are the kind that drift silently: every count here was wrong by one or
+# more before this edit, in a manifest whose stated purpose is to be the map
+# external tooling reads instead of parsing the workflow.
 #
 # Editing README.md, docs/*.md, or docs/derivation/reviews/ reds the docs
 # freshness gate until the site mirror is re-curated: mirror prose, the
