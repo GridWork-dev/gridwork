@@ -941,6 +941,39 @@ jobs:
           set -euo pipefail
           bun install --frozen-lockfile
           bun run check:docs
+      # `site/package.json` has defined this script and `site/README.md` has
+      # told contributors to run it since the project landed, and no workflow
+      # invoked it. The docker leg below runs `next build`, which does NOT
+      # type-check — so nothing here ever read a type error.
+      #
+      # `next typegen` first is not optional: it writes the generated route
+      # types `tsc` then resolves against, and a bare `tsc --noEmit` fails on
+      # their absence rather than on anything a contributor wrote.
+      - name: typecheck
+        working-directory: site
+        run: |
+          set -euo pipefail
+          # The documented contributor command verbatim — site/README.md tells
+          # people to run this exact script, so CI running something adjacent
+          # would let the two drift.
+          bun run typecheck
+
+          # A green `tsc` is not evidence it read anything. An empty project
+          # exits 0, and this repo is scheduled to move `site/` to TypeScript 7
+          # — where installing a package NAMED typescript at 7.x silently
+          # retargets JS-API consumers. The same class already took another
+          # project's module graph from 151 to 0 with exit 0 and no message.
+          # So count the files, and let the count decide.
+          checked="$(bunx tsc --noEmit --listFiles |
+            grep -v '/node_modules/' | grep -cv '/\.next/' || true)"
+          # 21 today. The floor is deliberately far below that rather than
+          # just under it: the failure being guarded lands at zero or a
+          # handful, so a tight floor buys nothing and reds on ordinary churn.
+          echo "typecheck: ${checked} project files"
+          if [ "${checked:-0}" -lt 10 ]; then
+            echo "typecheck: only ${checked} project files reached tsc — it is checking nothing" >&2
+            exit 1
+          fi
       - name: prove the freshness gate can fail (seeded violations)
         working-directory: site
         run: |
@@ -1776,3 +1809,79 @@ jobs:
             echo 'content scan missed an intermediate-commit leak — the gate is broken' >&2
             exit 1
           fi
+
+  # The single required context for branch protection.
+  #
+  # `if: always()` is load-bearing, and it is the same trap `cleanroom-gate`
+  # documents above from the other direction: a job left on the default
+  # `success()` condition SKIPS when a dependency fails, and GitHub reports a
+  # skipped required check as SUCCESS. Such an aggregator goes green by not
+  # running — it would report nothing at exactly the moment it matters.
+  #
+  # `advisories`, `perf-attempt`, and `perf-retry` are deliberately absent from
+  # `needs:`. All three are `continue-on-error: true`, so their result reads
+  # `success` here even when their steps fail; listing them would look like
+  # coverage while asserting nothing. `perf` is the rollup that actually
+  # decides, and it is listed.
+  verify:
+    if: always()
+    needs:
+      - cleanroom-gate
+      - commit-messages
+      - contract
+      - deny
+      - kernel-integration
+      - leak-scan
+      - macos
+      - msrv
+      - package
+      - perf
+      - pty
+      - pty-host
+      - schema
+      - site
+      - test
+      - unicode-conformance
+      - zig-free
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: prove the gate can fail (seeded violations)
+        run: |
+          set -euo pipefail
+
+          # A red dependency among green ones.
+          seeded='{"a":{"result":"success"},"b":{"result":"failure"}}'
+          if printf '%s' "$seeded" | EXPECTED_GATES=2 ./tools/verify-gates.sh >/dev/null 2>&1; then
+            echo 'verify accepted a failed dependency — the gate is broken' >&2
+            exit 1
+          fi
+
+          # A skipped dependency. GitHub reports skipped required checks as
+          # success, so "not failure" is not the same question as "success".
+          seeded='{"a":{"result":"success"},"b":{"result":"skipped"}}'
+          if printf '%s' "$seeded" | EXPECTED_GATES=2 ./tools/verify-gates.sh >/dev/null 2>&1; then
+            echo 'verify accepted a skipped dependency — the gate is broken' >&2
+            exit 1
+          fi
+
+          # No dependencies at all: `all()` over an empty set is true, so a
+          # `needs:` list that failed to expand would report green having
+          # checked nothing.
+          if printf '{}' | EXPECTED_GATES=0 ./tools/verify-gates.sh >/dev/null 2>&1; then
+            echo 'verify called an empty dependency set green — the gate is broken' >&2
+            exit 1
+          fi
+
+          # Positive control: three seeds that can only fail would also pass
+          # with the assertion replaced by `exit 1`.
+          printf '%s' '{"a":{"result":"success"},"b":{"result":"success"}}' |
+            EXPECTED_GATES=2 ./tools/verify-gates.sh >/dev/null
+          echo "verify: the assertion rejects red, skipped, and empty, and accepts green"
+      - name: every gate green
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: printf '%s' "$NEEDS" | ./tools/verify-gates.sh
