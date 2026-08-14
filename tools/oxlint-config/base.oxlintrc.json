@@ -59,6 +59,10 @@
         "no-console": "off",
         "gridwork/no-interpolated-exec": "off",
         "gridwork/no-abortsignal-timeout": "off",
+        // The house rule is "no `any` in PROD code" (CLAUDE.md). A stub `sql` object, a
+        // `Bun.TOML.parse` result, a swapped `process.stdout.write` — writing structural
+        // types for those makes the test longer and no safer.
+        "typescript/no-explicit-any": "off",
         // A malformed request is the subject of the assertion, not a defect.
         "unicorn/no-invalid-fetch-options": "off",
         // `(init?.signal as AbortSignal)` in a mock: the test IS the null check.
