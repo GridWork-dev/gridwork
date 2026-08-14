@@ -37,7 +37,9 @@ allowed to do that. GridWork is an operating layer for a fleet of terminal agent
 
 Pre-alpha, at stage 5 of 6. **Stages 1–4 — the contract, the kernel, the
 engines, and the console — are done**: the first two published on crates.io, stage 3
-exiting with its twelve-cell parity matrix certified green at pinned engine versions
+exiting with its twelve-cell parity matrix certified green at pinned engine versions —
+green with one declared gap inside a green cell, because the matrix's cells are engine
+× axis and Claude's idle fact is not adapted
 ([docs/PARITY.md](docs/PARITY.md)). The kernel is a daemon owning an append-only event store,
 projections written in the same transaction as their events, content-addressed
 encrypted blobs, authority evaluation that leaves a receipt, event subscriptions, and

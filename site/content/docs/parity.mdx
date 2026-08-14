@@ -3,7 +3,7 @@ title: Engine parity
 description: The four acceptance axes, version pins, harness, and live inventory used to prove adapter parity.
 ---
 
-{/* curated-from: docs/PARITY.md sha256=f2d684c8b0eb0916c3850d7ebdf18ed3859037d4d2176a7f1c3e80c7815453a7 */}
+{/* curated-from: docs/PARITY.md sha256=e3219f47e24402942702d131ff980806f13eff9a098d4d09feddf472d15a046a */}
 
 What "done" means for the agent adapters — the parity matrix the roadmap promises
 for stage 3, defined before any adapter exists to measure. Four axes, each with an
@@ -196,6 +196,20 @@ and opencode 1.18.3. The runner reported `all_green: true`:
 | opencode | pass | pass | pass | pass |
 | claude | pass | pass | pass | pass |
 | codex | pass | pass | pass | pass |
+
+**One green cell contains a declared gap, and the table cannot show it.** Cells
+are engine × axis, so `claude / lifecycle` is a single verdict over four facts:
+start, idle, error, end. Three are observed. The fourth is the known gap in Axis
+1 above — `gwk-adapter-claude` models the `PreToolUse` hook and not `Stop`, so
+idle is never reported, and `a_result_is_the_end_and_not_also_idle` pins it so
+the gap cannot be closed by conflating two different facts.
+
+The runner's `all_green: true` stays quoted verbatim: this section is the record
+of a run, and editing a record to reflect a later reading is how a record stops
+being one. What the record cannot carry on its own is that a cell's granularity
+is coarser than its axis, so it is written beside it instead. The matrix should
+not be cited as twelve-for-twelve without this paragraph arriving in the same
+breath.
 
 ## What the matrix does not measure
 
