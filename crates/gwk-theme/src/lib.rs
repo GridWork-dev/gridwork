@@ -149,7 +149,8 @@ pub struct LightToken {
 /// high-emphasis accent the least readable thing on the page.
 ///
 /// Every value here was chosen against a measured floor rather than by eye —
-/// `light_palette_clears_its_contrast_floors` is the record of which floor and
+/// `light_palette_clears_its_contrast_floors` and the `assert_contrast_floors`
+/// helper it shares with the dark palette are the record of which floor and
 /// why. `gws_faint` is the one token exempt from the text floor, because its
 /// ratified role forbids it from ever being text.
 #[rustfmt::skip]
@@ -283,26 +284,38 @@ mod tests {
         assert_eq!(value("gws_focus"), value("gws_hue"));
     }
 
-    #[test]
-    fn light_palette_clears_its_contrast_floors() {
-        // Measured against the DEEPEST ground a token can sit on — `surface_2`,
-        // not `bg`. Checking against the page background is the comfortable
-        // mistake: it passes for a colour that is unreadable in every card and
-        // panel on the page, which is where most of this text actually lives.
-        //
-        // 4.5:1 is WCAG AA for body text. `gws_border` gets 3.0:1, the
-        // non-text UI-component floor, because it draws boundaries rather than
-        // words. `gws_faint` is absent on purpose: its ratified role forbids
-        // text and essential UI outright, so a text floor would be asserting
-        // something the role already rules out.
-        let light = |name: &str| {
-            SIGNAL_LIGHT
+    /// The contrast floors, in the one place both polarities are held to them.
+    ///
+    /// Measured against the DEEPEST ground a token can sit on — `surface_2`,
+    /// not `bg`. Checking against the page background is the comfortable
+    /// mistake: it passes for a colour that is unreadable in every card and
+    /// panel on the page, which is where most of this text actually lives.
+    ///
+    /// 4.5:1 is WCAG AA for body text. `gws_border` gets 3.0:1, the non-text
+    /// UI-component floor, because it draws boundaries rather than words.
+    /// `gws_faint` is absent on purpose: its ratified role forbids text and
+    /// essential UI outright, so a text floor would be asserting something the
+    /// role already rules out.
+    fn assert_contrast_floors(palette: &[(&str, &str)], polarity: &str) {
+        // Count before verdict. Every assertion below is a fold, and a fold
+        // cannot tell "all eight cleared" from "the palette arrived empty" —
+        // a caller that normalized through a mistyped filter would collect
+        // nothing and be congratulated for it.
+        assert_eq!(
+            palette.len(),
+            15,
+            "{polarity}: expected the full 15-token palette, got {}",
+            palette.len()
+        );
+
+        let value = |name: &str| {
+            palette
                 .iter()
-                .find(|token| token.name == name)
-                .map(|token| token.value)
-                .expect("token")
+                .find(|(token, _)| *token == name)
+                .map(|(_, value)| *value)
+                .unwrap_or_else(|| panic!("{polarity} palette has no {name}"))
         };
-        let deepest = light("gws_surface_2");
+        let deepest = value("gws_surface_2");
 
         for name in [
             "gws_fg",
@@ -314,18 +327,44 @@ mod tests {
             "gws_fail",
             "gws_ok",
         ] {
-            let ratio = contrast(light(name), deepest);
+            let ratio = contrast(value(name), deepest);
             assert!(
                 ratio >= 4.5,
-                "{name} is {ratio:.2}:1 on gws_surface_2, below the 4.5:1 text floor"
+                "{polarity}: {name} is {ratio:.2}:1 on gws_surface_2, below the 4.5:1 text floor"
             );
         }
 
-        let border = contrast(light("gws_border"), deepest);
+        let border = contrast(value("gws_border"), deepest);
         assert!(
             border >= 3.0,
-            "gws_border is {border:.2}:1 on gws_surface_2, below the 3.0:1 UI floor"
+            "{polarity}: gws_border is {border:.2}:1 on gws_surface_2, below the 3.0:1 UI floor"
         );
+    }
+
+    #[test]
+    fn light_palette_clears_its_contrast_floors() {
+        let palette: Vec<(&str, &str)> = SIGNAL_LIGHT.iter().map(|t| (t.name, t.value)).collect();
+        assert_contrast_floors(&palette, "light");
+    }
+
+    #[test]
+    fn dark_palette_clears_its_contrast_floors() {
+        // The polarity most readers actually see — `globals.css` sets
+        // `color-scheme: dark` on `:root` and the crate's default is this
+        // palette — and until now the only one with no asserted floor. Light
+        // got a test because its values were being chosen against a measurement
+        // at the time; dark predated that and was simply never revisited.
+        //
+        // It passes, and passed before this test existed: the worst text token
+        // is `gws_hue_dim` at 5.25:1 against a 4.5 floor, and `gws_border` sits
+        // at 3.74:1 against 3.0 — more headroom than light has, whose worst is
+        // 4.74:1. That is the argument for pinning it rather than against.
+        // Nothing held it there, so a future palette edit could have dropped
+        // the default polarity below the floor with every gate still green,
+        // and the asymmetry itself was the tell: one polarity measured, one
+        // trusted, no reason recorded for the difference.
+        let palette: Vec<(&str, &str)> = SIGNAL.iter().map(|t| (t.name, t.value)).collect();
+        assert_contrast_floors(&palette, "dark");
     }
 
     #[test]
