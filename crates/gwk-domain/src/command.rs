@@ -10,6 +10,8 @@
 //! The set is CLOSED. A new command is a contract change with a new binding,
 //! never an open string a caller can invent.
 
+use std::collections::BTreeMap;
+
 use serde_json::Value;
 
 use crate::entity::Budget;
@@ -20,14 +22,27 @@ use crate::fsm::{
 use crate::ids::{
     AttemptId, AttentionItemId, AuthorityGrantId, ByteCount, CommandId, CorrelationId, CostEntryId,
     CostMicros, DispatchNodeId, EngineId, EngineSessionId, EvidenceId, GateId, LeaseId, MessageId,
-    PtySessionGeneration, PtySessionId, ReceiptId, TaskId, Timestamp, TokenCount, WorkflowRunId,
-    WorkspaceNodeId, WorktreeId,
+    PtySessionGeneration, PtySessionId, PtySessionTemplateName, ReceiptId, TaskId, Timestamp,
+    TokenCount, WorkflowRunId, WorkspaceNodeId, WorktreeId,
 };
 use crate::ingestion::IngestionKind;
 use crate::inherited::{FindingAction, OrchestratorCheckpoint, RoundFindingSummary};
 
 /// Standing-authority action class for terminal input.
 pub const PTY_INPUT_ACTION_CLASS: &str = "pty_input";
+/// Standing-authority action class for resize and stop controls.
+pub const PTY_CONTROL_ACTION_CLASS: &str = "pty_control";
+/// Standing-authority action class for starts from declared templates.
+pub const PTY_START_ACTION_CLASS: &str = "pty_start";
+/// Standing-authority action class for writing the declared template catalog.
+///
+/// Classified for its RECEIPT, not for its gate: `check_authority_admin` already
+/// refuses any actor kind but `operator` before the evaluation runs, so the
+/// operator branch is the only reachable outcome and the decision cannot change.
+/// Without a class there is no receipt row, which would leave the two commands
+/// that write the executable catalog as the only PTY-family verbs absent from
+/// the authority ledger.
+pub const PTY_TEMPLATE_ACTION_CLASS: &str = "pty_template";
 
 /// One requested mutation, tagged by `type`.
 ///
@@ -570,9 +585,44 @@ pub enum KernelCommand {
         generation: PtySessionGeneration,
         byte_count: ByteCount,
     },
+    /// Resize one exact hosted-session lifetime.
+    ResizePtySession {
+        pty_session_id: PtySessionId,
+        generation: PtySessionGeneration,
+        cols: u16,
+        rows: u16,
+    },
+    /// Stop one exact hosted-session lifetime.
+    StopPtySession {
+        pty_session_id: PtySessionId,
+        generation: PtySessionGeneration,
+    },
     ClosePtySession {
         pty_session_id: PtySessionId,
         expected_version: u32,
+    },
+
+    // ---- pty session templates ----
+    /// Declare an executable template. `command` is one program, never shell text.
+    DeclarePtySessionTemplate {
+        template_name: PtySessionTemplateName,
+        command: String,
+        args: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[specta(optional)]
+        cwd: Option<String>,
+        env: BTreeMap<String, String>,
+        cols: u16,
+        rows: u16,
+    },
+    RetirePtySessionTemplate {
+        template_name: PtySessionTemplateName,
+        expected_version: u32,
+    },
+    /// Request a session using only its declared template name.
+    RequestPtySessionStart {
+        template_name: PtySessionTemplateName,
+        pty_session_id: PtySessionId,
     },
 
     // ---- dispatch tree ----
@@ -704,7 +754,12 @@ impl KernelCommand {
             Self::RecordPtyAttach { .. } => "record_pty_attach",
             Self::RecordPtyDetach { .. } => "record_pty_detach",
             Self::SendPtyInput { .. } => "send_pty_input",
+            Self::ResizePtySession { .. } => "resize_pty_session",
+            Self::StopPtySession { .. } => "stop_pty_session",
             Self::ClosePtySession { .. } => "close_pty_session",
+            Self::DeclarePtySessionTemplate { .. } => "declare_pty_session_template",
+            Self::RetirePtySessionTemplate { .. } => "retire_pty_session_template",
+            Self::RequestPtySessionStart { .. } => "request_pty_session_start",
             Self::RegisterDispatchNode { .. } => "register_dispatch_node",
             Self::TransitionDispatchNode { .. } => "transition_dispatch_node",
             Self::WriteOrchestratorCheckpoint { .. } => "write_orchestrator_checkpoint",
@@ -779,7 +834,7 @@ mod tests {
         // slip in `command_type()` would silently route the wrong handler. Walk
         // the serialized tag of a value from EVERY variant instead.
         let all = all_variants();
-        assert_eq!(all.len(), 47, "the v1 command set is 47 variants");
+        assert_eq!(all.len(), 52, "the v1 command set is 52 variants");
         for command in &all {
             let json = serde_json::to_value(command).expect("serialize");
             let tag = json["type"].as_str().expect("tagged with a string type");
@@ -1186,6 +1241,33 @@ mod tests {
                 pty_session_id: PtySessionId::new("pty-1"),
                 generation: PtySessionGeneration::new("gen-1"),
                 byte_count: ByteCount::new(3),
+            },
+            KernelCommand::ResizePtySession {
+                pty_session_id: PtySessionId::new("pty-1"),
+                generation: PtySessionGeneration::new("gen-1"),
+                cols: 100,
+                rows: 30,
+            },
+            KernelCommand::StopPtySession {
+                pty_session_id: PtySessionId::new("pty-1"),
+                generation: PtySessionGeneration::new("gen-1"),
+            },
+            KernelCommand::DeclarePtySessionTemplate {
+                template_name: PtySessionTemplateName::new("review"),
+                command: "/bin/cat".into(),
+                args: vec!["-u".into()],
+                cwd: Some("/tmp".into()),
+                env: BTreeMap::from([("TERM".into(), "xterm-256color".into())]),
+                cols: 100,
+                rows: 30,
+            },
+            KernelCommand::RetirePtySessionTemplate {
+                template_name: PtySessionTemplateName::new("review"),
+                expected_version: 1,
+            },
+            KernelCommand::RequestPtySessionStart {
+                template_name: PtySessionTemplateName::new("review"),
+                pty_session_id: PtySessionId::new("review-7"),
             },
             KernelCommand::RegisterDispatchNode {
                 dispatch_node_id: DispatchNodeId::new("node-1"),

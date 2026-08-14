@@ -317,7 +317,7 @@ fn paint_header(
         .filter(|lease| lease.state == LeaseState::Held)
         .count();
 
-    put(buf, area, 1, 0, "FLEET", bold("fg", tier));
+    put(buf, area, 1, 0, "FLEET", bold("gws_fg", tier));
     let summary = if compact {
         format!(
             "{} attempts  {live} live  {} today",
@@ -333,7 +333,7 @@ fn paint_header(
             dollars(micros),
         )
     };
-    put(buf, area, 9, 0, &summary, style("fg", tier));
+    put(buf, area, 9, 0, &summary, style("gws_fg", tier));
 
     let badge = tier_badge(tier, glyphs);
     let right = if compact {
@@ -341,7 +341,7 @@ fn paint_header(
     } else {
         format!("tier {badge}  as-of 221  17:30")
     };
-    put_right(buf, area, 0, &right, style("muted", tier));
+    put_right(buf, area, 0, &right, style("gws_muted", tier));
 }
 
 /// The spend-per-hour chart: three `#` rows over the day's buckets. Bars
@@ -387,7 +387,7 @@ fn paint_spend_chart(buf: &mut Buffer, area: Rect, top: u16, tier: ColorTier, st
         priced,
         unattributed(state),
     );
-    put(buf, area, 2, top, &caption, bold("fg", tier));
+    put(buf, area, 2, top, &caption, bold("gws_fg", tier));
 
     for row in 0..ROWS {
         let y = top + 1 + row as u16;
@@ -397,11 +397,11 @@ fn paint_spend_chart(buf: &mut Buffer, area: Rect, top: u16, tier: ColorTier, st
             row if row == ROWS - 1 => "> $0".to_owned(),
             _ => String::new(),
         };
-        put(buf, area, 2, y, &label, style("muted", tier));
+        put(buf, area, 2, y, &label, style("gws_muted", tier));
         for (index, height) in heights.iter().enumerate() {
             if *height >= level {
                 let x = left + index as u16 * step;
-                put(buf, area, x, y, "####", style("hue", tier));
+                put(buf, area, x, y, "####", style("gws_hue", tier));
             }
         }
     }
@@ -415,7 +415,7 @@ fn paint_spend_chart(buf: &mut Buffer, area: Rect, top: u16, tier: ColorTier, st
             x,
             axis_y,
             &format!("{hour:02}h"),
-            style("muted", tier),
+            style("gws_muted", tier),
         );
     }
 }
@@ -467,7 +467,7 @@ fn paint_work(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) {
         ]
     };
     for (x, label) in columns {
-        put(buf, area, *x, 2, label, style("muted", tier));
+        put(buf, area, *x, 2, label, style("gws_muted", tier));
     }
 
     let mut y = 3;
@@ -480,7 +480,7 @@ fn paint_work(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) {
                 2,
                 y,
                 &format!("+{remaining} more"),
-                style("muted", tier),
+                style("gws_muted", tier),
             );
             y += 1;
             break;
@@ -511,7 +511,7 @@ fn paint_work(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) {
             0,
             y,
             if focused { ">" } else { " " },
-            bold("focus", tier),
+            bold("gws_focus", tier),
         );
         put(buf, area, 2, y, attempt.id.as_str(), paint);
         if wide {
@@ -521,7 +521,7 @@ fn paint_work(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) {
                 21,
                 y,
                 &task_label(&state, attempt),
-                style("muted", tier),
+                style("gws_muted", tier),
             );
         }
         let engine_x = if wide { 36 } else { 21 };
@@ -533,9 +533,16 @@ fn paint_work(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) {
             engine_x,
             y,
             attempt.engine.as_str(),
-            style("muted", tier),
+            style("gws_muted", tier),
         );
-        put(buf, area, role_x, y, role_label(attempt), style("fg", tier));
+        put(
+            buf,
+            area,
+            role_x,
+            y,
+            role_label(attempt),
+            style("gws_fg", tier),
+        );
         put(
             buf,
             area,
@@ -552,22 +559,29 @@ fn paint_work(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) {
             }
         };
         let (spend_x, age_x) = if wide {
-            put(buf, area, 67, y, &count(subtree), style("muted", tier));
-            put(buf, area, 72, y, &count(sessions), style("muted", tier));
-            put(buf, area, 77, y, &lease_text, style("muted", tier));
-            put(buf, area, 91, y, &spend.token_text(), style("muted", tier));
+            put(buf, area, 67, y, &count(subtree), style("gws_muted", tier));
+            put(buf, area, 72, y, &count(sessions), style("gws_muted", tier));
+            put(buf, area, 77, y, &lease_text, style("gws_muted", tier));
+            put(
+                buf,
+                area,
+                91,
+                y,
+                &spend.token_text(),
+                style("gws_muted", tier),
+            );
             (103, 115)
         } else {
             (52, 65)
         };
-        put(buf, area, spend_x, y, &spend.text(), style("fg", tier));
+        put(buf, area, spend_x, y, &spend.text(), style("gws_fg", tier));
         put(
             buf,
             area,
             age_x,
             y,
             &age(attempt.created_at.as_str()),
-            style("muted", tier),
+            style("gws_muted", tier),
         );
         y += 1;
     }

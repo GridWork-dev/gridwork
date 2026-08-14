@@ -35,6 +35,11 @@ use ratatui::style::{Color, Modifier, Style};
 use crate::input::HitMap;
 use crate::theme;
 
+/// Largest expanded mirror the TUI retains for one pane. The compact wire can
+/// represent much larger grids cheaply; expansion must remain bounded at the
+/// client boundary rather than turning compression into an allocation bypass.
+pub const MIRROR_CELL_LIMIT: usize = 16_800;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DrilldownTarget {
     Session(PtySessionId),
@@ -61,6 +66,7 @@ enum StreamStatus {
     Waiting,
     Snapshot,
     Live,
+    Disconnected,
     Closed {
         code: KernelErrorCode,
         last_seq: Option<PtyFrameSeq>,
@@ -131,6 +137,21 @@ impl DrilldownState {
     pub fn begin_attach(&mut self, request_id: RequestId) {
         self.attach_request_id = Some(request_id);
         self.stream_status = StreamStatus::Waiting;
+    }
+
+    /// The shared PTY transport ended without a request-local close control.
+    pub fn transport_closed(&mut self) {
+        self.attach_request_id = None;
+        self.stream_status = StreamStatus::Disconnected;
+    }
+
+    /// Refuse one attach locally while preserving the last valid mirror.
+    pub fn refuse_attach(&mut self, code: KernelErrorCode) {
+        self.attach_request_id = None;
+        self.stream_status = StreamStatus::Closed {
+            code,
+            last_seq: self.last_seq,
+        };
     }
 
     pub fn set_viewport(&mut self, row: u16, col: u16) {
@@ -265,6 +286,15 @@ impl DrilldownState {
         // old ragged-grid check counted. Non-maximal runs expand fine (the
         // tolerate ruling); the kernel's strict decoder is where refusals
         // with an error vocabulary live.
+        let cell_count = frame.rows.iter().try_fold(0usize, |total, row| {
+            row.iter()
+                .try_fold(0usize, |width, run| width.checked_add(run.width()))
+                .and_then(|width| total.checked_add(width))
+        });
+        if cell_count.is_none_or(|count| count > MIRROR_CELL_LIMIT) {
+            self.diagnostics.invalid_frames = self.diagnostics.invalid_frames.saturating_add(1);
+            return IngestDisposition::Counted;
+        }
         let Some(cells) = frame.cells() else {
             self.diagnostics.invalid_frames = self.diagnostics.invalid_frames.saturating_add(1);
             return IngestDisposition::Counted;
@@ -322,11 +352,20 @@ impl DrilldownState {
             self.diagnostics.stale_batches = self.diagnostics.stale_batches.saturating_add(1);
             return IngestDisposition::Counted;
         }
-
         let before = self.diagnostics;
+        let mut applied_all = true;
         for delta in deltas {
             match delta {
                 PtyDelta::Resized { rows, cols } => {
+                    if usize::from(*rows)
+                        .checked_mul(usize::from(*cols))
+                        .is_none_or(|cells| cells > MIRROR_CELL_LIMIT)
+                    {
+                        self.diagnostics.invalid_updates =
+                            self.diagnostics.invalid_updates.saturating_add(1);
+                        applied_all = false;
+                        continue;
+                    }
                     self.cells = None;
                     self.frame_seq = None;
                     self.expected_size = Some((*cols, *rows));
@@ -363,15 +402,21 @@ impl DrilldownState {
                             _ => {
                                 self.diagnostics.invalid_updates =
                                     self.diagnostics.invalid_updates.saturating_add(1);
+                                applied_all = false;
                             }
                         }
                     }
                 }
             }
         }
-        self.last_seq = Some(seq);
-        if self.cells.is_some() {
-            self.frame_seq = Some(seq);
+        if applied_all {
+            self.last_seq = Some(seq);
+            if self.cells.is_some() {
+                self.frame_seq = Some(seq);
+            }
+        } else {
+            self.cells = None;
+            self.frame_seq = None;
         }
         if self.diagnostics == before {
             IngestDisposition::Applied
@@ -561,7 +606,7 @@ pub fn render(
     if is_selected && matches!(tier, ColorTier::Truecolor | ColorTier::Xterm256) {
         status_style = gwk_theme::SIGNAL
             .iter()
-            .find(|token| token.name == "selection")
+            .find(|token| token.name == "gws_selection")
             .map_or(status_style, |token| theme::token_style(token, tier));
     }
     let seq = state
@@ -580,6 +625,7 @@ pub fn render(
         StreamStatus::Waiting => "waiting  ".to_owned(),
         StreamStatus::Snapshot => "snapshot  ".to_owned(),
         StreamStatus::Live => "live  ".to_owned(),
+        StreamStatus::Disconnected => "transport closed  ".to_owned(),
         StreamStatus::Closed { code, last_seq } => format!(
             "closed {code} at {}  ",
             last_seq.map_or_else(|| "-".to_owned(), |seq| seq.to_string())
@@ -886,7 +932,7 @@ mod tests {
             IngestDisposition::Counted
         );
 
-        assert_eq!(state.cells().expect("mirror")[0][0].glyph, "a");
+        assert!(state.cells().is_none());
         assert_eq!(
             state.diagnostics(),
             WireDiagnostics {
@@ -1038,6 +1084,50 @@ mod tests {
     }
 
     #[test]
+    fn drilldown_rejects_a_compressed_frame_past_its_mirror_cell_budget() {
+        let mut state = DrilldownState::new(PtySessionId::new("s"));
+        let frame = PtyFrame {
+            styles: vec![style()],
+            rows: vec![vec![gwk_domain::frame::PtyRun::Fill {
+                style: 0,
+                glyph: " ".to_owned(),
+                count: (MIRROR_CELL_LIMIT + 1) as u32,
+            }]],
+            cursor: None,
+        };
+
+        assert_eq!(
+            state.ingest(&snapshot_in_generation("r", "s", "life-1", 0, frame)),
+            IngestDisposition::Counted
+        );
+        assert!(state.cells().is_none());
+        assert_eq!(state.diagnostics().invalid_frames, 1);
+    }
+
+    #[test]
+    fn drilldown_rejects_a_resize_past_its_mirror_cell_budget() {
+        let mut state = DrilldownState::new(PtySessionId::new("s"));
+        state.begin_attach(RequestId::new("r"));
+        state.ingest(&attached("r", "s", 1, 1));
+        state.ingest(&snapshot("r", "s", 0, frame(&[&["a"]])));
+
+        let disposition = state.ingest(&batch(
+            "r",
+            "s",
+            1,
+            vec![PtyDelta::Resized {
+                rows: 200,
+                cols: 200,
+            }],
+        ));
+
+        assert_eq!(disposition, IngestDisposition::Counted);
+        assert!(state.cells().is_none());
+        assert_eq!(state.diagnostics().invalid_updates, 1);
+        assert_eq!(state.frame_seq(), None);
+    }
+
+    #[test]
     fn drilldown_stale_generation_pushes_cannot_mutate_or_close_the_current_life() {
         let mut state = DrilldownState::new(PtySessionId::new("pty-1"));
         state.begin_attach(RequestId::new("attach-2"));
@@ -1169,7 +1259,8 @@ mod tests {
     fn drilldown_dangling_style_indices_are_counted_not_followed() {
         // A frame whose run indexes past its table is counted as an invalid
         // frame and never painted; an update indexing past its BATCH table
-        // is counted as an invalid cell and the mirror keeps its content.
+        // is counted as an invalid cell and invalidates the mirror so a later
+        // snapshot, not a delta across a gap, restores continuity.
         let mut state = DrilldownState::new(PtySessionId::new("pty-1"));
         let dangling = PtyFrame {
             styles: Vec::new(),
@@ -1205,7 +1296,7 @@ mod tests {
             )),
             IngestDisposition::Counted
         );
-        assert_eq!(state.cells().expect("mirror")[0][0].glyph, "a");
+        assert!(state.cells().is_none());
         assert_eq!(state.diagnostics().invalid_updates, 1);
     }
 

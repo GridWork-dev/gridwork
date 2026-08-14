@@ -42,7 +42,8 @@ use std::sync::{Arc, Mutex};
 
 use gwk_domain::frame::{CellStyle, PtyDelta, PtyFrame, PtyRun, StyledCell};
 use gwk_domain::ids::{
-    ByteCount, CommandId, PtyFrameSeq, PtySessionGeneration, PtySessionId, RequestId, WriterEpoch,
+    ByteCount, CommandId, EventId, PtyFrameSeq, PtySessionGeneration, PtySessionId, RequestId,
+    WriterEpoch,
 };
 use gwk_domain::protocol::{
     FRAME_BODY_MAX_BYTES, KernelErrorCode, KernelResult, PtyInputData, SLOW_CONSUMER_TIMEOUT_SECS,
@@ -103,25 +104,27 @@ const RAW_BROADCAST_CAPACITY: usize = 64;
 /// refuses the claiming publish with `overloaded` and touches nothing else;
 /// a box hosting anywhere near this many live engine TUIs has other
 /// problems first.
-const MAX_SESSIONS: usize = 64;
+const MAX_SESSIONS: usize = gwk_domain::protocol::PTY_SESSION_MAX_COUNT;
 
 /// One wire connection's identity inside the hub, minted at accept time.
 /// Never reused within a process lifetime, which is what lets "the owner is
 /// gone" and "the owner is someone else" be the same comparison.
 pub type ConnectionId = u64;
 
-/// One reverse input control waiting for the connection writer. The sender's
+/// One reverse PTY control waiting for the connection writer. The sender's
 /// command response is not successful until `written` confirms the complete
 /// JSON frame left the kernel's socket writer.
-pub(crate) struct InputControl {
+pub(crate) struct PtyControl {
     pub(crate) control: ServerControl,
-    pub(crate) written: oneshot::Sender<Result<(), PtyRefusal>>,
 }
 
 #[derive(Clone)]
 struct ControlRoute {
-    sender: mpsc::Sender<InputControl>,
+    sender: mpsc::Sender<PtyControl>,
     input_enabled: bool,
+    control_enabled: bool,
+    start_enabled: bool,
+    disconnect: tokio::sync::watch::Sender<bool>,
 }
 
 /// One broadcast batch: the deltas that move a consumer to revision `seq`.
@@ -174,6 +177,7 @@ pub struct PtyRefusal {
     pub code: KernelErrorCode,
     pub message: String,
     pub detail: Option<serde_json::Value>,
+    pub(crate) indeterminate: bool,
 }
 
 impl PtyRefusal {
@@ -182,12 +186,22 @@ impl PtyRefusal {
             code,
             message: message.into(),
             detail: None,
+            indeterminate: false,
         }
     }
 
     fn with_detail(mut self, detail: serde_json::Value) -> Self {
         self.detail = Some(detail);
         self
+    }
+
+    fn indeterminate(message: impl Into<String>) -> Self {
+        Self {
+            code: KernelErrorCode::Indeterminate,
+            message: message.into(),
+            detail: None,
+            indeterminate: true,
+        }
     }
 
     /// The value form every serve arm answers with.
@@ -293,10 +307,29 @@ pub struct PtyHub {
     /// Priority control queue for each live wire connection. Session ownership
     /// stores only the id; this map is the reverse route from that id back to
     /// the outbound host connection.
-    controls: Mutex<HashMap<ConnectionId, ControlRoute>>,
+    controls: Mutex<ControlRegistry>,
+    start_changes: tokio::sync::watch::Sender<u64>,
     connections: AtomicU64,
     writer_epoch: WriterEpoch,
     generations: AtomicU64,
+}
+
+#[derive(Default)]
+struct ControlRegistry {
+    routes: HashMap<ConnectionId, ControlRoute>,
+    start_managers: Vec<ConnectionId>,
+    pending: HashMap<EventId, PendingDelivery>,
+}
+
+struct PendingDelivery {
+    owner: ConnectionId,
+    claim_token: String,
+    sender: oneshot::Sender<Result<(), PtyRefusal>>,
+}
+
+pub struct DisconnectOutcome {
+    pub retired: Vec<(PtySessionId, PtySessionGeneration)>,
+    pub abandoned: Vec<(EventId, String)>,
 }
 
 #[cfg(test)]
@@ -311,9 +344,11 @@ impl PtyHub {
     /// Generation tokens combine that epoch with a process-local counter, so
     /// neither a reclaimed id nor a restarted daemon can reuse a session life.
     pub fn new(writer_epoch: WriterEpoch) -> Self {
+        let (start_changes, _) = tokio::sync::watch::channel(0);
         Self {
             sessions: Mutex::new(HashMap::new()),
-            controls: Mutex::new(HashMap::new()),
+            controls: Mutex::new(ControlRegistry::default()),
+            start_changes,
             connections: AtomicU64::new(0),
             writer_epoch,
             generations: AtomicU64::new(0),
@@ -332,25 +367,43 @@ impl PtyHub {
     pub(crate) fn register_connection(
         &self,
         connection: ConnectionId,
-        controls: mpsc::Sender<InputControl>,
+        sender: mpsc::Sender<PtyControl>,
         input_enabled: bool,
-    ) {
-        self.control_routes().insert(
+        control_enabled: bool,
+        start_enabled: bool,
+    ) -> tokio::sync::watch::Receiver<bool> {
+        let (disconnect, disconnected) = tokio::sync::watch::channel(false);
+        let mut controls = self.control_routes();
+        controls.routes.insert(
             connection,
             ControlRoute {
-                sender: controls,
+                sender,
                 input_enabled,
+                control_enabled,
+                start_enabled,
+                disconnect,
             },
         );
+        if start_enabled {
+            controls
+                .start_managers
+                .retain(|manager| *manager != connection);
+            controls.start_managers.push(connection);
+            self.start_changes.send_modify(|version| *version += 1);
+        }
+        disconnected
     }
 
     /// Route one committed input batch to the connection owning this exact
     /// session generation. Queue admission is bounded by the existing priority
     /// response channel and by the same slow-consumer deadline as PTY output.
+    #[allow(clippy::too_many_arguments)]
     pub async fn deliver_input(
         &self,
         id: &PtySessionId,
         generation: &PtySessionGeneration,
+        claim_token: String,
+        delivery_id: EventId,
         command_id: CommandId,
         byte_size: ByteCount,
         data_base64: PtyInputData,
@@ -373,12 +426,17 @@ impl PtyHub {
             }
             session.owner
         };
-        let route = self.control_routes().get(&owner).cloned().ok_or_else(|| {
-            PtyRefusal::new(
-                KernelErrorCode::NotFound,
-                format!("pty session {id} has no live owning host connection"),
-            )
-        })?;
+        let route = self
+            .control_routes()
+            .routes
+            .get(&owner)
+            .cloned()
+            .ok_or_else(|| {
+                PtyRefusal::new(
+                    KernelErrorCode::NotFound,
+                    format!("pty session {id} has no live owning host connection"),
+                )
+            })?;
         if !route.input_enabled {
             return Err(PtyRefusal::new(
                 KernelErrorCode::Capability,
@@ -410,8 +468,10 @@ impl PtyHub {
         // the exact lifetime now, then consume the permit while the lifecycle
         // lock is held so retire/reclaim cannot redirect stale bytes to a new
         // generation on the same connection.
-        let (written, acknowledged) = oneshot::channel();
+        let pending_id = delivery_id.clone();
+        let (applied, acknowledged) = oneshot::channel();
         {
+            let mut controls = self.control_routes();
             let sessions = self.lock();
             let session = sessions.get(id).ok_or_else(|| unknown_session(id))?;
             if &session.generation != generation || session.owner != owner {
@@ -425,30 +485,253 @@ impl PtyHub {
                 })));
             }
             let control = ServerControl::PtyInput {
+                delivery_id: delivery_id.clone(),
                 command_id,
                 session_id: id.clone(),
                 generation: generation.clone(),
                 byte_size,
                 data_base64,
             };
-            permit.send(InputControl { control, written });
+            if controls.pending.contains_key(&delivery_id) {
+                return Err(delivery_already_pending(&delivery_id));
+            }
+            controls.pending.insert(
+                delivery_id.clone(),
+                PendingDelivery {
+                    owner,
+                    claim_token,
+                    sender: applied,
+                },
+            );
+            permit.send(PtyControl { control });
         }
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(SLOW_CONSUMER_TIMEOUT_SECS + 1),
+        let result = match tokio::time::timeout(
+            std::time::Duration::from_secs(SLOW_CONSUMER_TIMEOUT_SECS),
             acknowledged,
         )
         .await
         {
             Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(PtyRefusal::new(
-                KernelErrorCode::NotFound,
-                format!("pty session {id}'s owning host connection closed"),
-            )),
-            Err(_) => Err(PtyRefusal::new(
-                KernelErrorCode::SlowConsumer,
-                format!("pty session {id}'s owning host stopped accepting controls"),
-            )),
+            Ok(Err(_)) => Err(PtyRefusal::indeterminate(format!(
+                "pty session {id}'s owning host disconnected after delivery"
+            ))),
+            Err(_) => {
+                self.invalidate_connection(owner);
+                Err(PtyRefusal::indeterminate(format!(
+                    "pty session {id}'s owning host did not acknowledge application in time"
+                )))
+            }
+        };
+        if !result.as_ref().is_err_and(|error| error.indeterminate) {
+            self.control_routes().pending.remove(&pending_id);
         }
+        result
+    }
+
+    pub async fn deliver_control(
+        &self,
+        id: &PtySessionId,
+        generation: &PtySessionGeneration,
+        claim_token: String,
+        control: ServerControl,
+    ) -> Result<(), PtyRefusal> {
+        let owner = {
+            let sessions = self.lock();
+            let session = sessions.get(id).ok_or_else(|| unknown_session(id))?;
+            if &session.generation != generation {
+                return Err(stale_generation(id, generation, &session.generation));
+            }
+            session.owner
+        };
+        let route = self
+            .control_routes()
+            .routes
+            .get(&owner)
+            .cloned()
+            .ok_or_else(|| {
+                PtyRefusal::new(
+                    KernelErrorCode::NotFound,
+                    format!("pty session {id} has no live owning host connection"),
+                )
+            })?;
+        if !route.control_enabled {
+            return Err(PtyRefusal::new(
+                KernelErrorCode::Capability,
+                format!("pty session {id}'s owning host did not negotiate pty_control"),
+            ));
+        }
+        let permit = match tokio::time::timeout(
+            std::time::Duration::from_secs(SLOW_CONSUMER_TIMEOUT_SECS),
+            route.sender.reserve_owned(),
+        )
+        .await
+        {
+            Ok(Ok(permit)) => permit,
+            Ok(Err(_)) => {
+                return Err(PtyRefusal::new(
+                    KernelErrorCode::NotFound,
+                    format!("pty session {id}'s owning host connection closed"),
+                ));
+            }
+            Err(_) => {
+                return Err(PtyRefusal::new(
+                    KernelErrorCode::SlowConsumer,
+                    format!("pty session {id}'s owning host stopped accepting controls"),
+                ));
+            }
+        };
+
+        let delivery_id = control_delivery_id(&control)
+            .ok_or_else(not_a_delivery)?
+            .clone();
+        let pending_id = delivery_id.clone();
+        let (applied, acknowledged) = oneshot::channel();
+        {
+            let mut controls = self.control_routes();
+            let sessions = self.lock();
+            let session = sessions.get(id).ok_or_else(|| unknown_session(id))?;
+            if &session.generation != generation || session.owner != owner {
+                return Err(stale_generation(id, generation, &session.generation));
+            }
+            if controls.pending.contains_key(&delivery_id) {
+                return Err(delivery_already_pending(&delivery_id));
+            }
+            controls.pending.insert(
+                delivery_id,
+                PendingDelivery {
+                    owner,
+                    claim_token,
+                    sender: applied,
+                },
+            );
+            permit.send(PtyControl { control });
+        }
+        let result = match tokio::time::timeout(
+            std::time::Duration::from_secs(SLOW_CONSUMER_TIMEOUT_SECS),
+            acknowledged,
+        )
+        .await
+        {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(PtyRefusal::indeterminate(format!(
+                "pty session {id}'s owning host disconnected after delivery"
+            ))),
+            Err(_) => {
+                self.invalidate_connection(owner);
+                Err(PtyRefusal::indeterminate(format!(
+                    "pty session {id}'s owning host did not acknowledge application in time"
+                )))
+            }
+        };
+        if !result.as_ref().is_err_and(|error| error.indeterminate) {
+            self.control_routes().pending.remove(&pending_id);
+        }
+        result
+    }
+
+    pub async fn deliver_start(
+        &self,
+        claim_token: String,
+        control: ServerControl,
+    ) -> Result<(), PtyRefusal> {
+        let queue = async {
+            let mut changes = self.start_changes.subscribe();
+            loop {
+                let (manager, route) = self.start_route().ok_or_else(|| {
+                    PtyRefusal::new(
+                        KernelErrorCode::NotFound,
+                        "no live PTY host negotiated pty_start",
+                    )
+                })?;
+                if !route.start_enabled {
+                    return Err(PtyRefusal::new(
+                        KernelErrorCode::Capability,
+                        "the PTY host manager did not negotiate pty_start",
+                    ));
+                }
+                let permit = tokio::select! {
+                    permit = route.sender.reserve_owned() => permit.map_err(|_| {
+                        PtyRefusal::new(KernelErrorCode::NotFound, "PTY host connection closed")
+                    })?,
+                    changed = changes.changed() => {
+                        if changed.is_err() {
+                            return Err(PtyRefusal::new(
+                                KernelErrorCode::NotFound,
+                                "the PTY start-manager route closed",
+                            ));
+                        }
+                        continue;
+                    }
+                };
+
+                let delivery_id = control_delivery_id(&control)
+                    .ok_or_else(not_a_delivery)?
+                    .clone();
+                let pending_id = delivery_id.clone();
+                let (applied, acknowledged) = oneshot::channel();
+                {
+                    let mut current = self.control_routes();
+                    if current.start_managers.last().copied() != Some(manager) {
+                        drop(permit);
+                        continue;
+                    }
+                    if current.pending.contains_key(&delivery_id) {
+                        return Err(delivery_already_pending(&delivery_id));
+                    }
+                    current.pending.insert(
+                        delivery_id,
+                        PendingDelivery {
+                            owner: manager,
+                            claim_token,
+                            sender: applied,
+                        },
+                    );
+                    permit.send(PtyControl {
+                        control: control.clone(),
+                    });
+                }
+                return Ok((pending_id, acknowledged));
+            }
+        };
+        let (pending_id, acknowledged) = tokio::time::timeout(
+            std::time::Duration::from_secs(SLOW_CONSUMER_TIMEOUT_SECS),
+            queue,
+        )
+        .await
+        .map_err(|_| {
+            PtyRefusal::new(
+                KernelErrorCode::SlowConsumer,
+                "PTY start manager replacement prevented bounded delivery",
+            )
+        })??;
+        let result = match tokio::time::timeout(
+            std::time::Duration::from_secs(SLOW_CONSUMER_TIMEOUT_SECS),
+            acknowledged,
+        )
+        .await
+        {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(PtyRefusal::indeterminate(
+                "PTY host manager disconnected after delivery",
+            )),
+            Err(_) => {
+                let owner = self
+                    .control_routes()
+                    .pending
+                    .get(&pending_id)
+                    .map(|pending| pending.owner);
+                if let Some(owner) = owner {
+                    self.invalidate_connection(owner);
+                }
+                Err(PtyRefusal::indeterminate(
+                    "PTY host manager did not acknowledge application in time",
+                ))
+            }
+        };
+        if !result.as_ref().is_err_and(|error| error.indeterminate) {
+            self.control_routes().pending.remove(&pending_id);
+        }
+        result
     }
 
     /// Publish a full screen: claim (first publish), reseed (owner, at or
@@ -602,6 +885,7 @@ impl PtyHub {
                     rows: new_rows,
                     cols: new_cols,
                 } => {
+                    bounded_grid(*new_cols, *new_rows)?;
                     // The delta itself is bytes-tiny, but applying it
                     // allocates a full blank grid — so the grid it names is
                     // held to the same budget a snapshot publish of that grid
@@ -860,18 +1144,41 @@ impl PtyHub {
     /// the lifetimes that ended so the caller can close their ledger rows;
     /// the close event's hangup provenance is what tells a crash from a
     /// typed retire in the cutover receipt.
-    pub fn disconnect(&self, conn: ConnectionId) -> Vec<(PtySessionId, PtySessionGeneration)> {
-        self.control_routes().remove(&conn);
+    pub fn disconnect(&self, conn: ConnectionId) -> DisconnectOutcome {
+        let mut controls = self.control_routes();
+        controls.routes.remove(&conn);
+        let abandoned_ids: Vec<EventId> = controls
+            .pending
+            .iter()
+            .filter(|(_, pending)| pending.owner == conn)
+            .map(|(delivery_id, _)| delivery_id.clone())
+            .collect();
+        let abandoned = abandoned_ids
+            .into_iter()
+            .filter_map(|delivery_id| {
+                controls
+                    .pending
+                    .remove(&delivery_id)
+                    .map(|pending| (delivery_id, pending.claim_token))
+            })
+            .collect();
+        let previous_manager = controls.start_managers.last().copied();
+        controls.start_managers.retain(|manager| *manager != conn);
+        if controls.start_managers.last().copied() != previous_manager {
+            self.start_changes.send_modify(|version| *version += 1);
+        }
+        drop(controls);
         let mut sessions = self.lock();
         let claimed: Vec<PtySessionId> = sessions
             .iter()
             .filter(|(_, session)| session.owner == conn)
             .map(|(id, _)| id.clone())
             .collect();
-        claimed
+        let retired = claimed
             .into_iter()
             .filter_map(|id| sessions.remove(&id).map(|session| (id, session.generation)))
-            .collect()
+            .collect();
+        DisconnectOutcome { retired, abandoned }
     }
 
     /// Attach a consumer. The subscription and the replay are taken under
@@ -1051,11 +1358,122 @@ impl PtyHub {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn control_routes(&self) -> std::sync::MutexGuard<'_, HashMap<ConnectionId, ControlRoute>> {
+    fn start_route(&self) -> Option<(ConnectionId, ControlRoute)> {
+        let controls = self.control_routes();
+        let manager = controls.start_managers.last().copied()?;
+        controls
+            .routes
+            .get(&manager)
+            .cloned()
+            .map(|route| (manager, route))
+    }
+
+    pub(crate) fn delivery_pending(&self, delivery_id: &EventId) -> bool {
+        self.control_routes().pending.contains_key(delivery_id)
+    }
+
+    fn control_routes(&self) -> std::sync::MutexGuard<'_, ControlRegistry> {
         self.controls
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+
+    pub(crate) fn take_delivery_ack(
+        &self,
+        connection: ConnectionId,
+        delivery_id: &EventId,
+        claim_token: &str,
+    ) -> Result<oneshot::Sender<Result<(), PtyRefusal>>, PtyRefusal> {
+        let mut controls = self.control_routes();
+        let Some(pending) = controls.pending.get(delivery_id) else {
+            return Err(PtyRefusal::new(
+                KernelErrorCode::NotFound,
+                format!("no pending PTY delivery {delivery_id}"),
+            ));
+        };
+        if pending.owner != connection {
+            return Err(PtyRefusal::new(
+                KernelErrorCode::Authority,
+                format!("PTY delivery {delivery_id} belongs to another host connection"),
+            ));
+        }
+        if pending.claim_token != claim_token {
+            return Err(PtyRefusal::new(
+                KernelErrorCode::StaleVersion,
+                format!("PTY delivery {delivery_id} belongs to another delivery attempt"),
+            ));
+        }
+        Ok(controls
+            .pending
+            .remove(delivery_id)
+            .expect("present under the same lock")
+            .sender)
+    }
+
+    pub(crate) fn delivery_ack_claim(
+        &self,
+        connection: ConnectionId,
+        delivery_id: &EventId,
+    ) -> Result<String, PtyRefusal> {
+        let controls = self.control_routes();
+        let Some(pending) = controls.pending.get(delivery_id) else {
+            return Err(PtyRefusal::new(
+                KernelErrorCode::NotFound,
+                format!("no pending PTY delivery {delivery_id}"),
+            ));
+        };
+        if pending.owner != connection {
+            return Err(PtyRefusal::new(
+                KernelErrorCode::Authority,
+                format!("PTY delivery {delivery_id} belongs to another host connection"),
+            ));
+        }
+        Ok(pending.claim_token.clone())
+    }
+
+    fn invalidate_connection(&self, connection: ConnectionId) {
+        if let Some(route) = self.control_routes().routes.get(&connection) {
+            route.disconnect.send_replace(true);
+        }
+    }
+
+    #[cfg(test)]
+    fn acknowledge_delivery(
+        &self,
+        connection: ConnectionId,
+        delivery_id: &EventId,
+        result: Result<(), PtyRefusal>,
+    ) -> Result<(), PtyRefusal> {
+        let claim_token = self.delivery_ack_claim(connection, delivery_id)?;
+        let sender = self.take_delivery_ack(connection, delivery_id, &claim_token)?;
+        let _ = sender.send(result);
+        Ok(())
+    }
+}
+
+/// The delivery id a reverse control carries, if it is one that carries one.
+///
+/// `None` rather than a panic: `deliver_control` and `deliver_start` are both
+/// `pub` and both take a bare [`ServerControl`], so the "only deliveries reach
+/// here" invariant is held by call-site discipline, not by the type. Today
+/// every caller is in-crate and correct — but a panic on a daemon request path
+/// is a bug, not an error channel, and a refusal costs one line at each site.
+fn control_delivery_id(control: &ServerControl) -> Option<&EventId> {
+    match control {
+        ServerControl::PtyInput { delivery_id, .. }
+        | ServerControl::PtyResize { delivery_id, .. }
+        | ServerControl::PtyStop { delivery_id, .. }
+        | ServerControl::PtyStart { delivery_id, .. } => Some(delivery_id),
+        _ => None,
+    }
+}
+
+/// The refusal for a control that carries no delivery id.
+fn not_a_delivery() -> PtyRefusal {
+    PtyRefusal::new(
+        KernelErrorCode::Validation,
+        "only reverse PTY deliveries may be routed to a host",
+    )
 }
 
 /// Deliver one attach: replay first, then the live stream, until the
@@ -1427,6 +1845,7 @@ fn strict_frame(frame: &PtyFrame) -> Result<(u16, u16, Vec<Vec<StyledCell>>), Pt
         }
     }
     let cols = width.unwrap_or(0) as u16;
+    bounded_grid(cols, rows)?;
     if let Some(cursor) = frame.cursor
         && (cursor.row >= rows || cursor.col >= cols)
     {
@@ -1447,6 +1866,20 @@ fn strict_frame(frame: &PtyFrame) -> Result<(u16, u16, Vec<Vec<StyledCell>>), Pt
         )
     })?;
     Ok((rows, cols, cells))
+}
+
+fn bounded_grid(cols: u16, rows: u16) -> Result<(), PtyRefusal> {
+    if !gwk_domain::pty_grid_dimensions_are_bounded(cols, rows) {
+        return Err(PtyRefusal::new(
+            KernelErrorCode::Validation,
+            format!(
+                "a pty grid must be non-zero, no larger than {} per axis, and no larger than {} cells; got {cols}x{rows}",
+                gwk_domain::PTY_GRID_MAX_AXIS,
+                gwk_domain::PTY_GRID_MAX_CELLS,
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// The one-canonical-table refusal, shared by the frame and batch decoders.
@@ -1504,6 +1937,28 @@ fn unknown_session(id: &PtySessionId) -> PtyRefusal {
     PtyRefusal::new(KernelErrorCode::NotFound, format!("no pty session {id}"))
 }
 
+fn delivery_already_pending(delivery_id: &EventId) -> PtyRefusal {
+    PtyRefusal::new(
+        KernelErrorCode::Overloaded,
+        format!("PTY delivery {delivery_id} already has an active host attempt"),
+    )
+}
+
+fn stale_generation(
+    id: &PtySessionId,
+    presented: &PtySessionGeneration,
+    actual: &PtySessionGeneration,
+) -> PtyRefusal {
+    PtyRefusal::new(
+        KernelErrorCode::StaleVersion,
+        format!("pty session {id} generation {presented} is stale; current generation is {actual}"),
+    )
+    .with_detail(serde_json::json!({
+        "presented_generation": presented.as_str(),
+        "actual_generation": actual.as_str(),
+    }))
+}
+
 /// A non-advancing seq is a CAS refusal — the publisher's view of the head is
 /// stale — so it answers `stale_version` with the actual head in the detail,
 /// exactly as that code's own doc promises. `validation` would conflate it
@@ -1513,6 +1968,7 @@ fn backwards(id: &PtySessionId, seq: u64, head: u64) -> PtyRefusal {
         code: KernelErrorCode::StaleVersion,
         message: format!("pty session {id} is at revision {head}; {seq} does not advance it"),
         detail: Some(serde_json::json!({ "head": head.to_string() })),
+        indeterminate: false,
     }
 }
 
@@ -1523,6 +1979,7 @@ fn raw_stale(message: impl Into<String>, head: Option<u64>) -> PtyRefusal {
         detail: Some(serde_json::json!({
             "head": head.map(|head| head.to_string())
         })),
+        indeterminate: false,
     }
 }
 
@@ -1659,7 +2116,7 @@ mod tests {
         let hub = PtyHub::default();
         let host = hub.connection();
         let (controls, mut received) = mpsc::channel(2);
-        hub.register_connection(host, controls, true);
+        hub.register_connection(host, controls, true, false, false);
         let generation = hub
             .publish_snapshot(host, &id("s"), Some(0), frame(2, 4))
             .expect("claim")
@@ -1669,14 +2126,20 @@ mod tests {
         let delivered = hub.deliver_input(
             &session_id,
             &generation,
+            "claim-input-1".to_owned(),
+            EventId::new("pty_session:s:2"),
             CommandId::new("input-1"),
             ByteCount::new(3),
             PtyInputData::new("AP8K"),
         );
         let received_control = async {
-            let InputControl { control, written } =
-                received.recv().await.expect("owner receives control");
-            let _ = written.send(Ok(()));
+            let PtyControl { control } = received.recv().await.expect("owner receives control");
+            hub.acknowledge_delivery(
+                host,
+                control_delivery_id(&control).expect("a delivery control"),
+                Ok(()),
+            )
+            .expect("host applies input");
             control
         };
         let (delivered, received_control) = tokio::join!(delivered, received_control);
@@ -1684,6 +2147,7 @@ mod tests {
         assert_eq!(
             received_control,
             ServerControl::PtyInput {
+                delivery_id: EventId::new("pty_session:s:2"),
                 command_id: CommandId::new("input-1"),
                 session_id: id("s"),
                 generation: generation.clone(),
@@ -1696,6 +2160,8 @@ mod tests {
             .deliver_input(
                 &id("s"),
                 &PtySessionGeneration::new("older"),
+                "claim-input-2".to_owned(),
+                EventId::new("pty_session:s:3"),
                 CommandId::new("input-2"),
                 ByteCount::new(1),
                 PtyInputData::new("YQ=="),
@@ -1705,11 +2171,13 @@ mod tests {
         assert_eq!(stale.code, KernelErrorCode::StaleVersion);
         assert!(received.try_recv().is_err(), "stale input must not route");
 
-        hub.disconnect(host);
+        let _ = hub.disconnect(host);
         let absent = hub
             .deliver_input(
                 &id("s"),
                 &generation,
+                "claim-input-3".to_owned(),
+                EventId::new("pty_session:s:4"),
                 CommandId::new("input-3"),
                 ByteCount::new(1),
                 PtyInputData::new("YQ=="),
@@ -1717,6 +2185,271 @@ mod tests {
             .await
             .expect_err("retired session");
         assert_eq!(absent.code, KernelErrorCode::NotFound);
+    }
+
+    #[tokio::test]
+    async fn resize_stop_and_start_use_bounded_exact_routes() {
+        let hub = PtyHub::default();
+        let host = hub.connection();
+        let manager = hub.connection();
+        let (host_controls, mut host_received) = mpsc::channel(3);
+        let (manager_controls, mut manager_received) = mpsc::channel(1);
+        hub.register_connection(host, host_controls, true, true, false);
+        hub.register_connection(manager, manager_controls, false, false, true);
+        let requester = hub.connection();
+        let (requester_controls, mut requester_received) = mpsc::channel(1);
+        hub.register_connection(requester, requester_controls, false, false, false);
+        let generation = hub
+            .publish_snapshot(host, &id("s"), Some(0), frame(2, 4))
+            .expect("claim")
+            .expect("new lifetime");
+
+        let session_id = id("s");
+        let resize = hub.deliver_control(
+            &session_id,
+            &generation,
+            "claim-resize-1".to_owned(),
+            ServerControl::PtyResize {
+                delivery_id: EventId::new("pty_session:s:2"),
+                command_id: CommandId::new("resize-1"),
+                session_id: id("s"),
+                generation: generation.clone(),
+                cols: 100,
+                rows: 30,
+            },
+        );
+        let receive_resize = acknowledge(&hub, host, &mut host_received);
+        let (resize, delivered) = tokio::join!(resize, receive_resize);
+        resize.expect("resize routes");
+        assert!(matches!(
+            delivered,
+            ServerControl::PtyResize {
+                cols: 100,
+                rows: 30,
+                ..
+            }
+        ));
+
+        let stale = hub
+            .deliver_control(
+                &id("s"),
+                &PtySessionGeneration::new("old"),
+                "claim-stop-1".to_owned(),
+                ServerControl::PtyStop {
+                    delivery_id: EventId::new("pty_session:s:3"),
+                    command_id: CommandId::new("stop-old"),
+                    session_id: id("s"),
+                    generation: PtySessionGeneration::new("old"),
+                },
+            )
+            .await
+            .expect_err("stale stop");
+        assert_eq!(stale.code, KernelErrorCode::StaleVersion);
+
+        let start = hub.deliver_start(
+            "claim-start-1".to_owned(),
+            ServerControl::PtyStart {
+                delivery_id: EventId::new("pty_session_start:review-7:1"),
+                command_id: CommandId::new("start-1"),
+                template_name: gwk_domain::PtySessionTemplateName::new("review"),
+                session_id: id("review-7"),
+            },
+        );
+        let receive_start = acknowledge(&hub, manager, &mut manager_received);
+        let (start, delivered) = tokio::join!(start, receive_start);
+        start.expect("start routes to manager");
+        assert!(matches!(delivered, ServerControl::PtyStart { .. }));
+        assert!(
+            requester_received.try_recv().is_err(),
+            "a start-capable requester must not become the host manager"
+        );
+        assert!(
+            host_received.try_recv().is_err(),
+            "start must not route to a session publisher"
+        );
+    }
+
+    #[tokio::test]
+    async fn replacing_a_start_manager_reroutes_a_control_waiting_for_capacity() {
+        let hub = PtyHub::default();
+        let first = hub.connection();
+        let second = hub.connection();
+        let (first_controls, mut first_received) = mpsc::channel(1);
+        let (second_controls, mut second_received) = mpsc::channel(1);
+        first_controls
+            .send(PtyControl {
+                control: ServerControl::PtyStart {
+                    delivery_id: EventId::new("pty_session_start:blocker:1"),
+                    command_id: CommandId::new("blocker"),
+                    template_name: gwk_domain::PtySessionTemplateName::new("blocker"),
+                    session_id: id("blocker"),
+                },
+            })
+            .await
+            .expect("fill the first manager route");
+        hub.register_connection(first, first_controls, false, false, true);
+
+        let start = hub.deliver_start(
+            "claim-start-2".to_owned(),
+            ServerControl::PtyStart {
+                delivery_id: EventId::new("pty_session_start:review-replacement:1"),
+                command_id: CommandId::new("start-replacement"),
+                template_name: gwk_domain::PtySessionTemplateName::new("review"),
+                session_id: id("review-replacement"),
+            },
+        );
+        let replace = async {
+            tokio::task::yield_now().await;
+            hub.register_connection(second, second_controls, false, false, true);
+            let delivered = acknowledge(&hub, second, &mut second_received).await;
+            assert!(
+                first_received.try_recv().is_ok(),
+                "the blocker remains queued on the replaced manager"
+            );
+            (second, delivered)
+        };
+        let (start, (recipient, delivered)) = tokio::join!(start, replace);
+        start.expect("replacement manager receives the queued start");
+        assert_eq!(recipient, second, "the replaced manager received the start");
+        assert!(matches!(delivered, ServerControl::PtyStart { .. }));
+    }
+
+    #[test]
+    fn disconnecting_a_replacement_start_manager_restores_the_previous_route() {
+        let hub = PtyHub::default();
+        let first = hub.connection();
+        let second = hub.connection();
+        let (first_controls, _first_received) = mpsc::channel(1);
+        let (second_controls, _second_received) = mpsc::channel(1);
+        hub.register_connection(first, first_controls, false, false, true);
+        hub.register_connection(second, second_controls, false, false, true);
+        assert_eq!(hub.start_route().expect("replacement route").0, second);
+
+        let _ = hub.disconnect(second);
+
+        assert_eq!(
+            hub.start_route().expect("restored prior route").0,
+            first,
+            "a transient replacement must not erase the still-live manager"
+        );
+    }
+
+    #[test]
+    fn a_start_manager_is_never_visible_without_its_control_route() {
+        let hub = PtyHub::default();
+        let manager = hub.connection();
+        let (controls, _received) = mpsc::channel(1);
+        hub.register_connection(manager, controls, false, false, true);
+
+        let (registered, route) = hub.start_route().expect("manager route");
+        assert_eq!(registered, manager);
+        assert!(route.start_enabled);
+    }
+
+    #[tokio::test]
+    async fn a_control_waiting_for_capacity_cannot_cross_a_generation_flip() {
+        let hub = PtyHub::default();
+        let host = hub.connection();
+        let (host_controls, mut received) = mpsc::channel(1);
+        let blocker = ServerControl::PtyStop {
+            delivery_id: EventId::new("pty_session:other:2"),
+            command_id: CommandId::new("blocker"),
+            session_id: id("other"),
+            generation: PtySessionGeneration::new("other-life"),
+        };
+        host_controls
+            .send(PtyControl { control: blocker })
+            .await
+            .expect("fill the bounded route");
+        hub.register_connection(host, host_controls, false, true, false);
+        let generation = hub
+            .publish_snapshot(host, &id("s"), Some(0), frame(2, 4))
+            .expect("claim")
+            .expect("new lifetime");
+
+        let session_id = id("s");
+        let delivery = hub.deliver_control(
+            &session_id,
+            &generation,
+            "claim-stop-2".to_owned(),
+            ServerControl::PtyStop {
+                delivery_id: EventId::new("pty_session:s:2"),
+                command_id: CommandId::new("stale-stop"),
+                session_id: id("s"),
+                generation: generation.clone(),
+            },
+        );
+        let flip = async {
+            tokio::task::yield_now().await;
+            hub.retire(host, &id("s")).expect("retire old lifetime");
+            let next = hub
+                .publish_snapshot(host, &id("s"), Some(0), frame(2, 4))
+                .expect("reclaim")
+                .expect("new lifetime");
+            assert_ne!(next, generation);
+            let _ = received.recv().await.expect("drain blocker");
+        };
+        let (delivery, ()) = tokio::join!(delivery, flip);
+        let refused = delivery.expect_err("stale control must not cross the generation flip");
+        assert_eq!(refused.code, KernelErrorCode::StaleVersion);
+        assert!(received.try_recv().is_err(), "stale control must not route");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unacknowledged_application_invalidates_its_host_route() {
+        let hub = PtyHub::default();
+        let host = hub.connection();
+        let (host_controls, mut received) = mpsc::channel(1);
+        let mut disconnected = hub.register_connection(host, host_controls, false, true, false);
+        let generation = hub
+            .publish_snapshot(host, &id("s"), Some(0), frame(2, 4))
+            .expect("claim")
+            .expect("new lifetime");
+        let session_id = id("s");
+        let delivery_id = EventId::new("pty_session:s:2");
+        let delivery = hub.deliver_control(
+            &session_id,
+            &generation,
+            "claim-timeout".to_owned(),
+            ServerControl::PtyResize {
+                delivery_id: delivery_id.clone(),
+                command_id: CommandId::new("resize-timeout"),
+                session_id: id("s"),
+                generation: generation.clone(),
+                cols: 100,
+                rows: 30,
+            },
+        );
+        let host_wedges = async {
+            let _ = received.recv().await.expect("control reaches host");
+            tokio::time::advance(std::time::Duration::from_secs(
+                SLOW_CONSUMER_TIMEOUT_SECS + 1,
+            ))
+            .await;
+        };
+
+        let (result, ()) = tokio::join!(delivery, host_wedges);
+        let refusal = result.expect_err("missing application acknowledgement must fail bounded");
+        assert!(refusal.indeterminate);
+        disconnected.changed().await.expect("route invalidated");
+        assert!(*disconnected.borrow());
+        let DisconnectOutcome { abandoned, .. } = hub.disconnect(host);
+        assert_eq!(abandoned, vec![(delivery_id, "claim-timeout".to_owned())]);
+    }
+
+    async fn acknowledge(
+        hub: &PtyHub,
+        connection: ConnectionId,
+        received: &mut mpsc::Receiver<PtyControl>,
+    ) -> ServerControl {
+        let PtyControl { control } = received.recv().await.expect("receive control");
+        hub.acknowledge_delivery(
+            connection,
+            control_delivery_id(&control).expect("a delivery control"),
+            Ok(()),
+        )
+        .expect("host applies control");
+        control
     }
 
     #[test]
@@ -1894,7 +2627,7 @@ mod tests {
             .expect_err("one event past the count boundary must be refused");
         assert_eq!(full.code, KernelErrorCode::Overloaded);
 
-        hub.disconnect(host);
+        let _ = hub.disconnect(host);
         let host = hub.connection();
         hub.publish_snapshot(host, &id("s"), Some(0), frame(1, 1))
             .expect("reclaim render state");
@@ -2291,7 +3024,7 @@ mod tests {
         );
 
         // The hangup path retires whatever is left.
-        hub.disconnect(host);
+        let _ = hub.disconnect(host);
         assert_eq!(
             hub.snapshot(&id("b")).expect_err("gone").code,
             KernelErrorCode::NotFound
@@ -2358,7 +3091,7 @@ mod tests {
         // The host's connection dies mid-flight; its successor reclaims the
         // same id at the head its engine meanwhile reached. The reclaim's
         // window is empty: revisions 5..=9 exist and are gone.
-        hub.disconnect(host);
+        let _ = hub.disconnect(host);
         let successor = hub.connection();
         hub.publish_snapshot(successor, &id("s"), Some(9), frame(2, 4))
             .expect("reclaim");
@@ -2388,7 +3121,7 @@ mod tests {
             .expect("seed the first life");
         let first = hub.attach(&id("s"), None, None).expect("first attach");
 
-        hub.disconnect(host);
+        let _ = hub.disconnect(host);
         let successor = hub.connection();
         hub.publish_snapshot(successor, &id("s"), Some(4), frame(2, 4))
             .expect("reclaim at the same sequence");

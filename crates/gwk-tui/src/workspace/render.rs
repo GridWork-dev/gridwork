@@ -41,6 +41,27 @@ pub enum WorkspaceTarget {
     Pane(PaneId),
 }
 
+/// Visible pane rectangles inset past workspace furniture, in paint order.
+pub fn pane_content_rects(area: Rect, state: &WorkspaceState) -> Vec<(PaneId, Rect)> {
+    let body = Rect::new(
+        area.x,
+        area.y.saturating_add(1),
+        area.width,
+        area.height.saturating_sub(2),
+    );
+    state
+        .active_tab()
+        .into_iter()
+        .flat_map(|tab| tab.pane_rects(body))
+        .filter_map(|(pane, rect)| {
+            (rect.width > 2 && rect.height > 2).then_some((
+                pane,
+                Rect::new(rect.x + 1, rect.y + 1, rect.width - 2, rect.height - 2),
+            ))
+        })
+        .collect()
+}
+
 struct BorderGlyphs {
     horizontal: &'static str,
     vertical: &'static str,
@@ -121,10 +142,15 @@ pub fn render(
             };
             draw_border(buf, rect, chrome.style(role, tier), border);
             if rect.width > 2 {
+                let title = if id == tab.focus() {
+                    format!(">{id}")
+                } else {
+                    format!(" {id}")
+                };
                 buf.set_stringn(
                     rect.x + 1,
                     rect.y,
-                    id.to_string(),
+                    title,
                     (rect.width - 2) as usize,
                     chrome.style(ChromeRole::PaneTitle, tier),
                 );
@@ -383,7 +409,7 @@ mod tests {
             "header: label then strip"
         );
         assert!(
-            row(&buf, 1).starts_with("┌p1"),
+            row(&buf, 1).starts_with("┌>p1"),
             "the pane border opens on the body's first row, titled"
         );
         assert!(
@@ -476,7 +502,7 @@ mod tests {
             }
         }
         assert!(
-            row(&buf, 1).starts_with("+p1"),
+            row(&buf, 1).starts_with("+ p1"),
             "borders fall back to ascii"
         );
     }
@@ -629,7 +655,7 @@ mod tests {
     fn render_a_user_remap_reaches_the_furniture() {
         let mut chrome = ChromeTheme::signal();
         chrome
-            .bind(ChromeRole::PaneBorderFocused, "warn")
+            .bind(ChromeRole::PaneBorderFocused, "gws_warn")
             .expect("bind");
         let state = WorkspaceState::new();
         let mut buf = Buffer::empty(AREA);

@@ -1,6 +1,6 @@
 [package]
 name = "gwk-tui"
-version = "0.0.2"
+version = "0.0.3"
 description = "The GridWork terminal console — the thin client that renders kernel projections"
 homepage = "https://gridwork.sh"
 edition.workspace = true

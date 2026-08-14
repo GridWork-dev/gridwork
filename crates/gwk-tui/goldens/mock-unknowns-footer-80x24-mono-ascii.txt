@@ -1,0 +1,24 @@
+ FLEET   at least 11 attempts  4 live  $5.30 today              mono+asc  17:30
+
+  ATTEMPT            ENGINE  ROLE      STATE        SPEND        AGE
+  at-ship-done       codex   impl      v done       $0.34        8h45
+  at-pty-impl        codex   impl      - running    $0.09 +1u    7h50
+  at-pty-review      claude  rev       # blocked    $0.13        7h42
+  at-pty-start       claude  rsrch     ^ starting   -            6h55
+  at-tui-impl        claude  impl      - running    $2.10        7h30
+  at-tui-queue       codex   rust-pro  : queued     $0.01        7h23
+  at-release-lease   codex   devrel    : leased     -            8h15
+  at-flaky-cancel    claude  test-auto ~ canceling  +1u          5h30
+  at-flaky-canceled  claude  -         o canceled   -            6h30
+  +2 more
+  UNCLAIMED  1 lease  1 worktree  0 cost entries
+    ls-release expired   wt-release released
+  UNKNOWN  liveness, engine binding, fleet size
+ ------------------------------------------------------------------------------
+  SPEND / HOUR   10 priced   2 unpriced   0 unattributed
+  $2.47                                     ####
+                                            ####        ####
+  > $0  ####  ####                          ####  ####  ####
+        09h   10h   11h   12h   13h   14h   15h   16h   17h
+
+ : go   / filter   enter open   s stop   q quit

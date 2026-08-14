@@ -46,6 +46,11 @@ pub const fn exit_for(code: KernelErrorCode) -> u8 {
 
         KernelErrorCode::NotFound => NOT_FOUND,
 
+        // The command is durably terminal, but the kernel cannot prove whether
+        // its side effect applied. Blind retry is unsafe, so this is a refused
+        // state rather than transient unavailability.
+        KernelErrorCode::Indeterminate => REFUSED,
+
         // Not usable now. A handshake that cannot be agreed and a role the
         // daemon refuses to run with belong here rather than under "your
         // input": nothing the caller passed would have made them succeed, and

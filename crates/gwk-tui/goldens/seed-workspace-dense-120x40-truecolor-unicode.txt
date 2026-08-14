@@ -1,0 +1,40 @@
+ TERM   workspace  pty-build
+
+ws 1  1
+┌>p1───────────────────────────────────────────────────────┐┌ p2─────────────────────────┐┌ p3──────────┐┌ p4──────────┐
+│build                                                     ││review                      ││tests        ││docs         │
+│Compiling gridwork                                        ││checking workspace runtime  ││53 passed    ││derivation re│
+│Finished dev profile                                      ││no blockers                 ││0 failed     ││digest pendin│
+│                                                          ││                            ││             ││             │
+│                                                          ││                            ││             ││             │
+│                                                          ││                            ││             ││             │
+│                                                          ││                            ││             ││             │
+│                                                          ││                            ││             ││             │
+│                                                          ││                            ││             ││             │
+│                                                          ││                            ││             ││             │
+│                                                          ││                            ││             ││             │
+│                                                          ││                            ││             ││             │
+│                                                          ││                            ││             ││             │
+│                                                          ││                            ││             ││             │
+│                                                          ││                            ││             ││             │
+│                                                          ││                            ││             ││             │
+│                                                          ││                            ││             ││             │
+│                                                          ││                            ││             ││             │
+│                                                          ││                            ││             ││             │
+│                                                          ││                            ││             ││             │
+│                                                          ││                            ││             ││             │
+│                                                          ││                            ││             ││             │
+│                                                          ││                            ││             ││             │
+│                                                          ││                            ││             ││             │
+│                                                          ││                            ││             ││             │
+│                                                          ││                            ││             ││             │
+│                                                          ││                            ││             ││             │
+│                                                          ││                            ││             ││             │
+│                                                          ││                            ││             ││             │
+│                                                          ││                            ││             ││             │
+│                                                          ││                            ││             ││             │
+│                                                          ││                            ││             ││             │
+│ live  SESSION pty-build  seq 7  24x3  view 0,0           ││ live  SESSION pty-review  s││ live  SESSIO││ live  SESSIO│
+└──────────────────────────────────────────────────────────┘└────────────────────────────┘└─────────────┘└─────────────┘
+ws 1/1  tab 1/1  4 panes
+ VIEW  Ctrl-g command   Ctrl-g q back   mouse focus   input -> pane                                  motion off  tc+uni

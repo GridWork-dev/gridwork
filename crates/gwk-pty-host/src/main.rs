@@ -100,14 +100,25 @@ async fn main() -> std::process::ExitCode {
     for decl in &declared {
         if let Err(why) = start_session(&registry, decl).await {
             tracing::error!(session = %decl.id, %why, "a declared session could not start");
-            stop_sessions(&registry, &declared).await;
+            stop_sessions(&registry).await;
             return std::process::ExitCode::FAILURE;
         }
         tracing::info!(session = %decl.id, engine = %decl.engine, "session started");
     }
 
     let (stop_tx, stop_rx) = watch::channel(false);
-    let mut publishers = tokio::task::JoinSet::new();
+    let publishers = Arc::new(Mutex::new(tokio::task::JoinSet::new()));
+    let start_manager = tokio::spawn(gwk_pty_host::control::serve_starts(
+        socket.clone(),
+        Arc::clone(&registry),
+        Arc::clone(&publishers),
+        stop_rx.clone(),
+    ));
+    let reaper = tokio::spawn(gwk_pty_host::control::serve_reaper(
+        Arc::clone(&registry),
+        Arc::clone(&publishers),
+        stop_rx.clone(),
+    ));
     for decl in &declared {
         // Each publisher gets its own attach handle instead of the shared
         // registry: its attach round-trips through the session's thread, and
@@ -117,11 +128,11 @@ async fn main() -> std::process::ExitCode {
             Ok(attacher) => attacher,
             Err(why) => {
                 tracing::error!(session = %decl.id, %why, "a started session vanished");
-                stop_sessions(&registry, &declared).await;
+                stop_sessions(&registry).await;
                 return std::process::ExitCode::FAILURE;
             }
         };
-        publishers.spawn(publish::publish_session(
+        publishers.lock().await.spawn(publish::publish_session(
             attacher,
             socket.clone(),
             decl.id.clone(),
@@ -147,13 +158,16 @@ async fn main() -> std::process::ExitCode {
     // child that will not reap must not hold shutdown hostage (the service
     // manager's stop timeout would eventually win, but by SIGKILL).
     let _ = stop_tx.send(true);
-    if tokio::time::timeout(SESSION_STOP, stop_sessions(&registry, &declared))
+    if tokio::time::timeout(SESSION_STOP, stop_sessions(&registry))
         .await
         .is_err()
     {
         tracing::warn!("session shutdown exceeded its bound; exiting anyway");
     }
+    let _ = tokio::time::timeout(PUBLISHER_DRAIN, start_manager).await;
+    let _ = tokio::time::timeout(PUBLISHER_DRAIN, reaper).await;
     let _ = tokio::time::timeout(PUBLISHER_DRAIN, async {
+        let mut publishers = publishers.lock().await;
         while publishers.join_next().await.is_some() {}
     })
     .await;
@@ -176,14 +190,14 @@ async fn start_session(
         .map_err(|e| e.to_string())
 }
 
-/// Kill and reap every declared session, logging how each ended.
-async fn stop_sessions(registry: &Arc<Mutex<SessionRegistry>>, declared: &[SessionDecl]) {
+/// Kill and reap every session, including request-started sessions.
+async fn stop_sessions(registry: &Arc<Mutex<SessionRegistry>>) {
     let mut registry = registry.lock().await;
-    for decl in declared {
+    for id in registry.ids() {
         // An Err is already-gone — it ended on its own and was reaped, or it
         // never started; neither is a shutdown problem.
-        if let Ok(exit) = registry.stop(&decl.id).await {
-            tracing::info!(session = %decl.id, ?exit, "session stopped");
+        if let Ok(exit) = registry.stop(&id).await {
+            tracing::info!(session = %id, ?exit, "session stopped");
         }
     }
     let _ = registry

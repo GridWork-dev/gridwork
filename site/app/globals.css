@@ -2,43 +2,158 @@
 @import "fumadocs-ui/css/neutral.css";
 @import "fumadocs-ui/css/preset.css";
 
-:root {
-  --bg:#070B10;
-  --surface:#121A24;
-  --surface-2:#1F2B3A;
-  --hue:#6BDBFF;
-  --hue-dim:#3FA8CC;
-  --hue-bright:#9AE8FF;
-  --fg:#E4EDF5;
-  --faint:#526274;
-  --muted:#9AA5AF;
-  --warn:#F2C14E;
-  --fail:#FF6E6E;
-  --ok:#6EE7A8;
-  --border:#748496;
-  --focus:#6BDBFF;
-  --selection:#F5F9FD;
+/* Every property this stylesheet owns is `--gws-*`, and the three imports above
+   are why. Tailwind claims `--color-*`, `--font-*`, `--radius-*` and `--shadow-*`;
+   Fumadocs claims `--color-fd-*` and ships its own `--background`/`--foreground`
+   lineage. A bare `--bg` here is not a name, it is a bet on load order.
 
-  --line: rgba(82, 98, 116, 0.34);
-  --line-hi: rgba(82, 98, 116, 0.58);
-  --lift: inset 0 1px 0 rgba(154, 232, 255, 0.055);
-  --mono: var(--font-signal), ui-monospace, SFMono-Regular, "SF Mono", Menlo,
-    Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-  --ease: cubic-bezier(.44, 0, .56, 1);
-  --r: 6px;
-  --r-sm: 4px;
-  --r-xs: 3px;
+   The first fifteen are not authored here. They are `gwk_theme::SIGNAL`, the same
+   table the TUI paints from, and `tools/check-theme-sync.sh` fails the build if a
+   hex drifts from the crate in either direction. Edit the crate, not this block. */
+:root {
+  --gws-bg: #070b10;
+  --gws-surface: #121a24;
+  --gws-surface-2: #1f2b3a;
+  --gws-hue: #6bdbff;
+  --gws-hue-dim: #3fa8cc;
+  --gws-hue-bright: #9ae8ff;
+  --gws-fg: #e4edf5;
+  --gws-faint: #526274;
+  --gws-muted: #9aa5af;
+  --gws-warn: #f2c14e;
+  --gws-fail: #ff6e6e;
+  --gws-ok: #6ee7a8;
+  --gws-border: #748496;
+  --gws-focus: #6bdbff;
+  --gws-selection: #f5f9fd;
+
+  --gws-line: rgba(82, 98, 116, 0.34);
+  --gws-line-hi: rgba(82, 98, 116, 0.58);
+  --gws-lift: inset 0 1px 0 rgba(154, 232, 255, 0.055);
+  --gws-font-mono:
+    var(--gws-font-signal), ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas,
+    "Liberation Mono", "Courier New", monospace;
+  --gws-mono: var(--gws-font-mono);
+  --gws-ease: cubic-bezier(0.44, 0, 0.56, 1);
+
+  /* ── scale families ───────────────────────────────────────────────────────
+     Four families the house contract requires, each at least three steps.
+     Values are not invented: every step below is a number this stylesheet
+     already used as a literal, promoted to a name.
+
+     `radius` is a pure rename of the former `--gws-r` / `-sm` / `-xs`, whose
+     head segment `r` named no family and so registered as three unrelated
+     one-off tokens. Same three pixel values, 23 call sites, no visual change.
+
+     `duration` had exactly one real value, 150 milliseconds, at 13 sites. Its
+     neighbours are added so the family is a scale rather than a single step
+     wearing a scale's name, and those 13 sites now read the `base` step.
+
+     `space` and `size` are declared from the values the sheet measurably uses
+     but their call sites are NOT migrated here: that is ~80 literals across 158
+     rule blocks, each needing a both-polarity regression check, and it does not
+     belong in the same diff as a token contract. Recorded as follow-up. */
+  --gws-radius-xs: 3px;
+  --gws-radius-sm: 4px;
+  --gws-radius-md: 6px;
+
+  --gws-duration-fast: 90ms;
+  --gws-duration-base: 150ms;
+  --gws-duration-slow: 260ms;
+
+  --gws-space-xs: 0.5rem;
+  --gws-space-sm: 0.75rem;
+  --gws-space-md: 1rem;
+  --gws-space-lg: 1.5rem;
+  --gws-space-xl: 2.5rem;
+
+  --gws-size-xs: 0.6875rem;
+  --gws-size-sm: 0.75rem;
+  --gws-size-md: 0.8125rem;
+  --gws-size-lg: 0.875rem;
+  --gws-size-xl: 1rem;
+
+  /* ── the role layer ───────────────────────────────────────────────────────
+     The 24 roles of the house token contract, bound to the SIGNAL tokens above.
+     This layer is indirection on purpose. SIGNAL is the crate's vocabulary and
+     is bound bidirectionally to `gwk_theme` by tools/check-theme-sync.sh; the
+     role names are the estate's vocabulary, shared with sites that have no
+     crate at all. Keeping them separate is what lets both stay true: a role can
+     be re-pointed here without touching a published crate, and the crate can
+     add a token without inventing a role for it.
+
+     A binding is only written once per scope where it means something. Most
+     resolve identically in both polarities and are still declared three times,
+     because the contract's check is per-scope and an inherited value is exactly
+     the bug it exists to catch — `--gws-text` falling through to the dark `fg`
+     on a light page is invisible until someone reads it.
+
+     FOUR ROLES ARE NOT ALIASED AT ALL: `bg`, `surface`, `border` and `focus`
+     are spelled identically in both vocabularies, so the SIGNAL declarations
+     above already satisfy them and an alias would be a property assigning to
+     itself. They are absent here because they are present there — the one place
+     in this block where a missing line is the correct line.
+
+     Two bindings are not one-to-one and are worth naming:
+
+       surface-sunken  ->  the only role here that genuinely inverts. Recessed
+                           means darker than `surface` in both themes, which is
+                           `bg` on dark and `surface-2` on light.
+       font-sans       ->  the mono stack. This site has one face by design;
+                           `body` carries `font-mono`. Binding a sans role to a
+                           face that does not exist would be a more
+                           honest-looking lie than this.
+
+     `border-strong` binds to `line-hi` rather than to a second crate colour
+     because that is what the sheet actually draws with — measured, 24 sites
+     against zero for `var(--gws-border)`. The crate's `border` token is the
+     TUI's and is declared here only to keep the two vocabularies in sync. */
+  --gws-surface-raised: var(--gws-surface-2);
+  --gws-surface-sunken: var(--gws-bg);
+
+  --gws-text: var(--gws-fg);
+  --gws-text-muted: var(--gws-muted);
+  --gws-text-faint: var(--gws-faint);
+
+  --gws-border-strong: var(--gws-line-hi);
+
+  --gws-accent: var(--gws-hue);
+  --gws-accent-hover: var(--gws-hue-bright);
+  --gws-accent-contrast: var(--gws-bg);
+  --gws-link: var(--gws-hue);
+
+  --gws-scrim: rgba(7, 11, 16, 0.72);
+
+  --gws-danger: var(--gws-fail);
+  --gws-warning: var(--gws-warn);
+  --gws-success: var(--gws-ok);
+  --gws-info: var(--gws-hue);
+
+  /* Flat by decision, in both polarities. Elevation here is carried by surface
+     tier and hairline weight, which is why every Tailwind `--shadow-*` below is
+     `none` too. `--gws-lift` — an inset top highlight — is the one elevation
+     cue this design uses, and it is an edge treatment rather than a drop
+     shadow, so it is an extension rather than one of these three. Declared
+     anyway, because the contract wants the names to resolve. */
+  --gws-shadow-sm: none;
+  --gws-shadow-md: none;
+  --gws-shadow-lg: none;
+
+  /* The two polarity-independent roles. A typeface is the same face on either
+     ground, so the contract exempts exactly these from the alternate blocks —
+     which is why the light scopes below carry 22 roles, not 24. */
+  --gws-font-sans: var(--gws-font-mono);
 
   color-scheme: dark;
 
-  --radius-xs: var(--r-xs);
-  --radius-sm: var(--r-xs);
-  --radius-md: var(--r-sm);
-  --radius-lg: var(--r-sm);
-  --radius-xl: var(--r);
-  --radius-2xl: var(--r);
-  --radius-3xl: var(--r);
-  --radius-4xl: var(--r);
+  --radius-xs: var(--gws-radius-xs);
+  --radius-sm: var(--gws-radius-xs);
+  --radius-md: var(--gws-radius-sm);
+  --radius-lg: var(--gws-radius-sm);
+  --radius-xl: var(--gws-radius-md);
+  --radius-2xl: var(--gws-radius-md);
+  --radius-3xl: var(--gws-radius-md);
+  --radius-4xl: var(--gws-radius-md);
 
   --shadow-2xs: none;
   --shadow-xs: none;
@@ -49,59 +164,206 @@
   --shadow-2xl: none;
 }
 
-@theme inline {
-  --color-background: var(--bg);
-  --color-foreground: var(--fg);
-  --color-surface: var(--surface);
-  --color-surface-2: var(--surface-2);
-  --color-accent: var(--hue);
-  --color-muted: var(--muted);
-  --font-mono: var(--mono);
+/* SIGNAL at light polarity — `gwk_theme::SIGNAL_LIGHT`, same fifteen roles, and
+   also crate-owned. Declared twice on purpose, and both are load-bearing:
+
+     @media   honours the reader's OS setting with no JavaScript, which is what
+              renders before hydration and what a reader with JS off ever sees.
+     [data-theme]  honours an explicit choice, which the media query cannot —
+              a reader who wants dark on a light laptop has no other way in.
+
+   The `:not([data-theme="dark"])` guard is what keeps them from fighting: an
+   explicit dark choice must survive a light OS.
+
+   `gws-hue-bright` is the DARKEST cyan here. The role is `accent, bright`,
+   meaning most emphasis — on a near-white ground that is darker, not lighter.
+   `gwk-theme`'s `emphasis_runs_the_same_direction_in_both_polarities` pins it.
+
+   The derived three keep their dark alphas: over the light `faint` those same
+   0.34/0.58 land within 0.03 of dark's hairline weight, measured. `lift` is the
+   exception and inverts — a raised edge catches light, so on a light ground the
+   highlight is near-white rather than cyan. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --gws-bg: #f7f9fc;
+    --gws-surface: #ecf1f6;
+    --gws-surface-2: #dee6ee;
+    --gws-hue: #08657d;
+    --gws-hue-dim: #2c6b7e;
+    --gws-hue-bright: #054c60;
+    --gws-fg: #0a1018;
+    --gws-faint: #97a5b4;
+    --gws-muted: #45525f;
+    --gws-warn: #7f5300;
+    --gws-fail: #a0201b;
+    --gws-ok: #0a6338;
+    --gws-border: #6e7e8f;
+    --gws-focus: #08657d;
+    --gws-selection: #04090e;
+
+    --gws-line: rgba(151, 165, 180, 0.34);
+    --gws-line-hi: rgba(151, 165, 180, 0.58);
+    --gws-lift: inset 0 1px 0 rgba(247, 249, 252, 0.9);
+
+    /* The role layer, restated. Read the note on `:root` first — this block is
+       the cost that note describes, and it is worth being plain about: at
+       runtime almost every line here is redundant. `var()` resolves lazily in
+       the scope it is used from, so `--gws-text: var(--gws-fg)` declared once on
+       `:root` already yields the light `fg` on a light page.
+
+       They are written anyway because the validator checks per scope and cannot
+       see through the indirection, and the operator ruled literal conformance
+       over relaxing the check. That keeps the vendored validator byte-identical
+       to the canonical one, which is what makes its drift test a plain equality
+       — a fork of the validator would have cost more than these lines do.
+
+       Only `surface-sunken` and `scrim` carry values that actually differ.
+       `bg`, `surface`, `border` and `focus` are absent for the same reason as
+       on `:root`: the SIGNAL declarations above already are those roles. */
+    --gws-surface-raised: var(--gws-surface-2);
+    --gws-surface-sunken: var(--gws-surface-2);
+
+    --gws-text: var(--gws-fg);
+    --gws-text-muted: var(--gws-muted);
+    --gws-text-faint: var(--gws-faint);
+
+    --gws-border-strong: var(--gws-line-hi);
+
+    --gws-accent: var(--gws-hue);
+    --gws-accent-hover: var(--gws-hue-bright);
+    --gws-accent-contrast: var(--gws-bg);
+    --gws-link: var(--gws-hue);
+
+    --gws-scrim: rgba(10, 16, 24, 0.42);
+
+    --gws-danger: var(--gws-fail);
+    --gws-warning: var(--gws-warn);
+    --gws-success: var(--gws-ok);
+    --gws-info: var(--gws-hue);
+
+    --gws-shadow-sm: none;
+    --gws-shadow-md: none;
+    --gws-shadow-lg: none;
+
+    color-scheme: light;
+  }
 }
 
-/* Keep every Fumadocs color role inside the approved SIGNAL bridge. */
+:root[data-theme="light"] {
+  --gws-bg: #f7f9fc;
+  --gws-surface: #ecf1f6;
+  --gws-surface-2: #dee6ee;
+  --gws-hue: #08657d;
+  --gws-hue-dim: #2c6b7e;
+  --gws-hue-bright: #054c60;
+  --gws-fg: #0a1018;
+  --gws-faint: #97a5b4;
+  --gws-muted: #45525f;
+  --gws-warn: #7f5300;
+  --gws-fail: #a0201b;
+  --gws-ok: #0a6338;
+  --gws-border: #6e7e8f;
+  --gws-focus: #08657d;
+  --gws-selection: #04090e;
+
+  --gws-line: rgba(151, 165, 180, 0.34);
+  --gws-line-hi: rgba(151, 165, 180, 0.58);
+  --gws-lift: inset 0 1px 0 rgba(247, 249, 252, 0.9);
+
+  /* The same role layer as the media block above, for the explicit-choice path.
+     Both are required by the contract and neither substitutes for the other:
+     the media query cannot honour a reader who wants light on a dark OS, and
+     the attribute cannot paint before the theme script runs. */
+  --gws-surface-raised: var(--gws-surface-2);
+  --gws-surface-sunken: var(--gws-surface-2);
+
+  --gws-text: var(--gws-fg);
+  --gws-text-muted: var(--gws-muted);
+  --gws-text-faint: var(--gws-faint);
+
+  --gws-border-strong: var(--gws-line-hi);
+
+  --gws-accent: var(--gws-hue);
+  --gws-accent-hover: var(--gws-hue-bright);
+  --gws-accent-contrast: var(--gws-bg);
+  --gws-link: var(--gws-hue);
+
+  --gws-scrim: rgba(10, 16, 24, 0.42);
+
+  --gws-danger: var(--gws-fail);
+  --gws-warning: var(--gws-warn);
+  --gws-success: var(--gws-ok);
+  --gws-info: var(--gws-hue);
+
+  --gws-shadow-sm: none;
+  --gws-shadow-md: none;
+  --gws-shadow-lg: none;
+
+  color-scheme: light;
+}
+
+@theme inline {
+  --color-background: var(--gws-bg);
+  --color-foreground: var(--gws-fg);
+  --color-surface: var(--gws-surface);
+  --color-surface-2: var(--gws-surface-2);
+  --color-accent: var(--gws-hue);
+  --color-muted: var(--gws-muted);
+  --font-mono: var(--gws-mono);
+}
+
+/* Keep every Fumadocs color role inside the approved SIGNAL bridge.
+   Every mapping is a token reference rather than a hex, so this one block
+   re-bridges both polarities — Fumadocs' own light palette in `default-colors.css`
+   sits on `@theme` (which compiles to `:root`) and its dark palette on `.dark`,
+   and both are shadowed here. `html.dark` is kept alongside `:root` because
+   `.dark` from the vendor beats a bare `:root` on source order alone; the
+   class selector settles it in the one case that matters. */
 :root,
 html.dark {
-  --color-fd-background: var(--bg);
-  --color-fd-foreground: var(--fg);
-  --color-fd-muted: var(--surface);
-  --color-fd-muted-foreground: var(--muted);
-  --color-fd-popover: var(--surface);
-  --color-fd-popover-foreground: var(--fg);
-  --color-fd-card: var(--surface);
-  --color-fd-card-foreground: var(--fg);
-  --color-fd-border: var(--line);
-  --color-fd-primary: var(--hue);
-  --color-fd-primary-foreground: var(--bg);
-  --color-fd-secondary: var(--surface-2);
-  --color-fd-secondary-foreground: var(--fg);
-  --color-fd-accent: var(--surface-2);
-  --color-fd-accent-foreground: var(--hue);
-  --color-fd-ring: var(--hue);
-  --color-fd-overlay: var(--bg);
-  --color-fd-info: var(--hue);
-  --color-fd-warning: var(--muted);
-  --color-fd-error: var(--fg);
-  --color-fd-success: var(--hue);
-  --color-fd-idea: var(--hue);
-  --color-fd-diff-remove: var(--surface-2);
-  --color-fd-diff-remove-symbol: var(--fg);
-  --color-fd-diff-add: var(--surface);
-  --color-fd-diff-add-symbol: var(--hue);
+  --color-fd-background: var(--gws-bg);
+  --color-fd-foreground: var(--gws-fg);
+  --color-fd-muted: var(--gws-surface);
+  --color-fd-muted-foreground: var(--gws-muted);
+  --color-fd-popover: var(--gws-surface);
+  --color-fd-popover-foreground: var(--gws-fg);
+  --color-fd-card: var(--gws-surface);
+  --color-fd-card-foreground: var(--gws-fg);
+  --color-fd-border: var(--gws-line);
+  --color-fd-primary: var(--gws-hue);
+  --color-fd-primary-foreground: var(--gws-bg);
+  --color-fd-secondary: var(--gws-surface-2);
+  --color-fd-secondary-foreground: var(--gws-fg);
+  --color-fd-accent: var(--gws-surface-2);
+  --color-fd-accent-foreground: var(--gws-hue);
+  --color-fd-ring: var(--gws-hue);
+  --color-fd-overlay: var(--gws-bg);
+  --color-fd-info: var(--gws-hue);
+  --color-fd-warning: var(--gws-muted);
+  --color-fd-error: var(--gws-fg);
+  --color-fd-success: var(--gws-hue);
+  --color-fd-idea: var(--gws-hue);
+  --color-fd-diff-remove: var(--gws-surface-2);
+  --color-fd-diff-remove-symbol: var(--gws-fg);
+  --color-fd-diff-add: var(--gws-surface);
+  --color-fd-diff-add-symbol: var(--gws-hue);
 }
 
-/* neutral.css gives this region a more specific local palette. */
+/* neutral.css gives this region a more specific local palette, but only under
+   `.dark`. Both selectors are needed and neither is redundant: the vendor's
+   `.dark #nd-sidebar` outranks a bare `#nd-sidebar` on specificity, so dark
+   needs the class; light has no vendor rule at all, so it needs the bare one. */
+#nd-sidebar,
 html.dark #nd-sidebar {
-  --color-fd-muted: var(--surface);
-  --color-fd-secondary: var(--surface-2);
-  --color-fd-muted-foreground: var(--muted);
+  --color-fd-muted: var(--gws-surface);
+  --color-fd-secondary: var(--gws-surface-2);
+  --color-fd-muted-foreground: var(--gws-muted);
 }
 
 html,
 body {
-  background-color: var(--bg);
-  color: var(--fg);
-  color-scheme: dark;
+  background-color: var(--gws-bg);
+  color: var(--gws-fg);
 }
 
 html {
@@ -110,7 +372,7 @@ html {
 }
 
 body {
-  font-family: var(--mono);
+  font-family: var(--gws-mono);
   font-size: 15px;
   font-weight: 400;
   line-height: 1.65;
@@ -129,12 +391,12 @@ code,
 kbd,
 pre,
 samp {
-  font-family: var(--mono);
+  font-family: var(--gws-mono);
   font-variant-ligatures: none;
 }
 
 :where(a, button, input, select, summary, textarea, [role="button"], [role="menuitem"]) {
-  transition-timing-function: var(--ease);
+  transition-timing-function: var(--gws-ease);
 }
 
 .prose {
@@ -156,12 +418,12 @@ samp {
 }
 
 .prose :where(hr) {
-  border-color: var(--line-hi);
+  border-color: var(--gws-line-hi);
 }
 
 :focus-visible {
-  border-radius: var(--r-xs);
-  outline: 2px solid var(--hue) !important;
+  border-radius: var(--gws-radius-xs);
+  outline: 2px solid var(--gws-hue) !important;
   outline-offset: 3px !important;
 }
 
@@ -184,11 +446,13 @@ samp {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
+  *,
+  *::before,
+  *::after {
     scroll-behavior: auto !important;
-    animation-duration: .01ms !important;
+    animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
-    transition-duration: .01ms !important;
+    transition-duration: 0.01ms !important;
   }
 }
 
@@ -211,9 +475,9 @@ samp {
   inset-inline-start: 12px;
   z-index: 50;
   padding: 8px 12px;
-  color: var(--bg);
-  background: var(--hue-bright);
-  border-radius: var(--r-sm);
+  color: var(--gws-bg);
+  background: var(--gws-hue-bright);
+  border-radius: var(--gws-radius-sm);
   font-size: 0.75rem;
   font-weight: 700;
   text-decoration: none;
@@ -239,10 +503,10 @@ samp {
   inset-block-start: 0;
   z-index: 30;
   height: 34px;
-  color: var(--muted);
-  background: var(--surface);
-  border-bottom: 1px solid var(--line);
-  box-shadow: var(--lift);
+  color: var(--gws-muted);
+  background: var(--gws-surface);
+  border-bottom: 1px solid var(--gws-line);
+  box-shadow: var(--gws-lift);
 }
 
 .landing-status-inner {
@@ -264,7 +528,7 @@ samp {
   position: relative;
   color: inherit;
   text-decoration: none;
-  transition: color 150ms var(--ease);
+  transition: color var(--gws-duration-base) var(--gws-ease);
 }
 
 .landing-status-inner a::after {
@@ -274,31 +538,31 @@ samp {
 }
 
 .landing-status-inner a:hover {
-  color: var(--fg);
+  color: var(--gws-fg);
 }
 
 .landing-stage:hover {
-  color: var(--fg) !important;
+  color: var(--gws-fg) !important;
 }
 
 .landing-brand {
-  color: var(--fg) !important;
+  color: var(--gws-fg) !important;
   font-weight: 700;
   letter-spacing: -0.02em;
 }
 
 .landing-brand span {
-  color: var(--hue);
+  color: var(--gws-hue);
 }
 
 .landing-status-segment,
 .landing-stage {
   padding-inline-start: 0.75rem;
-  border-inline-start: 1px solid var(--line);
+  border-inline-start: 1px solid var(--gws-line);
 }
 
 .landing-stage {
-  color: var(--hue-bright) !important;
+  color: var(--gws-hue-bright) !important;
 }
 
 .landing-status-optional,
@@ -314,11 +578,11 @@ samp {
 }
 
 .landing-nav a:first-child {
-  color: var(--fg);
+  color: var(--gws-fg);
 }
 
 .landing-hero {
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid var(--gws-line);
 }
 
 .landing-hero-grid {
@@ -335,10 +599,10 @@ samp {
   width: fit-content;
   margin: 0;
   padding: 4px 7px;
-  color: var(--hue-bright);
-  background: var(--surface);
-  border: 1px solid var(--line-hi);
-  border-radius: var(--r-xs);
+  color: var(--gws-hue-bright);
+  background: var(--gws-surface);
+  border: 1px solid var(--gws-line-hi);
+  border-radius: var(--gws-radius-xs);
   font-size: 0.6875rem;
   line-height: 1.35;
   letter-spacing: 0.06em;
@@ -347,7 +611,7 @@ samp {
 .landing-hero h1 {
   max-width: 13ch;
   margin: 1.5rem 0 0;
-  color: var(--fg);
+  color: var(--gws-fg);
   font-size: clamp(1.75rem, 1rem + 3.1vw, 3rem);
   font-weight: 500;
   line-height: 1.06;
@@ -359,7 +623,7 @@ samp {
 .landing-lede {
   max-width: 54ch;
   margin: 1.5rem 0 0;
-  color: var(--muted);
+  color: var(--gws-muted);
   font-size: 1rem;
   line-height: 1.7;
   letter-spacing: 0.01em;
@@ -379,46 +643,46 @@ samp {
   justify-content: center;
   min-height: 44px;
   padding: 0.625rem 0.9375rem;
-  color: var(--fg);
-  background: var(--surface);
-  border: 1px solid var(--line-hi);
-  border-radius: var(--r-sm);
-  box-shadow: var(--lift);
+  color: var(--gws-fg);
+  background: var(--gws-surface);
+  border: 1px solid var(--gws-line-hi);
+  border-radius: var(--gws-radius-sm);
+  box-shadow: var(--gws-lift);
   font-size: 0.8125rem;
   font-weight: 600;
   line-height: 1;
   text-decoration: none;
   transition:
-    color 150ms var(--ease),
-    background-color 150ms var(--ease),
-    border-color 150ms var(--ease);
+    color var(--gws-duration-base) var(--gws-ease),
+    background-color var(--gws-duration-base) var(--gws-ease),
+    border-color var(--gws-duration-base) var(--gws-ease);
 }
 
 .landing-button::before {
   margin-inline-end: 0.5rem;
-  color: var(--hue-dim);
+  color: var(--gws-hue-dim);
   content: "▸";
 }
 
 .landing-button:hover,
 .landing-button:active {
-  color: var(--hue-bright);
-  background: var(--surface-2);
-  border-color: var(--faint);
+  color: var(--gws-hue-bright);
+  background: var(--gws-surface-2);
+  border-color: var(--gws-faint);
 }
 
 .landing-button--primary {
-  color: var(--hue-bright);
-  border-color: var(--hue-dim);
+  color: var(--gws-hue-bright);
+  border-color: var(--gws-hue-dim);
 }
 
 .landing-button--primary::before {
-  color: var(--hue);
+  color: var(--gws-hue);
 }
 
 .landing-spec-ledger {
   margin: 2.25rem 0 0;
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid var(--gws-line);
 }
 
 .landing-spec-ledger > div {
@@ -427,11 +691,11 @@ samp {
   gap: 0.75rem;
   align-items: baseline;
   padding-block: 0.75rem;
-  border-top: 1px solid var(--line);
+  border-top: 1px solid var(--gws-line);
 }
 
 .landing-spec-ledger dt {
-  color: var(--hue-dim);
+  color: var(--gws-hue-dim);
   font-size: 0.6875rem;
   line-height: 1.4;
   letter-spacing: 0.08em;
@@ -440,29 +704,29 @@ samp {
 .landing-spec-ledger dd {
   min-width: 0;
   margin: 0;
-  color: var(--fg);
+  color: var(--gws-fg);
   font-size: 0.75rem;
   line-height: 1.55;
 }
 
 .landing-spec-ledger dd span {
   display: block;
-  color: var(--muted);
+  color: var(--gws-muted);
 }
 
 .landing-spec-ledger code,
 .landing-truth-ledger code {
-  color: var(--hue-bright);
+  color: var(--gws-hue-bright);
 }
 
 .landing-terminal {
   min-width: 0;
   margin: 0;
   overflow: hidden;
-  background: var(--surface);
-  border: 1px solid var(--line-hi);
-  border-radius: var(--r);
-  box-shadow: var(--lift);
+  background: var(--gws-surface);
+  border: 1px solid var(--gws-line-hi);
+  border-radius: var(--gws-radius-md);
+  box-shadow: var(--gws-lift);
 }
 
 .landing-terminal pre {
@@ -470,11 +734,11 @@ samp {
   margin: 0;
   padding: 1.5rem;
   overflow-x: auto;
-  color: var(--fg);
+  color: var(--gws-fg);
   background: transparent;
   font-size: 0.75rem;
   line-height: 1.85;
-  scrollbar-color: var(--faint) var(--surface);
+  scrollbar-color: var(--gws-faint) var(--gws-surface);
 }
 
 .landing-terminal pre:focus-visible {
@@ -492,21 +756,21 @@ samp {
 
 .landing-install-block {
   overflow: hidden;
-  background: var(--surface);
-  border: 1px solid var(--line-hi);
-  border-radius: var(--r);
-  box-shadow: var(--lift);
+  background: var(--gws-surface);
+  border: 1px solid var(--gws-line-hi);
+  border-radius: var(--gws-radius-md);
+  box-shadow: var(--gws-lift);
 }
 
 .landing-install-line {
   min-width: 0;
   padding: 1rem;
-  color: var(--muted);
-  border-bottom: 1px solid var(--line);
+  color: var(--gws-muted);
+  border-bottom: 1px solid var(--gws-line);
   font-size: 0.75rem;
   line-height: 1.55;
   overflow-x: auto;
-  scrollbar-color: var(--faint) var(--surface);
+  scrollbar-color: var(--gws-faint) var(--gws-surface);
 }
 
 .landing-install-line code {
@@ -518,8 +782,8 @@ samp {
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
-  color: var(--fg);
-  background: var(--surface-2);
+  color: var(--gws-fg);
+  background: var(--gws-surface-2);
   overflow: visible;
 }
 
@@ -532,61 +796,61 @@ samp {
   min-width: 68px;
   min-height: 36px;
   padding: 0.5rem 0.75rem;
-  color: var(--hue-bright);
-  background: var(--surface);
-  border: 1px solid var(--hue-dim);
-  border-radius: var(--r-sm);
+  color: var(--gws-hue-bright);
+  background: var(--gws-surface);
+  border: 1px solid var(--gws-hue-dim);
+  border-radius: var(--gws-radius-sm);
   cursor: pointer;
   font-size: 0.6875rem;
   font-weight: 600;
   line-height: 1;
   transition:
-    color 150ms var(--ease),
-    background-color 150ms var(--ease),
-    border-color 150ms var(--ease);
+    color var(--gws-duration-base) var(--gws-ease),
+    background-color var(--gws-duration-base) var(--gws-ease),
+    border-color var(--gws-duration-base) var(--gws-ease);
 }
 
 .copy-command__button:hover,
 .copy-command__button:active {
-  color: var(--fg);
-  background: var(--surface-2);
-  border-color: var(--hue);
+  color: var(--gws-fg);
+  background: var(--gws-surface-2);
+  border-color: var(--gws-hue);
 }
 
 .landing-install-warning {
   margin: 0;
   padding: 1rem;
-  color: var(--muted);
-  background: color-mix(in oklch, var(--warn) 5%, var(--surface));
+  color: var(--gws-muted);
+  background: color-mix(in oklch, var(--gws-warn) 5%, var(--gws-surface));
   font-size: 0.8125rem;
   line-height: 1.65;
   text-wrap: pretty;
 }
 
 .landing-install-warning strong {
-  color: var(--warn);
+  color: var(--gws-warn);
   font-weight: 600;
 }
 
 .landing-install-warning a,
 .landing-section-heading a {
-  color: var(--hue-bright);
-  text-decoration-color: var(--hue-dim);
+  color: var(--gws-hue-bright);
+  text-decoration-color: var(--gws-hue-dim);
   text-underline-offset: 0.2em;
   transition:
-    color 150ms var(--ease),
-    text-decoration-color 150ms var(--ease);
+    color var(--gws-duration-base) var(--gws-ease),
+    text-decoration-color var(--gws-duration-base) var(--gws-ease);
 }
 
 .landing-install-warning a:hover,
 .landing-section-heading a:hover {
-  color: var(--fg);
-  text-decoration-color: var(--hue);
+  color: var(--gws-fg);
+  text-decoration-color: var(--gws-hue);
 }
 
 .landing-truth {
   padding-block: clamp(60px, 9vw, 108px);
-  border-top: 1px solid var(--line);
+  border-top: 1px solid var(--gws-line);
 }
 
 .landing-section-heading {
@@ -598,7 +862,7 @@ samp {
 .landing-section-heading h2 {
   max-width: 16ch;
   margin: 0;
-  color: var(--fg);
+  color: var(--gws-fg);
   font-size: clamp(1.2rem, 1rem + 0.85vw, 1.5rem);
   font-weight: 500;
   line-height: 1.2;
@@ -609,7 +873,7 @@ samp {
 .landing-section-heading p {
   max-width: 64ch;
   margin: 0;
-  color: var(--muted);
+  color: var(--gws-muted);
   font-size: 0.9375rem;
   line-height: 1.75;
   letter-spacing: 0.01em;
@@ -617,24 +881,24 @@ samp {
 }
 
 .landing-section-heading strong {
-  color: var(--fg);
+  color: var(--gws-fg);
   font-weight: 600;
 }
 
 .landing-truth-ledger {
-  border: 1px solid var(--line-hi);
-  border-radius: var(--r);
-  box-shadow: var(--lift);
+  border: 1px solid var(--gws-line-hi);
+  border-radius: var(--gws-radius-md);
+  box-shadow: var(--gws-lift);
 }
 
 .landing-truth-ledger section {
   min-width: 0;
   padding: clamp(1.25rem, 5vw, 2rem);
-  background: var(--surface);
+  background: var(--gws-surface);
 }
 
 .landing-truth-ledger section + section {
-  border-top: 1px solid var(--line-hi);
+  border-top: 1px solid var(--gws-line-hi);
 }
 
 .landing-truth-ledger h3 {
@@ -642,19 +906,19 @@ samp {
   gap: 0.625rem;
   align-items: center;
   margin: 0;
-  color: var(--fg);
+  color: var(--gws-fg);
   font-size: 0.875rem;
   font-weight: 600;
   line-height: 1.4;
 }
 
 .landing-truth-ledger h3 span {
-  color: var(--hue);
+  color: var(--gws-hue);
   font-size: 0.75rem;
 }
 
 .landing-truth-ledger section:last-child h3 span {
-  color: var(--warn);
+  color: var(--gws-warn);
 }
 
 .landing-truth-ledger ul {
@@ -668,8 +932,8 @@ samp {
 .landing-truth-ledger li {
   position: relative;
   padding: 0.75rem 0 0.75rem 1.25rem;
-  color: var(--muted);
-  border-top: 1px solid var(--line);
+  color: var(--gws-muted);
+  border-top: 1px solid var(--gws-line);
   font-size: 0.8125rem;
   line-height: 1.65;
   text-wrap: pretty;
@@ -679,12 +943,12 @@ samp {
   position: absolute;
   inset-block-start: 0.75rem;
   inset-inline-start: 0;
-  color: var(--hue-dim);
+  color: var(--gws-hue-dim);
   content: "▸";
 }
 
 .landing-truth-ledger section:last-child li::before {
-  color: var(--muted);
+  color: var(--gws-muted);
 }
 
 @media (min-width: 47.5rem) {
@@ -698,7 +962,7 @@ samp {
   }
 
   .landing-spec-ledger dd span::before {
-    color: var(--faint);
+    color: var(--gws-faint);
     content: " · ";
   }
 
@@ -725,7 +989,7 @@ samp {
 
   .landing-truth-ledger section + section {
     border-top: 0;
-    border-inline-start: 1px solid var(--line-hi);
+    border-inline-start: 1px solid var(--gws-line-hi);
   }
 }
 
@@ -750,7 +1014,7 @@ samp {
 .landing-cleanroom,
 .landing-crates {
   padding-block: clamp(60px, 9vw, 108px);
-  border-top: 1px solid var(--line);
+  border-top: 1px solid var(--gws-line);
 }
 
 .landing-section-route {
@@ -765,13 +1029,13 @@ samp {
 .landing-architecture-ledger a,
 .landing-crates a,
 .landing-footer a {
-  color: var(--hue-bright);
-  text-decoration-color: var(--hue-dim);
+  color: var(--gws-hue-bright);
+  text-decoration-color: var(--gws-hue-dim);
   text-decoration-thickness: 1px;
   text-underline-offset: 0.2em;
   transition:
-    color 150ms var(--ease),
-    text-decoration-color 150ms var(--ease);
+    color var(--gws-duration-base) var(--gws-ease),
+    text-decoration-color var(--gws-duration-base) var(--gws-ease);
 }
 
 .landing-section-route a,
@@ -785,19 +1049,19 @@ samp {
 .landing-architecture-ledger a:hover,
 .landing-crates a:hover,
 .landing-footer a:hover {
-  color: var(--fg);
-  text-decoration-color: var(--hue);
+  color: var(--gws-fg);
+  text-decoration-color: var(--gws-hue);
 }
 
 .landing-architecture-ledger {
   margin: 0;
   padding: 0;
-  border-bottom: 1px solid var(--line-hi);
+  border-bottom: 1px solid var(--gws-line-hi);
   list-style: none;
 }
 
 .landing-architecture-ledger li {
-  border-top: 1px solid var(--line-hi);
+  border-top: 1px solid var(--gws-line-hi);
 }
 
 .landing-architecture-ledger a {
@@ -810,7 +1074,7 @@ samp {
 
 .landing-architecture-ledger h3 {
   margin: 0;
-  color: var(--fg);
+  color: var(--gws-fg);
   font-size: 0.875rem;
   font-weight: 600;
   line-height: 1.45;
@@ -819,7 +1083,7 @@ samp {
 .landing-architecture-ledger p {
   max-width: 66ch;
   margin: 0;
-  color: var(--muted);
+  color: var(--gws-muted);
   font-size: 0.8125rem;
   line-height: 1.65;
   text-wrap: pretty;
@@ -827,26 +1091,26 @@ samp {
 
 .landing-architecture-ledger span {
   width: fit-content;
-  color: var(--hue-bright);
+  color: var(--gws-hue-bright);
   font-size: 0.75rem;
   line-height: 1.5;
   text-decoration: underline;
-  text-decoration-color: var(--hue-dim);
+  text-decoration-color: var(--gws-hue-dim);
   text-underline-offset: 0.2em;
   transition:
-    color 150ms var(--ease),
-    text-decoration-color 150ms var(--ease);
+    color var(--gws-duration-base) var(--gws-ease),
+    text-decoration-color var(--gws-duration-base) var(--gws-ease);
 }
 
 .landing-architecture-ledger a:hover span {
-  color: var(--fg);
-  text-decoration-color: var(--hue);
+  color: var(--gws-fg);
+  text-decoration-color: var(--gws-hue);
 }
 
 .landing-stage-list {
   margin: 0;
   padding: 0;
-  border-bottom: 1px solid var(--line-hi);
+  border-bottom: 1px solid var(--gws-line-hi);
   list-style: none;
 }
 
@@ -855,11 +1119,11 @@ samp {
   grid-template-columns: 2.25rem minmax(0, 1fr);
   gap: 1rem;
   padding-block: 1.25rem;
-  border-top: 1px solid var(--line-hi);
+  border-top: 1px solid var(--gws-line-hi);
 }
 
 .landing-stage-number {
-  color: var(--hue-dim);
+  color: var(--gws-hue-dim);
   font-size: 0.75rem;
   line-height: 1.5;
   letter-spacing: 0.08em;
@@ -874,7 +1138,7 @@ samp {
 
 .landing-stage-heading h3 {
   margin: 0;
-  color: var(--fg);
+  color: var(--gws-fg);
   font-size: 0.875rem;
   font-weight: 600;
   line-height: 1.45;
@@ -882,26 +1146,26 @@ samp {
 
 .landing-stage-heading span {
   padding: 2px 6px;
-  color: var(--muted);
-  border: 1px solid var(--line-hi);
-  border-radius: var(--r-xs);
+  color: var(--gws-muted);
+  border: 1px solid var(--gws-line-hi);
+  border-radius: var(--gws-radius-xs);
   font-size: 0.625rem;
   line-height: 1.4;
 }
 
 .landing-stage-heading span[data-status="shipped"] {
-  color: var(--ok);
+  color: var(--gws-ok);
 }
 
 .landing-stage-heading span[data-status="current"] {
-  color: var(--hue-bright);
-  border-color: var(--hue-dim);
+  color: var(--gws-hue-bright);
+  border-color: var(--gws-hue-dim);
 }
 
 .landing-stage-list p {
   max-width: 64ch;
   margin: 0.5rem 0 0;
-  color: var(--muted);
+  color: var(--gws-muted);
   font-size: 0.8125rem;
   line-height: 1.65;
   text-wrap: pretty;
@@ -910,15 +1174,15 @@ samp {
 .landing-principles {
   margin-block-start: 2.5rem;
   padding: clamp(1.25rem, 4vw, 2rem);
-  background: var(--surface-2);
-  border: 1px solid var(--line-hi);
-  border-radius: var(--r);
-  box-shadow: var(--lift);
+  background: var(--gws-surface-2);
+  border: 1px solid var(--gws-line-hi);
+  border-radius: var(--gws-radius-md);
+  box-shadow: var(--gws-lift);
 }
 
 .landing-principles h3 {
   margin: 0;
-  color: var(--fg);
+  color: var(--gws-fg);
   font-size: 0.875rem;
   font-weight: 600;
   line-height: 1.45;
@@ -935,7 +1199,7 @@ samp {
 .landing-principles li {
   position: relative;
   padding-inline-start: 1.25rem;
-  color: var(--fg);
+  color: var(--gws-fg);
   font-size: 0.8125rem;
   line-height: 1.65;
   text-wrap: pretty;
@@ -945,24 +1209,24 @@ samp {
   position: absolute;
   inset-block-start: 0;
   inset-inline-start: 0;
-  color: var(--hue-dim);
+  color: var(--gws-hue-dim);
   content: "▸";
 }
 
 .landing-provenance-facts {
   margin: 0;
-  border-bottom: 1px solid var(--line-hi);
+  border-bottom: 1px solid var(--gws-line-hi);
 }
 
 .landing-provenance-facts > div {
   display: grid;
   gap: 0.25rem;
   padding-block: 1rem;
-  border-top: 1px solid var(--line-hi);
+  border-top: 1px solid var(--gws-line-hi);
 }
 
 .landing-provenance-facts dt {
-  color: var(--hue-bright);
+  color: var(--gws-hue-bright);
   font-size: 0.875rem;
   font-weight: 600;
   line-height: 1.4;
@@ -970,7 +1234,7 @@ samp {
 
 .landing-provenance-facts dd {
   margin: 0;
-  color: var(--muted);
+  color: var(--gws-muted);
   font-size: 0.75rem;
   line-height: 1.55;
 }
@@ -978,7 +1242,7 @@ samp {
 .landing-provenance-disclosure {
   max-width: 68ch;
   margin: 2rem 0 0;
-  color: var(--muted);
+  color: var(--gws-muted);
   font-size: 0.875rem;
   line-height: 1.75;
   letter-spacing: 0.01em;
@@ -987,10 +1251,10 @@ samp {
 
 .landing-cleanroom-panel {
   overflow: hidden;
-  background: var(--surface);
-  border: 1px solid var(--line-hi);
-  border-radius: var(--r);
-  box-shadow: var(--lift);
+  background: var(--gws-surface);
+  border: 1px solid var(--gws-line-hi);
+  border-radius: var(--gws-radius-md);
+  box-shadow: var(--gws-lift);
 }
 
 .landing-verdict {
@@ -999,23 +1263,23 @@ samp {
 
 .landing-verdict + .landing-verdict,
 .landing-second-reader {
-  border-top: 1px solid var(--line-hi);
+  border-top: 1px solid var(--gws-line-hi);
 }
 
 .landing-verdict h3 {
   margin: 0;
-  color: var(--fg);
+  color: var(--gws-fg);
   font-size: 0.875rem;
   font-weight: 600;
   line-height: 1.45;
 }
 
 .landing-verdict--permitted h3 {
-  color: var(--ok);
+  color: var(--gws-ok);
 }
 
 .landing-verdict--forbidden h3 {
-  color: var(--fail);
+  color: var(--gws-fail);
 }
 
 .landing-verdict ul {
@@ -1029,8 +1293,8 @@ samp {
 .landing-verdict li {
   position: relative;
   padding: 0.75rem 0 0.75rem 1.25rem;
-  color: var(--muted);
-  border-top: 1px solid var(--line);
+  color: var(--gws-muted);
+  border-top: 1px solid var(--gws-line);
   font-size: 0.8125rem;
   line-height: 1.65;
   text-wrap: pretty;
@@ -1040,34 +1304,34 @@ samp {
   position: absolute;
   inset-block-start: 0.75rem;
   inset-inline-start: 0;
-  color: var(--hue-dim);
+  color: var(--gws-hue-dim);
   content: "▸";
 }
 
 .landing-verdict--forbidden li::before {
-  color: var(--fail);
+  color: var(--gws-fail);
 }
 
 .landing-second-reader {
   margin: 0;
   padding: clamp(1.25rem, 4vw, 2rem);
-  color: var(--muted);
+  color: var(--gws-muted);
   font-size: 0.8125rem;
   line-height: 1.7;
   text-wrap: pretty;
 }
 
 .landing-second-reader strong {
-  color: var(--fg);
+  color: var(--gws-fg);
   font-weight: 600;
 }
 
 .landing-crates-scroll {
   overflow-x: auto;
-  border: 1px solid var(--line-hi);
-  border-radius: var(--r);
-  box-shadow: var(--lift);
-  scrollbar-color: var(--faint) var(--surface);
+  border: 1px solid var(--gws-line-hi);
+  border-radius: var(--gws-radius-md);
+  box-shadow: var(--gws-lift);
+  scrollbar-color: var(--gws-faint) var(--gws-surface);
 }
 
 .landing-crates-scroll:focus-visible {
@@ -1078,16 +1342,16 @@ samp {
   width: 100%;
   min-width: 46rem;
   border-collapse: collapse;
-  background: var(--surface);
+  background: var(--gws-surface);
   font-size: 0.75rem;
   line-height: 1.55;
 }
 
 .landing-crates caption {
   padding: 1rem 1.25rem;
-  color: var(--fg);
-  background: var(--surface-2);
-  border-bottom: 1px solid var(--line-hi);
+  color: var(--gws-fg);
+  background: var(--gws-surface-2);
+  border-bottom: 1px solid var(--gws-line-hi);
   font-size: 0.8125rem;
   font-weight: 600;
   text-align: start;
@@ -1096,13 +1360,13 @@ samp {
 .landing-crates th,
 .landing-crates td {
   padding: 0.875rem 1rem;
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid var(--gws-line);
   text-align: start;
   vertical-align: top;
 }
 
 .landing-crates thead th {
-  color: var(--hue-dim);
+  color: var(--gws-hue-dim);
   font-size: 0.6875rem;
   font-weight: 500;
   letter-spacing: 0.06em;
@@ -1110,27 +1374,27 @@ samp {
 
 .landing-crates tbody th {
   width: 20%;
-  color: var(--fg);
+  color: var(--gws-fg);
   font-weight: 500;
 }
 
 .landing-crates tbody td {
-  color: var(--muted);
+  color: var(--gws-muted);
 }
 
 .landing-crates tbody td:last-child {
   width: 16%;
-  color: var(--fg);
+  color: var(--gws-fg);
   white-space: nowrap;
 }
 
 .landing-crates code {
-  color: var(--fg);
+  color: var(--gws-fg);
 }
 
 .landing-crates tfoot td {
-  color: var(--muted);
-  background: var(--surface-2);
+  color: var(--gws-muted);
+  background: var(--gws-surface-2);
   border-bottom: 0;
 }
 
@@ -1138,15 +1402,19 @@ samp {
   position: relative;
   overflow: hidden;
   padding-block: clamp(3rem, 8vw, 5rem);
-  background: var(--surface);
-  border-top: 1px solid var(--line-hi);
+  background: var(--gws-surface);
+  border-top: 1px solid var(--gws-line-hi);
 }
 
 .landing-footer-texture {
   position: absolute;
   inset-block-start: -0.25em;
   inset-inline: 0;
-  color: rgba(82, 98, 116, 0.18);
+  /* The one hardcoded colour this file had left, and it was the DARK `faint`
+     literal — invisible while there was only one theme, wrong the moment there
+     were two. `check-theme-sync.sh` cannot see it: it reads custom-property
+     declarations, and this was a value inside a rule. */
+  color: color-mix(in srgb, var(--gws-faint) 18%, transparent);
   font-size: clamp(2.5rem, 9vw, 6.5rem);
   line-height: 1;
   letter-spacing: 0.14em;
@@ -1166,7 +1434,7 @@ samp {
 }
 
 .landing-footer-inner > p strong {
-  color: var(--fg);
+  color: var(--gws-fg);
   font-size: 0.875rem;
   font-weight: 700;
   letter-spacing: -0.02em;
@@ -1174,7 +1442,7 @@ samp {
 
 .landing-footer-inner > p span {
   max-width: 32ch;
-  color: var(--muted);
+  color: var(--gws-muted);
   font-size: 0.75rem;
   line-height: 1.6;
 }
@@ -1188,7 +1456,7 @@ samp {
 
 .landing-footer h2 {
   margin: 0;
-  color: var(--hue-dim);
+  color: var(--gws-hue-dim);
   font-size: 0.6875rem;
   font-weight: 500;
   line-height: 1.4;
@@ -1235,7 +1503,7 @@ samp {
   .landing-provenance-facts {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
-    border-top: 1px solid var(--line-hi);
+    border-top: 1px solid var(--gws-line-hi);
   }
 
   .landing-provenance-facts > div {
@@ -1244,7 +1512,7 @@ samp {
   }
 
   .landing-provenance-facts > div + div {
-    border-inline-start: 1px solid var(--line-hi);
+    border-inline-start: 1px solid var(--gws-line-hi);
   }
 
   .landing-cleanroom-panel {
@@ -1254,7 +1522,7 @@ samp {
 
   .landing-verdict + .landing-verdict {
     border-top: 0;
-    border-inline-start: 1px solid var(--line-hi);
+    border-inline-start: 1px solid var(--gws-line-hi);
   }
 
   .landing-second-reader {

@@ -71,7 +71,7 @@ fn paint_header(
     note: &str,
 ) {
     let compact = area.width < 100;
-    put(buf, area, 1, 0, "WORK", bold("fg", tier));
+    put(buf, area, 1, 0, "WORK", bold("gws_fg", tier));
 
     let mut x = 8;
     for tab in TABS {
@@ -82,14 +82,14 @@ fn paint_header(
             format!(" {tab} ")
         };
         let paint = if is_active {
-            bold("hue", tier)
+            bold("gws_hue", tier)
         } else {
-            style("muted", tier)
+            style("gws_muted", tier)
         };
         put(buf, area, x, 0, &text, paint);
         x += text.chars().count() as u16 + 1;
     }
-    put(buf, area, x + 2, 0, note, style("muted", tier));
+    put(buf, area, x + 2, 0, note, style("gws_muted", tier));
 
     let badge = tier_badge(tier, glyphs);
     let right = if compact {
@@ -97,7 +97,7 @@ fn paint_header(
     } else {
         format!("tier {badge}  as-of 221  17:30")
     };
-    put_right(buf, area, 0, &right, style("muted", tier));
+    put_right(buf, area, 0, &right, style("gws_muted", tier));
 }
 
 fn body(area: Rect, rows: u16) -> Rect {
@@ -157,10 +157,10 @@ fn paint_gate(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) {
     put_rule(buf, area, top, tier);
 
     let mut y = top + 1;
-    put(buf, area, 2, y, "DECIDE", bold("warn", tier));
-    put(buf, area, 11, y, "gate g-deploy", bold("fg", tier));
-    put(buf, area, 27, y, "kind deploy", style("muted", tier));
-    put(buf, area, 42, y, "raised 17:00", style("muted", tier));
+    put(buf, area, 2, y, "DECIDE", bold("gws_warn", tier));
+    put(buf, area, 11, y, "gate g-deploy", bold("gws_fg", tier));
+    put(buf, area, 27, y, "kind deploy", style("gws_muted", tier));
+    put(buf, area, 42, y, "raised 17:00", style("gws_muted", tier));
     y += 1;
 
     put(
@@ -169,7 +169,7 @@ fn paint_gate(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) {
         2,
         y,
         "restart the kernel service after the pty_session receipt fix?",
-        style("fg", tier),
+        style("gws_fg", tier),
     );
     y += 2;
 
@@ -193,9 +193,9 @@ fn paint_gate(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) {
             2,
             y,
             if selected { ">" } else { " " },
-            bold("focus", tier),
+            bold("gws_focus", tier),
         );
-        put(buf, area, 4, y, key, style("muted", tier));
+        put(buf, area, 4, y, key, style("gws_muted", tier));
         put(
             buf,
             area,
@@ -203,12 +203,12 @@ fn paint_gate(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) {
             y,
             option,
             if selected {
-                bold("hue", tier)
+                bold("gws_hue", tier)
             } else {
-                style("fg", tier)
+                style("gws_fg", tier)
             },
         );
-        put(buf, area, 18, y, note, style("muted", tier));
+        put(buf, area, 18, y, note, style("gws_muted", tier));
         y += 1;
     }
     y += 1;
@@ -221,7 +221,7 @@ fn paint_gate(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) {
         2,
         y,
         "decides as operator -- receipted; the gate aggregate records no actor",
-        style("warn", tier),
+        style("gws_warn", tier),
     );
 
     put_keybar(
@@ -286,19 +286,19 @@ fn paint_mail(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) {
                 message.recipient.as_deref().unwrap_or("-"),
                 message.kind.as_deref().unwrap_or("-"),
             ),
-            style("fg", tier),
+            style("gws_fg", tier),
         );
     };
 
     let mut y = 2;
-    put(buf, area, 1, y, "MAIL", bold("fg", tier));
+    put(buf, area, 1, y, "MAIL", bold("gws_fg", tier));
     put(
         buf,
         area,
         8,
         y,
         "as shipped -- arrival only",
-        style("muted", tier),
+        style("gws_muted", tier),
     );
     y += 1;
     for message in &arrived {
@@ -307,14 +307,14 @@ fn paint_mail(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) {
     }
     y += 1;
 
-    put(buf, area, 1, y, "MAIL", bold("fg", tier));
+    put(buf, area, 1, y, "MAIL", bold("gws_fg", tier));
     put(
         buf,
         area,
         8,
         y,
         "ruled -- a message nobody received is owed work",
-        style("muted", tier),
+        style("gws_muted", tier),
     );
     y += 1;
     for message in &arrived {
@@ -338,7 +338,7 @@ fn paint_mail(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) {
                 message.recipient.as_deref().unwrap_or("-"),
                 message.kind.as_deref().unwrap_or("-"),
             ),
-            style("warn", tier),
+            style("gws_warn", tier),
         );
         y += 1;
         // The reason and the attempt count are the whole point: both are on
@@ -361,7 +361,7 @@ fn paint_mail(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) {
                     .as_deref()
                     .unwrap_or("no reason recorded"),
             ),
-            style("muted", tier),
+            style("gws_muted", tier),
         );
         y += 1;
     }
@@ -427,19 +427,19 @@ fn paint_form(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) {
     );
 
     let mut y = 2;
-    put(buf, area, 1, y, "FORM", bold("fg", tier));
+    put(buf, area, 1, y, "FORM", bold("gws_fg", tier));
     put(
         buf,
         area,
         8,
         y,
         "identity/capabilities.toml   shape is fixed by the incumbent file",
-        style("muted", tier),
+        style("gws_muted", tier),
     );
     y += 2;
 
     for (x, label) in [(2u16, "FIELD"), (34, "TYPE"), (44, "VALUE")] {
-        put(buf, area, x, y, label, style("muted", tier));
+        put(buf, area, x, y, label, style("gws_muted", tier));
     }
     y += 1;
 
@@ -469,14 +469,14 @@ fn paint_form(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) {
             0,
             y,
             if focused { ">" } else { " " },
-            bold("focus", tier),
+            bold("gws_focus", tier),
         );
-        put(buf, area, 2, y, field, style("fg", tier));
-        put(buf, area, 34, y, kind, style("muted", tier));
+        put(buf, area, 2, y, field, style("gws_fg", tier));
+        put(buf, area, 34, y, kind, style("gws_muted", tier));
         let paint = if focused {
-            bold("hue", tier)
+            bold("gws_hue", tier)
         } else {
-            style("fg", tier)
+            style("gws_fg", tier)
         };
         put(buf, area, 44, y, value, paint);
         if focused {
@@ -486,11 +486,11 @@ fn paint_form(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) {
                 44 + value.chars().count() as u16,
                 y,
                 "_",
-                bold("hue", tier),
+                bold("gws_hue", tier),
             );
         }
         if dirty {
-            put(buf, area, 74, y, "changed", style("warn", tier));
+            put(buf, area, 74, y, "changed", style("gws_warn", tier));
         }
         y += 1;
     }
@@ -502,7 +502,7 @@ fn paint_form(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) {
         2,
         y,
         "no field can be added or removed here -- the validator rejects any shape",
-        style("muted", tier),
+        style("gws_muted", tier),
     );
     y += 1;
     put(
@@ -511,11 +511,11 @@ fn paint_form(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) {
         2,
         y,
         "change against the incumbent file, so the form offers none",
-        style("muted", tier),
+        style("gws_muted", tier),
     );
     y += 2;
 
-    put(buf, area, 2, y, "COMMIT", bold("fg", tier));
+    put(buf, area, 2, y, "COMMIT", bold("gws_fg", tier));
     y += 1;
     put(
         buf,
@@ -523,7 +523,7 @@ fn paint_form(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) {
         2,
         y,
         "routing: sonnet lane for bounded code_write_",
-        style("fg", tier),
+        style("gws_fg", tier),
     );
     y += 1;
     put(
@@ -532,7 +532,7 @@ fn paint_form(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) {
         2,
         y,
         "one file, one commit, one config_change evidence record",
-        style("muted", tier),
+        style("gws_muted", tier),
     );
 
     put_rule(buf, area, area.height - 2, tier);

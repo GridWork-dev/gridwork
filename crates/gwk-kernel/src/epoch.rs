@@ -79,6 +79,22 @@ pub(crate) async fn epoch_of(conn: &mut PgConnection) -> Result<Epoch, Refusal> 
     Ok(Epoch::of_version(version))
 }
 
+/// The database's clock, RFC 3339, as the log itself stamps it.
+///
+/// Exposed because a projection page's `served_at` has to come from the same
+/// clock as the `appended_at` and `recorded_at` on the rows it describes. The
+/// `DB_NOW` comment above already states the rule for events — two clocks in
+/// one row is the failure — and an answer that pairs kernel rows with a
+/// process-clock timestamp is the same failure spread across two fields
+/// instead of two rows. A client comparing "today" against `recorded_at` would
+/// be comparing against a boundary the row's own clock never agreed to.
+pub(crate) async fn db_now(conn: &mut PgConnection) -> Result<String, Refusal> {
+    sqlx::query_scalar(DB_NOW)
+        .fetch_one(conn)
+        .await
+        .map_err(|e| Refusal::storage(format!("read the database clock: {e}")))
+}
+
 /// The cutover this kernel actually activated at, if it has.
 pub(crate) async fn committed_cutover(conn: &mut PgConnection) -> Result<Option<String>, Refusal> {
     sqlx::query_scalar(COMMITTED_CUTOVER)

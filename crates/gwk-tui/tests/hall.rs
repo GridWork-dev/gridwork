@@ -857,7 +857,7 @@ fn hall_focused_heading_is_visibly_marked_at_every_tier_and_rung() {
     let color = terminal.backend().buffer().clone();
     let focus_token = gwk_theme::SIGNAL
         .iter()
-        .find(|token| token.name == "focus")
+        .find(|token| token.name == "gws_focus")
         .expect("the focus token is pinned");
     let expected = match focus_token.paint(ColorTier::Truecolor) {
         gwk_theme::tier::Paint::Rgb(r, g, b) => ratatui::style::Color::Rgb(r, g, b),

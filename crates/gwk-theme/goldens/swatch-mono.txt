@@ -4,36 +4,36 @@ This file is the public mirror of the tier tables in the design record.
 Editing it by hand records a decision nobody made.
 
 TOKENS (15)
-  token        value     256  tier 16                     this tier
-  bg           #070B10   232  not a colour                unpainted
-  surface      #121A24   234  not a colour                unpainted
-  surface_2    #1F2B3A   235  not a colour                unpainted
-  hue          #6BDBFF    81  slot 14 bright_cyan         reset
-  hue_dim      #3FA8CC    38  slot 6 cyan                 reset
-  hue_bright   #9AE8FF   117  slot 14 bright_cyan + bold  reset
-  fg           #E4EDF5   255  reset                       reset
-  faint        #526274    59  dropped                     unpainted
-  muted        #9AA5AF   248  slot 8 bright_black         reset
-  warn         #F2C14E   221  slot 11 bright_yellow       reset
-  fail         #FF6E6E   203  slot 9 bright_red           reset
-  ok           #6EE7A8    78  slot 10 bright_green        reset
-  border       #748496   244  slot 7 white                reset
-  focus        #6BDBFF    81  reverse video               reverse video
-  selection    #F5F9FD   231  reverse video               reverse video
+  token           value     256  tier 16                     this tier
+  gws_bg          #070B10   232  not a colour                unpainted
+  gws_surface     #121A24   234  not a colour                unpainted
+  gws_surface_2   #1F2B3A   235  not a colour                unpainted
+  gws_hue         #6BDBFF    81  slot 14 bright_cyan         reset
+  gws_hue_dim     #3FA8CC    38  slot 6 cyan                 reset
+  gws_hue_bright  #9AE8FF   117  slot 14 bright_cyan + bold  reset
+  gws_fg          #E4EDF5   255  reset                       reset
+  gws_faint       #526274    59  dropped                     unpainted
+  gws_muted       #9AA5AF   248  slot 8 bright_black         reset
+  gws_warn        #F2C14E   221  slot 11 bright_yellow       reset
+  gws_fail        #FF6E6E   203  slot 9 bright_red           reset
+  gws_ok          #6EE7A8    78  slot 10 bright_green        reset
+  gws_border      #748496   244  slot 7 white                reset
+  gws_focus       #6BDBFF    81  reverse video               reverse video
+  gws_selection   #F5F9FD   231  reverse video               reverse video
 
 STATES (11)
-  state            mark              glyph  ascii  token       this tier
-  idle             idle              ⠄      .      muted       reset
-  queued           queued            ⠒      :      muted       reset
-  starting         starting          ⠉      ^      hue_dim     reset
-  running          spinner           ⠋      -      hue         reset
-  canceling        spinner_reversed  ⠆      ~      muted       reset
-  needs_attention  attention         !      !      warn        reset
-  blocked          blocked           ⊘      #      warn        reset
-  failed           failed            ✗      X      fail        reset
-  done             done              ✓      v      ok          reset
-  canceled         canceled          ⊖      o      muted       reset
-  unknown          unknown           ?      ?      warn        reset
+  state            mark              glyph  ascii  token           this tier
+  idle             idle              ⠄      .      gws_muted       reset
+  queued           queued            ⠒      :      gws_muted       reset
+  starting         starting          ⠉      ^      gws_hue_dim     reset
+  running          spinner           ⠋      -      gws_hue         reset
+  canceling        spinner_reversed  ⠆      ~      gws_muted       reset
+  needs_attention  attention         !      !      gws_warn        reset
+  blocked          blocked           ⊘      #      gws_warn        reset
+  failed           failed            ✗      X      gws_fail        reset
+  done             done              ✓      v      gws_ok          reset
+  canceled         canceled          ⊖      o      gws_muted       reset
+  unknown          unknown           ?      ?      gws_warn        reset
 
 IDENTITY MARKS (7)
   mark             glyph  ascii

@@ -13,10 +13,10 @@
 // one-shot by that grammar.
 //
 // Derivation: ZELLIJ-PRESETS §Unlock-First (non-colliding) preset — Ctrl-g as
-// the mode-entry default, the preset's own entry key, chosen there to avoid
-// colliding with keys running programs expect; single-character selections
-// inside the entered mode, and `n` new pane / `x` close focused pane as the
-// pane-verb defaults.
+// the preset's unlock key. This grammar deliberately combines that key choice
+// with TMUX-MANUAL's one-prefix/one-command sequence rather than reproducing
+// the preset's separate unlock-then-pane-mode steps; its `n` / `x` action
+// bindings belong to the default preset, not Unlock-First.
 //
 // Derivation: ZELLIJ-KEYBINDS §keybinds — the mode-division convention:
 // bindings grouped into named modes, each mode mapping keys to named actions.
@@ -65,6 +65,7 @@ pub enum Mode {
 /// One workspace action a key or palette command selects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
+    LeaveWorkspace,
     NewWorkspace,
     CloseWorkspace,
     NewTab,
@@ -104,12 +105,21 @@ pub enum Outcome {
 /// judged on the geometry the operator actually sees.
 pub fn apply(action: Action, state: &mut WorkspaceState, area: Rect) {
     match action {
-        Action::NewWorkspace => state.create_workspace(),
+        Action::LeaveWorkspace => {}
+        Action::NewWorkspace => {
+            state.create_workspace();
+        }
         Action::CloseWorkspace => state.close_workspace(),
-        Action::NewTab => state.create_tab(),
+        Action::NewTab => {
+            state.create_tab();
+        }
         Action::CloseTab => state.close_tab(),
-        Action::SplitColumns => state.split(Axis::Columns),
-        Action::SplitRows => state.split(Axis::Rows),
+        Action::SplitColumns => {
+            state.split(Axis::Columns);
+        }
+        Action::SplitRows => {
+            state.split(Axis::Rows);
+        }
         Action::ClosePane => state.close_pane(),
         Action::FocusLeft => state.move_focus(Direction::Left, area),
         Action::FocusRight => state.move_focus(Direction::Right, area),
@@ -150,7 +160,13 @@ pub const DEFAULTS: &[BindingRow] = &[
         does: "enter command mode; every other key belongs to the pane",
         lineage: "TMUX-MANUAL -- the prefix-key convention (one leader key, then one \
                   command key); ZELLIJ-PRESETS -- Ctrl-g, the non-colliding preset's \
-                  own entry key",
+                  unlock key, reused here as that one leader",
+    },
+    BindingRow {
+        mode: "command",
+        keys: "q",
+        does: "leave the workspace surface",
+        lineage: "original -- returns to the console shell",
     },
     BindingRow {
         mode: "command",
@@ -296,6 +312,10 @@ struct PaletteEntry {
 /// `select-tab` and `list-keys` are special-cased in [`Palette::resolve`]:
 /// the first takes an argument, the second switches the palette's view.
 const PALETTE_ENTRIES: &[PaletteEntry] = &[
+    PaletteEntry {
+        name: "leave-workspace",
+        action: Some(Action::LeaveWorkspace),
+    },
     PaletteEntry {
         name: "close-pane",
         action: Some(Action::ClosePane),
@@ -557,6 +577,7 @@ impl InputState {
                 return Outcome::Handled;
             }
             KeyCode::Char('n') => Action::SplitColumns,
+            KeyCode::Char('q') => Action::LeaveWorkspace,
             KeyCode::Char('N') => Action::SplitRows,
             KeyCode::Char('x') => Action::ClosePane,
             KeyCode::Char('h') | KeyCode::Left => Action::FocusLeft,

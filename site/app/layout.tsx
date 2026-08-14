@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import { JetBrains_Mono } from "next/font/google";
-import Script from "next/script";
 import type { ReactNode } from "react";
 import { RootProvider } from "fumadocs-ui/provider/next";
 
@@ -9,10 +8,16 @@ import { StructuredData } from "./structured-data";
 
 import "./globals.css";
 
+// `--gws-font-signal`, not `--font-signal`. The house token contract requires
+// every custom property this site owns to carry the site prefix, and this one is
+// ours — Next only injects the name we choose. Left bare it was the single
+// un-namespaced `var()` in the whole stylesheet, and the only way to make the
+// validator accept it would have been to declare `font` a third-party prefix,
+// which is a false statement about a variable we name ourselves.
 const mono = JetBrains_Mono({
   display: "swap",
   subsets: ["latin"],
-  variable: "--font-signal",
+  variable: "--gws-font-signal",
 });
 
 const title = "GridWork — an agent operating system for the terminal";
@@ -42,25 +47,46 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html
-      lang="en"
-      className={`dark ${mono.variable}`}
-      style={{ colorScheme: "dark" }}
-      suppressHydrationWarning
-    >
+    // No `dark` class and no inline `colorScheme` here any more. Both were
+    // hardcoded, and an inline style beats every stylesheet rule — `light` would
+    // have painted a light page inside a dark form control. The provider below
+    // writes the class before paint; `globals.css` covers the frame before that
+    // and the case where the script never runs.
+    <html lang="en" className={mono.variable} suppressHydrationWarning>
       <head>
-        {/* Cookieless, aggregate-only. data-domain is the canonical host;
-            gridwork.dev 301s at the edge, so the origin only ever sees this one. */}
-        <Script
-          defer
-          data-domain="gridwork.sh"
-          src="https://plausible.io/js/script.js"
-          strategy="afterInteractive"
-        />
+        {/* Cookieless, aggregate-only. data-domain is the canonical host, and
+            it is the only host this app is served from — gridwork.dev is a
+            separate application, not a redirect here. The earlier version of
+            this comment claimed a 301 that does not exist; the tag was right
+            for a reason that was not.
+
+            A plain tag, not next/script: afterInteractive injects the script
+            client-side after hydration, so it never appears in the served HTML
+            and a reader auditing the page source cannot see what is measuring
+            them. The literal tag is also what Plausible documents. */}
+        <script defer data-domain="gridwork.sh" src="https://plausible.io/js/script.js" />
         <StructuredData />
       </head>
       <body className="flex min-h-screen flex-col font-mono">
-        <RootProvider theme={{ enabled: false }} search={{ enabled: false }}>
+        <RootProvider
+          theme={{
+            // Two attributes, not one. `class` is what Fumadocs' own stylesheets
+            // key on (`.dark` in default-colors.css); `data-theme` is what the
+            // house token contract keys on. Writing only one leaves the other
+            // half of the page on the wrong palette.
+            attribute: ["class", "data-theme"],
+            // "system", not "dark". next-themes writes the resolved attribute on
+            // every load, so a hardcoded default makes the media query in
+            // globals.css unreachable — and worse than unreachable: on a light
+            // OS the pre-hydration stylesheet paints light and the script then
+            // flips it to dark, which is a visible flash rather than a
+            // preference. With "system" the two agree and there is nothing to
+            // flash. An explicit choice still wins, and still persists.
+            defaultTheme: "system",
+            enableSystem: true,
+          }}
+          search={{ enabled: false }}
+        >
           {children}
         </RootProvider>
       </body>

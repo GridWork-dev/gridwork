@@ -27,7 +27,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
       - run: cargo fmt --all --check
       - name: the performance whole-job guard fails closed (seeded violation)
         run: |
@@ -166,7 +166,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
       - name: Unicode tables and the published grapheme corpus agree
         run: cargo test -p gwk-text --all-targets --locked
       - name: prove the Unicode table-version gate can fail (seeded violation)
@@ -230,7 +230,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
       - name: Assert ignored kernel tests exist
         shell: bash
         run: |
@@ -286,7 +286,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
         with:
           shared-key: perf-release
       - id: envelope
@@ -336,7 +336,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
         with:
           shared-key: perf-release
       - id: envelope
@@ -391,7 +391,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
       # Default members — see the note in `test`. macOS would need its own Zig
       # and its own ghostty tree, and gwk-pty's portability is not what this job
       # is here to prove.
@@ -423,7 +423,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
         with:
           shared-key: pty
       # The zig-built engine library is tuned to the CPU that built it — with
@@ -639,7 +639,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
         with:
           shared-key: pty
       # Same reason as the `pty` job: the zig-built engine lib is native-CPU
@@ -702,7 +702,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
       - name: zig must be absent, or this job tests nothing
         run: |
           set -euo pipefail
@@ -761,7 +761,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
       - name: every published crate builds alone and carries its license and readme
         run: |
           set -euo pipefail
@@ -840,7 +840,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: "1.94"
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
       # Default members — see the note in `test`. NOTHING checks gwk-pty's MSRV:
       # the `pty` job builds it on stable, and this job cannot reach it without
       # the Zig toolchain. Stated rather than papered over — the crate is not
@@ -854,8 +854,9 @@ jobs:
     timeout-minutes: 10
     services:
       postgres:
-        # Digest-pinned like every action above; dependabot / a manual bump tracks
-        # the postgres:16 tag.
+        # Digest-pinned like every action above; Renovate tracks the postgres:16
+        # tag, and holds the major behind a `major-bump` label rather than
+        # proposing postgres:18 as routine.
         image: postgres:16@sha256:33f923b05f64ca54ac4401c01126a6b92afe839a0aa0a52bc5aeb5cc958e5f20
         env:
           POSTGRES_PASSWORD: ci
@@ -904,7 +905,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: "1.3.14"
@@ -941,6 +942,49 @@ jobs:
           set -euo pipefail
           bun install --frozen-lockfile
           bun run check:docs
+      # `site/package.json` has defined this script and `site/README.md` has
+      # told contributors to run it since the project landed, and no workflow
+      # invoked it. The docker leg below runs `next build`, which does NOT
+      # type-check — so nothing here ever read a type error.
+      #
+      # `next typegen` first is not optional: it writes the generated route
+      # types `tsc` then resolves against, and a bare `tsc --noEmit` fails on
+      # their absence rather than on anything a contributor wrote.
+      - name: typecheck
+        working-directory: site
+        run: |
+          set -euo pipefail
+          # The documented contributor command verbatim — site/README.md tells
+          # people to run this exact script, so CI running something adjacent
+          # would let the two drift.
+          bun run typecheck
+
+          # A green `tsc` is not evidence it read anything. An empty project
+          # exits 0, and `site/` now runs TypeScript 7 — the Go port, which
+          # ships no JavaScript compiler API, so every consumer that imported
+          # `typescript` as a library is retargeted by the bump alone. Next
+          # refused outright and needed `experimental.useTypeScriptCli`, which
+          # is the good case; the same removal took another project's module
+          # graph from 151 to 0 with exit 0 and no message. So count the files,
+          # and let the count decide.
+          checked="$(bunx tsc --noEmit --listFiles |
+            grep -v '/node_modules/' | grep -cv '/\.next/' || true)"
+          # 21 today. The floor is deliberately far below that rather than
+          # just under it: the failure being guarded lands at zero or a
+          # handful, so a tight floor buys nothing and reds on ordinary churn.
+          echo "typecheck: ${checked} project files"
+          if [ "${checked:-0}" -lt 10 ]; then
+            echo "typecheck: only ${checked} project files reached tsc — it is checking nothing" >&2
+            exit 1
+          fi
+      # Dead files, dead exports, dead dependencies. Wired here rather than
+      # left as a config file someone runs by hand, which is the state
+      # `typecheck` above was in. Its first run found a real dead export.
+      - name: knip
+        working-directory: site
+        run: |
+          set -euo pipefail
+          bun run knip
       - name: prove the freshness gate can fail (seeded violations)
         working-directory: site
         run: |
@@ -1003,9 +1047,18 @@ jobs:
           # with the checker replaced by `exit 1`.
           bun run check:docs
           echo "docs-freshness: the live tree is fresh"
+      # Built WITH the SHA, the same way a deploy does it. The value has to survive
+      # a build ARG, an ENV in a different stage, and a runtime read — three places
+      # it can be dropped without anything going red. The smoke step below asserts
+      # the route echoes this exact value back, which is the only way to know the
+      # chain is intact.
       - name: Build standalone site image
-        run: docker build -f site/Dockerfile -t gridwork-site:ci .
+        run: docker build -f site/Dockerfile --build-arg "GIT_SHA=${GIT_SHA}" -t gridwork-site:ci .
+        env:
+          GIT_SHA: ${{ github.sha }}
       - name: Smoke routes and security headers
+        env:
+          GIT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           container_id="$(docker run -d -p 127.0.0.1:8080:3000 -e PORT=3000 gridwork-site:ci)"
@@ -1047,7 +1100,145 @@ jobs:
 
           check_response / 200
           check_response /docs 200
+          check_response /health 200
           check_response /this-path-does-not-exist 404
+
+          # railway.json points healthcheckPath at /health, so a 200 there is now the
+          # difference between a failed deploy and a broken container being served.
+          # A 200 is not the whole claim, though: the route exists to report which
+          # commit is running, and that value crosses a build ARG, an ENV in a
+          # different stage, and a runtime read. Any of the three can be dropped
+          # while the route still answers 200 with a cheerful "unknown" — which is
+          # exactly how the sibling repo carrying this same stamp let a
+          # six-commit-stale build sit in production unnoticed. So compare it.
+          reported="$(curl -sS "http://127.0.0.1:8080/health" | jq -r '.sha')"
+          if [ "$reported" != "${GIT_SHA}" ]; then
+            echo "site smoke: /health reports '${reported}', expected '${GIT_SHA}'" >&2
+            echo "site smoke: the ARG -> ENV -> route chain is broken" >&2
+            exit 1
+          fi
+          echo "site smoke: /health reports the built commit"
+
+          # And it must not be cached. A cached health check answers for whichever
+          # container served it last, which is the one question it may never answer.
+          curl -sS -D - -o /dev/null "http://127.0.0.1:8080/health" |
+            grep -qi '^cache-control:.*no-store' || {
+            echo "site smoke: /health is missing cache-control: no-store" >&2
+            exit 1
+          }
+
+  # The house lint and format floor (SPEC house-standards D2b/D2c/D3). Wired here
+  # rather than left as scripts someone runs by hand, which is the state `typecheck`
+  # sat in until #120 — configured, documented, and never once invoked by CI.
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3.14"
+      # oxlint and oxfmt are pinned once, in site/package.json. There is no root
+      # package.json — three independent projects share this checkout — so both
+      # scripts resolve the binaries under site/ and run from the repo root, which
+      # is the only cwd where the configs and .prettierignore are discovered.
+      - name: install pinned tooling
+        working-directory: site
+        run: bun install --frozen-lockfile
+      - name: lint
+        run: ./tools/lint.sh .
+      - name: format
+        run: ./tools/format.sh --check
+      # Two tests, neither of which the linter stands in for. The drift gate proves
+      # the vendored house configs still match their recorded bytes; the load test
+      # proves the vendored jsPlugin actually loads under this repo's oxlint build
+      # and that its rules fire.
+      - name: vendored-config and plugin-load tests
+        run: bun test tools/
+      - name: prove the gates can fail (seeded violations)
+        run: |
+          set -euo pipefail
+          trap 'git checkout -- .oxfmtrc.json site/app/layout.tsx; [ -d contracts ] || mv ../contracts-moved contracts' EXIT
+
+          # A lint finding from the VENDORED PLUGIN's own rules, not a built-in one.
+          # A built-in seed would go red whether or not plugin.js loaded, and a
+          # jsPlugin that fails to load is silent — oxlint reports nothing and exits
+          # 0. This is the one seed that would catch that through the real gate.
+          printf '\nexport const seeded = AbortSignal.timeout(1);\n' >> site/app/layout.tsx
+          out=""
+          if out="$(./tools/lint.sh . 2>&1)"; then
+            echo 'lint accepted a seeded finding — the gate is broken' >&2
+            exit 1
+          fi
+          grep -q 'no-abortsignal-timeout' <<<"$out" || {
+            echo "the seed was rejected, but not by the vendored plugin's rule:" >&2
+            printf '%s\n' "$out" >&2
+            exit 1
+          }
+          git checkout -- site/app/layout.tsx
+          echo "lint: a vendored-plugin finding correctly rejected"
+
+          # Unformatted source. `--check` is the only thing standing between this
+          # repo and a formatter nobody runs.
+          printf '\nexport const seeded  =   1\n' >> site/app/layout.tsx
+          if ./tools/format.sh --check >/dev/null 2>&1; then
+            echo 'format accepted unformatted source — the gate is broken' >&2
+            exit 1
+          fi
+          git checkout -- site/app/layout.tsx
+          echo "format: unformatted source correctly rejected"
+
+          # A tree that moved. oxfmt does not fail on a path matching nothing, so a
+          # renamed directory otherwise just stops being formatted — silently, and
+          # green. The count cannot cover this: dropping `contracts` costs 3 of 25
+          # files, which no floor low enough to survive churn would ever catch. So
+          # the trees are asserted to exist by name, and this moves one to prove it.
+          mv contracts ../contracts-moved
+          if out="$(./tools/format.sh --check 2>&1)"; then
+            echo 'format accepted a missing tree — the gate is broken' >&2
+            exit 1
+          fi
+          grep -q 'aimed at a tree that moved' <<<"$out" || {
+            echo "the missing tree was rejected, but not by the existence check:" >&2
+            printf '%s\n' "$out" >&2
+            exit 1
+          }
+          mv ../contracts-moved contracts
+          echo "format: a moved tree correctly rejected"
+
+          # An empty scan. Both tools exit 0 having read nothing, so neither exit
+          # code is evidence on its own and the file count has to decide. Raising
+          # the floor above the real count stands in for the tree emptying out.
+          if LINT_FLOOR=9999 ./tools/lint.sh . >/dev/null 2>&1; then
+            echo 'lint accepted a count below its floor — the gate is broken' >&2
+            exit 1
+          fi
+          if FMT_FLOOR=9999 ./tools/format.sh --check >/dev/null 2>&1; then
+            echo 'format accepted a count below its floor — the gate is broken' >&2
+            exit 1
+          fi
+          echo "lint/format: an empty scan correctly rejected"
+
+          # Drift in a vendored config, proven under the conditions this runner has:
+          # no canonical checkout exists here, so the recorded digests are the only
+          # half of the drift gate that runs. Before they existed the whole suite
+          # skipped, and a vendored config edited on a branch reached main green.
+          printf '\n' >> .oxfmtrc.json
+          if bun test tools/vendored-config-drift.test.ts >/dev/null 2>&1; then
+            echo 'drift gate accepted an edited vendored config — the gate is broken' >&2
+            exit 1
+          fi
+          git checkout -- .oxfmtrc.json
+          echo "drift: an edited vendored config correctly rejected"
+
+          # Positive control: six seeds that can only fail would also pass with every
+          # script here replaced by `exit 1`.
+          ./tools/lint.sh .
+          ./tools/format.sh --check
+          bun test tools/
+          echo "lint: the live tree is clean"
 
   # bans/licenses/sources block merges; advisories run separately below so a
   # newly published advisory can't redden an unchanged PR.
@@ -1776,3 +1967,80 @@ jobs:
             echo 'content scan missed an intermediate-commit leak — the gate is broken' >&2
             exit 1
           fi
+
+  # The single required context for branch protection.
+  #
+  # `if: always()` is load-bearing, and it is the same trap `cleanroom-gate`
+  # documents above from the other direction: a job left on the default
+  # `success()` condition SKIPS when a dependency fails, and GitHub reports a
+  # skipped required check as SUCCESS. Such an aggregator goes green by not
+  # running — it would report nothing at exactly the moment it matters.
+  #
+  # `advisories`, `perf-attempt`, and `perf-retry` are deliberately absent from
+  # `needs:`. All three are `continue-on-error: true`, so their result reads
+  # `success` here even when their steps fail; listing them would look like
+  # coverage while asserting nothing. `perf` is the rollup that actually
+  # decides, and it is listed.
+  verify:
+    if: always()
+    needs:
+      - cleanroom-gate
+      - commit-messages
+      - contract
+      - deny
+      - kernel-integration
+      - leak-scan
+      - lint
+      - macos
+      - msrv
+      - package
+      - perf
+      - pty
+      - pty-host
+      - schema
+      - site
+      - test
+      - unicode-conformance
+      - zig-free
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: prove the gate can fail (seeded violations)
+        run: |
+          set -euo pipefail
+
+          # A red dependency among green ones.
+          seeded='{"a":{"result":"success"},"b":{"result":"failure"}}'
+          if printf '%s' "$seeded" | EXPECTED_GATES=2 ./tools/verify-gates.sh >/dev/null 2>&1; then
+            echo 'verify accepted a failed dependency — the gate is broken' >&2
+            exit 1
+          fi
+
+          # A skipped dependency. GitHub reports skipped required checks as
+          # success, so "not failure" is not the same question as "success".
+          seeded='{"a":{"result":"success"},"b":{"result":"skipped"}}'
+          if printf '%s' "$seeded" | EXPECTED_GATES=2 ./tools/verify-gates.sh >/dev/null 2>&1; then
+            echo 'verify accepted a skipped dependency — the gate is broken' >&2
+            exit 1
+          fi
+
+          # No dependencies at all: `all()` over an empty set is true, so a
+          # `needs:` list that failed to expand would report green having
+          # checked nothing.
+          if printf '{}' | EXPECTED_GATES=0 ./tools/verify-gates.sh >/dev/null 2>&1; then
+            echo 'verify called an empty dependency set green — the gate is broken' >&2
+            exit 1
+          fi
+
+          # Positive control: three seeds that can only fail would also pass
+          # with the assertion replaced by `exit 1`.
+          printf '%s' '{"a":{"result":"success"},"b":{"result":"success"}}' |
+            EXPECTED_GATES=2 ./tools/verify-gates.sh >/dev/null
+          echo "verify: the assertion rejects red, skipped, and empty, and accepts green"
+      - name: every gate green
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: printf '%s' "$NEEDS" | ./tools/verify-gates.sh

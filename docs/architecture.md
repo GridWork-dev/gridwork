@@ -21,13 +21,17 @@ Locked decisions change only by a recorded amendment, not by drift.
 > hookup that serves its frames to a consumer — the publish/retire wire family
 > plus `PtyAttach`/`PtySnapshot` answering from the kernel's PTY hub, so the
 > resident host's sessions reach the drill-down lens across the kernel socket.
-> Spawn-over-socket, via the adapters' control halves, remains deferred.
+> Consumer input/resize/stop route back to the exact host generation, and a
+> request-driven start names a kernel-declared executable template rather than
+> carrying an arbitrary command line. Template environment entries are durable `env:NAME`
+> references resolved only inside the resident host. The host clears inherited environment before
+> applying the template map, bounds every resident grid before allocation, replaces
+> stale start-manager routes, and periodically reaps ended local sessions.
 >
-> **Built (partial):** the TUI's Queue, Board, Hall, session drill-down, and
-> Config lenses (`crates/gwk-tui`), with `gw tui` driving the Hall lens live
-> from the kernel's projections and events (`crates/gridwork/src/tui.rs`).
-> **Not built:** the workspace — the real multiplexer (`ROADMAP.md` stage 5);
-> anything this file says about that surface is specification.
+> **Built:** the TUI's Queue, Board, Hall, session drill-down, and Config
+> lenses (`crates/gwk-tui`), with `gw tui` driving the Hall lens live from the
+> kernel's projections and events (`crates/gridwork/src/tui.rs`), and the
+> workspace — the real multiplexer (`crates/gwk-tui/src/workspace`).
 >
 > `docs/security/THREAT_MODEL.md` labels each security stance **in force** /
 > **partial** / **designed, not yet built**; when this file and that one disagree

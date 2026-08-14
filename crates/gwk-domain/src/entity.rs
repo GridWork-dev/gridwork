@@ -17,7 +17,8 @@ use crate::ids::{
     AttemptId, AttentionItemId, AuthorityGrantId, ByteCount, CommandId, CorrelationId, CostEntryId,
     CostMicros, DispatchNodeId, EngineId, EngineSessionId, EvidenceId, FenceToken, GateId,
     IdempotencyKey, IngestedRecordId, LeaseId, MessageId, PtySessionGeneration, PtySessionId,
-    ReceiptId, Seq, TaskId, Timestamp, TokenCount, WorkflowRunId, WorkspaceNodeId, WorktreeId,
+    PtySessionTemplateName, ReceiptId, Seq, TaskId, Timestamp, TokenCount, WorkflowRunId,
+    WorkspaceNodeId, WorktreeId,
 };
 use crate::ingestion::IngestionKind;
 
@@ -626,6 +627,30 @@ pub struct PtySession {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[specta(optional)]
     pub closed_at: Option<Timestamp>,
+}
+
+/// One operator-declared executable template for request-driven PTY sessions.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
+#[serde(deny_unknown_fields)]
+pub struct PtySessionTemplate {
+    pub name: PtySessionTemplateName,
+    pub version: u32,
+    /// `active` until retired; retired declarations remain ledger history.
+    pub state: String,
+    /// Executable path or program name. Never a shell command line.
+    pub command: String,
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub cwd: Option<String>,
+    pub env: BTreeMap<String, String>,
+    pub cols: u16,
+    pub rows: u16,
+    pub declared_at: Timestamp,
+    pub updated_at: Timestamp,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub retired_at: Option<Timestamp>,
 }
 
 /// An advisory lease over a scope (worktree, file set, singleton role).

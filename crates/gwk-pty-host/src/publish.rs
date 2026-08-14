@@ -12,11 +12,9 @@
 //! local attach, which is always sufficient: a snapshot reseed is the
 //! contract's own answer to a gap on either side of the socket.
 //!
-//! Sessions are declared by the operator in [`SESSIONS_ENV`], because the
-//! resident host serves this box and the box's owner decides what runs on
-//! it. Routing spawn requests across the socket is the lifecycle follow-up
-//! the crate root doc scopes to the adapters' control halves — not this
-//! module's.
+//! Boot sessions remain declared by the operator in [`SESSIONS_ENV`]. Request-
+//! driven starts sit beside them through the kernel's durable template catalog;
+//! this module publishes either source identically once a local session exists.
 //!
 //! Derivation: none — channel plumbing and typed client calls only; no
 //! terminal byte is parsed and no process is supervised here (the registry
@@ -60,6 +58,19 @@ const RESTARTS: u32 = 5;
 /// The pause between engine-child restarts.
 const RESTART_DELAY: Duration = Duration::from_secs(2);
 
+pub fn session_config(cols: u16, rows: u16) -> SessionConfig {
+    SessionConfig {
+        cols,
+        rows,
+        recording_cap: RECORDING_CAP,
+        retained_batches: RETAINED_BATCHES,
+        restart: RestartPolicy::OnFailure {
+            max: RESTARTS,
+            delay: RESTART_DELAY,
+        },
+    }
+}
+
 /// One operator-declared session: what to run and at what size.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionDecl {
@@ -72,16 +83,7 @@ pub struct SessionDecl {
 impl SessionDecl {
     /// The config every declared session runs under.
     pub fn config(&self) -> SessionConfig {
-        SessionConfig {
-            cols: self.cols,
-            rows: self.rows,
-            recording_cap: RECORDING_CAP,
-            retained_batches: RETAINED_BATCHES,
-            restart: RestartPolicy::OnFailure {
-                max: RESTARTS,
-                delay: RESTART_DELAY,
-            },
-        }
+        session_config(self.cols, self.rows)
     }
 }
 
@@ -113,6 +115,13 @@ pub fn parse_sessions(value: &str) -> Result<Vec<SessionDecl>, String> {
         let (name, engine) = (name.trim(), engine.trim());
         if name.is_empty() || engine.is_empty() || cols == 0 || rows == 0 {
             return Err(format!("{entry:?} has an empty name, engine, or size"));
+        }
+        if !gwk_domain::pty_grid_dimensions_are_bounded(cols, rows) {
+            return Err(format!(
+                "{entry:?} exceeds the {}-cell or {}-cell-axis PTY geometry bound",
+                gwk_domain::PTY_GRID_MAX_CELLS,
+                gwk_domain::PTY_GRID_MAX_AXIS,
+            ));
         }
         if blank_grid_bytes(rows, cols) > PUBLISH_BYTE_BUDGET {
             // The kernel holds every snapshot publish to its budget, and a
@@ -197,17 +206,45 @@ pub async fn publish_session(
     attacher: Attacher,
     socket: std::path::PathBuf,
     id: PtySessionId,
+    stop: watch::Receiver<bool>,
+) {
+    publish_session_inner(attacher, socket, id, stop, None).await;
+}
+
+pub(crate) async fn publish_session_with_readiness(
+    attacher: Attacher,
+    socket: std::path::PathBuf,
+    id: PtySessionId,
+    stop: watch::Receiver<bool>,
+    ready: tokio::sync::oneshot::Sender<Result<(), String>>,
+) {
+    publish_session_inner(attacher, socket, id, stop, Some(ready)).await;
+}
+
+async fn publish_session_inner(
+    attacher: Attacher,
+    socket: std::path::PathBuf,
+    id: PtySessionId,
     mut stop: watch::Receiver<bool>,
+    mut ready: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
 ) {
     loop {
         if *stop.borrow() {
+            if let Some(ready) = ready.take() {
+                let _ = ready.send(Err(
+                    "the host stopped before the session was published".to_owned()
+                ));
+            }
             return;
         }
-        match publish_once(&attacher, &socket, &id, &mut stop).await {
+        match publish_once(&attacher, &socket, &id, &mut stop, &mut ready).await {
             // The session itself ended (or a stop was asked): nothing left
             // to publish, and the registry's reap will report why.
             Outcome::SessionOver => return,
             Outcome::Fatal(why) => {
+                if let Some(ready) = ready.take() {
+                    let _ = ready.send(Err(why.clone()));
+                }
                 tracing::error!(
                     session = %id, %why,
                     "the kernel refused this session's publish as invalid; \
@@ -233,6 +270,18 @@ enum Outcome {
     Retry(String),
 }
 
+enum ControlOutcome {
+    Continue(String),
+    Retry(String),
+}
+
+fn control_outcome(error: KernelClientError) -> ControlOutcome {
+    match error {
+        local @ KernelClientError::Input { .. } => ControlOutcome::Continue(local.to_string()),
+        transport => ControlOutcome::Retry(transport.to_string()),
+    }
+}
+
 /// Split a kernel-client failure by what a retry could do about it. A
 /// `validation` refusal is the kernel judging the value itself; every other
 /// failure — transport, staleness, an ownership race with a dying twin, a
@@ -255,11 +304,18 @@ async fn publish_once(
     socket: &std::path::Path,
     id: &PtySessionId,
     stop: &mut watch::Receiver<bool>,
+    ready: &mut Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
 ) -> Outcome {
     let mut client = match KernelClient::connect_for_session(socket, attacher.clone()).await {
         Ok(client) => client,
         Err(e) => return Outcome::Retry(format!("connect: {e}")),
     };
+    if let Err(e) = client
+        .reconcile_applied_deliveries(attacher.applied_deliveries().await)
+        .await
+    {
+        return Outcome::Retry(format!("reconcile applied controls: {e}"));
+    }
 
     // A fresh attach — cursor `None` — is always snapshotted, which is
     // exactly the seed the kernel-side claim wants. The attach handle stands
@@ -289,6 +345,9 @@ async fn publish_once(
             return refusal_outcome("raw seed", &e);
         }
     }
+    if let Some(ready) = ready.take() {
+        let _ = ready.send(Ok(()));
+    }
 
     loop {
         tokio::select! {
@@ -297,8 +356,15 @@ async fn publish_once(
                     Ok(control) => control,
                     Err(error) => return Outcome::Retry(format!("input control: {error}")),
                 };
-                if let Err(error) = client.apply_input_control(control).await {
-                    return Outcome::Retry(format!("input control: {error}"));
+                if let Err(error) = client.apply_session_control(control).await {
+                    match control_outcome(error) {
+                        ControlOutcome::Continue(why) => {
+                            tracing::warn!(%why, "PTY control was terminally refused locally");
+                        }
+                        ControlOutcome::Retry(why) => {
+                            return Outcome::Retry(format!("input control: {why}"));
+                        }
+                    }
                 }
             }
             batch = live.recv() => match batch {
@@ -366,6 +432,21 @@ async fn publish_once(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn acknowledged_local_control_refusal_does_not_reconnect_the_publisher() {
+        let error = KernelClientError::Input {
+            command_id: gwk_domain::CommandId::new("resize-refused"),
+            session_id: PtySessionId::new("console"),
+            generation: gwk_domain::PtySessionGeneration::new("life-1"),
+            message: "local resize refused".to_owned(),
+        };
+
+        assert!(matches!(
+            control_outcome(error),
+            ControlOutcome::Continue(_)
+        ));
+    }
 
     #[test]
     fn declarations_parse_whole_or_not_at_all() {

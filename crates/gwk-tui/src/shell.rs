@@ -719,7 +719,7 @@ pub fn render_chrome(
     }
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
         clear(area, buffer);
-        put(buffer, area, 0, 0, "GRIDWORK", bold("fg", tier));
+        put(buffer, area, 0, 0, "GRIDWORK", bold("gws_fg", tier));
         put(
             buffer,
             area,
@@ -729,7 +729,7 @@ pub fn render_chrome(
                 "terminal too small: {}x{} (minimum {MIN_WIDTH}x{MIN_HEIGHT})",
                 area.width, area.height
             ),
-            style("warn", tier),
+            style("gws_warn", tier),
         );
         return;
     }
@@ -746,7 +746,7 @@ pub fn render_chrome(
         paint_header(area, buffer, shell, tier);
     }
     if let Some(notice) = shell.notice() {
-        put(buffer, area, 2, 1, notice, style("warn", tier));
+        put(buffer, area, 2, 1, notice, style("gws_warn", tier));
     }
     match shell.mode {
         ShellMode::Navigator => {
@@ -766,7 +766,7 @@ pub fn render_chrome(
                 2,
                 2,
                 &format!("/{}", shell.filter),
-                bold("hue", tier),
+                bold("gws_hue", tier),
             );
         }
         ShellMode::Prompt(verb) => paint_prompt(area, buffer, shell, verb, tier),
@@ -791,9 +791,9 @@ fn paint_fleet_tabs(area: Rect, buffer: &mut Buffer, shell: &ShellState, tier: C
             1,
             &text,
             if *tab == shell.surface {
-                bold("hue", tier)
+                bold("gws_hue", tier)
             } else {
-                style("muted", tier)
+                style("gws_muted", tier)
             },
         );
         x = x.saturating_add(text.len() as u16 + 1);
@@ -814,14 +814,14 @@ fn paint_header(area: Rect, buffer: &mut Buffer, shell: &ShellState, tier: Color
         1,
         0,
         &title.to_ascii_uppercase(),
-        bold("fg", tier),
+        bold("gws_fg", tier),
     );
     if lens == Lens::Hall {
         return;
     }
     if surface == Surface::TermAttach {
         if let Some(subject) = &shell.attach_subject {
-            put(buffer, area, 8, 0, subject, style("fg", tier));
+            put(buffer, area, 8, 0, subject, style("gws_fg", tier));
         }
         return;
     }
@@ -839,9 +839,9 @@ fn paint_header(area: Rect, buffer: &mut Buffer, shell: &ShellState, tier: Color
             0,
             &text,
             if *tab == surface {
-                bold("hue", tier)
+                bold("gws_hue", tier)
             } else {
-                style("muted", tier)
+                style("gws_muted", tier)
             },
         );
         x = x.saturating_add(text.len() as u16 + 1);
@@ -856,7 +856,7 @@ fn paint_navigator(area: Rect, buffer: &mut Buffer, shell: &ShellState, tier: Co
         2,
         2,
         &format!("NAVIGATE  :{}", shell.navigator_input),
-        bold("hue", tier),
+        bold("gws_hue", tier),
     );
     let capacity = area.height.saturating_sub(6) as usize;
     for (index, destination) in matches.iter().take(capacity).enumerate() {
@@ -873,7 +873,7 @@ fn paint_navigator(area: Rect, buffer: &mut Buffer, shell: &ShellState, tier: Co
             } else {
                 " "
             },
-            bold("focus", tier),
+            bold("gws_focus", tier),
         );
         put(
             buffer,
@@ -882,9 +882,9 @@ fn paint_navigator(area: Rect, buffer: &mut Buffer, shell: &ShellState, tier: Co
             4 + index as u16,
             &label,
             if index == shell.navigator_index {
-                bold("fg", tier)
+                bold("gws_fg", tier)
             } else {
-                style("muted", tier)
+                style("gws_muted", tier)
             },
         );
     }
@@ -895,7 +895,7 @@ fn paint_navigator(area: Rect, buffer: &mut Buffer, shell: &ShellState, tier: Co
             4,
             4 + capacity as u16,
             &format!("+{} more", matches.len() - capacity),
-            style("muted", tier),
+            style("gws_muted", tier),
         );
     }
 }
@@ -908,19 +908,19 @@ fn paint_prompt(
     tier: ColorTier,
 ) {
     let y = area.height.saturating_sub(7);
-    put(buffer, area, 2, y, "DEADLINE", bold("warn", tier));
+    put(buffer, area, 2, y, "DEADLINE", bold("gws_warn", tier));
     let label = shell.confirmation_target.as_ref().map_or_else(
         || verb.label().to_owned(),
         |target| format!("{}  {target}", verb.label()),
     );
-    put(buffer, area, 12, y, &label, bold("fg", tier));
+    put(buffer, area, 12, y, &label, bold("gws_fg", tier));
     put(
         buffer,
         area,
         2,
         y.saturating_add(2),
         &format!("{}_", shell.prompt_input),
-        bold("focus", tier),
+        bold("gws_focus", tier),
     );
     put(
         buffer,
@@ -928,7 +928,7 @@ fn paint_prompt(
         2,
         y.saturating_add(3),
         "YYYY-MM-DDTHH:MM:SSZ   enter continue   esc cancel",
-        style("muted", tier),
+        style("gws_muted", tier),
     );
 }
 
@@ -940,7 +940,7 @@ fn paint_confirm(
     tier: ColorTier,
 ) {
     let y = area.height.saturating_sub(7);
-    put(buffer, area, 2, y, "CONFIRM", bold("warn", tier));
+    put(buffer, area, 2, y, "CONFIRM", bold("gws_warn", tier));
     let label = if verb == ContextVerb::MuteAttention {
         format!(
             "{} {} until {}",
@@ -956,14 +956,14 @@ fn paint_confirm(
     } else {
         verb.label().to_owned()
     };
-    put(buffer, area, 12, y, &label, bold("fg", tier));
+    put(buffer, area, 12, y, &label, bold("gws_fg", tier));
     put(
         buffer,
         area,
         2,
         y.saturating_add(2),
         "enter/y confirm   esc/n cancel",
-        style("muted", tier),
+        style("gws_muted", tier),
     );
 }
 
@@ -996,14 +996,14 @@ fn paint_keybar(
         &left,
         bold(
             if shell.mode == ShellMode::Input {
-                "warn"
+                "gws_warn"
             } else {
-                "fg"
+                "gws_fg"
             },
             tier,
         ),
     );
-    put_right(buffer, area, y, &right, style("muted", tier));
+    put_right(buffer, area, y, &right, style("gws_muted", tier));
 
     let hints = key_hints(shell);
     let start = left.len() as u16 + 1;
@@ -1014,7 +1014,7 @@ fn paint_keybar(
         return;
     }
     if hints.len() <= available {
-        put(buffer, area, start, y, hints, style("muted", tier));
+        put(buffer, area, start, y, hints, style("gws_muted", tier));
         return;
     }
     let mut used = 0usize;
@@ -1030,7 +1030,7 @@ fn paint_keybar(
                 start + used as u16,
                 y,
                 "   ",
-                style("muted", tier),
+                style("gws_muted", tier),
             );
             used += 3;
         }
@@ -1040,7 +1040,7 @@ fn paint_keybar(
             start + used as u16,
             y,
             segment,
-            style("muted", tier),
+            style("gws_muted", tier),
         );
         used += segment.len();
     }
@@ -1050,7 +1050,7 @@ fn paint_keybar(
         end.saturating_sub(1),
         y,
         "+",
-        style("muted", tier),
+        style("gws_muted", tier),
     );
 }
 
@@ -1076,7 +1076,7 @@ fn key_hints(shell: &ShellState) -> &'static str {
             Surface::FleetAgents => {
                 ": go   / filter   enter open   s stop   b budget   [/] tab   q quit"
             }
-            Surface::TermAttach => "i input   r rail   j/k scroll   / filter   : go   q back",
+            Surface::TermAttach => "Ctrl-g command   Ctrl-g q back   mouse focus   input -> pane",
             // q leaves a WORK surface for the Hall (the ruled "q back");
             // everywhere else in this arm it quits.
             Surface::WorkTasks | Surface::WorkRuns => {
@@ -1196,7 +1196,7 @@ pub fn render_budget_form(
     if area.width == 0 || area.height == 0 {
         return;
     }
-    put(buffer, area, 1, 0, "BUDGET", bold("fg", tier));
+    put(buffer, area, 1, 0, "BUDGET", bold("gws_fg", tier));
     put(
         buffer,
         area,
@@ -1206,10 +1206,10 @@ pub fn render_budget_form(
             "attempt {}  version {}",
             form.attempt_id, form.expected_version
         ),
-        style("muted", tier),
+        style("gws_muted", tier),
     );
-    put(buffer, area, 2, 2, "AXIS", style("muted", tier));
-    put(buffer, area, 34, 2, "CAP", style("muted", tier));
+    put(buffer, area, 2, 2, "AXIS", style("gws_muted", tier));
+    put(buffer, area, 34, 2, "CAP", style("gws_muted", tier));
     for (index, label) in [
         "max tokens",
         "max tool calls",
@@ -1227,9 +1227,9 @@ pub fn render_budget_form(
             0,
             y,
             if selected { ">" } else { " " },
-            bold("focus", tier),
+            bold("gws_focus", tier),
         );
-        put(buffer, area, 2, y, label, style("fg", tier));
+        put(buffer, area, 2, y, label, style("gws_fg", tier));
         let value = if form.fields[index].is_empty() {
             "uncapped"
         } else {
@@ -1242,9 +1242,9 @@ pub fn render_budget_form(
             y,
             value,
             if selected {
-                bold("focus", tier)
+                bold("gws_focus", tier)
             } else {
-                style("fg", tier)
+                style("gws_fg", tier)
             },
         );
         if selected {
@@ -1254,11 +1254,11 @@ pub fn render_budget_form(
                 34u16.saturating_add(u16::try_from(value.len()).unwrap_or(u16::MAX)),
                 y,
                 "_",
-                bold("focus", tier),
+                bold("gws_focus", tier),
             );
         }
         if form.fields[index] != form.original[index] {
-            put(buffer, area, 58, y, "changed", style("warn", tier));
+            put(buffer, area, 58, y, "changed", style("gws_warn", tier));
         }
     }
     put(
@@ -1267,7 +1267,7 @@ pub fn render_budget_form(
         2,
         9,
         "blank means uncapped, never zero; Enter reviews the typed replacement command",
-        style("muted", tier),
+        style("gws_muted", tier),
     );
 }
 
@@ -1332,10 +1332,10 @@ pub fn render_gate_decision(
         0,
         top,
         &"-".repeat(area.width as usize),
-        style("muted", tier),
+        style("gws_muted", tier),
     );
     let gate = &decision.gate;
-    put(buffer, area, 2, top + 1, "DECIDE", bold("warn", tier));
+    put(buffer, area, 2, top + 1, "DECIDE", bold("gws_warn", tier));
     put(
         buffer,
         area,
@@ -1347,7 +1347,7 @@ pub fn render_gate_decision(
             gate.kind.as_deref().unwrap_or("-"),
             clock(&gate.created_at)
         ),
-        style("fg", tier),
+        style("gws_fg", tier),
     );
     put(
         buffer,
@@ -1355,7 +1355,7 @@ pub fn render_gate_decision(
         2,
         top + 2,
         gate.question.as_deref().unwrap_or("question unavailable"),
-        style("fg", tier),
+        style("gws_fg", tier),
     );
     let capacity = usize::from(height.saturating_sub(5));
     let start = decision
@@ -1371,7 +1371,7 @@ pub fn render_gate_decision(
             2,
             y,
             if index == decision.selected { ">" } else { " " },
-            bold("focus", tier),
+            bold("gws_focus", tier),
         );
         put(
             buffer,
@@ -1380,9 +1380,9 @@ pub fn render_gate_decision(
             y,
             &format!("{}  {option}", index + 1),
             if index == decision.selected {
-                bold("fg", tier)
+                bold("gws_fg", tier)
             } else {
-                style("fg", tier)
+                style("gws_fg", tier)
             },
         );
     }
@@ -1392,7 +1392,7 @@ pub fn render_gate_decision(
         2,
         area.height.saturating_sub(2),
         "decides as operator -- receipted; the gate aggregate records no actor",
-        style("muted", tier),
+        style("gws_muted", tier),
     );
 }
 
@@ -1428,7 +1428,7 @@ pub fn render_attach_rail(
     if area.width == 0 || area.height == 0 {
         return;
     }
-    put(buffer, area, 1, 0, "ESTATE", bold("fg", tier));
+    put(buffer, area, 1, 0, "ESTATE", bold("gws_fg", tier));
     for (index, (label, value)) in [
         ("running", state.running.to_string()),
         ("attention", state.attention.to_string()),
@@ -1439,12 +1439,12 @@ pub fn render_attach_rail(
     .enumerate()
     {
         let y = 2 + u16::try_from(index).unwrap_or(u16::MAX);
-        put(buffer, area, 1, y, label, style("muted", tier));
-        put(buffer, area, 14, y, &value, style("fg", tier));
+        put(buffer, area, 1, y, label, style("gws_muted", tier));
+        put(buffer, area, 14, y, &value, style("gws_fg", tier));
     }
 
     let mut y = 8;
-    put(buffer, area, 1, y, "TERMS", bold("fg", tier));
+    put(buffer, area, 1, y, "TERMS", bold("gws_fg", tier));
     y += 1;
     for term in &state.terms {
         if y >= area.height.saturating_sub(5) {
@@ -1456,10 +1456,10 @@ pub fn render_attach_rail(
             0,
             y,
             if term.attached { ">" } else { " " },
-            bold("focus", tier),
+            bold("gws_focus", tier),
         );
         let subject = theme::safe_text(&term.subject, area.width.saturating_sub(2) as usize);
-        put(buffer, area, 2, y, subject.as_ref(), style("fg", tier));
+        put(buffer, area, 2, y, subject.as_ref(), style("gws_fg", tier));
         crate::row::paint_tail(
             buffer,
             area,
@@ -1468,14 +1468,14 @@ pub fn render_attach_rail(
                 .saturating_add(2)
                 .saturating_add(u16::try_from(subject.chars().count()).unwrap_or(u16::MAX)),
             &term.state,
-            style("muted", tier),
+            style("gws_muted", tier),
         );
         y += 1;
     }
 
     y = y.saturating_add(1);
     if y < area.height.saturating_sub(2) {
-        put(buffer, area, 1, y, "QUEUE", bold("fg", tier));
+        put(buffer, area, 1, y, "QUEUE", bold("gws_fg", tier));
         y += 1;
     }
     for item in &state.queue {
@@ -1489,12 +1489,12 @@ pub fn render_attach_rail(
             y,
             if item.attention { "!" } else { " " },
             if item.attention {
-                style("warn", tier)
+                style("gws_warn", tier)
             } else {
-                style("muted", tier)
+                style("gws_muted", tier)
             },
         );
-        put(buffer, area, 3, y, &item.text, style("fg", tier));
+        put(buffer, area, 3, y, &item.text, style("gws_fg", tier));
         y += 1;
     }
 }
@@ -1592,7 +1592,7 @@ pub fn render_terms(
             x,
             0,
             TERM_COLUMNS[*column].header,
-            style("muted", tier),
+            style("gws_muted", tier),
         );
         x = x.saturating_add(widths[slot] as u16 + 2);
     }
@@ -1627,7 +1627,7 @@ pub fn render_terms(
             0,
             y,
             if selected == Some(&target) { ">" } else { " " },
-            bold("focus", tier),
+            bold("gws_focus", tier),
         );
         x = 2;
         for (slot, column) in keep.iter().enumerate() {
@@ -1638,7 +1638,7 @@ pub fn render_terms(
                 y,
                 &row[*column],
                 widths[slot],
-                style("fg", tier),
+                style("gws_fg", tier),
             );
             x = x.saturating_add(widths[slot] as u16 + 2);
         }
@@ -1657,7 +1657,7 @@ pub fn render_terms(
             1,
             area.height.saturating_sub(2),
             &notice,
-            style("muted", tier),
+            style("gws_muted", tier),
         );
     }
     let count = if state.complete {
@@ -1674,7 +1674,7 @@ pub fn render_terms(
         0,
         area.height - 1,
         &format!("{count}  watermark {watermark}"),
-        style("muted", tier),
+        style("gws_muted", tier),
     );
 }
 

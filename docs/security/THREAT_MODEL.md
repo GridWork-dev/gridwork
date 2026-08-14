@@ -92,8 +92,30 @@ Any local process with socket access can send arbitrary frames.
 `docs/protocol.md`); strict framing bounds and `deny_unknown_fields`
 decoding bound WHAT they can say; commands are CAS-guarded, idempotent, and
 policy-checked, so a misbehaving client can be refused but not corrupt
-order. Same-EUID peer validation reinforces socket permissions. No network listener
-exists before the authentication decision required by ADR 0002.
+order. PTY input, resize, and stop are separately capability-negotiated, authority-gated,
+and receipted; declared-template starts are authority-gated and receipted on baseline JSON,
+while only the resident receiving role negotiates `pty_start`. Delivery-bearing commands are
+refused through generic command submission so capability checks and post-commit host delivery
+cannot be skipped. Pending delivery is durable, short-leased, and retry-serialized without
+holding a database lock across host work; explicit host refusals settle terminally, failures
+before dispatch remain retryable, and disconnects plus expired or orphaned claims after dispatch
+settle as terminally indeterminate rather than risking a duplicate side effect. A surviving host
+can reconcile retained applied evidence after reconnect, but the kernel never redelivers merely
+because a lease expired. Settled commands and the apply-before-ack crash interval are deduplicated
+by event-derived delivery id. Low-entropy input carriers are bound with a domain-separated keyed
+MAC rather than a recoverable plain digest. Lifecycle controls carry an
+exact generation. Executable data lives only in
+the operator-declared kernel catalog rather than in start requests. Catalog environments store
+only `env:NAME` references; values resolve inside the resident host and never enter immutable
+events or projections. That reference discipline covers environment VALUES and nothing else:
+a template's `command`, `args`, and `cwd` are persisted verbatim in the append-only event log
+and in the catalog projection, neither of which the runtime role may update or delete. There is
+no redaction path, and the catalog is readable by any same-EUID peer through a projection read.
+A credential must therefore travel as `env:NAME` — passing one as an argument writes it into the
+log permanently. Children receive only that resolved declared environment, and every
+resident grid is bounded before allocation to 1,000
+cells per axis and 100,000 cells total. Same-EUID peer validation reinforces socket permissions.
+No network listener exists before the authentication decision required by ADR 0002.
 
 **Status: in force.** The daemon binds a Unix socket inside a directory it
 resolves and checks the ownership and mode of, refuses a peer whose effective

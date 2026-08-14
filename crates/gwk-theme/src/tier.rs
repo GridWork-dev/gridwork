@@ -476,8 +476,8 @@ mod tests {
             .filter(|pair| pair[0].0 == pair[1].0)
             .map(|pair| (pair[0].1, pair[1].1))
             .collect();
-        assert_eq!(collisions, vec![("focus", "hue")]);
-        assert_eq!(token("focus").value, token("hue").value);
+        assert_eq!(collisions, vec![("gws_focus", "gws_hue")]);
+        assert_eq!(token("gws_focus").value, token("gws_hue").value);
     }
 
     #[test]
@@ -486,27 +486,27 @@ mod tests {
         // Every one of these is what nearest-colour quantization actually
         // produces, and every one of them is wrong.
         assert_eq!(
-            token("fail").tier16,
+            token("gws_fail").tier16,
             Tier16::Slot(AnsiSlot::BrightRed),
             "quantization puts fail on slot 1, a dark maroon at dE 41"
         );
         assert_eq!(
-            token("warn").tier16,
+            token("gws_warn").tier16,
             Tier16::Slot(AnsiSlot::BrightYellow),
             "quantization puts warn on slot 3, an olive at dE 34.7"
         );
         // The elevation ramp does not collapse onto slot 0, because it does not
         // reach the slots at all.
-        for name in ["bg", "surface", "surface_2"] {
+        for name in ["gws_bg", "gws_surface", "gws_surface_2"] {
             assert_eq!(token(name).tier16, Tier16::NotAColor, "{name}");
         }
         // hue and ok both quantize onto slot 14; the authored map keeps them
         // apart, and hue_bright separates from hue by weight rather than by
         // taking a slot that means something else.
-        assert_eq!(token("hue").tier16, Tier16::Slot(AnsiSlot::BrightCyan));
-        assert_eq!(token("ok").tier16, Tier16::Slot(AnsiSlot::BrightGreen));
+        assert_eq!(token("gws_hue").tier16, Tier16::Slot(AnsiSlot::BrightCyan));
+        assert_eq!(token("gws_ok").tier16, Tier16::Slot(AnsiSlot::BrightGreen));
         assert_eq!(
-            token("hue_bright").tier16,
+            token("gws_hue_bright").tier16,
             Tier16::BoldSlot(AnsiSlot::BrightCyan)
         );
     }
@@ -515,11 +515,14 @@ mod tests {
     fn tier_dropped_and_no_slot_are_different_dispositions() {
         // `faint` is DROPPED — it has no expression at sixteen colours and
         // would collide with `muted` if it tried.
-        assert_eq!(token("faint").tier16, Tier16::Dropped);
-        assert_eq!(token("faint").paint(ColorTier::Ansi16), Paint::Unpainted);
+        assert_eq!(token("gws_faint").tier16, Tier16::Dropped);
+        assert_eq!(
+            token("gws_faint").paint(ColorTier::Ansi16),
+            Paint::Unpainted
+        );
         // `focus` and `selection` have NO SLOT — reverse video and the accent
         // cell carry them. The role survives; only the colour does not.
-        for name in ["focus", "selection"] {
+        for name in ["gws_focus", "gws_selection"] {
             assert_eq!(token(name).tier16, Tier16::ReverseVideo, "{name}");
             assert_eq!(
                 token(name).paint(ColorTier::Ansi16),
@@ -529,7 +532,7 @@ mod tests {
         }
         // `border` is the one minted role that needed a slot at all: a box rule
         // cannot be drawn by reverse video, and `faint` is not available.
-        assert_eq!(token("border").tier16, Tier16::Slot(AnsiSlot::White));
+        assert_eq!(token("gws_border").tier16, Tier16::Slot(AnsiSlot::White));
     }
 
     #[test]
@@ -541,18 +544,18 @@ mod tests {
             }
         }
         assert_eq!(
-            token("focus").paint(ColorTier::Mono),
+            token("gws_focus").paint(ColorTier::Mono),
             Paint::ReverseVideo,
             "reverse video is the tier-independent primitive, monochrome included"
         );
-        assert_eq!(token("fail").paint(ColorTier::Mono), Paint::Reset);
-        assert_eq!(token("faint").paint(ColorTier::Mono), Paint::Unpainted);
+        assert_eq!(token("gws_fail").paint(ColorTier::Mono), Paint::Reset);
+        assert_eq!(token("gws_faint").paint(ColorTier::Mono), Paint::Unpainted);
     }
 
     #[test]
     fn tier_the_elevation_tokens_are_never_painted_at_any_tier() {
         for tier in ColorTier::ALL {
-            for name in ["bg", "surface", "surface_2"] {
+            for name in ["gws_bg", "gws_surface", "gws_surface_2"] {
                 assert_eq!(
                     token(name).paint(*tier),
                     Paint::Unpainted,
@@ -580,7 +583,7 @@ mod tests {
         // video at the top of the ladder too — the tokens LAYER over the
         // primitive rather than replacing it. At truecolor and 256 they still
         // have a colour to layer with.
-        for name in ["focus", "selection"] {
+        for name in ["gws_focus", "gws_selection"] {
             assert!(matches!(
                 token(name).paint(ColorTier::Truecolor),
                 Paint::Rgb(..)

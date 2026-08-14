@@ -31,7 +31,7 @@
 //! want of that toolchain is wired in here, and the `pty-host` CI job
 //! materializes it the same way the `pty` job does.
 //!
-//! # The boundary that remains
+//! # Hosted lifecycle
 //!
 //! The attach hookup is in: the wire's `pty_publish_snapshot` /
 //! `pty_publish_deltas` / `pty_retire` family is how [`publish`] pushes
@@ -40,13 +40,15 @@
 //! and `PtyAttach`/`PtySnapshot` answer consumers from there. The raw fallback
 //! is published beside that primary render-state path: JSON headers carry
 //! correlation and kind `0x02` carries the byte-exact snapshot/output payload.
-//! What remains is the rest of the verb set: nothing on
-//! the wire yet carries a consumer's input, resize, or stop to a hosted
-//! session, and sessions START from the operator's own declaration
-//! ([`publish::SESSIONS_ENV`]) rather than from a request — routing
-//! lifecycle across the socket is `docs/PARITY.md` axes 1, 2, and 4's
-//! follow-up, which needs the adapters' control halves that no 6′ verify
-//! demands of the host yet.
+//! Input, resize, and stop now return across the same bounded owner connection,
+//! addressed to one exact session generation. Sessions start either from the
+//! operator's environment declaration ([`publish::SESSIONS_ENV`]) or from a
+//! name-only request against the kernel's durable template catalog; executable
+//! command, cwd, and environment data never ride a start request, and a catalog
+//! child inherits only the environment map that catalog declared. Resident grid
+//! allocations are bounded before spawn or resize, replaced start-manager routes
+//! are rechecked before delivery, delivery retries are command-id deduplicated,
+//! and ended sessions and publishers are periodically reaped.
 //!
 //! # Clean-room scope
 //!
@@ -64,6 +66,7 @@
 
 #![doc(html_root_url = "https://docs.rs/gwk-pty-host")]
 
+pub mod control;
 pub mod dispatch_node;
 pub mod engines;
 pub mod envelope;

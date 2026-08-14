@@ -106,6 +106,111 @@ if [ -z "$readme_crates" ] || [ "$readme_crates" != "$site_crates" ]; then
   fail=1
 fi
 
+# C9 — how many jobs `verify` gathers: one number, three surfaces, derived.
+# CLAUDE.md tells contributors that when a check aggregates, assert the count
+# first. Nothing applied that to the aggregate count itself: three files state
+# it in prose and none read ci.yml, so renovate.json sat at 17 while the
+# workflow had grown to 18. Neither number is checkable by reading the file that
+# claims it, which is why this derives both from the workflow.
+counts=$(awk '
+  /^jobs:/                      { in_jobs = 1; next }
+  !in_jobs                      { next }
+  /^  [A-Za-z0-9_-]+:/          { jobs++; is_verify = ($1 == "verify:"); in_needs = 0 }
+  is_verify && /^    needs:/    { in_needs = 1; next }
+  is_verify && /^    [A-Za-z]/  { in_needs = 0 }
+  in_needs && /^      - /       { needs++ }
+  END                           { print jobs + 0, needs + 0 }
+' .github/workflows/ci.yml)
+ci_jobs=${counts% *}
+verify_needs=${counts#* }
+# Count first, verdict second. An awk that matched nothing prints "0 0", and
+# every `need` below would then search for "aggregates 0" and fail with a
+# confusing message about prose rather than the real fault, which is that this
+# gate lost its grip on the workflow.
+if [ "$ci_jobs" -lt 2 ] || [ "$verify_needs" -lt 1 ]; then
+  echo "check-claims: could not read job counts from ci.yml (jobs=$ci_jobs needs=$verify_needs)" >&2
+  fail=1
+else
+  # `verify` is one of the job keys; the prose counts the others against it.
+  others=$((ci_jobs - 1))
+  need renovate.json "aggregates $verify_needs jobs" "verify aggregate count"
+  # Both of these line-wrap after the number, so the total is matched separately.
+  need CLAUDE.md "aggregates $verify_needs of the" "verify aggregate count"
+  need .gridwork/project.toml "aggregates $verify_needs" "verify aggregate count"
+  need CLAUDE.md "$others jobs in" "ci job total"
+  need .gridwork/project.toml "$others jobs plus" "ci job total"
+fi
+
+# C10 — a published crate's stated version equals the version it will publish AT.
+# C8 above pins the crate NAME SET across the two surfaces, which is why both
+# listed gwk-tui and neither was flagged while the README called it "in tree,
+# unpublished" and the site gave it a null docs link — on the day it went to
+# crates.io, inside its own published README. Names agreeing is not statuses
+# agreeing, and comparing the two surfaces to EACH OTHER cannot catch them being
+# wrong together. So this derives from crates/<name>/Cargo.toml, the same file
+# `cargo publish` reads.
+#
+# Deliberately local: no network. A gate that phones crates.io would be red
+# whenever the network is, and would test the registry rather than the claim.
+# The crate list comes from the MANIFESTS, never from the README. Deriving it
+# from the README's linked rows is the version of this check that does not work:
+# delinking gwk-tui back to an "in tree, unpublished" row would drop it out of
+# the list entirely and the gate would pass, which is the precise defect being
+# guarded. Removing a claim must not remove its check.
+#
+# Publishable == the manifest does not say `publish = false`. That makes
+# "publish-flagged but absent from the table" a red state, deliberately: gwk-tui
+# sat publish-flagged and described as unpublished for weeks, and that gap is
+# what shipped a README calling it unpublished inside its own published crate.
+published=$(for m in crates/*/Cargo.toml; do
+  grep -qE '^publish = false' "$m" || basename "$(dirname "$m")"
+done | LC_ALL=C sort || true)
+if [ -z "$published" ]; then
+  echo "check-claims: no publishable crates found under crates/ — cannot pin versions" >&2
+  fail=1
+else
+  for crate in $published; do
+    manifest="crates/$crate/Cargo.toml"
+    if [ ! -f "$manifest" ]; then
+      echo "check-claims: README links crate '$crate' with no crates/$crate/Cargo.toml" >&2
+      fail=1
+      continue
+    fi
+    ver=$(grep -m1 -oE '^version = "[0-9]+\.[0-9]+\.[0-9]+"' "$manifest" | grep -oE '[0-9.]+' || true)
+    if [ -z "$ver" ]; then
+      echo "check-claims: no version in $manifest — cannot pin '$crate'" >&2
+      fail=1
+      continue
+    fi
+    need README.md "\`$crate\`\\]\\(https://docs\\.rs/$crate\\).*\\| $ver" "README $crate version $ver"
+    # The site array spreads name and version across separate lines, so it is
+    # asserted below as a set rather than per-crate here — a `\n` in a grep
+    # pattern is a literal backslash-n and would pass while testing nothing.
+    need "$landing" "\"$crate\"" "site lists $crate"
+  done
+  # The site array states the same numbers in a different shape, so assert the
+  # set of versions it carries rather than trying to pair them up in grep.
+  site_versions=$(grep -oE '"0\.0\.[0-9]+(, name only)?"' "$landing" | grep -oE '0\.0\.[0-9]+' | LC_ALL=C sort -u || true)
+  readme_versions=$(grep -oE '^\| \[`[a-z-]+`\].*\| 0\.0\.[0-9]+' README.md | grep -oE '0\.0\.[0-9]+$' | LC_ALL=C sort -u || true)
+  if [ -z "$site_versions" ] || [ "$site_versions" != "$readme_versions" ]; then
+    echo "check-claims: published-version disagreement — README=[$(echo "$readme_versions" | tr '\n' ' ')] site=[$(echo "$site_versions" | tr '\n' ' ')]" >&2
+    fail=1
+  fi
+
+  # The THIRD surface, and the last one found: JSON-LD softwareVersion. It sat
+  # at 0.0.2 straight through the 0.0.3 release and neither the README nor the
+  # landing array could see it, because it is machine-readable metadata nobody
+  # reads by eye. It is also the surface where being wrong costs most — a
+  # crawler ingests it as a fact rather than weighing it as prose.
+  binver=$(grep -m1 -oE '^version = "[0-9]+\.[0-9]+\.[0-9]+"' crates/gridwork/Cargo.toml | grep -oE '[0-9.]+' || true)
+  if [ -z "$binver" ]; then
+    echo "check-claims: no version in crates/gridwork/Cargo.toml — cannot pin structured data" >&2
+    fail=1
+  else
+    need site/app/structured-data.tsx "softwareVersion: \"${binver//./\\.}\"" "JSON-LD softwareVersion $binver"
+  fi
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "check-claims: FAIL" >&2
   exit 1

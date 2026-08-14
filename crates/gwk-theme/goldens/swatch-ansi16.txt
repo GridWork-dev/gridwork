@@ -4,36 +4,36 @@ This file is the public mirror of the tier tables in the design record.
 Editing it by hand records a decision nobody made.
 
 TOKENS (15)
-  token        value     256  tier 16                     this tier
-  bg           #070B10   232  not a colour                unpainted
-  surface      #121A24   234  not a colour                unpainted
-  surface_2    #1F2B3A   235  not a colour                unpainted
-  hue          #6BDBFF    81  slot 14 bright_cyan         slot 14 bright_cyan
-  hue_dim      #3FA8CC    38  slot 6 cyan                 slot 6 cyan
-  hue_bright   #9AE8FF   117  slot 14 bright_cyan + bold  slot 14 bright_cyan + bold
-  fg           #E4EDF5   255  reset                       reset
-  faint        #526274    59  dropped                     unpainted
-  muted        #9AA5AF   248  slot 8 bright_black         slot 8 bright_black
-  warn         #F2C14E   221  slot 11 bright_yellow       slot 11 bright_yellow
-  fail         #FF6E6E   203  slot 9 bright_red           slot 9 bright_red
-  ok           #6EE7A8    78  slot 10 bright_green        slot 10 bright_green
-  border       #748496   244  slot 7 white                slot 7 white
-  focus        #6BDBFF    81  reverse video               reverse video
-  selection    #F5F9FD   231  reverse video               reverse video
+  token           value     256  tier 16                     this tier
+  gws_bg          #070B10   232  not a colour                unpainted
+  gws_surface     #121A24   234  not a colour                unpainted
+  gws_surface_2   #1F2B3A   235  not a colour                unpainted
+  gws_hue         #6BDBFF    81  slot 14 bright_cyan         slot 14 bright_cyan
+  gws_hue_dim     #3FA8CC    38  slot 6 cyan                 slot 6 cyan
+  gws_hue_bright  #9AE8FF   117  slot 14 bright_cyan + bold  slot 14 bright_cyan + bold
+  gws_fg          #E4EDF5   255  reset                       reset
+  gws_faint       #526274    59  dropped                     unpainted
+  gws_muted       #9AA5AF   248  slot 8 bright_black         slot 8 bright_black
+  gws_warn        #F2C14E   221  slot 11 bright_yellow       slot 11 bright_yellow
+  gws_fail        #FF6E6E   203  slot 9 bright_red           slot 9 bright_red
+  gws_ok          #6EE7A8    78  slot 10 bright_green        slot 10 bright_green
+  gws_border      #748496   244  slot 7 white                slot 7 white
+  gws_focus       #6BDBFF    81  reverse video               reverse video
+  gws_selection   #F5F9FD   231  reverse video               reverse video
 
 STATES (11)
-  state            mark              glyph  ascii  token       this tier
-  idle             idle              ⠄      .      muted       slot 8 bright_black
-  queued           queued            ⠒      :      muted       slot 8 bright_black
-  starting         starting          ⠉      ^      hue_dim     slot 6 cyan
-  running          spinner           ⠋      -      hue         slot 14 bright_cyan
-  canceling        spinner_reversed  ⠆      ~      muted       slot 8 bright_black
-  needs_attention  attention         !      !      warn        slot 11 bright_yellow
-  blocked          blocked           ⊘      #      warn        slot 11 bright_yellow
-  failed           failed            ✗      X      fail        slot 9 bright_red
-  done             done              ✓      v      ok          slot 10 bright_green
-  canceled         canceled          ⊖      o      muted       slot 8 bright_black
-  unknown          unknown           ?      ?      warn        slot 11 bright_yellow
+  state            mark              glyph  ascii  token           this tier
+  idle             idle              ⠄      .      gws_muted       slot 8 bright_black
+  queued           queued            ⠒      :      gws_muted       slot 8 bright_black
+  starting         starting          ⠉      ^      gws_hue_dim     slot 6 cyan
+  running          spinner           ⠋      -      gws_hue         slot 14 bright_cyan
+  canceling        spinner_reversed  ⠆      ~      gws_muted       slot 8 bright_black
+  needs_attention  attention         !      !      gws_warn        slot 11 bright_yellow
+  blocked          blocked           ⊘      #      gws_warn        slot 11 bright_yellow
+  failed           failed            ✗      X      gws_fail        slot 9 bright_red
+  done             done              ✓      v      gws_ok          slot 10 bright_green
+  canceled         canceled          ⊖      o      gws_muted       slot 8 bright_black
+  unknown          unknown           ?      ?      gws_warn        slot 11 bright_yellow
 
 IDENTITY MARKS (7)
   mark             glyph  ascii

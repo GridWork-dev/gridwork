@@ -17,8 +17,8 @@ use gwk_domain::blob::{BlobAddress, BlobDescriptor};
 use gwk_domain::checkpoint::{CHECKPOINT_SCHEMA_VERSION, Checkpoint};
 use gwk_domain::command::KernelCommand;
 use gwk_domain::entity::{
-    Attempt, Budget, Command, Message, PtySession, Task, WorkflowRun, WorkspaceNode,
-    WorkspaceNodeKind,
+    Attempt, Budget, Command, Message, PtySession, PtySessionTemplate, Task, WorkflowRun,
+    WorkspaceNode, WorkspaceNodeKind,
 };
 use gwk_domain::envelope::{Actor, CommandEnvelope, EventEnvelope, Origin, PayloadRef};
 use gwk_domain::frame::{
@@ -29,8 +29,8 @@ use gwk_domain::fsm::{AttemptState, CommandState, MessageState, Outcome, TaskSta
 use gwk_domain::ids::{
     AggregateId, AttemptId, BlobUploadId, ByteCount, CommandId, CorrelationId, CostMicros,
     EngineId, EngineSessionId, EventCount, EventId, IdempotencyKey, LeaseId, MessageId, ProjectId,
-    PtyFrameSeq, PtySessionGeneration, PtySessionId, RequestId, Seq, TaskId, Timestamp,
-    WorkflowRunId, WorkspaceNodeId,
+    PtyFrameSeq, PtySessionGeneration, PtySessionId, PtySessionTemplateName, RequestId, Seq,
+    TaskId, Timestamp, WorkflowRunId, WorkspaceNodeId,
 };
 use gwk_domain::inherited::{BudgetCursor, OrchestratorCheckpoint, PendingApproval};
 use gwk_domain::protocol::{
@@ -84,6 +84,7 @@ fn bindings() -> String {
         .register::<gwk_domain::entity::WorkspaceNode>()
         .register::<gwk_domain::entity::WorkflowRun>()
         .register::<gwk_domain::entity::PtySession>()
+        .register::<gwk_domain::entity::PtySessionTemplate>()
         .register::<gwk_domain::entity::Lease>()
         .register::<gwk_domain::entity::DispatchNode>()
         .register::<TransitionResult<TaskState>>()
@@ -345,6 +346,23 @@ fn golden_pty_session() -> PtySession {
     }
 }
 
+fn golden_pty_session_template() -> PtySessionTemplate {
+    PtySessionTemplate {
+        name: PtySessionTemplateName::new("review"),
+        version: 1,
+        state: "active".to_owned(),
+        command: "/usr/bin/review-agent".to_owned(),
+        args: vec!["--interactive".to_owned()],
+        cwd: Some("/work/gridwork".to_owned()),
+        env: BTreeMap::from([("TERM".to_owned(), "env:TERM".to_owned())]),
+        cols: 100,
+        rows: 30,
+        declared_at: Timestamp::new("2026-08-12T12:00:00Z"),
+        updated_at: Timestamp::new("2026-08-12T12:00:00Z"),
+        retired_at: None,
+    }
+}
+
 fn golden_transition_results() -> Vec<TransitionResult<TaskState>> {
     vec![
         TransitionResult::Applied {
@@ -463,6 +481,29 @@ fn golden_pty_input_envelope() -> CommandEnvelope {
         causation_id: None,
         correlation_id: None,
         payload: serde_json::to_value(command).expect("serialize input command"),
+    }
+}
+
+fn golden_pty_control_envelope(command: KernelCommand) -> CommandEnvelope {
+    let command_type = command.command_type();
+    CommandEnvelope {
+        command_id: CommandId::new(format!("{command_type}-1")),
+        project_id: ProjectId::new("system"),
+        command_type: command_type.into(),
+        schema_version: 1,
+        issued_at: Timestamp::new("2026-08-12T12:00:00Z"),
+        actor: actor("operator", Some("op-1")),
+        origin: Origin {
+            system: "gw".into(),
+            r#ref: None,
+        },
+        target_aggregate_type: None,
+        target_aggregate_id: None,
+        expected_version: None,
+        idempotency_key: IdempotencyKey::new(format!("{command_type}-1")),
+        causation_id: None,
+        correlation_id: None,
+        payload: serde_json::to_value(command).expect("serialize PTY control command"),
     }
 }
 
@@ -589,7 +630,9 @@ fn golden_client_control() -> Vec<ClientControl> {
                 capability("event_subscribe"),
                 capability("blob"),
                 capability("pty_raw"),
-                capability("pty_input"),
+                capability(gwk_domain::PTY_INPUT_CAPABILITY),
+                capability("pty_control"),
+                capability("pty_start"),
             ],
             client: Some("gw".into()),
         },
@@ -702,6 +745,39 @@ fn golden_client_control() -> Vec<ClientControl> {
                 data_base64: PtyInputData::new("AP8K"),
             },
         },
+        ClientControl::Request {
+            request_id: RequestId::new("req-16"),
+            request: KernelRequest::ResizePtySession {
+                envelope: golden_pty_control_envelope(KernelCommand::ResizePtySession {
+                    pty_session_id: pty_session_id(),
+                    generation: pty_generation(),
+                    cols: 120,
+                    rows: 40,
+                }),
+            },
+        },
+        ClientControl::Request {
+            request_id: RequestId::new("req-17"),
+            request: KernelRequest::StopPtySession {
+                envelope: golden_pty_control_envelope(KernelCommand::StopPtySession {
+                    pty_session_id: pty_session_id(),
+                    generation: pty_generation(),
+                }),
+            },
+        },
+        ClientControl::Request {
+            request_id: RequestId::new("req-18"),
+            request: KernelRequest::StartPtySession {
+                envelope: golden_pty_control_envelope(KernelCommand::RequestPtySessionStart {
+                    template_name: PtySessionTemplateName::new("review"),
+                    pty_session_id: PtySessionId::new("review-7"),
+                }),
+            },
+        },
+        ClientControl::PtyDeliveryAck {
+            delivery_id: EventId::new("pty_session:pty-1:2"),
+            result: gwk_domain::protocol::PtyDeliveryResult::Applied,
+        },
     ]
 }
 
@@ -712,7 +788,12 @@ fn golden_server_control() -> Vec<ServerControl> {
             protocol_minor: PROTOCOL_MINOR,
             // The INTERSECTION: the client asked for three capabilities; this
             // kernel offers only the raw PTY fallback.
-            capabilities: vec![capability("pty_raw"), capability("pty_input")],
+            capabilities: vec![
+                capability("pty_raw"),
+                capability(gwk_domain::PTY_INPUT_CAPABILITY),
+                capability("pty_control"),
+                capability("pty_start"),
+            ],
             sealed: true,
             watermark: Some(Seq::new(9_007_199_254_740_993)),
         },
@@ -855,11 +936,35 @@ fn golden_server_control() -> Vec<ServerControl> {
             },
         },
         ServerControl::PtyInput {
+            delivery_id: EventId::new("pty_session:pty-1:2"),
             command_id: CommandId::new("input-1"),
             session_id: pty_session_id(),
             generation: pty_generation(),
             byte_size: ByteCount::new(3),
             data_base64: PtyInputData::new("AP8K"),
+        },
+        ServerControl::PtyResize {
+            delivery_id: EventId::new("pty_session:pty-1:3"),
+            command_id: CommandId::new("resize-1"),
+            session_id: pty_session_id(),
+            generation: pty_generation(),
+            cols: 120,
+            rows: 40,
+        },
+        ServerControl::PtyStop {
+            delivery_id: EventId::new("pty_session:pty-1:4"),
+            command_id: CommandId::new("stop-1"),
+            session_id: pty_session_id(),
+            generation: pty_generation(),
+        },
+        ServerControl::PtyStart {
+            delivery_id: EventId::new("pty_session_start:review-7:1"),
+            command_id: CommandId::new("start-1"),
+            template_name: PtySessionTemplateName::new("review"),
+            session_id: PtySessionId::new("review-7"),
+        },
+        ServerControl::PtyDeliverySettled {
+            delivery_id: EventId::new("pty_session:pty-1:2"),
         },
     ]
 }
@@ -961,6 +1066,10 @@ fn goldens() -> Vec<(&'static str, String)> {
         ("workspace-node.json", pretty(&golden_workspace_node())),
         ("workflow-run.json", pretty(&golden_workflow_run())),
         ("pty-session.json", pretty(&golden_pty_session())),
+        (
+            "pty-session-template.json",
+            pretty(&golden_pty_session_template()),
+        ),
         (
             "transition-results.json",
             pretty(&golden_transition_results()),
@@ -1135,6 +1244,11 @@ pub fn run(check: bool) {
             &ts_goldens_dir,
             find("pty-session.json"),
         ),
+        round_trip::<PtySessionTemplate>(
+            "pty-session-template.json",
+            &ts_goldens_dir,
+            find("pty-session-template.json"),
+        ),
         round_trip::<Vec<TransitionResult<TaskState>>>(
             "transition-results.json",
             &ts_goldens_dir,
@@ -1190,7 +1304,7 @@ mod tests {
     /// manual root registry described in its doc comment. Update this
     /// constant AND the `.register()` chain together in the same change;
     /// a mismatch means one moved without the other.
-    const REGISTERED_ROOT_COUNT: usize = 27;
+    const REGISTERED_ROOT_COUNT: usize = 28;
 
     #[test]
     fn bindings_registry_matches_its_pin() {

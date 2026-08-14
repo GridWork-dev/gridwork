@@ -15,14 +15,16 @@ mod common;
 
 use base64::prelude::{BASE64_STANDARD, Engine as _};
 use common::*;
+use gwk_domain::KernelCommand;
 use gwk_domain::blob::BLOB_CHUNK_BYTES;
 use gwk_domain::ids::Seq;
 use gwk_domain::port::EventStore;
 use gwk_domain::protocol::{
     CONNECTION_EGRESS_BYTES_PER_WINDOW, CONNECTION_INGRESS_BYTES_PER_WINDOW, CONTRACT_VERSION,
-    FRAME_BODY_MAX_BYTES, KernelErrorCode, KernelResult, MAX_SUBSCRIPTIONS_PER_CONNECTION,
-    PTY_INPUT_CAPABILITY, ProjectionKind, ProjectionRecord, ProtocolVersion, PtyInputData,
-    SLOW_CONSUMER_TIMEOUT_SECS, SUBSCRIPTION_POLL_SECS, ServerControl,
+    ClientControl, FRAME_BODY_MAX_BYTES, KernelErrorCode, KernelRequest, KernelResult,
+    MAX_SUBSCRIPTIONS_PER_CONNECTION, PTY_CONTROL_CAPABILITY, PTY_INPUT_CAPABILITY,
+    PTY_START_CAPABILITY, ProjectionKind, ProjectionRecord, ProtocolVersion, PtyDeliveryResult,
+    PtyInputData, SLOW_CONSUMER_TIMEOUT_SECS, SUBSCRIPTION_POLL_SECS, ServerControl,
 };
 use gwk_kernel::store::connect_pool;
 use gwk_kernel::wire::frame::{Budget, Incoming, read_frame};
@@ -204,6 +206,7 @@ async fn a_page_at_a_time_walks_a_projection_exactly_once() {
                 records,
                 next_cursor,
                 watermark,
+                served_at,
             } => {
                 // Every page carries how far the projector had applied. The
                 // log is non-empty by construction here — these tasks were
@@ -212,6 +215,17 @@ async fn a_page_at_a_time_walks_a_projection_exactly_once() {
                 assert!(
                     watermark.is_some(),
                     "page {round} carried no watermark against a non-empty log"
+                );
+                // And the clock it was served at, from the database rather
+                // than this process — a client folding a day window against
+                // its own wall clock is comparing to a boundary the rows never
+                // agreed to. Asserted against a live kernel because that is
+                // the only place the DB clock is real.
+                let served_at =
+                    served_at.unwrap_or_else(|| panic!("page {round} carried no served_at"));
+                assert!(
+                    served_at.as_str().contains('T'),
+                    "page {round} served_at is not a timestamp: {served_at:?}"
                 );
                 seen.extend(records.iter().map(record_key));
                 match next_cursor {
@@ -1366,6 +1380,1035 @@ async fn send_pty_input(
         .await
 }
 
+async fn submit_pty_control(
+    client: &mut Client,
+    request_id: &str,
+    request: KernelRequest,
+) -> KernelResult {
+    client
+        .ask(
+            request_id,
+            &serde_json::to_string(&request).expect("serialize PTY control request"),
+        )
+        .await
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
+async fn generic_submit_refuses_delivery_only_pty_commands() {
+    use gwk_domain::{KernelCommand, PtySessionGeneration, PtySessionId, PtySessionTemplateName};
+
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "wire_pty_generic_refusal", 8).await;
+    let served = Running::open(store, "ptygeneric").await;
+    let mut client = served.client_with_capabilities(&[]).await;
+    let commands = [
+        KernelCommand::ResizePtySession {
+            pty_session_id: PtySessionId::new("console"),
+            generation: PtySessionGeneration::new("life-1"),
+            cols: 120,
+            rows: 40,
+        },
+        KernelCommand::StopPtySession {
+            pty_session_id: PtySessionId::new("console"),
+            generation: PtySessionGeneration::new("life-1"),
+        },
+        KernelCommand::RequestPtySessionStart {
+            template_name: PtySessionTemplateName::new("review"),
+            pty_session_id: PtySessionId::new("review-1"),
+        },
+    ];
+
+    for (index, command) in commands.iter().enumerate() {
+        let request = format!("generic-{index}");
+        let result =
+            submit_kernel_command(&mut client, &request, &request, "operator", command).await;
+        let KernelResult::Error { code, message, .. } = result else {
+            panic!("generic submit unexpectedly accepted a delivery-only command: {result:?}");
+        };
+        assert_eq!(code, KernelErrorCode::Validation);
+        assert!(message.contains("dedicated PTY request"), "{message}");
+    }
+
+    drop(client);
+    served.close().await;
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
+async fn dedicated_pty_requests_validate_their_command_before_commit() {
+    use gwk_domain::{KernelCommand, PtySessionGeneration, PtySessionId};
+
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "wire_pty_cross_verb", 8).await;
+    let pool = store.pool().clone();
+    let served = Running::open(store, "ptycrossverb").await;
+    let mut client = served
+        .client_with_capabilities(&[PTY_CONTROL_CAPABILITY])
+        .await;
+    let stop = KernelCommand::StopPtySession {
+        pty_session_id: PtySessionId::new("console"),
+        generation: PtySessionGeneration::new("life-1"),
+    };
+    let envelope = envelope_in(
+        gwk_kernel::SYSTEM_PROJECT,
+        "resize-carrying-stop",
+        actor("operator"),
+        &stop,
+    );
+    let request = KernelRequest::ResizePtySession { envelope };
+
+    let result = submit_pty_control(&mut client, "resize-carrying-stop", request).await;
+    assert!(matches!(
+        result,
+        KernelResult::Error {
+            code: KernelErrorCode::Validation,
+            ..
+        }
+    ));
+    let durable: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM gwk.event WHERE idempotency_key = 'resize-carrying-stop'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("cross-verb event count");
+    assert_eq!(durable, 0, "a mismatched dedicated verb must not commit");
+
+    drop(client);
+    served.close().await;
+    drop(pool);
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
+async fn receipted_resize_stop_and_declared_start_route_across_the_real_wire() {
+    use gwk_domain::{KernelCommand, PtySessionTemplateName};
+    use sqlx::Row;
+
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "wire_pty_controls", 8).await;
+    let pool = store.pool().clone();
+    let served = Running::open(store, "ptycontrols").await;
+    let mut host = served
+        .client_with_capabilities(&[PTY_INPUT_CAPABILITY, PTY_CONTROL_CAPABILITY])
+        .await;
+    let mut manager = served
+        .client_with_capabilities(&[PTY_START_CAPABILITY])
+        .await;
+    let mut sender = served
+        .client_with_capabilities(&[PTY_CONTROL_CAPABILITY])
+        .await;
+    let frame = serde_json::to_string(&pty_frame(2, 4)).expect("serialize frame");
+    assert!(matches!(
+        host.ask(
+            "seed",
+            &format!(
+                r#"{{"type":"pty_publish_snapshot","session_id":"console","seq":"0","frame":{frame}}}"#
+            ),
+        )
+        .await,
+        KernelResult::PtyPublished { .. }
+    ));
+    let generation = match sender
+        .ask(
+            "generation",
+            r#"{"type":"pty_snapshot","session_id":"console"}"#,
+        )
+        .await
+    {
+        KernelResult::PtySnapshot { generation, .. } => generation,
+        other => panic!("generation: {other:?}"),
+    };
+
+    let resize = KernelCommand::ResizePtySession {
+        pty_session_id: gwk_domain::PtySessionId::new("console"),
+        generation: generation.clone(),
+        cols: 120,
+        rows: 40,
+    };
+    let resize_request = KernelRequest::ResizePtySession {
+        envelope: envelope_in(
+            gwk_kernel::SYSTEM_PROJECT,
+            "resize",
+            actor("operator"),
+            &resize,
+        ),
+    };
+    let resize_send = submit_pty_control(&mut sender, "resize-request", resize_request);
+    let resize_apply = async {
+        let control = tokio::time::timeout(std::time::Duration::from_secs(3), host.recv())
+            .await
+            .expect("resize reaches host")
+            .expect("host remains open");
+        let ServerControl::PtyResize {
+            delivery_id,
+            cols: 120,
+            rows: 40,
+            ..
+        } = control
+        else {
+            panic!("unexpected resize delivery: {control:?}");
+        };
+        let row_lock_released =
+            tokio::time::timeout(std::time::Duration::from_millis(500), async {
+                let mut transaction = pool.begin().await.expect("begin lock probe");
+                sqlx::query(
+                    "SELECT 1 FROM gwk_internal.pty_delivery \
+                     WHERE idempotency_key = 'resize' FOR UPDATE",
+                )
+                .execute(&mut *transaction)
+                .await
+                .expect("lock pending delivery");
+                transaction.rollback().await.expect("release lock probe");
+            })
+            .await
+            .is_ok();
+        host.send(
+            &serde_json::to_string(&gwk_domain::ClientControl::PtyDeliveryAck {
+                delivery_id,
+                result: gwk_domain::protocol::PtyDeliveryResult::Applied,
+            })
+            .expect("serialize resize ack"),
+        )
+        .await;
+        assert!(
+            row_lock_released,
+            "host application must not hold a database row lock or pool connection"
+        );
+    };
+    let (resize_result, ()) = tokio::join!(resize_send, resize_apply);
+    assert!(matches!(resize_result, KernelResult::CommandApplied { .. }));
+
+    let template = KernelCommand::DeclarePtySessionTemplate {
+        template_name: PtySessionTemplateName::new("review"),
+        command: "/bin/cat".to_owned(),
+        args: vec![],
+        cwd: None,
+        env: std::collections::BTreeMap::new(),
+        cols: 100,
+        rows: 30,
+    };
+    assert!(matches!(
+        submit_kernel_command(
+            &mut sender,
+            "declare-request",
+            "declare",
+            "operator",
+            &template,
+        )
+        .await,
+        KernelResult::CommandApplied { .. }
+    ));
+    let start = KernelCommand::RequestPtySessionStart {
+        template_name: PtySessionTemplateName::new("review"),
+        pty_session_id: gwk_domain::PtySessionId::new("review-7"),
+    };
+    let start_send = submit_pty_control(
+        &mut sender,
+        "start-request",
+        KernelRequest::StartPtySession {
+            envelope: envelope_in(
+                gwk_kernel::SYSTEM_PROJECT,
+                "start",
+                actor("operator"),
+                &start,
+            ),
+        },
+    );
+    let start_apply = async {
+        let control = tokio::time::timeout(std::time::Duration::from_secs(3), manager.recv())
+            .await
+            .expect("start reaches manager")
+            .expect("manager remains open");
+        let delivery_id = match control {
+            ServerControl::PtyStart {
+                delivery_id,
+                template_name,
+                session_id,
+                ..
+            } => {
+                assert_eq!(template_name.as_str(), "review");
+                assert_eq!(session_id.as_str(), "review-7");
+                delivery_id
+            }
+            other => panic!("manager received {other:?}"),
+        };
+        manager
+            .send(
+                &serde_json::to_string(&gwk_domain::ClientControl::PtyDeliveryAck {
+                    delivery_id,
+                    result: gwk_domain::protocol::PtyDeliveryResult::Applied,
+                })
+                .expect("serialize start ack"),
+            )
+            .await;
+    };
+    let (start_result, ()) = tokio::join!(start_send, start_apply);
+    assert!(matches!(start_result, KernelResult::CommandApplied { .. }));
+
+    let stop = KernelCommand::StopPtySession {
+        pty_session_id: gwk_domain::PtySessionId::new("console"),
+        generation: generation.clone(),
+    };
+    let stop_send = submit_pty_control(
+        &mut sender,
+        "stop-request",
+        KernelRequest::StopPtySession {
+            envelope: envelope_in(gwk_kernel::SYSTEM_PROJECT, "stop", actor("operator"), &stop),
+        },
+    );
+    let stop_apply = async {
+        let control = tokio::time::timeout(std::time::Duration::from_secs(3), host.recv())
+            .await
+            .expect("stop reaches host")
+            .expect("host remains open");
+        let ServerControl::PtyStop { delivery_id, .. } = control else {
+            panic!("unexpected stop delivery: {control:?}");
+        };
+        host.send(
+            &serde_json::to_string(&gwk_domain::ClientControl::PtyDeliveryAck {
+                delivery_id,
+                result: gwk_domain::protocol::PtyDeliveryResult::Applied,
+            })
+            .expect("serialize stop ack"),
+        )
+        .await;
+    };
+    let (stop_result, ()) = tokio::join!(stop_send, stop_apply);
+    assert!(matches!(stop_result, KernelResult::CommandApplied { .. }));
+
+    let receipts = sqlx::query(
+        "SELECT action, observed_basis FROM gwk.receipt \
+         WHERE id IN ('receipt:system:resize', 'receipt:system:start', 'receipt:system:stop') \
+         ORDER BY id",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("control receipts");
+    assert_eq!(receipts.len(), 3);
+    assert!(receipts.iter().any(|row| {
+        row.get::<String, _>("action") == "pty_control"
+            && row
+                .get::<String, _>("observed_basis")
+                .contains("cols=120; rows=40")
+    }));
+    assert!(receipts.iter().any(|row| {
+        row.get::<String, _>("action") == "pty_control"
+            && row.get::<String, _>("observed_basis").contains("stop=true")
+    }));
+    assert!(receipts.iter().any(|row| {
+        row.get::<String, _>("action") == "pty_start"
+            && row
+                .get::<String, _>("observed_basis")
+                .contains("template=review")
+            && !row.get::<String, _>("observed_basis").contains("/bin/cat")
+    }));
+
+    drop(host);
+    drop(manager);
+    drop(sender);
+    served.close().await;
+    drop(pool);
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
+async fn host_refusal_is_terminal_without_reconnect_and_stop_still_reaches_the_child() {
+    use gwk_domain::KernelCommand;
+    use sqlx::Row;
+
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "wire_pty_apply_ack", 8).await;
+    let pool = store.pool().clone();
+    let served = Running::open(store, "ptyapplyack").await;
+    let mut host = served
+        .client_with_capabilities(&[PTY_CONTROL_CAPABILITY, PTY_INPUT_CAPABILITY])
+        .await;
+    let mut sender = served
+        .client_with_capabilities(&[PTY_CONTROL_CAPABILITY, PTY_INPUT_CAPABILITY])
+        .await;
+    let frame = serde_json::to_string(&pty_frame(2, 4)).expect("serialize frame");
+    assert!(matches!(
+        host.ask(
+            "seed",
+            &format!(
+                r#"{{"type":"pty_publish_snapshot","session_id":"console","seq":"0","frame":{frame}}}"#
+            ),
+        )
+        .await,
+        KernelResult::PtyPublished { .. }
+    ));
+    let generation = match sender
+        .ask(
+            "generation",
+            r#"{"type":"pty_snapshot","session_id":"console"}"#,
+        )
+        .await
+    {
+        KernelResult::PtySnapshot { generation, .. } => generation,
+        other => panic!("generation: {other:?}"),
+    };
+
+    let resize = KernelCommand::ResizePtySession {
+        pty_session_id: gwk_domain::PtySessionId::new("console"),
+        generation: generation.clone(),
+        cols: 120,
+        rows: 40,
+    };
+    let resize_request = KernelRequest::ResizePtySession {
+        envelope: envelope_in(
+            gwk_kernel::SYSTEM_PROJECT,
+            "resize-refused",
+            actor("operator"),
+            &resize,
+        ),
+    };
+    let resize_send = submit_pty_control(&mut sender, "resize-refused", resize_request.clone());
+    let resize_refuse = async {
+        let control = host.recv().await.expect("resize delivery");
+        let ServerControl::PtyResize { delivery_id, .. } = control else {
+            panic!("unexpected resize: {control:?}");
+        };
+        host.send(
+            &serde_json::to_string(&gwk_domain::ClientControl::PtyDeliveryAck {
+                delivery_id,
+                result: gwk_domain::protocol::PtyDeliveryResult::Refused {
+                    code: KernelErrorCode::Validation,
+                    message: "local resize refused".to_owned(),
+                },
+            })
+            .expect("serialize refusal"),
+        )
+        .await;
+    };
+    let (resize_result, ()) = tokio::join!(resize_send, resize_refuse);
+    assert!(matches!(resize_result, KernelResult::Error { .. }));
+    let failed: bool = sqlx::query_scalar(
+        "SELECT failed_at IS NOT NULL FROM gwk_internal.pty_delivery \
+         WHERE idempotency_key = 'resize-refused'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("failed delivery");
+    assert!(failed, "host refusal must terminally settle delivery");
+
+    let replay = submit_pty_control(&mut sender, "resize-replay", resize_request).await;
+    assert!(matches!(replay, KernelResult::Error { .. }));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), host.recv())
+            .await
+            .is_err(),
+        "a terminally refused replay must not redeliver"
+    );
+
+    let stop = KernelCommand::StopPtySession {
+        pty_session_id: gwk_domain::PtySessionId::new("console"),
+        generation: generation.clone(),
+    };
+    let stop_request = KernelRequest::StopPtySession {
+        envelope: envelope_in(
+            gwk_kernel::SYSTEM_PROJECT,
+            "stop-fence",
+            actor("operator"),
+            &stop,
+        ),
+    };
+    let stop_send = submit_pty_control(&mut sender, "stop-fence", stop_request);
+    let stop_apply = async {
+        let control = tokio::time::timeout(std::time::Duration::from_secs(3), host.recv())
+            .await
+            .expect("stop reaches the same host connection after refusal")
+            .expect("host remains connected");
+        let ServerControl::PtyStop { delivery_id, .. } = control else {
+            panic!("unexpected stop delivery: {control:?}");
+        };
+        host.send(
+            &serde_json::to_string(&gwk_domain::ClientControl::PtyDeliveryAck {
+                delivery_id,
+                result: gwk_domain::protocol::PtyDeliveryResult::Applied,
+            })
+            .expect("serialize stop acknowledgement"),
+        )
+        .await;
+        assert!(matches!(
+            host.ask(
+                "retire-after-stop",
+                r#"{"type":"pty_retire","session_id":"console"}"#,
+            )
+            .await,
+            KernelResult::PtyRetired { .. }
+        ));
+    };
+    let (stop_result, ()) = tokio::join!(stop_send, stop_apply);
+    assert!(matches!(stop_result, KernelResult::CommandApplied { .. }));
+    let row = sqlx::query("SELECT state FROM gwk.pty_session WHERE id = $1")
+        .bind(format!("console:{generation}"))
+        .fetch_one(&pool)
+        .await
+        .expect("session row");
+    assert_eq!(row.get::<String, _>("state"), "closed");
+
+    let later = send_pty_input(
+        &mut sender,
+        "input-after-stop",
+        "input-after-stop",
+        "operator",
+        "console",
+        &generation,
+        b"x",
+    )
+    .await;
+    assert!(matches!(
+        later,
+        KernelResult::Error {
+            code: KernelErrorCode::StaleVersion,
+            ..
+        }
+    ));
+
+    drop(host);
+    drop(sender);
+    served.close().await;
+    drop(pool);
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
+async fn oversized_host_refusal_prose_is_not_persisted() {
+    use gwk_domain::KernelCommand;
+    use sqlx::Row;
+
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "wire_pty_bounded_ack", 8).await;
+    let pool = store.pool().clone();
+    let served = Running::open(store, "ptyboundedack").await;
+    let mut host = served
+        .client_with_capabilities(&[PTY_CONTROL_CAPABILITY])
+        .await;
+    let mut sender = served
+        .client_with_capabilities(&[PTY_CONTROL_CAPABILITY])
+        .await;
+    let frame = serde_json::to_string(&pty_frame(2, 4)).expect("serialize frame");
+    assert!(matches!(
+        host.ask(
+            "seed",
+            &format!(
+                r#"{{"type":"pty_publish_snapshot","session_id":"console","seq":"0","frame":{frame}}}"#
+            ),
+        )
+        .await,
+        KernelResult::PtyPublished { .. }
+    ));
+    let generation = match sender
+        .ask(
+            "generation",
+            r#"{"type":"pty_snapshot","session_id":"console"}"#,
+        )
+        .await
+    {
+        KernelResult::PtySnapshot { generation, .. } => generation,
+        other => panic!("generation: {other:?}"),
+    };
+    let resize = KernelCommand::ResizePtySession {
+        pty_session_id: gwk_domain::PtySessionId::new("console"),
+        generation,
+        cols: 120,
+        rows: 40,
+    };
+    let request = KernelRequest::ResizePtySession {
+        envelope: envelope_in(
+            gwk_kernel::SYSTEM_PROJECT,
+            "resize-oversized-refusal",
+            actor("operator"),
+            &resize,
+        ),
+    };
+
+    let submitted = submit_pty_control(&mut sender, "resize-oversized-refusal", request);
+    let refused = async {
+        let control = host.recv().await.expect("resize delivery");
+        let ServerControl::PtyResize { delivery_id, .. } = control else {
+            panic!("unexpected resize: {control:?}");
+        };
+        let oversized = "x".repeat(4 * 1024 + 1);
+        host.send(
+            &serde_json::to_string(&gwk_domain::ClientControl::PtyDeliveryAck {
+                delivery_id,
+                result: gwk_domain::protocol::PtyDeliveryResult::Refused {
+                    code: KernelErrorCode::Validation,
+                    message: oversized,
+                },
+            })
+            .expect("serialize oversized refusal"),
+        )
+        .await;
+    };
+    let (result, ()) = tokio::join!(submitted, refused);
+    assert!(matches!(result, KernelResult::Error { .. }));
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        let row = sqlx::query(
+            "SELECT failed_at IS NOT NULL AS failed, \
+                    indeterminate_at IS NOT NULL AS indeterminate, \
+                    failure_code, failure_message FROM gwk_internal.pty_delivery \
+             WHERE idempotency_key = 'resize-oversized-refusal'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("delivery state");
+        if row.get::<bool, _>("indeterminate") {
+            assert!(!row.get::<bool, _>("failed"));
+            assert!(row.get::<Option<String>, _>("failure_code").is_none());
+            assert!(row.get::<Option<String>, _>("failure_message").is_none());
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "invalid acknowledgement must terminally settle without persisting host prose"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    drop(host);
+    drop(sender);
+    served.close().await;
+    drop(pool);
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
+async fn host_disconnect_after_dispatch_settles_terminally_indeterminate() {
+    use gwk_domain::KernelCommand;
+    use sqlx::Row;
+
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "wire_pty_disconnect_ack", 8).await;
+    let pool = store.pool().clone();
+    let served = Running::open(store, "ptydisconnectack").await;
+    let mut host = served
+        .client_with_capabilities(&[PTY_CONTROL_CAPABILITY])
+        .await;
+    let mut sender = served
+        .client_with_capabilities(&[PTY_CONTROL_CAPABILITY])
+        .await;
+    let frame = serde_json::to_string(&pty_frame(2, 4)).expect("serialize frame");
+    assert!(matches!(
+        host.ask(
+            "seed",
+            &format!(
+                r#"{{"type":"pty_publish_snapshot","session_id":"console","seq":"0","frame":{frame}}}"#
+            ),
+        )
+        .await,
+        KernelResult::PtyPublished { .. }
+    ));
+    let generation = match sender
+        .ask(
+            "generation",
+            r#"{"type":"pty_snapshot","session_id":"console"}"#,
+        )
+        .await
+    {
+        KernelResult::PtySnapshot { generation, .. } => generation,
+        other => panic!("generation: {other:?}"),
+    };
+    let resize = KernelCommand::ResizePtySession {
+        pty_session_id: gwk_domain::PtySessionId::new("console"),
+        generation,
+        cols: 120,
+        rows: 40,
+    };
+    let request = KernelRequest::ResizePtySession {
+        envelope: envelope_in(
+            gwk_kernel::SYSTEM_PROJECT,
+            "resize-disconnected",
+            actor("operator"),
+            &resize,
+        ),
+    };
+
+    let submitted = submit_pty_control(&mut sender, "resize-disconnected", request);
+    let disconnected = async {
+        let control = tokio::time::timeout(std::time::Duration::from_secs(3), host.recv())
+            .await
+            .expect("resize reaches host")
+            .expect("host remains open until dispatch");
+        assert!(matches!(control, ServerControl::PtyResize { .. }));
+        drop(host);
+    };
+    let (result, ()) = tokio::join!(submitted, disconnected);
+    assert!(matches!(result, KernelResult::Error { .. }));
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        let row = sqlx::query(
+            "SELECT failed_at IS NOT NULL AS failed, \
+                    indeterminate_at IS NOT NULL AS indeterminate \
+             FROM gwk_internal.pty_delivery \
+             WHERE idempotency_key = 'resize-disconnected'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("delivery state");
+        if row.get::<bool, _>("indeterminate") {
+            assert!(!row.get::<bool, _>("failed"));
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "disconnect after dispatch must not leave a permanently pending delivery"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    let mut replacement = served
+        .client_with_capabilities(&[PTY_CONTROL_CAPABILITY])
+        .await;
+    let replay = submit_pty_control(
+        &mut sender,
+        "resize-disconnected-replay",
+        KernelRequest::ResizePtySession {
+            envelope: envelope_in(
+                gwk_kernel::SYSTEM_PROJECT,
+                "resize-disconnected",
+                actor("operator"),
+                &resize,
+            ),
+        },
+    )
+    .await;
+    assert!(matches!(
+        replay,
+        KernelResult::Error {
+            code: KernelErrorCode::Indeterminate,
+            ..
+        }
+    ));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), replacement.recv())
+            .await
+            .is_err(),
+        "an indeterminate delivery must never be redelivered"
+    );
+
+    drop(replacement);
+    drop(sender);
+    served.close().await;
+    drop(pool);
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
+async fn retained_applied_ack_reconciles_an_indeterminate_delivery() {
+    use gwk_domain::KernelCommand;
+    use sqlx::Row;
+
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "wire_pty_reconcile_ack", 8).await;
+    let pool = store.pool().clone();
+    let served = Running::open(store, "ptyreconcileack").await;
+    let mut host = served
+        .client_with_capabilities(&[PTY_CONTROL_CAPABILITY])
+        .await;
+    let mut sender = served
+        .client_with_capabilities(&[PTY_CONTROL_CAPABILITY])
+        .await;
+    let frame = serde_json::to_string(&pty_frame(2, 4)).expect("serialize frame");
+    assert!(matches!(
+        host.ask(
+            "seed",
+            &format!(
+                r#"{{"type":"pty_publish_snapshot","session_id":"console","seq":"0","frame":{frame}}}"#
+            ),
+        )
+        .await,
+        KernelResult::PtyPublished { .. }
+    ));
+    let generation = match sender
+        .ask(
+            "generation",
+            r#"{"type":"pty_snapshot","session_id":"console"}"#,
+        )
+        .await
+    {
+        KernelResult::PtySnapshot { generation, .. } => generation,
+        other => panic!("generation: {other:?}"),
+    };
+    let resize = KernelCommand::ResizePtySession {
+        pty_session_id: gwk_domain::PtySessionId::new("console"),
+        generation,
+        cols: 120,
+        rows: 40,
+    };
+    let request = KernelRequest::ResizePtySession {
+        envelope: envelope_in(
+            gwk_kernel::SYSTEM_PROJECT,
+            "resize-reconciled",
+            actor("operator"),
+            &resize,
+        ),
+    };
+
+    let submitted = submit_pty_control(&mut sender, "resize-reconciled", request.clone());
+    let disconnected = async {
+        let delivery_id = match tokio::time::timeout(std::time::Duration::from_secs(3), host.recv())
+            .await
+            .expect("resize reaches host")
+            .expect("host remains open until dispatch")
+        {
+            ServerControl::PtyResize { delivery_id, .. } => delivery_id,
+            other => panic!("unexpected control: {other:?}"),
+        };
+        drop(host);
+        delivery_id
+    };
+    let (result, delivery_id) = tokio::join!(submitted, disconnected);
+    assert!(matches!(result, KernelResult::Error { .. }));
+
+    let mut reconnected = served
+        .client_with_capabilities(&[PTY_CONTROL_CAPABILITY])
+        .await;
+    reconnected
+        .send(
+            &serde_json::to_string(&ClientControl::PtyDeliveryAck {
+                delivery_id: delivery_id.clone(),
+                result: PtyDeliveryResult::Applied,
+            })
+            .expect("serialize retained acknowledgement"),
+        )
+        .await;
+    assert!(matches!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            reconnected.recv_control(),
+        )
+            .await
+            .expect("settlement confirmation arrives")
+            .expect("reconnected host remains open"),
+        ServerControl::PtyDeliverySettled { delivery_id: settled } if settled == delivery_id
+    ));
+
+    let row = sqlx::query(
+        "SELECT delivered_at IS NOT NULL AS delivered, \
+                indeterminate_at IS NOT NULL AS indeterminate \
+         FROM gwk_internal.pty_delivery WHERE idempotency_key = 'resize-reconciled'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("reconciled delivery state");
+    assert!(row.get::<bool, _>("delivered"));
+    assert!(!row.get::<bool, _>("indeterminate"));
+    assert!(matches!(
+        submit_pty_control(&mut sender, "resize-reconciled-replay", request).await,
+        KernelResult::CommandApplied { .. }
+    ));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), reconnected.recv())
+            .await
+            .is_err(),
+        "a reconciled replay must not redeliver"
+    );
+
+    drop(reconnected);
+    drop(sender);
+    served.close().await;
+    drop(pool);
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
+async fn a_failed_start_delivery_retries_and_a_later_lifetime_can_reuse_the_session_id() {
+    use gwk_domain::{KernelCommand, PtySessionTemplateName};
+
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "wire_pty_start_retry", 8).await;
+    let pool = store.pool().clone();
+    let served = Running::open(store, "ptystartretry").await;
+    let mut sender = served.client().await;
+    let template = KernelCommand::DeclarePtySessionTemplate {
+        template_name: PtySessionTemplateName::new("review"),
+        command: "/bin/cat".to_owned(),
+        args: vec![],
+        cwd: None,
+        env: std::collections::BTreeMap::new(),
+        cols: 100,
+        rows: 30,
+    };
+    assert!(matches!(
+        submit_kernel_command(
+            &mut sender,
+            "declare-retry-template",
+            "declare-retry-template",
+            "operator",
+            &template,
+        )
+        .await,
+        KernelResult::CommandApplied { .. }
+    ));
+
+    let start = KernelCommand::RequestPtySessionStart {
+        template_name: PtySessionTemplateName::new("review"),
+        pty_session_id: gwk_domain::PtySessionId::new("reusable"),
+    };
+    let first_envelope = envelope_in(
+        gwk_kernel::SYSTEM_PROJECT,
+        "start-before-manager",
+        actor("operator"),
+        &start,
+    );
+    let first_request = KernelRequest::StartPtySession {
+        envelope: first_envelope.clone(),
+    };
+    let first =
+        submit_pty_control(&mut sender, "start-before-manager", first_request.clone()).await;
+    let KernelResult::Error { detail, .. } = first else {
+        panic!("a committed start with no manager must report delivery failure: {first:?}");
+    };
+    assert_eq!(
+        detail
+            .as_ref()
+            .and_then(|detail| detail.get("command_committed"))
+            .and_then(serde_json::Value::as_bool),
+        Some(true),
+    );
+
+    let mut manager = served
+        .client_with_capabilities(&[PTY_START_CAPABILITY])
+        .await;
+    let retry_send = submit_pty_control(&mut sender, "retry-after-manager", first_request);
+    let retry_apply = async {
+        let control = tokio::time::timeout(std::time::Duration::from_secs(3), manager.recv())
+            .await
+            .expect("the retry reaches the new manager")
+            .expect("manager remains open");
+        let ServerControl::PtyStart {
+            delivery_id,
+            session_id,
+            ..
+        } = control
+        else {
+            panic!("unexpected start retry: {control:?}");
+        };
+        assert_eq!(session_id.as_str(), "reusable");
+        manager
+            .send(
+                &serde_json::to_string(&gwk_domain::ClientControl::PtyDeliveryAck {
+                    delivery_id,
+                    result: gwk_domain::protocol::PtyDeliveryResult::Applied,
+                })
+                .expect("serialize retry ack"),
+            )
+            .await;
+    };
+    let (retry_result, ()) = tokio::join!(retry_send, retry_apply);
+    assert!(matches!(retry_result, KernelResult::CommandApplied { .. }));
+
+    assert!(matches!(
+        submit_pty_control(
+            &mut sender,
+            "settled-replay",
+            KernelRequest::StartPtySession {
+                envelope: first_envelope,
+            },
+        )
+        .await,
+        KernelResult::CommandApplied { .. }
+    ));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), manager.recv())
+            .await
+            .is_err(),
+        "a settled replay must not deliver twice"
+    );
+
+    let later_envelope = envelope_in(
+        gwk_kernel::SYSTEM_PROJECT,
+        "start-later-lifetime",
+        actor("operator"),
+        &start,
+    );
+    let later_send = submit_pty_control(
+        &mut sender,
+        "start-later-lifetime",
+        KernelRequest::StartPtySession {
+            envelope: later_envelope,
+        },
+    );
+    let later_apply = async {
+        let control = tokio::time::timeout(std::time::Duration::from_secs(3), manager.recv())
+            .await
+            .expect("the later lifetime reaches the manager")
+            .expect("manager remains open");
+        let ServerControl::PtyStart {
+            delivery_id,
+            session_id,
+            ..
+        } = control
+        else {
+            panic!("unexpected later start: {control:?}");
+        };
+        assert_eq!(session_id.as_str(), "reusable");
+        manager
+            .send(
+                &serde_json::to_string(&gwk_domain::ClientControl::PtyDeliveryAck {
+                    delivery_id,
+                    result: gwk_domain::protocol::PtyDeliveryResult::Applied,
+                })
+                .expect("serialize later ack"),
+            )
+            .await;
+    };
+    let (later_result, ()) = tokio::join!(later_send, later_apply);
+    assert!(matches!(later_result, KernelResult::CommandApplied { .. }));
+
+    let mut colliding_envelope = envelope_in(
+        gwk_kernel::SYSTEM_PROJECT,
+        "start-command-id-collision",
+        actor("operator"),
+        &start,
+    );
+    colliding_envelope.command_id = gwk_domain::CommandId::new("cmd-system-start-later-lifetime");
+    assert!(matches!(
+        submit_pty_control(
+            &mut sender,
+            "start-command-id-collision",
+            KernelRequest::StartPtySession {
+                envelope: colliding_envelope,
+            },
+        )
+        .await,
+        KernelResult::Error {
+            code: KernelErrorCode::IdempotencyConflict,
+            ..
+        }
+    ));
+
+    let starts: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM gwk.event WHERE event_type = 'pty_session_start_requested'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("start event count");
+    assert_eq!(
+        starts, 2,
+        "the retry is one event and the later lifetime another"
+    );
+
+    drop(manager);
+    drop(sender);
+    served.close().await;
+    drop(pool);
+    drop_database(&maintenance, &name).await;
+}
+
 #[tokio::test]
 #[ignore = "requires PostgreSQL"]
 async fn a_published_pty_session_is_served_end_to_end_and_a_foreign_writer_is_refused() {
@@ -1822,7 +2865,46 @@ async fn receipted_pty_input_reaches_the_owning_host_once_across_the_real_wire()
         data_base64: PtyInputData::new(BASE64_STANDARD.encode(bytes)),
     };
     let request = serde_json::to_string(&request).expect("serialize input request");
-    match sender.ask("send", &request).await {
+    let input_send = sender.ask("send", &request);
+    let input_apply = async {
+        let control = tokio::time::timeout(std::time::Duration::from_secs(3), host.recv())
+            .await
+            .expect("input reaches the owning host promptly")
+            .expect("host connection remains open");
+        let delivery_id = match control {
+            ServerControl::PtyInput {
+                delivery_id,
+                command_id,
+                session_id,
+                generation: delivered_generation,
+                byte_size,
+                data_base64,
+            } => {
+                assert_eq!(command_id, envelope.command_id);
+                assert_eq!(session_id.as_str(), "console");
+                assert_eq!(delivered_generation, generation);
+                assert_eq!(byte_size, ByteCount::new(bytes.len() as u64));
+                assert_eq!(
+                    BASE64_STANDARD
+                        .decode(data_base64.as_str())
+                        .expect("delivery base64"),
+                    bytes
+                );
+                delivery_id
+            }
+            other => panic!("owner received {other:?}"),
+        };
+        host.send(
+            &serde_json::to_string(&gwk_domain::ClientControl::PtyDeliveryAck {
+                delivery_id,
+                result: gwk_domain::protocol::PtyDeliveryResult::Applied,
+            })
+            .expect("serialize input ack"),
+        )
+        .await;
+    };
+    let (input_result, ()) = tokio::join!(input_send, input_apply);
+    match input_result {
         KernelResult::CommandApplied { events, .. } => {
             assert_eq!(events.len(), 1);
             assert_eq!(events[0].event_type, "pty_input_requested");
@@ -1832,32 +2914,6 @@ async fn receipted_pty_input_reaches_the_owning_host_once_across_the_real_wire()
             );
         }
         other => panic!("send: {other:?}"),
-    }
-
-    match tokio::time::timeout(std::time::Duration::from_secs(3), host.recv())
-        .await
-        .expect("input reaches the owning host promptly")
-        .expect("host connection remains open")
-    {
-        ServerControl::PtyInput {
-            command_id,
-            session_id,
-            generation: delivered_generation,
-            byte_size,
-            data_base64,
-        } => {
-            assert_eq!(command_id, envelope.command_id);
-            assert_eq!(session_id.as_str(), "console");
-            assert_eq!(delivered_generation, generation);
-            assert_eq!(byte_size, ByteCount::new(bytes.len() as u64));
-            assert_eq!(
-                BASE64_STANDARD
-                    .decode(data_base64.as_str())
-                    .expect("delivery base64"),
-                bytes
-            );
-        }
-        other => panic!("owner received {other:?}"),
     }
 
     // A retry is the same logical call. It returns the original command result
@@ -1896,6 +2952,107 @@ async fn receipted_pty_input_reaches_the_owning_host_once_across_the_real_wire()
     assert_eq!(
         receipt.get::<String, _>("observed_basis"),
         "operator authority; byte_count=3"
+    );
+
+    drop(host);
+    drop(sender);
+    served.close().await;
+    drop(pool);
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
+async fn a_pending_input_retry_cannot_replace_the_original_bytes() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "wire_pty_input_binding", 8).await;
+    let pool = store.pool().clone();
+    let served = Running::open(store, "ptyinputbinding").await;
+    let mut host = served
+        .client_with_capabilities(&[PTY_INPUT_CAPABILITY])
+        .await;
+    let mut sender = served
+        .client_with_capabilities(&[PTY_INPUT_CAPABILITY])
+        .await;
+    let frame = serde_json::to_string(&pty_frame(2, 4)).expect("serialize frame");
+    assert!(matches!(
+        host.ask(
+            "seed",
+            &format!(
+                r#"{{"type":"pty_publish_snapshot","session_id":"console","seq":"0","frame":{frame}}}"#
+            ),
+        )
+        .await,
+        KernelResult::PtyPublished { .. }
+    ));
+    let generation = match sender
+        .ask(
+            "generation",
+            r#"{"type":"pty_snapshot","session_id":"console"}"#,
+        )
+        .await
+    {
+        KernelResult::PtySnapshot { generation, .. } => generation,
+        other => panic!("generation: {other:?}"),
+    };
+    let command = KernelCommand::SendPtyInput {
+        pty_session_id: gwk_domain::PtySessionId::new("console"),
+        generation: generation.clone(),
+        byte_count: gwk_domain::ByteCount::new(1),
+    };
+    let envelope = envelope_in(
+        gwk_kernel::SYSTEM_PROJECT,
+        "bound-input",
+        actor("operator"),
+        &command,
+    );
+    let request = |byte| KernelRequest::SendPtyInput {
+        envelope: envelope.clone(),
+        data_base64: PtyInputData::new(BASE64_STANDARD.encode([byte])),
+    };
+
+    let first = serde_json::to_string(&request(b'a')).expect("serialize first input");
+    let first_send = sender.ask("first", &first);
+    let first_apply = async {
+        let control = host.recv().await.expect("first delivery");
+        let ServerControl::PtyInput { delivery_id, .. } = control else {
+            panic!("unexpected delivery: {control:?}");
+        };
+        host.send(
+            &serde_json::to_string(&ClientControl::PtyDeliveryAck {
+                delivery_id,
+                result: PtyDeliveryResult::Refused {
+                    code: KernelErrorCode::Overloaded,
+                    message: "retry later".to_owned(),
+                },
+            })
+            .expect("serialize refusal"),
+        )
+        .await;
+    };
+    let (first_result, ()) = tokio::join!(first_send, first_apply);
+    assert!(matches!(first_result, KernelResult::Error { .. }));
+
+    let replacement = serde_json::to_string(&request(b'b')).expect("serialize replacement");
+    match sender.ask("replacement", &replacement).await {
+        KernelResult::Error { code, .. } => assert_eq!(code, KernelErrorCode::IdempotencyConflict),
+        other => panic!("replacement carrier: {other:?}"),
+    }
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), host.recv())
+            .await
+            .is_err(),
+        "a conflicting carrier must not reach the host"
+    );
+    let binding: Option<Vec<u8>> = sqlx::query_scalar(
+        "SELECT input_binding FROM gwk_internal.pty_delivery WHERE idempotency_key = 'bound-input'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("input binding");
+    assert!(
+        binding.is_some(),
+        "the original carrier must be durably bound"
     );
 
     drop(host);
@@ -1983,26 +3140,47 @@ async fn pty_input_authority_honors_live_grants_revocation_and_actor_kind() {
         .await,
         KernelResult::CommandApplied { .. }
     ));
-    assert!(matches!(
-        send_pty_input(
-            &mut sender,
-            "granted-request",
-            "granted",
-            "orchestrator",
-            "console",
-            &generation,
-            b"b",
-        )
-        .await,
-        KernelResult::CommandApplied { .. }
-    ));
-    assert!(matches!(
-        tokio::time::timeout(std::time::Duration::from_secs(3), host.recv())
+    let granted_send = send_pty_input(
+        &mut sender,
+        "granted-request",
+        "granted",
+        "orchestrator",
+        "console",
+        &generation,
+        b"b",
+    );
+    let granted_apply = async {
+        let control = tokio::time::timeout(std::time::Duration::from_secs(3), host.recv())
             .await
             .expect("granted input reaches host")
-            .expect("host remains open"),
-        ServerControl::PtyInput { data_base64, .. }
-            if BASE64_STANDARD.decode(data_base64.as_str()).expect("delivery") == b"b"
+            .expect("host remains open");
+        let ServerControl::PtyInput {
+            delivery_id,
+            data_base64,
+            ..
+        } = control
+        else {
+            panic!("unexpected granted delivery: {control:?}");
+        };
+        assert_eq!(
+            BASE64_STANDARD
+                .decode(data_base64.as_str())
+                .expect("delivery"),
+            b"b"
+        );
+        host.send(
+            &serde_json::to_string(&gwk_domain::ClientControl::PtyDeliveryAck {
+                delivery_id,
+                result: gwk_domain::protocol::PtyDeliveryResult::Applied,
+            })
+            .expect("serialize granted ack"),
+        )
+        .await;
+    };
+    let (granted_result, ()) = tokio::join!(granted_send, granted_apply);
+    assert!(matches!(
+        granted_result,
+        KernelResult::CommandApplied { .. }
     ));
 
     let revoke = gwk_domain::KernelCommand::RevokeAuthority {
@@ -2267,26 +3445,48 @@ async fn pty_input_refuses_stale_and_missing_generations_with_receipts() {
         }
         other => panic!("missing send: {other:?}"),
     }
-    assert!(matches!(
-        send_pty_input(
-            &mut sender,
-            "current-request",
-            "current",
-            "operator",
-            "console",
-            &current,
-            b"z",
-        )
-        .await,
-        KernelResult::CommandApplied { .. }
-    ));
-    assert!(matches!(
-        tokio::time::timeout(std::time::Duration::from_secs(3), current_host.recv())
+    let current_send = send_pty_input(
+        &mut sender,
+        "current-request",
+        "current",
+        "operator",
+        "console",
+        &current,
+        b"z",
+    );
+    let current_apply = async {
+        let control = tokio::time::timeout(std::time::Duration::from_secs(3), current_host.recv())
             .await
             .expect("current input reaches current host")
-            .expect("current host remains open"),
-        ServerControl::PtyInput { data_base64, .. }
-            if BASE64_STANDARD.decode(data_base64.as_str()).expect("delivery") == b"z"
+            .expect("current host remains open");
+        let ServerControl::PtyInput {
+            delivery_id,
+            data_base64,
+            ..
+        } = control
+        else {
+            panic!("unexpected current delivery: {control:?}");
+        };
+        assert_eq!(
+            BASE64_STANDARD
+                .decode(data_base64.as_str())
+                .expect("delivery"),
+            b"z"
+        );
+        current_host
+            .send(
+                &serde_json::to_string(&gwk_domain::ClientControl::PtyDeliveryAck {
+                    delivery_id,
+                    result: gwk_domain::protocol::PtyDeliveryResult::Applied,
+                })
+                .expect("serialize current ack"),
+            )
+            .await;
+    };
+    let (current_result, ()) = tokio::join!(current_send, current_apply);
+    assert!(matches!(
+        current_result,
+        KernelResult::CommandApplied { .. }
     ));
 
     let receipts = sqlx::query(

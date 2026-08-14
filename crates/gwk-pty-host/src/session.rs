@@ -150,6 +150,7 @@ pub enum SessionCommand {
     Resize {
         cols: u16,
         rows: u16,
+        reply: oneshot::Sender<Result<(), String>>,
     },
     Snapshot {
         reply: oneshot::Sender<Snapshot>,
@@ -159,7 +160,9 @@ pub enum SessionCommand {
         cursor: Option<u64>,
         reply: oneshot::Sender<Attached>,
     },
-    Stop,
+    Stop {
+        reply: oneshot::Sender<Result<(), String>>,
+    },
 }
 
 /// Capacity of the live-delta broadcast. A consumer that falls this many
@@ -289,11 +292,19 @@ pub(crate) async fn run(
             Wake::Chunk(Err(e)) => {
                 return SessionExit::Failed(format!("reading the pty: {e}"));
             }
-            Wake::Command(None) | Wake::Command(Some(SessionCommand::Stop)) => {
+            Wake::Command(None) => {
                 if let Err(e) = session.kill().await {
                     tracing::warn!(%e, "killing the child on stop");
                 }
                 let _ = session.wait().await;
+                return SessionExit::Stopped;
+            }
+            Wake::Command(Some(SessionCommand::Stop { reply })) => {
+                let result = match session.kill().await {
+                    Ok(()) => session.wait().await.map(|_| ()).map_err(|e| e.to_string()),
+                    Err(e) => Err(e.to_string()),
+                };
+                let _ = reply.send(result);
                 return SessionExit::Stopped;
             }
             Wake::Command(Some(SessionCommand::Input { bytes, reply })) => {
@@ -306,8 +317,9 @@ pub(crate) async fn run(
                 }
                 let _ = reply.send(result);
             }
-            Wake::Command(Some(SessionCommand::Resize { cols, rows })) => {
-                match session.resize(cols, rows) {
+            Wake::Command(Some(SessionCommand::Resize { cols, rows, reply })) => {
+                let result = session.resize(cols, rows).map_err(|e| e.to_string());
+                match result {
                     Ok(()) => {
                         // The reflow marked the grid fully dirty; take the
                         // frame NOW rather than waiting for the child to
@@ -337,8 +349,9 @@ pub(crate) async fn run(
                             config.retained_batches,
                         );
                     }
-                    Err(e) => tracing::warn!(%e, cols, rows, "resize refused"),
+                    Err(ref e) => tracing::warn!(%e, cols, rows, "resize refused"),
                 }
+                let _ = reply.send(result);
             }
             Wake::Command(Some(SessionCommand::Snapshot { reply })) => {
                 let _ = reply.send(Snapshot {

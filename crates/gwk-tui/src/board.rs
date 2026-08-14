@@ -1834,13 +1834,22 @@ fn activity_rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
     out
 }
 
+/// What an engine session carrying no `ended_at` reads as, wherever it is
+/// rendered.
+///
+/// The log holds no end stamp. That is not the claim that the session is
+/// alive: nothing here heartbeats, probes, or watches a process, so this is
+/// the whole of what can honestly be said. It is a constant rather than a
+/// literal because three surfaces render this one field — this panel, the
+/// console's FLEET column, and `gw session list` — and three spellings of one
+/// absence is exactly how the word `live` ended up on a CLI table beside a
+/// panel that already refused to say it.
+pub const NO_END_RECORDED: &str = "no end recorded";
+
 fn session_face(session: &EngineSession) -> (&'static str, &'static StateBinding) {
     match session.ended_at {
         Some(_) => ("ended", theme::binding("done")),
-        // The log holds no end stamp. That is not the claim that the session
-        // is alive: nothing here heartbeats, probes, or watches a process,
-        // so `unended` is the whole of what can honestly be said.
-        None => ("no end recorded", theme::binding("unknown")),
+        None => (NO_END_RECORDED, theme::binding("unknown")),
     }
 }
 
@@ -2239,9 +2248,22 @@ fn cost_health_rows(state: &BoardState, tier: ColorTier) -> Vec<Row> {
             why: note.why.clone(),
         })
         .collect();
-    if health == 0 {
+    // Both halves of the ingestion block, and for the same reason: the two
+    // kinds share one absent producer, so an explanation on only one of them
+    // is worse than none on either. A reader who has just been told why
+    // `health` reads zero will take the silence beside it as a measurement.
+    // The colour alone cannot carry this — the `unknown` binding degrades to
+    // the terminal's own foreground at mono, where the row becomes
+    // indistinguishable from a counted one.
+    for (subject, empty) in [
+        ("health", health == 0),
+        ("session", session_records.is_empty()),
+    ] {
+        if !empty {
+            continue;
+        }
         unknowns.push(UnknownNote {
-            subject: "health",
+            subject,
             // "no records" is a claim about the whole ledger and this count is
             // over one page, so a partial read says so — the same distinction
             // the floor note below draws, applied where it is also true.
@@ -3144,7 +3166,7 @@ fn render_with_status(
     let selection_fg = match tier {
         ColorTier::Truecolor | ColorTier::Xterm256 => gwk_theme::SIGNAL
             .iter()
-            .find(|t| t.name == "selection")
+            .find(|t| t.name == "gws_selection")
             .map(|t| theme::token_style(t, tier)),
         ColorTier::Ansi16 | ColorTier::Mono => None,
     };
@@ -3152,7 +3174,7 @@ fn render_with_status(
     // of it: reverse video is the expression 16-colour and mono can carry.
     let accent_style = gwk_theme::SIGNAL
         .iter()
-        .find(|t| t.name == "selection")
+        .find(|t| t.name == "gws_selection")
         .map(|t| theme::token_style(t, tier))
         .unwrap_or_default()
         .add_modifier(Modifier::BOLD);
@@ -5224,7 +5246,7 @@ mod tests {
         let running_fg = theme::state_style(theme::binding("running"), ColorTier::Truecolor).fg;
         let selection_fg = gwk_theme::SIGNAL
             .iter()
-            .find(|t| t.name == "selection")
+            .find(|t| t.name == "gws_selection")
             .and_then(|t| theme::token_style(t, ColorTier::Truecolor).fg);
         assert!(
             running_fg.is_some() && selection_fg.is_some(),

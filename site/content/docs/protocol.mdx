@@ -3,7 +3,7 @@ title: Protocol
 description: The implemented Unix-socket handshake, bounded JSON and raw PTY framing, backpressure, authentication, subscriptions, commands, and typed errors.
 ---
 
-{/* curated-from: docs/protocol.md sha256=66574b47b6307ec7ec54ab78888e4a5f5179b264da8b8292cb5aaad69723c444 */}
+{/* curated-from: docs/protocol.md sha256=035ceb5ed2b4d89ed5844047c65d33b30d3e037f131d437b5ec8dfeaa2e22e59 */}
 
 The client↔kernel contract. Semantics and byte-level framing are locked by
 [ADR 0001](https://github.com/GridWork-dev/gridwork/blob/main/docs/decisions/0001-wire-codec.md). The UDS-only authentication boundary
@@ -61,6 +61,25 @@ child's original output bytes in kind `0x02` frames; resizes remain typed JSON c
 because they are not byte-stream events. Both paths use the same session generation and
 frame-revision cursor, so a reconnect either replays a retained gap or reseeds without
 claiming continuity across one.
+
+`pty_input_delivery` and `pty_control` negotiate generation-addressed reverse delivery;
+`pty_start` identifies the resident host connection that receives starts. Input, resize,
+and stop are authority-gated metadata commands, delivered only after commit through the
+bounded owner-connection control queue. Delivery-bearing commands use dedicated request
+variants so capability checks and post-commit host delivery cannot be bypassed. A start
+carries only a declared template name and session id; program, arguments, cwd, `env:NAME`
+references, and geometry come from the kernel catalog. Arbitrary executable data never
+crosses a start request.
+
+Each append creates a durable pending-delivery row. Explicit host refusals settle as
+failed; a disconnect or expired/orphaned claim after dispatch settles as terminally
+`indeterminate`, and is never redelivered. The host retains applied event ids until the
+kernel confirms durable settlement. If that confirmation is lost, reconnect reasserts the
+applied acknowledgement: delivered rows confirm again and indeterminate rows reconcile to
+delivered. All three terminal outcomes replay without another host side effect.
+
+All declared, published, and requested PTY geometries are bounded to 1,000 cells per axis
+and 100,000 cells total before resident grid allocation.
 
 One raw seed is accepted per session generation. A session then retains at most 1,024 raw
 events and 8 MiB; reaching either bound refuses the publisher, whose reconnect creates a

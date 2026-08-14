@@ -1,0 +1,28 @@
+{
+  // site/ is JSX, so it extends the react entry, which itself extends the base. oxlint
+  // applies the NEAREST config to each file, so this one governs `site/` while the
+  // repo-root `.oxlintrc.json` governs `contracts/`. One invocation, two floors.
+  //
+  // TRAP, and the reason both keys below are re-listed IN FULL rather than appended:
+  // `plugins`, `overrides` and `ignorePatterns` REPLACE rather than merge, and they do so
+  // across `extends` too. Trimming the array below to ["nextjs"] would silently drop
+  // unicorn, typescript, oxc, jsx-a11y, react and react-perf — the entire house floor —
+  // and still exit 0. Measured on oxlint 1.78.0.
+  "extends": ["../tools/oxlint-config/react.oxlintrc.json"],
+
+  // The react entry's six, plus Next's own. `nextjs` is deliberately absent from the
+  // house config: pinning it upstream would couple every repo in the estate to one Next
+  // major. A Next app turns it on here, which is this file's whole reason to exist.
+  "plugins": ["unicorn", "typescript", "oxc", "jsx-a11y", "react", "react-perf", "nextjs"],
+
+  // Re-listed in full, per the trap above. `.source/**` is the only entry that is not in
+  // the base list: it is fumadocs-mdx generated output, rewritten by `postinstall` on
+  // every install and gitignored.
+  "ignorePatterns": [
+    "**/node_modules/**",
+    "**/dist/**",
+    "**/.next/**",
+    "**/*.d.ts",
+    ".source/**"
+  ]
+}

@@ -862,6 +862,21 @@ pub async fn populate(store: &PgEventStore) {
         },
     )
     .await;
+    apply_as(
+        store,
+        "pty-template",
+        actor("operator"),
+        KernelCommand::DeclarePtySessionTemplate {
+            template_name: gwk_domain::PtySessionTemplateName::new("review"),
+            command: "/bin/cat".to_owned(),
+            args: vec![],
+            cwd: None,
+            env: std::collections::BTreeMap::new(),
+            cols: 100,
+            rows: 30,
+        },
+    )
+    .await;
 }
 
 pub fn task(id: &str) -> KernelCommand {
@@ -971,6 +986,24 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Client<S> {
     }
 
     pub async fn recv(&mut self) -> Option<ServerControl> {
+        loop {
+            match read_frame(&mut self.stream, FRAME_BODY_MAX_BYTES, &mut self.budget)
+                .await
+                .expect("read")
+            {
+                Incoming::Frame(frame) => {
+                    let control = serde_json::from_slice(&frame.body).expect("decode the answer");
+                    if matches!(control, ServerControl::PtyDeliverySettled { .. }) {
+                        continue;
+                    }
+                    return Some(control);
+                }
+                Incoming::Closed => return None,
+            }
+        }
+    }
+
+    pub async fn recv_control(&mut self) -> Option<ServerControl> {
         match read_frame(&mut self.stream, FRAME_BODY_MAX_BYTES, &mut self.budget)
             .await
             .expect("read")

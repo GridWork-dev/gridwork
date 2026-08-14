@@ -28,6 +28,7 @@ const BACKEND_MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0002_writer.sql"),
     include_str!("../migrations/0003_blob.sql"),
     include_str!("../migrations/0004_checkpoint.sql"),
+    include_str!("../migrations/0005_pty_delivery.sql"),
 ];
 
 // ponytail: still no migration runner, and now for a better reason than "there
@@ -286,6 +287,7 @@ pub fn backend_script(role: &str, contract_sha256: &str) -> String {
          GRANT DELETE ON gwk.workspace_node TO {role};\n\
          GRANT SELECT ON gwk_internal.schema_fingerprint TO {role};\n\
          GRANT SELECT, UPDATE ON gwk_internal.writer TO {role};\n\
+         GRANT SELECT, INSERT, UPDATE ON gwk_internal.pty_delivery TO {role};\n\
          GRANT SELECT, INSERT, UPDATE, DELETE ON \
            gwk_internal.blob, gwk_internal.blob_pin, gwk_internal.blob_upload TO {role};\n\
          GRANT SELECT, INSERT ON gwk_internal.checkpoint TO {role};\n"
@@ -434,6 +436,7 @@ mod tests {
         assert!(script.contains("GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA gwk"));
         assert!(script.contains("REVOKE UPDATE ON gwk.event, gwk.receipt"));
         assert!(script.contains("REVOKE INSERT, UPDATE ON gwk.transition"));
+        assert!(script.contains("GRANT SELECT, INSERT, UPDATE ON gwk_internal.pty_delivery"));
         assert!(!script.contains("TRUNCATE"), "{script}");
 
         // Deletion is granted on the blob tables and on gwk.workspace_node —

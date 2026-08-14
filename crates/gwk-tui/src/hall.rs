@@ -1291,7 +1291,7 @@ fn heading_style(is_focused: bool, tier: ColorTier) -> Style {
     }
     gwk_theme::SIGNAL
         .iter()
-        .find(|token| token.name == "focus")
+        .find(|token| token.name == "gws_focus")
         .map_or(base, |token| base.patch(theme::token_style(token, tier)))
 }
 

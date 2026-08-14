@@ -1,8 +1,8 @@
 $ gw session list
-SESSION          ATTEMPT          ENGINE  STATE  STARTED  ENDED
-es-ship-done     at-ship-done     codex   ended  09:40    09:14
-es-audit-fail    at-audit-fail    claude  ended  09:40    15:12
-es-pty-impl      at-pty-impl      codex   live   09:40    -
-es-tui-impl      at-tui-impl      claude  live   09:40    -
-es-flaky-cancel  at-flaky-cancel  claude  live   09:40    -
+SESSION          ATTEMPT          ENGINE  STATE            STARTED  ENDED
+es-ship-done     at-ship-done     codex   ended            09:40    09:14
+es-audit-fail    at-audit-fail    claude  ended            09:40    15:12
+es-pty-impl      at-pty-impl      codex   no end recorded  09:40    -
+es-tui-impl      at-tui-impl      claude  no end recorded  09:40    -
+es-flaky-cancel  at-flaky-cancel  claude  no end recorded  09:40    -
 at least 5 rows · watermark 221 · more: --cursor c2VxOjIyMQ

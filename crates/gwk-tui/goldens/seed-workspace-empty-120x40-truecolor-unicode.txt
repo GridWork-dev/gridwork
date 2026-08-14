@@ -1,0 +1,40 @@
+ TERM   workspace  unbound
+
+no workspaces open
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ VIEW  Ctrl-g command   Ctrl-g q back   mouse focus   input -> pane                                  motion off  tc+uni

@@ -587,7 +587,7 @@ pub fn render(
         // signal (STM: the reverse-video space is the carrier at every tier).
         ColorTier::Truecolor | ColorTier::Xterm256 => gwk_theme::SIGNAL
             .iter()
-            .find(|t| t.name == "selection")
+            .find(|t| t.name == "gws_selection")
             .map(|t| theme::token_style(t, tier)),
         ColorTier::Ansi16 | ColorTier::Mono => None,
     };
@@ -595,7 +595,7 @@ pub fn render(
     // of it: reverse video is the expression 16-colour and mono can carry.
     let accent_style = gwk_theme::SIGNAL
         .iter()
-        .find(|t| t.name == "selection")
+        .find(|t| t.name == "gws_selection")
         .map(|t| theme::token_style(t, tier))
         .unwrap_or_default()
         .add_modifier(Modifier::BOLD);
@@ -1284,7 +1284,7 @@ mod tests {
         let warn_fg = theme::state_style(binding("needs_attention"), ColorTier::Truecolor).fg;
         let selection_fg = gwk_theme::SIGNAL
             .iter()
-            .find(|t| t.name == "selection")
+            .find(|t| t.name == "gws_selection")
             .and_then(|t| theme::token_style(t, ColorTier::Truecolor).fg);
         assert!(warn_fg.is_some() && selection_fg.is_some(), "tier emits fg");
         // The row sits at y=1 under the verdict line: accent 0, mark 1, text 3.

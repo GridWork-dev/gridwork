@@ -3,7 +3,7 @@
   "pages": [
     {
       "destination": "content/docs/index.mdx",
-      "sha256": "171a801921db64ab9350ffd866e6ed2eb30f6b536d44f16164b5541907077340",
+      "sha256": "dbb467b83a418699a27fa2d07cca2c9e547c118dfc719e7bfe8f9050cbd2698b",
       "sources": [
         {
           "path": "README.md"
@@ -12,7 +12,7 @@
     },
     {
       "destination": "content/docs/quickstart.mdx",
-      "sha256": "cdf5f94ae39d1b40e70eb64342bd2fd62453cb2fd3b969334906256bfe1c401e",
+      "sha256": "6911515d0d5a075957e3534cf0a91f17545cbe2eb3b831f43967ad8c49f60c9a",
       "sources": [
         {
           "path": "README.md"
@@ -21,7 +21,7 @@
     },
     {
       "destination": "content/docs/architecture.mdx",
-      "sha256": "e83a307f152fd3ff54cadbe8bc3b73430fbc46d259db8fb914d9b0a0b8618b25",
+      "sha256": "94059e9fa07c5cbdf4471d85ff83e2772fffae3d50bbeef8cafe864df5f367bf",
       "sources": [
         {
           "path": "docs/architecture.md"
@@ -30,7 +30,7 @@
     },
     {
       "destination": "content/docs/protocol.mdx",
-      "sha256": "a44a5233e24ff361896c71b22b5799bf09bc01d3cd684770bc650e72f34a6b35",
+      "sha256": "267818fef5c7b2e22248bae5c769d7bec1dfcba140ddbd53b0050d0b1a1d8e18",
       "sources": [
         {
           "path": "docs/protocol.md"
@@ -39,7 +39,7 @@
     },
     {
       "destination": "content/docs/parity.mdx",
-      "sha256": "bc358c507018380a4aaa435bcf83514e0616ac6187bded7c193f113ad203b0c2",
+      "sha256": "5933339bbf02e1d582ad2e590b8d01e818de15aad0f5f1fe18d2ed1f5133d897",
       "sources": [
         {
           "path": "docs/PARITY.md"
@@ -57,7 +57,7 @@
     },
     {
       "destination": "content/docs/security/index.mdx",
-      "sha256": "7ff0df4f2307c40ce799f9450827e4a60a2491f579180dae9ef0eecc32cc8d04",
+      "sha256": "bf707df2dec077193a95ca8dbee8ec091d01bc8faacb7fc3efdc1231b81718d6",
       "sources": [
         {
           "path": "docs/security/THREAT_MODEL.md"
@@ -78,7 +78,7 @@
     },
     {
       "destination": "content/docs/derivation/specifications.mdx",
-      "sha256": "403d4c5396bd794ed345bc3cd7a3657a9892ea4c679b14af8b4aa3bcf7e730c1",
+      "sha256": "9b202d4faca9809cdfb7666c8796e27ba62a19360204f8a3af048eeea80d69f0",
       "sources": [
         {
           "path": "docs/derivation/SPECS.md"
@@ -96,7 +96,7 @@
     },
     {
       "destination": "content/docs/derivation/reviews.mdx",
-      "sha256": "8d439e2842b664bbcb8874b2d4fb8bd6cc3ef399cf2570f9a175221f111e7d74",
+      "sha256": "75af3efc9365668522d46ba96409816cb93dd1816e8685e92e58ebb865df6959",
       "sources": [
         {
           "path": "docs/derivation/reviews"
@@ -105,7 +105,7 @@
     },
     {
       "destination": "content/docs/roadmap.mdx",
-      "sha256": "99f4396b7c3916667f8b35cdd2632e21286df35a53da5de259a11b0530967253",
+      "sha256": "8e3380d3f02714cefb74476fa1af9cdbab64ba163d973b7e0ab240aee947bb17",
       "sources": [
         {
           "path": "ROADMAP.md"

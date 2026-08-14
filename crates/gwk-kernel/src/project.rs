@@ -1273,6 +1273,41 @@ pub(crate) async fn apply_event(
             .map_err(|e| db("record pty input", e))?;
             require_one(done, "pty_session", lifetime.as_str())?;
         }
+        KernelCommand::ResizePtySession {
+            pty_session_id,
+            generation,
+            ..
+        } => {
+            let lifetime = gwk_domain::ids::pty_session_lifetime_id(pty_session_id, generation);
+            let done = sqlx::query(
+                "UPDATE gwk.pty_session SET version = $2, updated_at = $3::timestamptz \
+                 WHERE id = $1",
+            )
+            .bind(lifetime.as_str())
+            .bind(version)
+            .bind(at)
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| db("record pty resize", e))?;
+            require_one(done, "pty_session", lifetime.as_str())?;
+        }
+        KernelCommand::StopPtySession {
+            pty_session_id,
+            generation,
+        } => {
+            let lifetime = gwk_domain::ids::pty_session_lifetime_id(pty_session_id, generation);
+            let done = sqlx::query(
+                "UPDATE gwk.pty_session SET version = $2, updated_at = $3::timestamptz \
+                  WHERE id = $1",
+            )
+            .bind(lifetime.as_str())
+            .bind(version)
+            .bind(at)
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| db("record pty stop", e))?;
+            require_one(done, "pty_session", lifetime.as_str())?;
+        }
         KernelCommand::ClosePtySession { pty_session_id, .. } => {
             // No DELETE: the S8 receipt reads closed sessions' rows, and the
             // no-delete trigger holds them in place. Close stamps the state.
@@ -1289,6 +1324,55 @@ pub(crate) async fn apply_event(
             .map_err(|e| db("close pty session", e))?;
             require_one(done, "pty_session", pty_session_id.as_str())?;
         }
+
+        KernelCommand::DeclarePtySessionTemplate {
+            template_name,
+            command,
+            args,
+            cwd,
+            env,
+            cols,
+            rows,
+        } => {
+            sqlx::query(
+                "INSERT INTO gwk.pty_session_template \
+                   (name, version, state, command, args, cwd, env, cols, rows, declared_at, updated_at) \
+                 VALUES ($1, $2, 'active', $3, $4, $5, $6, $7, $8, \
+                    $9::timestamptz, $9::timestamptz)",
+            )
+            .bind(template_name.as_str())
+            .bind(version)
+            .bind(command)
+            .bind(serde_json::to_value(args).map_err(|e| {
+                Refusal::storage(format!("serialize template args: {e}"))
+            })?)
+            .bind(cwd.as_deref())
+            .bind(serde_json::to_value(env).map_err(|e| {
+                Refusal::storage(format!("serialize template env: {e}"))
+            })?)
+            .bind(i32::from(*cols))
+            .bind(i32::from(*rows))
+            .bind(at)
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| db("declare pty session template", e))?;
+        }
+        KernelCommand::RetirePtySessionTemplate { template_name, .. } => {
+            let done = sqlx::query(
+                "UPDATE gwk.pty_session_template SET state = 'retired', version = $2, \
+                   retired_at = $3::timestamptz, updated_at = $3::timestamptz WHERE name = $1",
+            )
+            .bind(template_name.as_str())
+            .bind(version)
+            .bind(at)
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| db("retire pty session template", e))?;
+            require_one(done, "pty_session_template", template_name.as_str())?;
+        }
+        // The durable start request is itself the history; the host creates the
+        // ordinary pty_session lifetime when it publishes the resulting seed.
+        KernelCommand::RequestPtySessionStart { .. } => {}
 
         // The epoch boundary is the log itself — there is no row behind it.
         KernelCommand::ActivateKernel { .. } => {}

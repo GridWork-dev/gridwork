@@ -9,7 +9,8 @@ No dates. A stage is done when its gates are green, not when a calendar says so.
 
 The shared language everything else speaks. Published to crates.io under Apache-2.0 with
 live docs.rs pages — five crates at 0.0.1, six at 0.0.2 once the kernel itself went up,
-which is what made `cargo install gridwork` work.
+which is what made `cargo install gridwork` work, and seven at 0.0.3 once `gwk-tui` went
+up, which is what made the sentence below about the lenses true rather than intended.
 
 - Domain types, event schemas, and four state machines in `gwk-domain`. Each machine is
   an enum plus a fixed edge table, and the table *is* the contract: terminality is
@@ -70,8 +71,8 @@ the engine crates stay in-tree, unpublished until 1.0 packaging.
 - Replay of persisted terminal recordings as a deterministic timeline in the console
 
 Shipped with named residue: the ledger-synced, exportable-as-evidence half of
-replay is not built, and two stage-3 leftovers — consumer-routed resize/stop and
-request-driven session starts — are still open.
+replay is not built. The two stage-3 leftovers named here — consumer-routed
+resize/stop and request-driven session starts — closed during stage 5.
 
 ## 5 · Workspace *(current)*
 

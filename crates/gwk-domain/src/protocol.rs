@@ -26,14 +26,14 @@
 use crate::blob::{BlobAddress, BlobDescriptor};
 use crate::entity::{
     Attempt, AttentionItem, AuthorityGrant, Command, CostEntry, DispatchNode, EngineSession,
-    Evidence, Gate, IngestedRecord, Lease, Message, PtySession, Receipt, Task, WorkflowRun,
-    WorkspaceNode, Worktree,
+    Evidence, Gate, IngestedRecord, Lease, Message, PtySession, PtySessionTemplate, Receipt, Task,
+    WorkflowRun, WorkspaceNode, Worktree,
 };
 use crate::envelope::{CommandEnvelope, EventEnvelope, JsonValue};
 use crate::frame::{PtyDelta, PtyFrame};
 use crate::ids::{
     BlobUploadId, ByteCount, CommandId, EventCount, EventId, PtyFrameSeq, PtySessionGeneration,
-    PtySessionId, RequestId, Seq, WriterEpoch,
+    PtySessionId, PtySessionTemplateName, RequestId, Seq, Timestamp, WriterEpoch,
 };
 use crate::inherited::OrchestratorCheckpoint;
 
@@ -96,7 +96,7 @@ impl specta::Type for ProtocolVersion {
 /// The protocol MINOR version this crate speaks. Minor negotiates DOWNWARD:
 /// both sides use `min(client, server)`, so a newer peer degrades instead of
 /// refusing.
-pub const PROTOCOL_MINOR: u32 = 0;
+pub const PROTOCOL_MINOR: u32 = 1;
 
 /// The version of the DOMAIN CONTRACT this crate defines — the event, command,
 /// and projection shapes — which is a different axis from the wire protocol
@@ -182,7 +182,19 @@ pub const PTY_RAW_CAPABILITY: &str = "pty_raw";
 /// [`KernelRequest::SendPtyInput`], and the kernel must not send
 /// [`ServerControl::PtyInput`], unless this name survived the hello
 /// intersection.
+///
+/// The wire name is FROZEN. A capability is a hard string intersection at
+/// hello, so a rename is not a minor-version concern: a kernel and a client on
+/// either side of one simply fail to agree, and every keystroke comes back
+/// `capability`. Under the estate's two-sha-pin deploy that skew is routine.
 pub const PTY_INPUT_CAPABILITY: &str = "pty_input";
+
+/// Negotiates consumer-to-host resize and stop controls.
+pub const PTY_CONTROL_CAPABILITY: &str = "pty_control";
+
+/// Negotiates receiving name-only starts as the resident PTY host manager.
+/// Submitting the authority-gated request itself uses the baseline JSON surface.
+pub const PTY_START_CAPABILITY: &str = "pty_start";
 
 /// Longest a publisher may leave a raw header without its paired payload.
 pub const PTY_RAW_PAYLOAD_DEADLINE_SECS: u64 = 5;
@@ -192,10 +204,36 @@ pub const PTY_RAW_PAYLOAD_DEADLINE_SECS: u64 = 5;
 /// while a paste larger than this is flushed as more than one receipted call.
 pub const PTY_INPUT_MAX_BYTES: usize = 64 * 1024;
 
+/// Maximum resident PTY sessions in both the host and kernel mirror.
+/// Keeping one shared number makes admission happen before child spawn rather
+/// than after the host has created work the kernel must refuse.
+pub const PTY_SESSION_MAX_COUNT: usize = 64;
+
 /// Largest standard-padded base64 carrier that can decode to one legal PTY
 /// input batch. Checked before decoding so the decoded allocation obeys the
 /// same bound as the resulting byte vector.
 pub const PTY_INPUT_MAX_BASE64_BYTES: usize = PTY_INPUT_MAX_BYTES.div_ceil(3) * 4;
+
+/// Largest PTY grid axis accepted from declarations, controls, or publishes.
+/// The cell-count bound below is the primary allocation ceiling; this also
+/// refuses pathological one-row/one-column shapes before allocating vectors.
+pub const PTY_GRID_MAX_AXIS: u16 = 1_000;
+
+/// Largest expanded PTY grid held for one session. A 240x70 screen is the
+/// repository's measured large-screen floor (16,800 cells); 100,000 preserves
+/// substantial headroom while bounding the host and kernel's per-session
+/// `Vec<Vec<StyledCell>>` allocations independently of compact wire size.
+pub const PTY_GRID_MAX_CELLS: u32 = 100_000;
+
+/// Whether a PTY geometry is non-zero and inside both resident allocation
+/// bounds. Shared by command admission and the resident host declaration path.
+pub fn pty_grid_dimensions_are_bounded(cols: u16, rows: u16) -> bool {
+    cols != 0
+        && rows != 0
+        && cols <= PTY_GRID_MAX_AXIS
+        && rows <= PTY_GRID_MAX_AXIS
+        && u32::from(cols) * u32::from(rows) <= PTY_GRID_MAX_CELLS
+}
 
 // Relations between the bounds, checked at COMPILE time in every build — a
 // later edit that makes the hello cap exceed the frame cap, or the blob chunk
@@ -204,6 +242,7 @@ pub const PTY_INPUT_MAX_BASE64_BYTES: usize = PTY_INPUT_MAX_BYTES.div_ceil(3) * 
 const _: () = {
     assert!(HELLO_MAX_BYTES < FRAME_BODY_MAX_BYTES);
     assert!(FRAME_BODY_MIN_BYTES >= 1);
+    assert!(PTY_GRID_MAX_CELLS >= 240 * 70);
     assert!(
         FRAME_PAYLOAD_MAX_BYTES + FRAME_BODY_MIN_BYTES as usize == FRAME_BODY_MAX_BYTES as usize
     );
@@ -390,6 +429,10 @@ pub enum KernelErrorCode {
     /// The kernel is already active and this request is activation-only.
     AlreadyActive,
     NotFound,
+    /// A committed side effect may have applied, but its definitive host
+    /// acknowledgement did not reach durable settlement. Retrying the command
+    /// would risk applying it twice.
+    Indeterminate,
     /// CAS refusal; the actual version travels in the error detail.
     StaleVersion,
     /// The requested edge is not in the state machine's table.
@@ -430,6 +473,7 @@ impl KernelErrorCode {
         Self::Sealed,
         Self::AlreadyActive,
         Self::NotFound,
+        Self::Indeterminate,
         Self::StaleVersion,
         Self::IllegalEdge,
         Self::Authority,
@@ -456,6 +500,7 @@ impl KernelErrorCode {
             Self::Sealed => "sealed",
             Self::AlreadyActive => "already_active",
             Self::NotFound => "not_found",
+            Self::Indeterminate => "indeterminate",
             Self::StaleVersion => "stale_version",
             Self::IllegalEdge => "illegal_edge",
             Self::Authority => "authority",
@@ -518,6 +563,7 @@ pub enum ProjectionKind {
     WorkspaceNode,
     WorkflowRun,
     PtySession,
+    PtySessionTemplate,
 }
 
 impl ProjectionKind {
@@ -542,6 +588,7 @@ impl ProjectionKind {
         Self::WorkspaceNode,
         Self::WorkflowRun,
         Self::PtySession,
+        Self::PtySessionTemplate,
     ];
 
     /// The wire name — the same string `serde` writes, and the same one that
@@ -570,6 +617,7 @@ impl ProjectionKind {
             Self::WorkspaceNode => "workspace_node",
             Self::WorkflowRun => "workflow_run",
             Self::PtySession => "pty_session",
+            Self::PtySessionTemplate => "pty_session_template",
         }
     }
 }
@@ -647,6 +695,9 @@ pub enum ProjectionRecord {
     PtySession {
         pty_session: PtySession,
     },
+    PtySessionTemplate {
+        pty_session_template: PtySessionTemplate,
+    },
 }
 
 impl ProjectionRecord {
@@ -673,6 +724,7 @@ impl ProjectionRecord {
             Self::WorkspaceNode { .. } => ProjectionKind::WorkspaceNode,
             Self::WorkflowRun { .. } => ProjectionKind::WorkflowRun,
             Self::PtySession { .. } => ProjectionKind::PtySession,
+            Self::PtySessionTemplate { .. } => ProjectionKind::PtySessionTemplate,
         }
     }
 }
@@ -717,6 +769,18 @@ pub enum KernelRequest {
     SendPtyInput {
         envelope: CommandEnvelope,
         data_base64: PtyInputData,
+    },
+    /// Submit a generation-addressed resize command; no local geometry is inferred.
+    ResizePtySession {
+        envelope: CommandEnvelope,
+    },
+    /// Submit a generation-addressed stop command.
+    StopPtySession {
+        envelope: CommandEnvelope,
+    },
+    /// Submit a name-only declared-template start command.
+    StartPtySession {
+        envelope: CommandEnvelope,
     },
     GetProjection {
         projection: ProjectionKind,
@@ -944,6 +1008,26 @@ pub enum KernelResult {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[specta(optional)]
         watermark: Option<Seq>,
+        /// The kernel's own clock when it served this page.
+        ///
+        /// Same argument as `watermark` one field up, on the other axis: that
+        /// one lets a client say how stale its view is against kernel truth
+        /// rather than against its own poll clock, and this one lets it say
+        /// WHEN against kernel truth rather than against its own wall clock.
+        /// A client folding "today's spend" from a page of cost entries was
+        /// choosing the day boundary itself, so two clients disagreeing by a
+        /// few minutes across midnight would report different totals over
+        /// identical rows, and neither would be wrong about anything it could
+        /// check.
+        ///
+        /// Optional because it is additive: a client reading from a kernel
+        /// that predates the field falls back to its own clock, which is what
+        /// it was doing anyway. A client that needs the boundary to be
+        /// authoritative must treat absence as a reason to say so, not as a
+        /// reason to assume agreement.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[specta(optional)]
+        served_at: Option<Timestamp>,
     },
     Events {
         events: Vec<EventEnvelope>,
@@ -1062,6 +1146,13 @@ pub enum ClientControl {
         request_id: RequestId,
         request: KernelRequest,
     },
+    /// Host-to-kernel result for one reverse PTY delivery. The id is derived
+    /// from the immutable command event, so a retry after reconnect uses the
+    /// same application identity without trusting a host-minted value.
+    PtyDeliveryAck {
+        delivery_id: EventId,
+        result: PtyDeliveryResult,
+    },
     /// Header for a model-produced VT snapshot. The next frame MUST be kind
     /// `0x02` with exactly `byte_size` bytes; the response is delayed until
     /// both frames have been validated and the snapshot has landed.
@@ -1114,12 +1205,37 @@ pub enum ServerControl {
     /// owns `session_id`. The host validates `byte_size`, decodes the base64,
     /// and writes the resulting bytes through its local session registry.
     PtyInput {
+        delivery_id: EventId,
         command_id: CommandId,
         session_id: PtySessionId,
         generation: PtySessionGeneration,
         byte_size: ByteCount,
         data_base64: PtyInputData,
     },
+    PtyResize {
+        delivery_id: EventId,
+        command_id: CommandId,
+        session_id: PtySessionId,
+        generation: PtySessionGeneration,
+        cols: u16,
+        rows: u16,
+    },
+    PtyStop {
+        delivery_id: EventId,
+        command_id: CommandId,
+        session_id: PtySessionId,
+        generation: PtySessionGeneration,
+    },
+    /// Name-only start delivery. The host resolves executable data from the catalog.
+    PtyStart {
+        delivery_id: EventId,
+        command_id: CommandId,
+        template_name: PtySessionTemplateName,
+        session_id: PtySessionId,
+    },
+    /// Confirms that the kernel durably settled one host application result.
+    /// The host may forget its local dedup entry only after receiving this.
+    PtyDeliverySettled { delivery_id: EventId },
     /// One batch on a live subscription. `cursor` is the last sequence in the
     /// batch — what a reconnect resumes from.
     EventBatch {
@@ -1199,6 +1315,19 @@ pub enum ServerControl {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[specta(optional)]
         last_seq: Option<PtyFrameSeq>,
+    },
+}
+
+/// The host's application result for a reverse PTY delivery. A refusal is a
+/// terminal application result; transport failures leave the durable row
+/// retryable under the same event-derived identity.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, specta::Type)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PtyDeliveryResult {
+    Applied,
+    Refused {
+        code: KernelErrorCode,
+        message: String,
     },
 }
 
@@ -1331,6 +1460,7 @@ mod tests {
         );
 
         let delivery = ServerControl::PtyInput {
+            delivery_id: EventId::new("pty_session:pty-1:2"),
             command_id: CommandId::new("input-1"),
             session_id: PtySessionId::new("pty-1"),
             generation: PtySessionGeneration::new("life-1"),
@@ -1349,6 +1479,103 @@ mod tests {
         assert!(!delivery_debug.contains("AP8K"));
         assert!(request_debug.contains("<redacted>"));
         assert!(delivery_debug.contains("<redacted>"));
+    }
+
+    #[test]
+    fn pty_lifecycle_controls_and_name_only_starts_round_trip() {
+        let resize = KernelRequest::ResizePtySession {
+            envelope: pty_command_envelope(crate::command::KernelCommand::ResizePtySession {
+                pty_session_id: PtySessionId::new("pty-1"),
+                generation: PtySessionGeneration::new("life-1"),
+                cols: 120,
+                rows: 40,
+            }),
+        };
+        let stop = KernelRequest::StopPtySession {
+            envelope: pty_command_envelope(crate::command::KernelCommand::StopPtySession {
+                pty_session_id: PtySessionId::new("pty-1"),
+                generation: PtySessionGeneration::new("life-1"),
+            }),
+        };
+        let start = KernelRequest::StartPtySession {
+            envelope: pty_command_envelope(crate::command::KernelCommand::RequestPtySessionStart {
+                template_name: crate::ids::PtySessionTemplateName::new("review"),
+                pty_session_id: PtySessionId::new("review-7"),
+            }),
+        };
+
+        for (request, tag) in [
+            (resize, "resize_pty_session"),
+            (stop, "stop_pty_session"),
+            (start, "start_pty_session"),
+        ] {
+            let json = serde_json::to_value(&request).expect("serialize PTY control request");
+            assert_eq!(json["type"], tag);
+            assert!(
+                json["envelope"]["payload"].get("command").is_none(),
+                "start/control requests never carry an executable command outside the declared catalog"
+            );
+            assert_eq!(
+                serde_json::from_value::<KernelRequest>(json).expect("decode PTY control request"),
+                request
+            );
+        }
+
+        let deliveries = [
+            ServerControl::PtyResize {
+                delivery_id: EventId::new("pty_session:pty-1:2"),
+                command_id: CommandId::new("resize-1"),
+                session_id: PtySessionId::new("pty-1"),
+                generation: PtySessionGeneration::new("life-1"),
+                cols: 120,
+                rows: 40,
+            },
+            ServerControl::PtyStop {
+                delivery_id: EventId::new("pty_session:pty-1:3"),
+                command_id: CommandId::new("stop-1"),
+                session_id: PtySessionId::new("pty-1"),
+                generation: PtySessionGeneration::new("life-1"),
+            },
+            ServerControl::PtyStart {
+                delivery_id: EventId::new("pty_session_start:review-7:1"),
+                command_id: CommandId::new("start-1"),
+                template_name: crate::ids::PtySessionTemplateName::new("review"),
+                session_id: PtySessionId::new("review-7"),
+            },
+        ];
+        for delivery in deliveries {
+            let json = serde_json::to_value(&delivery).expect("serialize PTY delivery");
+            assert!(json.get("command").is_none());
+            assert_eq!(
+                serde_json::from_value::<ServerControl>(json).expect("decode PTY delivery"),
+                delivery
+            );
+        }
+    }
+
+    fn pty_command_envelope(command: crate::command::KernelCommand) -> crate::CommandEnvelope {
+        crate::CommandEnvelope {
+            command_id: CommandId::new(format!("{}-1", command.command_type())),
+            project_id: crate::ProjectId::new("system"),
+            command_type: command.command_type().to_owned(),
+            schema_version: crate::ENVELOPE_SCHEMA_VERSION,
+            issued_at: crate::Timestamp::new("2026-08-12T00:00:00Z"),
+            actor: crate::Actor {
+                kind: "operator".to_owned(),
+                id: None,
+            },
+            origin: crate::Origin {
+                system: "gw".to_owned(),
+                r#ref: None,
+            },
+            target_aggregate_type: None,
+            target_aggregate_id: None,
+            expected_version: None,
+            idempotency_key: crate::IdempotencyKey::new(format!("{}-1", command.command_type())),
+            causation_id: None,
+            correlation_id: None,
+            payload: serde_json::to_value(command).expect("serialize PTY command"),
+        }
     }
 
     #[test]
@@ -1397,7 +1624,7 @@ mod tests {
         wire.sort_unstable();
         wire.dedup();
         assert_eq!(wire.len(), total, "two error codes share a wire value");
-        assert_eq!(total, 21);
+        assert_eq!(total, 22);
         assert_eq!(
             KernelErrorCode::IdempotencyConflict.as_str(),
             "idempotency_conflict"
@@ -1826,6 +2053,22 @@ mod tests {
                     opened_at: ts(),
                     updated_at: ts(),
                     closed_at: None,
+                },
+            },
+            ProjectionRecord::PtySessionTemplate {
+                pty_session_template: PtySessionTemplate {
+                    name: crate::PtySessionTemplateName::new("review"),
+                    version: 1,
+                    state: "active".into(),
+                    command: "/bin/cat".into(),
+                    args: vec![],
+                    cwd: None,
+                    env: std::collections::BTreeMap::new(),
+                    cols: 100,
+                    rows: 30,
+                    declared_at: ts(),
+                    updated_at: ts(),
+                    retired_at: None,
                 },
             },
         ]

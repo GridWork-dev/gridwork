@@ -11,10 +11,13 @@
 
 mod common;
 
-use common::{apply, drop_database, fresh_store, maintenance_pool, refuse};
+use common::{
+    actor, apply, apply_as, drop_database, fresh_store, maintenance_pool, refuse, refuse_as,
+};
 use gwk_domain::command::KernelCommand;
 use gwk_domain::ids::{
-    AttemptId, EngineId, EngineSessionId, PtySessionGeneration, PtySessionId, TaskId,
+    AttemptId, EngineId, EngineSessionId, PtySessionGeneration, PtySessionId,
+    PtySessionTemplateName, TaskId,
 };
 use gwk_domain::protocol::KernelErrorCode;
 use sqlx::Row;
@@ -98,6 +101,39 @@ async fn a_session_counts_attaches_and_closes_terminal() {
         .await
         .expect("count");
     assert_eq!(count, 1);
+
+    drop(store);
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
+async fn a_stop_request_keeps_the_live_session_attachable_until_close() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "pty_stop_requested", 8).await;
+
+    apply(&store, "open", open("pty-1:gen-1", "gen-1")).await;
+    apply_as(
+        &store,
+        "stop",
+        actor("operator"),
+        KernelCommand::StopPtySession {
+            pty_session_id: PtySessionId::new("pty-1"),
+            generation: PtySessionGeneration::new("gen-1"),
+        },
+    )
+    .await;
+    apply(&store, "attach-after-stop", attach("pty-1:gen-1", 2)).await;
+
+    let row = sqlx::query(
+        "SELECT state, version, attach_count FROM gwk.pty_session WHERE id = 'pty-1:gen-1'",
+    )
+    .fetch_one(store.pool())
+    .await
+    .expect("live lifetime");
+    assert_eq!(row.get::<String, _>("state"), "running");
+    assert_eq!(row.get::<i64, _>("version"), 3);
+    assert_eq!(row.get::<i64, _>("attach_count"), 1);
 
     drop(store);
     drop_database(&maintenance, &name).await;
@@ -209,7 +245,7 @@ async fn a_closed_session_refuses_reattach_and_reclose_but_records_a_late_detach
 
     let (code, msg) = refuse(&store, "att-after", attach("pty-1", 3)).await;
     assert_eq!(code, KernelErrorCode::Validation);
-    assert!(msg.contains("already closed as closed"), "{msg}");
+    assert!(msg.contains("closed and cannot be attached"), "{msg}");
     let (code, msg) = refuse(&store, "close-again", close("pty-1", 3)).await;
     assert_eq!(code, KernelErrorCode::Validation);
     assert!(msg.contains("already closed"), "{msg}");
@@ -250,6 +286,39 @@ async fn stale_versions_bad_shapes_and_missing_sessions_are_refused() {
     assert_eq!(code, KernelErrorCode::Validation);
     assert!(msg.contains("host generation"), "{msg}");
 
+    let (code, msg) = refuse_as(
+        &store,
+        "oversized-template",
+        actor("operator"),
+        KernelCommand::DeclarePtySessionTemplate {
+            template_name: PtySessionTemplateName::new("oversized"),
+            command: "/bin/cat".to_owned(),
+            args: vec![],
+            cwd: None,
+            env: std::collections::BTreeMap::new(),
+            cols: u16::MAX,
+            rows: u16::MAX,
+        },
+    )
+    .await;
+    assert_eq!(code, KernelErrorCode::Validation);
+    assert!(msg.contains("100000 cells"), "{msg}");
+
+    let (code, msg) = refuse_as(
+        &store,
+        "oversized-resize",
+        actor("operator"),
+        KernelCommand::ResizePtySession {
+            pty_session_id: PtySessionId::new("pty-1"),
+            generation: PtySessionGeneration::new("gen-1"),
+            cols: 1_000,
+            rows: 101,
+        },
+    )
+    .await;
+    assert_eq!(code, KernelErrorCode::Validation);
+    assert!(msg.contains("100000 cells"), "{msg}");
+
     drop(store);
     drop_database(&maintenance, &name).await;
 }
@@ -288,5 +357,133 @@ async fn the_seeded_delete_proves_the_row_is_ledger_history() {
     );
 
     drop(store);
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
+async fn the_declared_template_catalog_is_cas_guarded_and_never_deleted() {
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "pty_template_ledger", 8).await;
+
+    apply_as(
+        &store,
+        "declare-template",
+        actor("operator"),
+        KernelCommand::DeclarePtySessionTemplate {
+            template_name: PtySessionTemplateName::new("review"),
+            command: "/bin/cat".to_owned(),
+            args: vec![],
+            cwd: None,
+            env: std::collections::BTreeMap::new(),
+            cols: 100,
+            rows: 30,
+        },
+    )
+    .await;
+    apply_as(
+        &store,
+        "retire-template",
+        actor("operator"),
+        KernelCommand::RetirePtySessionTemplate {
+            template_name: PtySessionTemplateName::new("review"),
+            expected_version: 1,
+        },
+    )
+    .await;
+
+    let wrong_cas =
+        sqlx::query("UPDATE gwk.pty_session_template SET version = 4 WHERE name = 'review'")
+            .execute(store.pool())
+            .await
+            .expect_err("a template version may advance by exactly one")
+            .to_string();
+    assert!(
+        wrong_cas.contains("version must advance by exactly 1"),
+        "the CAS trigger refused it: {wrong_cas}"
+    );
+
+    let deleted = sqlx::query("DELETE FROM gwk.pty_session_template WHERE name = 'review'")
+        .execute(store.pool())
+        .await
+        .expect_err("template history cannot be deleted")
+        .to_string();
+    assert!(
+        deleted.contains("pty_session_template"),
+        "the no-delete trigger refused it: {deleted}"
+    );
+
+    let truncated = sqlx::query("TRUNCATE gwk.pty_session_template")
+        .execute(store.pool())
+        .await
+        .expect_err("template history cannot be truncated")
+        .to_string();
+    assert!(
+        truncated.contains("pty_session_template"),
+        "the no-truncate trigger refused it: {truncated}"
+    );
+
+    let oversized = sqlx::query(
+        "INSERT INTO gwk.pty_session_template (name, command, cols, rows) \
+         VALUES ('oversized', '/bin/cat', 1000, 101)",
+    )
+    .execute(store.pool())
+    .await
+    .expect_err("the table pins the resident cell allocation bound")
+    .to_string();
+    assert!(
+        oversized.contains("pty_template_grid_cell_bound"),
+        "the cell-bound CHECK refused it: {oversized}"
+    );
+
+    drop(store);
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
+async fn a_declared_template_persists_environment_references_not_secret_values() {
+    use gwk_domain::{KernelCommand, KernelResult, PtySessionTemplateName};
+    use sqlx::Row;
+
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "pty_template_env_refs", 8).await;
+    let command = KernelCommand::DeclarePtySessionTemplate {
+        template_name: PtySessionTemplateName::new("secret-safe"),
+        command: "/bin/cat".to_owned(),
+        args: vec![],
+        cwd: None,
+        env: std::collections::BTreeMap::from([(
+            "TOKEN".to_owned(),
+            "env:GWK_TEST_TEMPLATE_TOKEN".to_owned(),
+        )]),
+        cols: 80,
+        rows: 24,
+    };
+    assert!(matches!(
+        store
+            .submit(&common::envelope_as(
+                "declare-env-ref",
+                actor("operator"),
+                &command,
+            ))
+            .await,
+        KernelResult::CommandApplied { .. }
+    ));
+
+    let row = sqlx::query("SELECT env FROM gwk.pty_session_template WHERE name = 'secret-safe'")
+        .fetch_one(store.pool())
+        .await
+        .expect("template row");
+    let env: serde_json::Value = row.get("env");
+    assert_eq!(env["TOKEN"], "env:GWK_TEST_TEMPLATE_TOKEN");
+    let payload: serde_json::Value = sqlx::query_scalar(
+        "SELECT payload FROM gwk.event WHERE event_type = 'pty_session_template_declared'",
+    )
+    .fetch_one(store.pool())
+    .await
+    .expect("template event");
+    assert_eq!(payload["env"]["TOKEN"], "env:GWK_TEST_TEMPLATE_TOKEN");
+
     drop_database(&maintenance, &name).await;
 }

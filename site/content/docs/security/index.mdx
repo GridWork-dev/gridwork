@@ -3,7 +3,7 @@ title: Threat model
 description: Assets, trust boundaries, ten threat stances, implementation status, and explicit non-goals.
 ---
 
-{/* curated-from: docs/security/THREAT_MODEL.md sha256=8970cfe01a76bb51654065ddacbd90890249c85561e31c579d3fd74ffc20c732 */}
+{/* curated-from: docs/security/THREAT_MODEL.md sha256=50e40a20756d9eec26d15a15b48ae1e77467416463eb97c0eac9f2b862a3bf0f */}
 {/* curated-from: SECURITY.md sha256=76ceaf65dce41deafa4f17823fa4f6069b729525c24a624fae9f9450248bb14c */}
 
 What GridWork defends against, what it deliberately does not, and where each
@@ -98,8 +98,21 @@ Any local process with socket access can send arbitrary frames.
 `docs/protocol.md`); strict framing bounds and `deny_unknown_fields`
 decoding bound WHAT they can say; commands are CAS-guarded, idempotent, and
 policy-checked, so a misbehaving client can be refused but not corrupt
-order. Same-EUID peer validation reinforces socket permissions. No network listener
-exists before the authentication decision required by ADR 0002.
+order. PTY input, resize, stop, and declared-template starts are authority-gated,
+receipted, and delivered only through their capability-checked dedicated routes. Pending
+delivery is durable and short-leased. Explicit host refusal is terminal; disconnects and
+expired/orphaned claims after dispatch become terminally indeterminate rather than risking
+a duplicate side effect. A surviving host can reconcile retained applied evidence after
+reconnect, but the kernel never redelivers merely because a lease expired. Low-entropy
+input carriers are bound with a domain-separated keyed MAC rather than a recoverable plain
+digest. Lifecycle controls carry an exact generation, and arbitrary executable data never
+crosses a start request — it lives only in the operator-declared catalog. That catalog's
+environment values must be `env:NAME` references, resolved inside the resident host so a
+value never enters an immutable event. The discipline stops there: a template's command,
+arguments, and working directory are persisted verbatim and permanently, with no redaction
+path, so a credential must travel as a reference and never as an argument. Same-EUID peer
+validation reinforces socket permissions. No network listener exists before the
+authentication decision required by ADR 0002.
 
 **Status: in force.** The daemon binds a Unix socket inside a directory it
 resolves and checks the ownership and mode of, refuses a peer whose effective

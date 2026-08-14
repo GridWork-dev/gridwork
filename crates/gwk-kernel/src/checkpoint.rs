@@ -335,6 +335,19 @@ const PROJECTIONS: &[Projection] = &[
            AND ($2::text IS NULL OR t.id = $2) \
          ORDER BY t.id COLLATE \"C\" LIMIT $3",
     ),
+    derived(
+        "pty_session_template",
+        "name",
+        "SELECT jsonb_build_object('projection_type', 'pty_session_template', \
+           'pty_session_template', to_jsonb(t))::text \
+         FROM gwk.pty_session_template t ORDER BY t.name",
+        "SELECT jsonb_build_object('projection_type', 'pty_session_template', \
+           'pty_session_template', to_jsonb(t))::text \
+         FROM gwk.pty_session_template t \
+         WHERE ($1::text IS NULL OR t.name COLLATE \"C\" > $1) \
+           AND ($2::text IS NULL OR t.name = $2) \
+         ORDER BY t.name COLLATE \"C\" LIMIT $3",
+    ),
     written_beside_the_log(
         "receipt",
         "id",

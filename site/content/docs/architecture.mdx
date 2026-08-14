@@ -3,7 +3,7 @@ title: Architecture
 description: Truth ownership, append serialization, storage ports, projections, blobs, crash recovery, and contract surfaces.
 ---
 
-{/* curated-from: docs/architecture.md sha256=09b28adce25967bd5a701fc93361332f2c905de39d870c59e6a2e6981cfddad7 */}
+{/* curated-from: docs/architecture.md sha256=30e62f61e9ec30de3611420e6fc794923d80bfdd13c22db51a7f2f7e562637f6 */}
 
 The implementation contract behind the roadmap: what owns truth, what the
 pieces are, and which decisions are locked versus deliberately deferred.
@@ -26,13 +26,18 @@ Locked decisions change only by a recorded amendment, not by drift.
 > hookup that serves its frames to a consumer — the publish/retire wire family
 > plus `PtyAttach`/`PtySnapshot` answering from the kernel's PTY hub, so the
 > resident host's sessions reach the drill-down lens across the kernel socket.
-> Spawn-over-socket, via the adapters' control halves, remains deferred.
+> Consumer input/resize/stop route back to the exact host generation, and a
+> request-driven start names a kernel-declared executable template rather than
+> carrying an arbitrary command line. Template environment entries are durable
+> `env:NAME` references resolved only inside the resident host. The host clears
+> inherited environment before applying the template map, bounds every resident
+> grid before allocation, replaces stale start-manager routes, and periodically
+> reaps ended local sessions.
 >
-> **Built (partial):** the TUI's Queue, Board, Hall, session drill-down, and
-> Config lenses (`crates/gwk-tui`), with `gw tui` driving the Hall lens live
-> from the kernel's projections and events (`crates/gridwork/src/tui.rs`).
-> **Not built:** the workspace — the real multiplexer (stage 5 of the roadmap);
-> anything this file says about that surface is specification.
+> **Built:** the TUI's Queue, Board, Hall, session drill-down, and Config
+> lenses (`crates/gwk-tui`), with `gw tui` driving the Hall lens live from the
+> kernel's projections and events (`crates/gridwork/src/tui.rs`), and the
+> workspace — the real multiplexer (`crates/gwk-tui/src/workspace`).
 >
 > [Threat model](/docs/security) labels each security stance **in force** /
 > **partial** / **designed, not yet built**; when this file and that one disagree

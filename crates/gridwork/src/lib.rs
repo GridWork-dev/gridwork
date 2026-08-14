@@ -370,8 +370,21 @@ async fn execute(verb: Verb, pretty: bool, human_tables: bool) -> Result<(), Fai
     }
 }
 
-const SUMMARY_PAGE_LIMIT: u32 = 256;
+const PROJECTION_PAGE_LIMIT: u32 = 256;
 const SUMMARY_SNAPSHOT_ATTEMPTS: usize = 3;
+
+/// How many pages one projection kind may draw before the read stops short.
+///
+/// 32 × [`PROJECTION_PAGE_LIMIT`] is 8192 rows per kind, which no surface in
+/// this repo can usefully paint and no operator can usefully read. The bound
+/// exists because the alternative is worse than slow: an unbounded drain makes
+/// console startup cost a function of estate size, and the one estate large
+/// enough to notice is the one where noticing is least convenient.
+///
+/// Stopping short is not a failure — the surfaces already know how to say
+/// "at least" instead of "total". What matters is that stopping short is
+/// *reported*, which is what [`BoardState::complete`] carries.
+const MAX_PAGES_PER_PROJECTION: u32 = 32;
 const ESTATE_PROJECTIONS: &[ProjectionKind] = &[
     ProjectionKind::Task,
     ProjectionKind::Attempt,
@@ -470,6 +483,7 @@ async fn load_attempt_table_state(
                 records,
                 next_cursor,
                 watermark,
+                served_at: _,
             } => (records, next_cursor, watermark),
             KernelResult::Error {
                 code,
@@ -543,6 +557,7 @@ async fn projection_page(
             records,
             next_cursor,
             watermark,
+            served_at: _,
         } => Ok((records, next_cursor, watermark)),
         KernelResult::Error {
             code,
@@ -666,58 +681,151 @@ async fn load_board_state_once(
     };
     let mut watermarks = Vec::new();
     for &kind in kinds {
-        let mut cursor = None;
-        let mut seen = BTreeSet::new();
-        loop {
-            let result = client
-                .ask(KernelRequest::ListProjection {
-                    projection: kind,
-                    cursor: cursor.clone(),
-                    limit: Some(SUMMARY_PAGE_LIMIT),
-                })
-                .await?;
-            let (records, next_cursor, watermark) = match result {
-                KernelResult::ProjectionPage {
-                    records,
-                    next_cursor,
-                    watermark,
-                } => (records, next_cursor, watermark),
-                KernelResult::Error { code, message, .. } => {
-                    return Err(Failure::new(code, message));
-                }
-                other => {
-                    return Err(Failure::internal(format!(
-                        "read summary projections: kernel answered with {other:?}"
-                    )));
-                }
-            };
-            if !records.is_empty() && watermark.is_none() {
-                return Err(Failure::new(
-                    KernelErrorCode::Schema,
-                    format!(
-                        "{} projection rows arrived without a page watermark",
-                        kind.as_str()
-                    ),
-                ));
-            }
-            watermarks.push(watermark);
-            for record in records {
-                push_board_record(&mut state, kind, record)?;
-            }
-            let Some(next) = next_cursor else {
-                break;
-            };
-            if !seen.insert(next.clone()) {
-                return Err(Failure::internal(format!(
-                    "{} projection cursor repeated {next:?}",
-                    kind.as_str()
-                )));
-            }
-            cursor = Some(next);
-        }
+        let page = drain_projection(client, kind, &mut state, "read summary projections").await?;
+        watermarks.extend(page.watermarks);
+        // A conjunction, not an assignment: one kind stopping short makes the
+        // whole read short, and a later kind that drained must not clear it.
+        state.complete &= page.drained;
     }
     state.watermark = watermarks.first().copied().flatten();
     Ok((state, watermarks))
+}
+
+/// What a paged read should do after taking a page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PageStep {
+    /// A cursor came back and the budget allows another page.
+    Continue,
+    /// No cursor came back — the kind is exhausted and the read is whole.
+    Drained,
+    /// The budget is spent with a cursor still in hand. The read stops here and
+    /// the caller must not claim a total.
+    Short,
+}
+
+/// Decide the step from whether a cursor came back and how many pages have been
+/// taken, this one included.
+///
+/// Lifted out of both read loops for one reason: inside them it is reachable
+/// only through a live kernel socket, and a guard that cannot be exercised is
+/// indistinguishable from one that is absent. Everything else in those loops is
+/// plumbing; this is the whole of what decides `complete`.
+pub(crate) fn page_step(has_next: bool, pages_taken: u32) -> PageStep {
+    if !has_next {
+        // Exhaustion beats the budget, and the order is load-bearing: a read
+        // whose last page happens to be its 32nd is WHOLE, not short. Checking
+        // the budget first would report a complete read as a floor.
+        return PageStep::Drained;
+    }
+    if pages_taken >= MAX_PAGES_PER_PROJECTION {
+        return PageStep::Short;
+    }
+    PageStep::Continue
+}
+
+/// What one projection kind's paged read produced.
+pub(crate) struct DrainedPages {
+    /// One entry per page fetched, for the caller's coherence check.
+    pub(crate) watermarks: Vec<Option<Seq>>,
+    /// False iff the page budget ran out while a cursor was still in hand.
+    ///
+    /// The distinction the whole struct exists for: a read that ended because
+    /// there was nothing left and a read that ended because it was told to stop
+    /// both leave the same rows behind. Only this flag separates them, and
+    /// every "total" the surfaces print is a claim it is true.
+    pub(crate) drained: bool,
+}
+
+/// Page one projection kind into `state`, up to [`MAX_PAGES_PER_PROJECTION`].
+///
+/// The console and the CLI both fold the same projections into the same
+/// `BoardState`, and both used to carry their own copy of this loop with
+/// `complete` hardcoded `true` at the end of it. One copy means one place
+/// decides whether a read was whole — and, less obviously, means the schema
+/// guard below (rows arriving without a page watermark) now covers the console
+/// too, which it did not when the loops were separate.
+pub(crate) async fn drain_projection(
+    client: &mut Client,
+    kind: ProjectionKind,
+    state: &mut BoardState,
+    context: &str,
+) -> Result<DrainedPages, Failure> {
+    let mut cursor = None;
+    let mut seen = BTreeSet::new();
+    let mut watermarks = Vec::new();
+    let mut pages = 0u32;
+    loop {
+        let result = client
+            .ask(KernelRequest::ListProjection {
+                projection: kind,
+                cursor: cursor.clone(),
+                limit: Some(PROJECTION_PAGE_LIMIT),
+            })
+            .await?;
+        let (records, next_cursor, watermark) = match result {
+            KernelResult::ProjectionPage {
+                records,
+                next_cursor,
+                watermark,
+                served_at: _,
+            } => (records, next_cursor, watermark),
+            KernelResult::Error { code, message, .. } => {
+                return Err(Failure::new(code, message));
+            }
+            other => {
+                return Err(Failure::internal(format!(
+                    "{context}: kernel answered with {other:?}"
+                )));
+            }
+        };
+        if !records.is_empty() && watermark.is_none() {
+            return Err(Failure::new(
+                KernelErrorCode::Schema,
+                format!(
+                    "{} projection rows arrived without a page watermark",
+                    kind.as_str()
+                ),
+            ));
+        }
+        watermarks.push(watermark);
+        for record in records {
+            push_board_record(state, kind, record)?;
+        }
+        pages += 1;
+        match (page_step(next_cursor.is_some(), pages), next_cursor) {
+            (PageStep::Drained, _) => {
+                return Ok(DrainedPages {
+                    watermarks,
+                    drained: true,
+                });
+            }
+            // The only path that reports short, and the reason `complete` is
+            // reachable at all.
+            (PageStep::Short, _) => {
+                return Ok(DrainedPages {
+                    watermarks,
+                    drained: false,
+                });
+            }
+            (PageStep::Continue, Some(next)) => {
+                if !seen.insert(next.clone()) {
+                    return Err(Failure::internal(format!(
+                        "{} projection cursor repeated {next:?}",
+                        kind.as_str()
+                    )));
+                }
+                cursor = Some(next);
+            }
+            // Unreachable by construction — `page_step` returns `Drained` for
+            // exactly this input. An error rather than a panic, because a
+            // broken invariant in a read path should refuse, not abort.
+            (PageStep::Continue, None) => {
+                return Err(Failure::internal(
+                    "projection paging asked to continue with no cursor",
+                ));
+            }
+        }
+    }
 }
 
 fn push_board_record(
@@ -786,6 +894,11 @@ fn emit_serialized(value: &impl serde::Serialize, pretty: bool) -> Result<(), Fa
 /// would not use. It answers `signal: true` when nothing was remapped, which
 /// is the difference between "my file did nothing" and "my file was never
 /// found" — two states an operator otherwise cannot tell apart.
+///
+/// "Same resolver" is the literal claim: the console calls this same
+/// [`ChromeTheme::from_env`](gwk_tui::chrome::ChromeTheme::from_env) once at
+/// startup and paints the workspace through the result, so the two cannot
+/// drift without one of them failing to build.
 fn chrome_theme() -> Result<Value, Failure> {
     let theme = gwk_tui::chrome::ChromeTheme::from_env()
         .map_err(|why| Failure::new(KernelErrorCode::Schema, why.to_string()))?;
@@ -1301,5 +1414,58 @@ mod tests {
         assert!(expect_command(&envelope, "resolve_attention").is_ok());
         let wrong = expect_command(&envelope, "grant_authority").expect_err("refused");
         assert_eq!(wrong.exit, exit::USAGE);
+    }
+}
+
+#[cfg(test)]
+mod paging_tests {
+    use super::{MAX_PAGES_PER_PROJECTION, PageStep, page_step};
+
+    #[test]
+    fn no_cursor_means_the_read_is_whole() {
+        assert_eq!(page_step(false, 1), PageStep::Drained);
+        assert_eq!(
+            page_step(false, MAX_PAGES_PER_PROJECTION),
+            PageStep::Drained
+        );
+        // Past the budget with nothing left is still whole — the budget only
+        // decides whether to ask again, never whether what we have is all.
+        assert_eq!(
+            page_step(false, MAX_PAGES_PER_PROJECTION + 5),
+            PageStep::Drained
+        );
+    }
+
+    #[test]
+    fn the_last_allowed_page_is_not_a_short_read_when_it_exhausts() {
+        // The ordering guard. If the budget were checked before exhaustion, a
+        // read whose final page is its 32nd would report `complete: false` and
+        // every folded figure would degrade to "at least" over a total read.
+        assert_eq!(
+            page_step(false, MAX_PAGES_PER_PROJECTION),
+            PageStep::Drained
+        );
+        assert_eq!(page_step(true, MAX_PAGES_PER_PROJECTION), PageStep::Short);
+    }
+
+    #[test]
+    fn the_budget_boundary_is_off_by_one_proof() {
+        // `pages` is incremented BEFORE the check, so the budget is spent when
+        // the count reaches it, not after. `>` instead of `>=` would take one
+        // page too many.
+        assert_eq!(
+            page_step(true, MAX_PAGES_PER_PROJECTION - 1),
+            PageStep::Continue
+        );
+        assert_eq!(page_step(true, MAX_PAGES_PER_PROJECTION), PageStep::Short);
+        assert_eq!(
+            page_step(true, MAX_PAGES_PER_PROJECTION + 1),
+            PageStep::Short
+        );
+    }
+
+    #[test]
+    fn a_cursor_inside_budget_keeps_going() {
+        assert_eq!(page_step(true, 1), PageStep::Continue);
     }
 }

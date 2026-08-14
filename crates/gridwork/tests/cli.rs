@@ -126,6 +126,9 @@ async fn serve_empty_projection_pages(listener: UnixListener, connections: usize
                     records: Vec::new(),
                     next_cursor: None,
                     watermark: Some(gwk_domain::ids::Seq::new(221)),
+                    // Absent on purpose: this fake stands in for a kernel that
+                    // predates the field, which is the fallback path.
+                    served_at: None,
                 },
             };
             write_frame(
@@ -213,7 +216,7 @@ fn the_chrome_theme_resolves_without_a_daemon_and_refuses_an_invisible_remap() {
 
     // The twin reports exactly what the workspace would paint, remap and all.
     let file = dir.join("chrome.toml");
-    std::fs::write(&file, "tab_active = \"ok\"\n").expect("write theme");
+    std::fs::write(&file, "tab_active = \"gws_ok\"\n").expect("write theme");
     let themed = gw_env("theme", &[("GWK_CHROME_THEME", &file.to_string_lossy())]);
     assert_eq!(code(&themed), 0);
     let answer = json(&themed);
@@ -224,14 +227,14 @@ fn the_chrome_theme_resolves_without_a_daemon_and_refuses_an_invisible_remap() {
         .iter()
         .find(|role| role["role"] == "tab_active")
         .expect("tab_active");
-    assert_eq!(active["token"], "ok");
-    assert_eq!(active["default"], "hue_bright");
+    assert_eq!(active["token"], "gws_ok");
+    assert_eq!(active["default"], "gws_hue_bright");
 
     // An elevation step paints nothing at any tier, so a role pointed at one
     // would be invisible rather than differently coloured. Refused, with the
     // reason, rather than accepted into a workspace that looks broken.
     let bad = dir.join("bad.toml");
-    std::fs::write(&bad, "pane_border = \"bg\"\n").expect("write theme");
+    std::fs::write(&bad, "pane_border = \"gws_bg\"\n").expect("write theme");
     let refused = gw_env("theme", &[("GWK_CHROME_THEME", &bad.to_string_lossy())]);
     assert_eq!(
         code(&refused),
