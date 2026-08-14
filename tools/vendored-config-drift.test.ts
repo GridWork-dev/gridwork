@@ -75,6 +75,19 @@ const VENDORED: readonly (readonly [string, string])[] = [
   // sibling. Editing the copy here is not the workaround; that IS the fork D3 forbids.
   // What covers the gap meanwhile is tools/oxlint-plugin-load.test.ts, which proves the
   // plugin loads and both security rules fire against THIS repo's oxlint build.
+  //
+  // The design-token contract and its validator (Lane E item 2, acceptance 7). Vendored
+  // under site/ rather than tools/ because index.ts imports postcss and Bun resolves bare
+  // specifiers by walking up from the imported file — there is no root package.json here,
+  // so a copy beside this test would find no node_modules at all. The canonical path is
+  // unchanged; only the local one moves.
+  //
+  // These two are why the site declares all 24 roles literally in all three theme scopes
+  // instead of generating them: keeping the validator byte-identical is what makes this a
+  // plain equality check. A local relaxation would have made it a fork with a diff to
+  // maintain, which is the thing D3 exists to prevent.
+  ["site/tools/design-tokens/contract.ts", "tools/design-tokens/contract.ts"],
+  ["site/tools/design-tokens/index.ts", "tools/design-tokens/index.ts"],
 ] as const;
 
 /** The vendored bytes as of the commit that recorded them, keyed by the same repo-relative
@@ -99,6 +112,10 @@ const RECORDED: Readonly<Record<string, string>> = {
   "tools/oxlint-config/plugin.js":
     "c1f050b5b2b4ce9586776163f6d519e15cff51c85bd5b73762e2cfdb9ce045a0",
   ".oxfmtrc.json": "e02c4a19a29b71af404771d5d57f10f4f97f42cbbdfc4256c831ff1832a5eb80",
+  "site/tools/design-tokens/contract.ts":
+    "da35d2b648a26aa132934a11c6704d02b827673d1354beeff1f358e882a26ffc",
+  "site/tools/design-tokens/index.ts":
+    "e8ecbdb20459df57e7f3afc508ffc98f3851b37072e701b3893455f54a39296c",
 };
 
 /** SHA-256 of the file's raw bytes. Byte-for-byte, not parsed-and-compared: a reordered
@@ -148,7 +165,7 @@ describe("vendored house configs match canonical (SPEC D3)", () => {
   // and never listed, which is the drift that actually happens — someone copies a fifth
   // config in and the gate stays green because it was never told to look.
   it("checks every vendored file", () => {
-    expect(VENDORED).toHaveLength(4);
+    expect(VENDORED).toHaveLength(6);
   });
 
   for (const [local, canonical] of VENDORED) {

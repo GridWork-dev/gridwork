@@ -8,10 +8,16 @@ import { StructuredData } from "./structured-data";
 
 import "./globals.css";
 
+// `--gws-font-signal`, not `--font-signal`. The house token contract requires
+// every custom property this site owns to carry the site prefix, and this one is
+// ours — Next only injects the name we choose. Left bare it was the single
+// un-namespaced `var()` in the whole stylesheet, and the only way to make the
+// validator accept it would have been to declare `font` a third-party prefix,
+// which is a false statement about a variable we name ourselves.
 const mono = JetBrains_Mono({
   display: "swap",
   subsets: ["latin"],
-  variable: "--font-signal",
+  variable: "--gws-font-signal",
 });
 
 const title = "GridWork — an agent operating system for the terminal";

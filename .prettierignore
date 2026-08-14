@@ -30,6 +30,14 @@ contracts/signal-theme.json
 # Their content is load-bearing prose about traps, and it stays as authored.
 **/.oxlintrc.json
 
+# The vendored design-token contract and validator, byte-pinned against their canonical
+# copies by tools/vendored-config-drift.test.ts — the same rule as tools/oxlint-config/
+# above, but this one DOES need naming because it sits inside the `site` tree the formatter
+# is given. They conform to this repo's oxfmt today, which is precisely why the exclusion
+# looks redundant: the day upstream style and this config disagree, `--check` reds with no
+# source change here and `format.sh` in write mode silently breaks the byte-pin.
+site/tools/design-tokens/
+
 # The docs mirror is sha256-pinned three ways by site/scripts/check-doc-freshness.ts.
 # Reformatting an .mdx page changes its registered bytes and reds the freshness gate
 # against a source that never moved. (`**/*.md` is already excluded upstream in
