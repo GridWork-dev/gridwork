@@ -1,5 +1,16 @@
 {
-  "$schema": "https://unpkg.com/knip@6/schema.json"
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+
+  // oxlint and oxfmt are pinned here and invoked from the REPO ROOT, by tools/lint.sh and
+  // tools/format.sh. Both tools read their config and ignore files from the current
+  // directory only, and the configs live at the root, so root is the one cwd where they
+  // behave correctly — while site/ is the one Bun project that gets installed, and so the
+  // only place a version can be pinned. knip sees the half inside its scope and is right
+  // that nothing in site/ imports them; the conclusion is what does not follow.
+  //
+  // This is the ONLY entry here, and it is narrow on purpose: an `ignoreDependencies` that
+  // grows by reflex is how a dead-code gate stops reporting dead code.
+  "ignoreDependencies": ["oxlint", "oxfmt"]
 
   // Scoped to site/ because this repo has no root package.json — three
   // independent projects share the checkout and each carries its own lockfile.
