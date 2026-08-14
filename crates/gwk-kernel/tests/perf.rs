@@ -6,6 +6,11 @@
 //! not the first, because a run that stops at the first miss costs a second run
 //! to learn the rest.
 //!
+//! The receipt carries one number that is not an accepted bound: the load the
+//! latency phase actually offered. It rides in the same list so that a run which
+//! failed to set up its own experiment still writes a receipt and still fails,
+//! rather than aborting into silence — see [`latency_measurements`].
+//!
 //! ```text
 //! GWK_TEST_ADMIN_DATABASE_URL=postgres://postgres@localhost:55432/postgres \
 //!   cargo test --release -p gwk-kernel --test perf -- --ignored --nocapture
@@ -93,6 +98,10 @@ struct Measurement {
     method: String,
     /// Against the bound as accepted, with no slack. This is the phase verdict.
     holds: bool,
+    /// Whether a runner's slack may rescue this. False for the accepted hardware
+    /// bounds, which is what slack exists for; true for a check on the harness's
+    /// own validity, which no slack should ever pass.
+    slack_exempt: bool,
 }
 
 impl Measurement {
@@ -116,12 +125,32 @@ impl Measurement {
             direction,
             method,
             holds,
+            slack_exempt: false,
+        }
+    }
+
+    /// A check on the harness rather than on the kernel. Slack models a machine
+    /// slower than the operator's box; this models an experiment that did not
+    /// happen, and no multiple of a wrong run makes it a right one.
+    fn harness(
+        name: &'static str,
+        unit: &'static str,
+        value: f64,
+        bound: f64,
+        direction: Direction,
+        method: String,
+    ) -> Self {
+        Self {
+            slack_exempt: true,
+            ..Self::new(name, unit, value, bound, direction, method)
         }
     }
 
     /// Whether it clears the bound after the runner's slack is applied. Equal to
-    /// [`Self::holds`] at the default slack of 1.
+    /// [`Self::holds`] at the default slack of 1, and always for a slack-exempt
+    /// measurement.
     fn passes(&self, slack: f64) -> bool {
+        let slack = if self.slack_exempt { 1.0 } else { slack };
         match self.direction {
             Direction::AtMost => self.value <= self.bound * slack,
             Direction::AtLeast => self.value * slack >= self.bound,
@@ -270,22 +299,52 @@ async fn command_latency(maintenance: &PgPool) -> Vec<Measurement> {
     }
     millis.sort_by(f64::total_cmp);
     let rate = total as f64 / offered.as_secs_f64();
-    assert!(
-        rate >= LATENCY_COMMANDS_PER_SECOND as f64 * 0.95,
-        "the load offered was {rate:.1}/s, not {LATENCY_COMMANDS_PER_SECOND}/s: \
-         the percentiles below are from a different experiment"
-    );
     drop_database(maintenance, &name).await;
 
     let method = format!(
         "{total} mixed single-event commands over five aggregate types, offered at \
          {rate:.1}/s for {LATENCY_SECONDS}s, every one applied"
     );
+    latency_measurements(rate, &millis, method)
+}
+
+/// The latency phase's verdict, separated from its measurement so the decision is
+/// testable without a database and a minute of wall clock.
+///
+/// **The offered rate is reported, not asserted.** An assertion here fires before
+/// the receipt is written, so the run produces no artifact at all — and CI cannot
+/// tell a runner that was too busy from a job that broke. That inverted the whole
+/// two-runner design: a real latency regression wrote its receipt and was
+/// tolerated as one miss beside a clean fresh run, while runner contention — the
+/// exact noise the second runner exists to absorb — hard-failed the build.
+///
+/// It is exempt from `GWK_PERF_SLACK` because it is not a hardware bound. Slack
+/// says "this runner is slower than the operator's box"; this says "the harness
+/// did not run the experiment the percentiles claim to describe", and a generous
+/// multiple would turn that into a pass over samples nobody should read.
+///
+/// When it misses, the percentiles are **withheld** rather than reported as
+/// missed. They are not bad numbers, they are numbers from a different
+/// experiment, and a receipt listing them as failed bounds would send the next
+/// reader after a latency regression that never happened.
+fn latency_measurements(rate: f64, millis: &[f64], method: String) -> Vec<Measurement> {
+    let offered = Measurement::harness(
+        "command_latency_offered_rate",
+        "cmd/s",
+        rate,
+        LATENCY_COMMANDS_PER_SECOND as f64 * 0.95,
+        Direction::AtLeast,
+        method.clone(),
+    );
+    if !offered.holds {
+        return vec![offered];
+    }
     vec![
+        offered,
         Measurement::new(
             "command_latency_p95",
             "ms",
-            percentile(&millis, 95),
+            percentile(millis, 95),
             50.0,
             Direction::AtMost,
             method.clone(),
@@ -293,7 +352,7 @@ async fn command_latency(maintenance: &PgPool) -> Vec<Measurement> {
         Measurement::new(
             "command_latency_p99",
             "ms",
-            percentile(&millis, 99),
+            percentile(millis, 99),
             200.0,
             Direction::AtMost,
             method,
@@ -711,5 +770,50 @@ mod tests {
             )
             .holds
         );
+    }
+
+    #[test]
+    fn an_under_offered_run_withholds_its_percentiles_and_no_slack_rescues_it() {
+        // Tenths of a millisecond, so a valid run clears both latency bounds and
+        // the only thing under test is the offered-rate decision.
+        let millis: Vec<f64> = (1..=100).map(|n| f64::from(n) / 10.0).collect();
+
+        // 82.3/s against a 100/s target is the shape a contended hosted runner
+        // produced on 2026-08-14, and the shape that used to abort before the
+        // receipt was written.
+        let missed = latency_measurements(82.3, &millis, String::new());
+        assert_eq!(
+            missed.len(),
+            1,
+            "percentiles from an under-offered run describe a different \
+             experiment and must not reach the receipt"
+        );
+        assert_eq!(missed[0].name, "command_latency_offered_rate");
+        assert!(!missed[0].holds, "82.3/s is not 100/s");
+        // The one that matters: CI runs GWK_PERF_SLACK=3. Slack must not turn a
+        // harness failure into a pass over samples nobody should read.
+        assert!(
+            !missed[0].passes(3.0),
+            "slack rescued an invalid experiment"
+        );
+        assert!(!missed[0].passes(1_000.0));
+
+        let clean = latency_measurements(100.0, &millis, String::new());
+        assert_eq!(
+            clean.len(),
+            3,
+            "a valid run reports the offered rate and both percentiles"
+        );
+        assert!(clean.iter().all(|m| m.holds));
+        assert_eq!(clean[1].name, "command_latency_p95");
+        assert_eq!(clean[2].name, "command_latency_p99");
+        assert!(
+            !clean[1].slack_exempt,
+            "a hardware bound still takes the runner's slack"
+        );
+
+        // The floor is 95% of the target, and it is inclusive.
+        assert!(latency_measurements(95.0, &millis, String::new())[0].holds);
+        assert_eq!(latency_measurements(94.9, &millis, String::new()).len(), 1);
     }
 }
