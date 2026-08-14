@@ -3,7 +3,7 @@ title: Run GridWork today
 description: Certify a sample stream, install the gw CLI, initialize a PostgreSQL 16 kernel, and understand the current limits.
 ---
 
-{/* curated-from: README.md sha256=0552ecc8ebc2bbddc13fb370b69c8ecdf8494065f71a3c0176e55a83762f45a7 */}
+{/* curated-from: README.md sha256=222a98adf5fb86fe4945384447b3bb04116147d5ae7b79d0034f270d62601eca */}
 
 ## Before you clone
 
@@ -64,10 +64,12 @@ stream is included under `fixtures/` in the unpacked published crate.
 cargo install gridwork
 ```
 
-That installs the headless `gw` binary. Library crates use the `gwk-` prefix because
-the crates.io name `gw` belongs to an unrelated tool; the GridWork binary itself is
-permanently named `gw`. It still needs PostgreSQL 16 and the two-role initialization
-below before it can run a kernel.
+At 0.0.3 that installs the `gw` binary **and the console it renders** — `gwk-tui`
+reached crates.io in that release, so the five lenses come with it. Through 0.0.2 the
+same command got you the headless CLI alone, which is what this page used to say.
+Library crates use the `gwk-` prefix because the crates.io name `gw` belongs to an
+unrelated tool; the GridWork binary itself is permanently named `gw`. It still needs
+PostgreSQL 16 and the two-role initialization below before it can run a kernel.
 
 ## Run the kernel
 
