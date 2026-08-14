@@ -63,17 +63,23 @@ branch_prefix = "feature/"
 #
 #     git diff --cached --no-renames --name-only | ./tools/cleanroom-gate.sh
 #
-# CI is `.github/workflows/ci.yml` — 21 jobs plus the `verify` aggregator, and 3
-# CodeQL checks from GitHub's default setup that live outside the file (its five
-# configured languages collapse to three `Analyze` runs). Branch protection
-# requires exactly one context, `verify`, which aggregates 18 of the 21; the
-# other three — `perf-attempt`, `perf-retry`, `advisories` — are
+# CI is `.github/workflows/ci.yml` — 21 jobs plus the `verify` aggregator.
+# Branch protection requires exactly one context, `verify`, which aggregates 18
+# of the 21; the other three — `perf-attempt`, `perf-retry`, `advisories` — are
 # `continue-on-error` and cannot fail anything.
 #
-# Counted from the file and from main's check runs, not carried forward. These
-# numbers are the kind that drift silently: every count here was wrong by one or
-# more before this edit, in a manifest whose stated purpose is to be the map
-# external tooling reads instead of parsing the workflow.
+# Code scanning lives outside the file and does not count the way it reads. Five
+# languages are configured, but `javascript` and `typescript` share one
+# analysis, so three `Analyze` runs appear — on every commit, main included. A
+# fourth check named `CodeQL` appears on pull request heads ONLY: it comes from
+# a different app and reports alert status rather than running an analysis. A PR
+# therefore shows four and main shows three, and neither number is wrong.
+#
+# Counted from the file and from live check runs on both a PR head and main, not
+# carried forward. Worth saying why the last line is spelled out: the first pass
+# at this edit counted main alone, concluded three, and would have replaced a
+# correct number with a wrong one in the commit that exists to fix wrong
+# numbers. A count is only as good as the ref it was taken on.
 #
 # Editing README.md, docs/*.md, or docs/derivation/reviews/ reds the docs
 # freshness gate until the site mirror is re-curated: mirror prose, the
