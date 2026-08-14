@@ -119,7 +119,7 @@ Designer-decided defaults (taken, vetoable): the 120×40/80×24 grid contract wi
 explicit too-small card; keybar elision over wholesale dropping; urgency ordering
 applied at every density rung (not only at Paging); real elapsed times replacing the
 hardcoded "live" text; a visible loading state; color-tier/glyph-set visibility in the
-bar; selection/focus painted with the already-ratified `focus`/`selection` tokens.
+bar; selection/focus painted with the already-ratified `gws_focus`/`gws_selection` tokens.
 
 ## 3. Question storm
 
@@ -251,9 +251,9 @@ that raised it.
   stay visually distinct from these exceptions?
 
 ### Theme / degradation
-- `focus` shares `hue`'s hex "until a rendered console proves it must diverge" — this
+- `gws_focus` shares `gws_hue`'s hex "until a rendered console proves it must diverge" — this
   design round is that trigger. Diverge or ratify?
-- At Mono, `hue` vs `hue_bright` are identical and `fail` carries no color. Per-token,
+- At Mono, `gws_hue` vs `gws_hue_bright` are identical and `gws_fail` carries no color. Per-token,
   what compensates at the bottom tier?
 - Elevation tokens are never-a-color by contract; their alternate expressions
   (reverse video, box rules, blank-line grouping) are undemonstrated. The mockups must
@@ -431,7 +431,7 @@ ladder rather than shearing the session identity:
 `sent 14B  rcpt 01J9F2C4  operator  17:29:58` → `sent 14B  rcpt 01J9F2C4` → `sent 14B`.
 
 **Refusals are a state, not an event**, so they do not expire on a timer: a refusal holds
-the same slot in `fail` styling until the next send or until INPUT is left, and the mode
+the same slot in `gws_fail` styling until the next send or until INPUT is left, and the mode
 bar says so.
 
 **Finding — the rail costs the session columns.** The fixture's session is 100 cols; a
@@ -637,7 +637,7 @@ as pinned as a header.
   *differently* rather than why they go unrendered. The block sits **above the column
   heads**, not in the footer beside `UNKNOWN`, and that placement is the ruling: a
   caveat printed after the table has already let the reader believe the rows. It opens
-  with the word `INTEGRITY` and a count, carried by words rather than the `fail`
+  with the word `INTEGRITY` and a count, carried by words rather than the `gws_fail`
   binding, because mono and ascii lose every binding and an alarm that only alarms in
   truecolor is not one — the specific way B4 was worse than a plain omission. It is
   evidence, not chrome: no findings, no block, and the clean frame keeps its column

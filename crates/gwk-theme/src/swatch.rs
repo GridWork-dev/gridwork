@@ -41,14 +41,21 @@ pub fn frame(tier: ColorTier) -> String {
          Editing it by hand records a decision nobody made.\n\n",
     );
 
+    // Measured, not a literal. A hard-coded column width does not fail when a
+    // longer token name arrives — it pads to at least that many and shoves the
+    // rest of THAT row right, so the table goes quietly ragged in a file whose
+    // whole job is to be eyeballed. Both tables key off the same width so the
+    // token column lines up between them.
+    let token_col = SIGNAL.iter().map(|t| t.name.len()).max().unwrap_or(0) + 1;
+
     out.push_str(&format!("TOKENS ({})\n", SIGNAL.len()));
     out.push_str(&format!(
-        "  {:<12} {:<8} {:>4}  {:<27} {}\n",
+        "  {:<token_col$} {:<8} {:>4}  {:<27} {}\n",
         "token", "value", "256", "tier 16", "this tier"
     ));
     for token in SIGNAL {
         out.push_str(&format!(
-            "  {:<12} {:<8} {:>4}  {:<27} {}\n",
+            "  {:<token_col$} {:<8} {:>4}  {:<27} {}\n",
             token.name,
             token.value,
             token.index256,
@@ -59,7 +66,7 @@ pub fn frame(tier: ColorTier) -> String {
 
     out.push_str(&format!("\nSTATES ({})\n", STATES.len()));
     out.push_str(&format!(
-        "  {:<16} {:<17} {:<6} {:<6} {:<11} {}\n",
+        "  {:<16} {:<17} {:<6} {:<6} {:<token_col$} {}\n",
         "state", "mark", "glyph", "ascii", "token", "this tier"
     ));
     for state in STATES {
@@ -72,7 +79,7 @@ pub fn frame(tier: ColorTier) -> String {
             None => ('?', '?'),
         };
         out.push_str(&format!(
-            "  {:<16} {:<17} {:<6} {:<6} {:<11} {}\n",
+            "  {:<16} {:<17} {:<6} {:<6} {:<token_col$} {}\n",
             state.name,
             state.mark,
             glyph,

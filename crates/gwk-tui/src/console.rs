@@ -92,7 +92,7 @@ pub fn render_hall_at(
                 2,
                 3,
                 "loading estate projections...",
-                style("muted", tier),
+                style("gws_muted", tier),
             );
         }
         LoadState::Ready if input.districts.is_empty() => {
@@ -102,7 +102,7 @@ pub fn render_hall_at(
                 2,
                 3,
                 "estate idle -- no active districts",
-                style("muted", tier),
+                style("gws_muted", tier),
             );
         }
         LoadState::Ready => {
@@ -129,7 +129,7 @@ pub fn render_hall_at(
             area,
             area.height - 1,
             &format!("{} districts  {agents} agents", input.districts.len()),
-            style("muted", tier),
+            style("gws_muted", tier),
         );
     }
 }
@@ -143,14 +143,14 @@ fn paint_hall_header(
     glyphs: GlyphSet,
     compact: bool,
 ) {
-    put(buf, area, 1, 0, "GRIDWORK", bold("fg", tier));
+    put(buf, area, 1, 0, "GRIDWORK", bold("gws_fg", tier));
     put(
         buf,
         area,
         11,
         0,
         &format!("run {}", context.running),
-        style("hue", tier),
+        style("gws_hue", tier),
     );
     put(
         buf,
@@ -158,7 +158,7 @@ fn paint_hall_header(
         18,
         0,
         &format!("!{}", context.attention),
-        style("warn", tier),
+        style("gws_warn", tier),
     );
     // "(local)" only when the kernel did not supply the boundary. The common
     // path keeps its width; the qualifier appears exactly when the number is
@@ -169,7 +169,7 @@ fn paint_hall_header(
     } else {
         format!("{} today (local)", dollars(context.cost_micros))
     };
-    put(buf, area, 22, 0, &today, style("fg", tier));
+    put(buf, area, 22, 0, &today, style("gws_fg", tier));
 
     let badge = tier_badge(tier, glyphs);
     let clock = hhmm(&context.now);
@@ -181,7 +181,7 @@ fn paint_hall_header(
             .map_or_else(|| "-".to_owned(), |value| value.to_string());
         format!("tier {badge}  as-of {watermark}  {clock}")
     };
-    put_right(buf, area, 0, &right, style("muted", tier));
+    put_right(buf, area, 0, &right, style("gws_muted", tier));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -214,7 +214,7 @@ fn paint_hall_body(
                 x,
                 y,
                 station_label.as_ref(),
-                style("muted", tier),
+                style("gws_muted", tier),
             );
             x = x.saturating_add(station_label.chars().count() as u16 + 2);
             for agent in &station.agents {
@@ -274,9 +274,9 @@ fn paint_district_heading(
         y,
         safe_text.as_ref(),
         if focused {
-            bold("focus", tier)
+            bold("gws_focus", tier)
         } else {
-            bold("fg", tier)
+            bold("gws_fg", tier)
         },
     );
     let mut x = safe_text.chars().count() as u16 + 2;
@@ -287,7 +287,7 @@ fn paint_district_heading(
         .count();
     if attention > 0 {
         let badge = format!("!{attention}");
-        put(buf, area, x, y, &badge, style("warn", tier));
+        put(buf, area, x, y, &badge, style("gws_warn", tier));
         x = x.saturating_add(badge.chars().count() as u16 + 2);
     }
     if district.aged_done > 0 {
@@ -297,7 +297,7 @@ fn paint_district_heading(
             x,
             y,
             &format!("+{} done", district.aged_done),
-            style("muted", tier),
+            style("gws_muted", tier),
         );
     }
 }
@@ -330,7 +330,7 @@ pub fn render_fleet(
             2,
             3,
             "loading fleet projections...",
-            style("muted", tier),
+            style("gws_muted", tier),
         );
         fleet_keybar(area, buf, tier);
         return;
@@ -382,7 +382,7 @@ pub fn render_fleet(
     let columns_y = 2u16.saturating_add(integrity_block);
     paint_integrity(area, buf, &fleet.findings, integrity_block, tier);
     for (x, label) in columns {
-        put(buf, area, *x, columns_y, label, style("muted", tier));
+        put(buf, area, *x, columns_y, label, style("gws_muted", tier));
     }
 
     let attempt_rows =
@@ -422,7 +422,7 @@ pub fn render_fleet(
         } else {
             format!("+{start} before  +{} more", state.attempts.len() - end)
         };
-        put(buf, area, 2, y, &notice, style("muted", tier));
+        put(buf, area, 2, y, &notice, style("gws_muted", tier));
         y = y.saturating_add(1);
     }
 
@@ -458,7 +458,7 @@ fn paint_fleet_header(
         .iter()
         .filter(|lease| lease.state == LeaseState::Held)
         .count();
-    put(buf, area, 1, 0, "FLEET", bold("fg", tier));
+    put(buf, area, 1, 0, "FLEET", bold("gws_fg", tier));
     // A fold over a read that stopped short of the last projection page is a
     // floor, not a total. One qualifier governs the whole run of counts rather
     // than repeating on each figure — the same prefix `gw`'s own table
@@ -506,8 +506,8 @@ fn paint_fleet_header(
     .find(|(summary, right)| fits(summary, right))
     .unwrap_or((&short_summary, &short_right));
 
-    put(buf, area, 9, 0, summary, style("fg", tier));
-    put_right(buf, area, 0, right, style("muted", tier));
+    put(buf, area, 9, 0, summary, style("gws_fg", tier));
+    put_right(buf, area, 0, right, style("gws_muted", tier));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -555,7 +555,7 @@ fn paint_attempt_row(
         0,
         y,
         if focused { ">" } else { " " },
-        bold("focus", tier),
+        bold("gws_focus", tier),
     );
     put_cell(buf, area, 2, 21, y, attempt.id.as_str(), paint);
     if wide {
@@ -566,7 +566,7 @@ fn paint_attempt_row(
             36,
             y,
             &task_label(state, attempt),
-            style("muted", tier),
+            style("gws_muted", tier),
         );
     }
     let engine_x = if wide { 36 } else { 21 };
@@ -579,7 +579,7 @@ fn paint_attempt_row(
         role_x,
         y,
         attempt.engine.as_str(),
-        style("muted", tier),
+        style("gws_muted", tier),
     );
     put_cell(
         buf,
@@ -588,7 +588,7 @@ fn paint_attempt_row(
         state_x,
         y,
         attempt.role.as_deref().map_or("-", short_role),
-        style("fg", tier),
+        style("gws_fg", tier),
     );
     put_cell(
         buf,
@@ -614,7 +614,7 @@ fn paint_attempt_row(
             71,
             y,
             &count(subtree_size(state, &attempt.id)),
-            style("muted", tier),
+            style("gws_muted", tier),
         );
         put_value_cell(
             buf,
@@ -623,9 +623,9 @@ fn paint_attempt_row(
             77,
             y,
             &unended_cell(state, attempt),
-            style("muted", tier),
+            style("gws_muted", tier),
         );
-        put_cell(buf, area, 77, 91, y, &lease_text, style("muted", tier));
+        put_cell(buf, area, 77, 91, y, &lease_text, style("gws_muted", tier));
         put_value_cell(
             buf,
             area,
@@ -633,7 +633,7 @@ fn paint_attempt_row(
             103,
             y,
             &spend.token_text(),
-            style("muted", tier),
+            style("gws_muted", tier),
         );
         (103, 115)
     } else {
@@ -646,7 +646,7 @@ fn paint_attempt_row(
         age_x,
         y,
         &spend.text(),
-        style("fg", tier),
+        style("gws_fg", tier),
     );
     put_tail_cell(
         buf,
@@ -654,7 +654,7 @@ fn paint_attempt_row(
         age_x,
         y,
         &elapsed(&context.now, &attempt.created_at).unwrap_or_else(|| "-".to_owned()),
-        style("muted", tier),
+        style("gws_muted", tier),
     );
     hits.register(Rect::new(area.x, area.y + y, area.width, 1), target);
 }
@@ -701,7 +701,7 @@ fn paint_unclaimed(
             plural_suffix(worktrees.len()),
             if unattributed == 1 { "y" } else { "ies" },
         ),
-        bold("fg", tier),
+        bold("gws_fg", tier),
     );
     y = y.saturating_add(1);
     let mut facts = leases
@@ -718,7 +718,14 @@ fn paint_unclaimed(
     if unattributed > 0 {
         facts.push(format!("{unattributed} unattributed cost"));
     }
-    put(buf, area, 4, y, &facts.join("   "), style("muted", tier));
+    put(
+        buf,
+        area,
+        4,
+        y,
+        &facts.join("   "),
+        style("gws_muted", tier),
+    );
     y.saturating_add(1)
 }
 
@@ -742,7 +749,7 @@ fn paint_integrity(area: Rect, buf: &mut Buffer, findings: &[String], block: u16
         findings.len(),
         plural_suffix(findings.len())
     );
-    put(buf, area, 2, 2, &head, bold("fail", tier));
+    put(buf, area, 2, 2, &head, bold("gws_fail", tier));
     if block == 1 {
         // Degraded: the count and the word, nothing itemized. A reader who
         // sees this knows to run the CLI twin, which never truncates.
@@ -750,7 +757,7 @@ fn paint_integrity(area: Rect, buf: &mut Buffer, findings: &[String], block: u16
     }
     let mut y = 3u16;
     for finding in findings {
-        put(buf, area, 4, y, finding, style("fail", tier));
+        put(buf, area, 4, y, finding, style("gws_fail", tier));
         y = y.saturating_add(1);
     }
     // The last reserved row is left blank on purpose: it separates the alarm
@@ -855,7 +862,7 @@ fn paint_unknowns(
             2,
             y,
             &format!("UNKNOWN  {}", subject_line(notes, budget)),
-            bold("fg", tier),
+            bold("gws_fg", tier),
         );
         return y.saturating_add(1);
     }
@@ -869,7 +876,7 @@ fn paint_unknowns(
             notes.len(),
             plural_suffix(notes.len())
         ),
-        bold("fg", tier),
+        bold("gws_fg", tier),
     );
     y = y.saturating_add(1);
     for note in notes {
@@ -879,7 +886,7 @@ fn paint_unknowns(
             4,
             y,
             &format!("{}: {}", note.subject, note.why),
-            style("muted", tier),
+            style("gws_muted", tier),
         );
         y = y.saturating_add(1);
     }
@@ -1040,7 +1047,7 @@ fn paint_spend_chart(
             "SPEND / HOUR   {priced} priced   {unpriced} unpriced   {} unattributed{earlier}",
             unattributed(state)
         ),
-        bold("fg", tier),
+        bold("gws_fg", tier),
     );
     // The counts above are honest — they are row counts, and zero rows is a
     // fact. The chart below is not: with no priced entry, `peak` floors to one
@@ -1055,7 +1062,7 @@ fn paint_spend_chart(
             2,
             top.saturating_add(1),
             "no priced spend in the log -- no scale to draw",
-            style("muted", tier),
+            style("gws_muted", tier),
         );
         return;
     }
@@ -1067,7 +1074,7 @@ fn paint_spend_chart(
             value if value == ROWS - 1 => "> $0".to_owned(),
             _ => String::new(),
         };
-        put(buf, area, 2, y, &label, style("muted", tier));
+        put(buf, area, 2, y, &label, style("gws_muted", tier));
         for (index, height) in heights.iter().enumerate() {
             if *height >= level {
                 put(
@@ -1076,7 +1083,7 @@ fn paint_spend_chart(
                     left.saturating_add(index as u16 * step),
                     y,
                     "####",
-                    style("hue", tier),
+                    style("gws_hue", tier),
                 );
             }
         }
@@ -1089,7 +1096,7 @@ fn paint_spend_chart(
             left.saturating_add((hour - shown_first) as u16 * step),
             axis_y,
             &format!("{hour:02}h"),
-            style("muted", tier),
+            style("gws_muted", tier),
         );
     }
 }
@@ -1341,7 +1348,7 @@ fn task_label(state: &BoardState, attempt: &Attempt) -> String {
 }
 
 fn render_too_small(area: Rect, buf: &mut Buffer, tier: ColorTier) {
-    put(buf, area, 0, 0, "GRIDWORK", bold("fg", tier));
+    put(buf, area, 0, 0, "GRIDWORK", bold("gws_fg", tier));
     put(
         buf,
         area,
@@ -1351,7 +1358,7 @@ fn render_too_small(area: Rect, buf: &mut Buffer, tier: ColorTier) {
             "terminal too small: {}x{} (minimum {MIN_WIDTH}x{MIN_HEIGHT})",
             area.width, area.height
         ),
-        style("warn", tier),
+        style("gws_warn", tier),
     );
 }
 
@@ -1597,7 +1604,14 @@ fn put_right(buf: &mut Buffer, area: Rect, y: u16, text: &str, paint: Style) {
 
 fn put_keybar(buf: &mut Buffer, area: Rect, tier: ColorTier, wide: &str, narrow: &str) {
     let keys = if area.width < 100 { narrow } else { wide };
-    put(buf, area, 0, area.height - 1, keys, style("muted", tier));
+    put(
+        buf,
+        area,
+        0,
+        area.height - 1,
+        keys,
+        style("gws_muted", tier),
+    );
 }
 
 fn put_rule(buf: &mut Buffer, area: Rect, y: u16, tier: ColorTier) {
@@ -1607,6 +1621,6 @@ fn put_rule(buf: &mut Buffer, area: Rect, y: u16, tier: ColorTier) {
         1,
         y,
         &"-".repeat(area.width.saturating_sub(2) as usize),
-        style("faint", tier),
+        style("gws_faint", tier),
     );
 }

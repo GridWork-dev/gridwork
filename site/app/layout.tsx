@@ -41,12 +41,12 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html
-      lang="en"
-      className={`dark ${mono.variable}`}
-      style={{ colorScheme: "dark" }}
-      suppressHydrationWarning
-    >
+    // No `dark` class and no inline `colorScheme` here any more. Both were
+    // hardcoded, and an inline style beats every stylesheet rule — `light` would
+    // have painted a light page inside a dark form control. The provider below
+    // writes the class before paint; `globals.css` covers the frame before that
+    // and the case where the script never runs.
+    <html lang="en" className={mono.variable} suppressHydrationWarning>
       <head>
         {/* Cookieless, aggregate-only. data-domain is the canonical host;
             gridwork.dev 301s at the edge, so the origin only ever sees this one.
@@ -59,7 +59,25 @@ export default function RootLayout({ children }: { children: ReactNode }) {
         <StructuredData />
       </head>
       <body className="flex min-h-screen flex-col font-mono">
-        <RootProvider theme={{ enabled: false }} search={{ enabled: false }}>
+        <RootProvider
+          theme={{
+            // Two attributes, not one. `class` is what Fumadocs' own stylesheets
+            // key on (`.dark` in default-colors.css); `data-theme` is what the
+            // house token contract keys on. Writing only one leaves the other
+            // half of the page on the wrong palette.
+            attribute: ["class", "data-theme"],
+            // "system", not "dark". next-themes writes the resolved attribute on
+            // every load, so a hardcoded default makes the media query in
+            // globals.css unreachable — and worse than unreachable: on a light
+            // OS the pre-hydration stylesheet paints light and the script then
+            // flips it to dark, which is a visible flash rather than a
+            // preference. With "system" the two agree and there is nothing to
+            // flash. An explicit choice still wins, and still persists.
+            defaultTheme: "system",
+            enableSystem: true,
+          }}
+          search={{ enabled: false }}
+        >
           {children}
         </RootProvider>
       </body>

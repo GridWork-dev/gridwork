@@ -104,10 +104,10 @@ fn is_focused(input: &FrameInput, district: &District) -> bool {
 }
 
 fn paint_header(buf: &mut Buffer, area: Rect, tier: ColorTier, glyphs: GlyphSet, compact: bool) {
-    put(buf, area, 1, 0, "GRIDWORK", bold("fg", tier));
-    put(buf, area, 11, 0, "run 4", style("hue", tier));
-    put(buf, area, 18, 0, "!2", style("warn", tier));
-    put(buf, area, 22, 0, "$5.30 today", style("fg", tier));
+    put(buf, area, 1, 0, "GRIDWORK", bold("gws_fg", tier));
+    put(buf, area, 11, 0, "run 4", style("gws_hue", tier));
+    put(buf, area, 18, 0, "!2", style("gws_warn", tier));
+    put(buf, area, 22, 0, "$5.30 today", style("gws_fg", tier));
 
     let badge = tier_badge(tier, glyphs);
     let right = if compact {
@@ -115,7 +115,7 @@ fn paint_header(buf: &mut Buffer, area: Rect, tier: ColorTier, glyphs: GlyphSet,
     } else {
         format!("tier {badge}  as-of 221  17:30")
     };
-    put_right(buf, area, 0, &right, style("muted", tier));
+    put_right(buf, area, 0, &right, style("gws_muted", tier));
 }
 
 fn paint_heading(
@@ -133,9 +133,9 @@ fn paint_heading(
         district.label.to_uppercase()
     );
     let heading = if focused {
-        bold("focus", tier)
+        bold("gws_focus", tier)
     } else {
-        bold("fg", tier)
+        bold("gws_fg", tier)
     };
     put(buf, area, 0, y, &text, heading);
 
@@ -143,12 +143,12 @@ fn paint_heading(
     let attention = unresolved_attention(input, district);
     if attention > 0 {
         let badge = format!("!{attention}");
-        put(buf, area, x, y, &badge, style("warn", tier));
+        put(buf, area, x, y, &badge, style("gws_warn", tier));
         x += badge.chars().count() as u16 + 2;
     }
     if district.aged_done > 0 {
         let done = format!("+{} done", district.aged_done);
-        put(buf, area, x, y, &done, style("muted", tier));
+        put(buf, area, x, y, &done, style("gws_muted", tier));
     }
 }
 
@@ -167,7 +167,7 @@ fn paint_hall(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) {
 
         let mut x = 2u16;
         for station in &district.stations {
-            put(buf, area, x, y, &station.label, style("muted", tier));
+            put(buf, area, x, y, &station.label, style("gws_muted", tier));
             x += station.label.chars().count() as u16 + 2;
 
             for agent in &station.agents {
@@ -198,7 +198,7 @@ fn paint_hall(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) {
             area,
             area.height - 1,
             "4 districts  15 agents",
-            style("muted", tier),
+            style("gws_muted", tier),
         );
     }
 }

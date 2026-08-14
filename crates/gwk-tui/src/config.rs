@@ -1560,10 +1560,10 @@ pub fn render_form(area: Rect, buffer: &mut Buffer, form: &ConfigForm, tier: Col
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let field_style = config_style("fg", tier);
-    let muted = config_style("muted", tier);
-    let focus = config_style("focus", tier).add_modifier(Modifier::BOLD);
-    let warning = config_style("warn", tier);
+    let field_style = config_style("gws_fg", tier);
+    let muted = config_style("gws_muted", tier);
+    let focus = config_style("gws_focus", tier).add_modifier(Modifier::BOLD);
+    let warning = config_style("gws_warn", tier);
 
     form_put(
         buffer,
@@ -1824,7 +1824,7 @@ pub fn render(
     let end = (start + visible).min(file_rows.len());
     let selection_style = gwk_theme::SIGNAL
         .iter()
-        .find(|token| token.name == "selection")
+        .find(|token| token.name == "gws_selection")
         .map(|token| theme::token_style(token, tier));
 
     if pinned == 1 {

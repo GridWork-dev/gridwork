@@ -89,15 +89,15 @@ fn paint_header(
     note: &str,
 ) {
     let compact = area.width < RAIL_FLOOR;
-    put(buf, area, 1, 0, "TERM", bold("fg", tier));
-    put(buf, area, 8, 0, subject, bold("hue", tier));
+    put(buf, area, 1, 0, "TERM", bold("gws_fg", tier));
+    put(buf, area, 8, 0, subject, bold("gws_hue", tier));
     put(
         buf,
         area,
         8 + subject.chars().count() as u16 + 2,
         0,
         note,
-        style("muted", tier),
+        style("gws_muted", tier),
     );
 
     let badge = tier_badge(tier, glyphs);
@@ -106,7 +106,7 @@ fn paint_header(
     } else {
         format!("tier {badge}  as-of 221  17:30")
     };
-    put_right(buf, area, 0, &right, style("muted", tier));
+    put_right(buf, area, 0, &right, style("gws_muted", tier));
 }
 
 /// The identity a send is addressed to: session AND generation. A send to a
@@ -126,22 +126,22 @@ fn subject(drill: &DrilldownState) -> String {
 /// away, not a second copy of it.
 fn paint_rail(buf: &mut Buffer, area: Rect, tier: ColorTier) {
     let mut y = 2;
-    put(buf, area, 1, y, "ESTATE", bold("fg", tier));
+    put(buf, area, 1, y, "ESTATE", bold("gws_fg", tier));
     y += 2;
 
     for (label, value, token) in [
-        ("running", "4", "hue"),
-        ("attention", "2", "warn"),
-        ("blocked", "1", "warn"),
-        ("today", "$5.30", "fg"),
+        ("running", "4", "gws_hue"),
+        ("attention", "2", "gws_warn"),
+        ("blocked", "1", "gws_warn"),
+        ("today", "$5.30", "gws_fg"),
     ] {
-        put(buf, area, 1, y, label, style("muted", tier));
+        put(buf, area, 1, y, label, style("gws_muted", tier));
         put(buf, area, 14, y, value, style(token, tier));
         y += 1;
     }
     y += 1;
 
-    put(buf, area, 1, y, "TERMS", bold("fg", tier));
+    put(buf, area, 1, y, "TERMS", bold("gws_fg", tier));
     y += 1;
     for (id, note, focused) in [
         ("pty-1:gen-3", "attached", true),
@@ -153,19 +153,19 @@ fn paint_rail(buf: &mut Buffer, area: Rect, tier: ColorTier) {
             0,
             y,
             if focused { ">" } else { " " },
-            bold("focus", tier),
+            bold("gws_focus", tier),
         );
-        put(buf, area, 2, y, id, style("fg", tier));
-        put(buf, area, 15, y, note, style("muted", tier));
+        put(buf, area, 2, y, id, style("gws_fg", tier));
+        put(buf, area, 15, y, note, style("gws_muted", tier));
         y += 1;
     }
     y += 1;
 
-    put(buf, area, 1, y, "QUEUE", bold("fg", tier));
+    put(buf, area, 1, y, "QUEUE", bold("gws_fg", tier));
     y += 1;
-    put(buf, area, 1, y, "! gate deploy", style("warn", tier));
+    put(buf, area, 1, y, "! gate deploy", style("gws_warn", tier));
     y += 1;
-    put(buf, area, 1, y, "! kek rotation", style("warn", tier));
+    put(buf, area, 1, y, "! kek rotation", style("gws_warn", tier));
 }
 
 /// The vertical rule between rail and session. Painted with `|`, which is
@@ -173,7 +173,7 @@ fn paint_rail(buf: &mut Buffer, area: Rect, tier: ColorTier) {
 /// are never-a-colour, so structure has to be a character.
 fn paint_divider(buf: &mut Buffer, area: Rect, tier: ColorTier, top: u16, bottom: u16) {
     for y in top..bottom {
-        put(buf, area, RAIL, y, "|", style("faint", tier));
+        put(buf, area, RAIL, y, "|", style("gws_faint", tier));
     }
 }
 
@@ -227,7 +227,11 @@ fn paint_toast(buf: &mut Buffer, area: Rect, session: Rect, tier: ColorTier, mod
         return;
     };
 
-    let token = if mode == Mode::Refused { "fail" } else { "ok" };
+    let token = if mode == Mode::Refused {
+        "gws_fail"
+    } else {
+        "gws_ok"
+    };
     let x = right - text.chars().count() as u16 - area.x;
     put(buf, area, x, y - area.y, text, bold(token, tier));
 }
@@ -240,7 +244,7 @@ fn paint_mode_bar(buf: &mut Buffer, area: Rect, y: u16, tier: ColorTier, mode: M
     let (badge, badge_token, keys) = match mode {
         Mode::View => (
             " VIEW ",
-            "muted",
+            "gws_muted",
             if compact {
                 "i input   j/k scroll   q back"
             } else {
@@ -249,7 +253,7 @@ fn paint_mode_bar(buf: &mut Buffer, area: Rect, y: u16, tier: ColorTier, mode: M
         ),
         Mode::Refused => (
             " INPUT ",
-            "fail",
+            "gws_fail",
             if compact {
                 "ctrl-] leave   refusal clears on the next send"
             } else {
@@ -258,7 +262,7 @@ fn paint_mode_bar(buf: &mut Buffer, area: Rect, y: u16, tier: ColorTier, mode: M
         ),
         Mode::Sent | Mode::Input => (
             " INPUT ",
-            "warn",
+            "gws_warn",
             if compact {
                 "ctrl-] leave   keys -> pty"
             } else {
@@ -273,7 +277,7 @@ fn paint_mode_bar(buf: &mut Buffer, area: Rect, y: u16, tier: ColorTier, mode: M
         1 + badge.chars().count() as u16 + 2,
         y,
         keys,
-        style("muted", tier),
+        style("gws_muted", tier),
     );
 }
 
@@ -336,7 +340,7 @@ fn paint_send(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) {
     );
 
     let mut y = 2;
-    put(buf, area, 1, y, "TERMINALS", bold("fg", tier));
+    put(buf, area, 1, y, "TERMINALS", bold("gws_fg", tier));
     y += 1;
 
     for (x, label) in [
@@ -347,7 +351,7 @@ fn paint_send(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) {
         (45, "TITLE"),
         (72, "OPENED"),
     ] {
-        put(buf, area, x, y, label, style("muted", tier));
+        put(buf, area, x, y, label, style("gws_muted", tier));
     }
     y += 1;
 
@@ -378,38 +382,38 @@ fn paint_send(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) {
             0,
             y,
             if focused { ">" } else { " " },
-            bold("focus", tier),
+            bold("gws_focus", tier),
         );
-        put(buf, area, 2, y, id, style("fg", tier));
-        put(buf, area, 18, y, generation, style("muted", tier));
+        put(buf, area, 2, y, id, style("gws_fg", tier));
+        put(buf, area, 18, y, generation, style("gws_muted", tier));
         put(
             buf,
             area,
             25,
             y,
             state_word,
-            style(if live { "hue" } else { "muted" }, tier),
+            style(if live { "gws_hue" } else { "gws_muted" }, tier),
         );
-        put(buf, area, 35, y, churn, style("muted", tier));
-        put(buf, area, 45, y, title, style("fg", tier));
-        put(buf, area, 72, y, opened, style("muted", tier));
+        put(buf, area, 35, y, churn, style("gws_muted", tier));
+        put(buf, area, 45, y, title, style("gws_fg", tier));
+        put(buf, area, 72, y, opened, style("gws_muted", tier));
         y += 1;
     }
 
     y += 2;
-    put(buf, area, 1, y, "COMMAND", bold("fg", tier));
+    put(buf, area, 1, y, "COMMAND", bold("gws_fg", tier));
     y += 1;
     // The composed one-shot. Escapes are shown literally so a control byte
     // is visible in the line the operator is about to fire.
     let composed = ":send pty-1 y\\n";
-    put(buf, area, 2, y, composed, bold("hue", tier));
+    put(buf, area, 2, y, composed, bold("gws_hue", tier));
     put(
         buf,
         area,
         2 + composed.chars().count() as u16,
         y,
         "_",
-        bold("hue", tier),
+        bold("gws_hue", tier),
     );
     y += 1;
     put(
@@ -418,7 +422,7 @@ fn paint_send(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) {
         2,
         y,
         "14 bytes to pty-1:gen-3 as operator -- one receipt, refused if the generation moves",
-        style("muted", tier),
+        style("gws_muted", tier),
     );
 
     put_rule(buf, area, area.height - 3, tier);
@@ -428,7 +432,7 @@ fn paint_send(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) {
         1,
         area.height - 2,
         "enter send   ctrl-c cancel",
-        style("muted", tier),
+        style("gws_muted", tier),
     );
     put(
         buf,
@@ -436,7 +440,7 @@ fn paint_send(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) {
         1,
         area.height - 1,
         " COMMAND ",
-        bold("hue", tier),
+        bold("gws_hue", tier),
     );
     put(
         buf,
@@ -444,7 +448,7 @@ fn paint_send(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) {
         12,
         area.height - 1,
         "a one-shot needs no attach; the target is named, never inferred",
-        style("muted", tier),
+        style("gws_muted", tier),
     );
 }
 

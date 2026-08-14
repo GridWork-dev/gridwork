@@ -240,37 +240,37 @@ mod tests {
     #[test]
     fn tier_truecolor_and_256_carry_colour_and_mono_carries_none() {
         assert_eq!(
-            token_style(token("fail"), ColorTier::Truecolor),
+            token_style(token("gws_fail"), ColorTier::Truecolor),
             Style::default().fg(Color::Rgb(0xFF, 0x6E, 0x6E))
         );
         assert_eq!(
-            token_style(token("fail"), ColorTier::Xterm256),
+            token_style(token("gws_fail"), ColorTier::Xterm256),
             Style::default().fg(Color::Indexed(203))
         );
         assert_eq!(
-            token_style(token("fail"), ColorTier::Ansi16),
+            token_style(token("gws_fail"), ColorTier::Ansi16),
             Style::default().fg(Color::LightRed)
         );
         assert_eq!(
-            token_style(token("fail"), ColorTier::Mono),
+            token_style(token("gws_fail"), ColorTier::Mono),
             Style::default().fg(Color::Reset)
         );
     }
 
     #[test]
     fn tier_bold_is_the_escalation_channel_at_sixteen_only() {
-        let bright = token("hue_bright");
+        let bright = token("gws_hue_bright");
         let at16 = token_style(bright, ColorTier::Ansi16);
         assert_eq!(at16.fg, Some(Color::LightCyan));
         assert!(at16.add_modifier.contains(Modifier::BOLD));
         // `hue` and `hue_bright` share slot 14; weight is what keeps them
         // apart once the palette is gone.
         assert_eq!(
-            token_style(token("hue"), ColorTier::Ansi16).fg,
+            token_style(token("gws_hue"), ColorTier::Ansi16).fg,
             Some(Color::LightCyan)
         );
         assert!(
-            !token_style(token("hue"), ColorTier::Ansi16)
+            !token_style(token("gws_hue"), ColorTier::Ansi16)
                 .add_modifier
                 .contains(Modifier::BOLD)
         );
@@ -288,7 +288,7 @@ mod tests {
             .iter()
             .filter(|t| matches!(t, ColorTier::Ansi16) || matches!(t, ColorTier::Mono))
         {
-            for name in ["focus", "selection"] {
+            for name in ["gws_focus", "gws_selection"] {
                 let style = token_style(token(name), *tier);
                 assert_eq!(style.fg, None, "{name} at {}", tier.as_str());
                 assert!(
@@ -303,11 +303,11 @@ mod tests {
     #[test]
     fn tier_an_unpainted_token_sets_no_foreground_at_all() {
         for tier in ColorTier::ALL {
-            for name in ["bg", "surface", "surface_2"] {
+            for name in ["gws_bg", "gws_surface", "gws_surface_2"] {
                 assert_eq!(token_style(token(name), *tier), Style::default());
             }
             assert_eq!(
-                token_style(token("faint"), *tier) == Style::default(),
+                token_style(token("gws_faint"), *tier) == Style::default(),
                 matches!(tier, ColorTier::Ansi16 | ColorTier::Mono),
                 "faint at {}",
                 tier.as_str()
@@ -374,7 +374,7 @@ mod tests {
             );
         }
         assert_eq!(
-            token_style(token("fail"), ColorTier::Truecolor).fg,
+            token_style(token("gws_fail"), ColorTier::Truecolor).fg,
             Some(Color::Rgb(0xFF, 0x6E, 0x6E)),
             "the tier moved with the glyph set"
         );
