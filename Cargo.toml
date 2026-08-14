@@ -137,7 +137,7 @@ sqlx = { version = "0.9.0", default-features = false, features = [
 thiserror = "2.0.19"
 tempfile = "3"
 tokio = { version = "1.53.1", default-features = false }
-toml = "0.9"
+toml = "1.1"
 # Already resolved: `sqlx`/`tokio-util` pull it transitively, so naming it
 # here adds no crate to the graph, only a new edge to one cargo-deny already
 # cleared — the same reasoning as the two unicode crates below. Named for
