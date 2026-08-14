@@ -854,8 +854,9 @@ jobs:
     timeout-minutes: 10
     services:
       postgres:
-        # Digest-pinned like every action above; dependabot / a manual bump tracks
-        # the postgres:16 tag.
+        # Digest-pinned like every action above; Renovate tracks the postgres:16
+        # tag, and holds the major behind a `major-bump` label rather than
+        # proposing postgres:18 as routine.
         image: postgres:16@sha256:33f923b05f64ca54ac4401c01126a6b92afe839a0aa0a52bc5aeb5cc958e5f20
         env:
           POSTGRES_PASSWORD: ci

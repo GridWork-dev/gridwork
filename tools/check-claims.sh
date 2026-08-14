@@ -106,6 +106,41 @@ if [ -z "$readme_crates" ] || [ "$readme_crates" != "$site_crates" ]; then
   fail=1
 fi
 
+# C9 — how many jobs `verify` gathers: one number, three surfaces, derived.
+# CLAUDE.md tells contributors that when a check aggregates, assert the count
+# first. Nothing applied that to the aggregate count itself: three files state
+# it in prose and none read ci.yml, so renovate.json sat at 17 while the
+# workflow had grown to 18. Neither number is checkable by reading the file that
+# claims it, which is why this derives both from the workflow.
+counts=$(awk '
+  /^jobs:/                      { in_jobs = 1; next }
+  !in_jobs                      { next }
+  /^  [A-Za-z0-9_-]+:/          { jobs++; is_verify = ($1 == "verify:"); in_needs = 0 }
+  is_verify && /^    needs:/    { in_needs = 1; next }
+  is_verify && /^    [A-Za-z]/  { in_needs = 0 }
+  in_needs && /^      - /       { needs++ }
+  END                           { print jobs + 0, needs + 0 }
+' .github/workflows/ci.yml)
+ci_jobs=${counts% *}
+verify_needs=${counts#* }
+# Count first, verdict second. An awk that matched nothing prints "0 0", and
+# every `need` below would then search for "aggregates 0" and fail with a
+# confusing message about prose rather than the real fault, which is that this
+# gate lost its grip on the workflow.
+if [ "$ci_jobs" -lt 2 ] || [ "$verify_needs" -lt 1 ]; then
+  echo "check-claims: could not read job counts from ci.yml (jobs=$ci_jobs needs=$verify_needs)" >&2
+  fail=1
+else
+  # `verify` is one of the job keys; the prose counts the others against it.
+  others=$((ci_jobs - 1))
+  need renovate.json "aggregates $verify_needs jobs" "verify aggregate count"
+  # Both of these line-wrap after the number, so the total is matched separately.
+  need CLAUDE.md "aggregates $verify_needs of the" "verify aggregate count"
+  need .gridwork/project.toml "aggregates $verify_needs" "verify aggregate count"
+  need CLAUDE.md "$others jobs in" "ci job total"
+  need .gridwork/project.toml "$others jobs plus" "ci job total"
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "check-claims: FAIL" >&2
   exit 1
