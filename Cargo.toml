@@ -83,9 +83,9 @@ gwk-kernel = { path = "crates/gwk-kernel", version = "0.0.3" }
 # crates that depend on it.
 gwk-pty = { path = "crates/gwk-pty" }
 gwk-text = { path = "crates/gwk-text" }
-gwk-theme = { path = "crates/gwk-theme", version = "0.0.5" }
+gwk-theme = { path = "crates/gwk-theme", version = "0.0.3" }
 # The installed `gw` binary carries the production terminal loop.
-gwk-tui = { path = "crates/gwk-tui", version = "0.0.2" }
+gwk-tui = { path = "crates/gwk-tui", version = "0.0.3" }
 # The SAFE wrapper, not the raw `-sys` bindings: this workspace forbids
 # `unsafe_code`, so raw FFI would not compile here at all. Exact-pinned because
 # libghostty-vt is pre-1.0 and its own docs promise breaking changes — a caret
