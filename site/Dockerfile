@@ -22,9 +22,22 @@ RUN bun run postinstall && bun run build
 
 FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS runtime
 WORKDIR /app
+
+# Deploy provenance. `railway up` uploads the local working TREE, not a git ref, so
+# nothing in the image or in any response could say what is running — twelve services in
+# this estate, none traceable to a commit. /health reports this value.
+#
+# `.git` is excluded by .dockerignore, correctly: the image should not carry a repo. So
+# the SHA cannot be read at build time, it has to be passed in, and
+# tools/railway-deploy.sh is what passes it.
+#
+# The default is `unknown` on purpose. A deploy that skipped the wrapper reports that it
+# does not know, which is the honest answer, and never states a SHA it cannot stand behind.
+ARG GIT_SHA=unknown
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
-    HOSTNAME=0.0.0.0
+    HOSTNAME=0.0.0.0 \
+    GRIDWORK_GIT_SHA=${GIT_SHA}
 
 COPY --from=build /repo/site/public ./public
 COPY --from=build /repo/site/.next/standalone ./

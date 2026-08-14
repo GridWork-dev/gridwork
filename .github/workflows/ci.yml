@@ -1046,9 +1046,18 @@ jobs:
           # with the checker replaced by `exit 1`.
           bun run check:docs
           echo "docs-freshness: the live tree is fresh"
+      # Built WITH the SHA, the same way a deploy does it. The value has to survive
+      # a build ARG, an ENV in a different stage, and a runtime read — three places
+      # it can be dropped without anything going red. The smoke step below asserts
+      # the route echoes this exact value back, which is the only way to know the
+      # chain is intact.
       - name: Build standalone site image
-        run: docker build -f site/Dockerfile -t gridwork-site:ci .
+        run: docker build -f site/Dockerfile --build-arg "GIT_SHA=${GIT_SHA}" -t gridwork-site:ci .
+        env:
+          GIT_SHA: ${{ github.sha }}
       - name: Smoke routes and security headers
+        env:
+          GIT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           container_id="$(docker run -d -p 127.0.0.1:8080:3000 -e PORT=3000 gridwork-site:ci)"
@@ -1090,7 +1099,32 @@ jobs:
 
           check_response / 200
           check_response /docs 200
+          check_response /health 200
           check_response /this-path-does-not-exist 404
+
+          # railway.json points healthcheckPath at /health, so a 200 there is now the
+          # difference between a failed deploy and a broken container being served.
+          # A 200 is not the whole claim, though: the route exists to report which
+          # commit is running, and that value crosses a build ARG, an ENV in a
+          # different stage, and a runtime read. Any of the three can be dropped
+          # while the route still answers 200 with a cheerful "unknown" — which is
+          # exactly how the sibling repo carrying this same stamp let a
+          # six-commit-stale build sit in production unnoticed. So compare it.
+          reported="$(curl -sS "http://127.0.0.1:8080/health" | jq -r '.sha')"
+          if [ "$reported" != "${GIT_SHA}" ]; then
+            echo "site smoke: /health reports '${reported}', expected '${GIT_SHA}'" >&2
+            echo "site smoke: the ARG -> ENV -> route chain is broken" >&2
+            exit 1
+          fi
+          echo "site smoke: /health reports the built commit"
+
+          # And it must not be cached. A cached health check answers for whichever
+          # container served it last, which is the one question it may never answer.
+          curl -sS -D - -o /dev/null "http://127.0.0.1:8080/health" |
+            grep -qi '^cache-control:.*no-store' || {
+            echo "site smoke: /health is missing cache-control: no-store" >&2
+            exit 1
+          }
 
   # The house lint and format floor (SPEC house-standards D2b/D2c/D3). Wired here
   # rather than left as scripts someone runs by hand, which is the state `typecheck`
