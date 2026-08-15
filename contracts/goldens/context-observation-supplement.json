@@ -1,0 +1,14 @@
+{
+  "id": "observation-0001",
+  "manifest_id": "manifest-0001",
+  "observation_index": 1,
+  "fact_digest": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+  "observed_bytes": "96",
+  "visible_source_count": 1,
+  "truncated": false,
+  "evidence_ids": [
+    "evidence-context-1",
+    "evidence-context-2"
+  ],
+  "observed_at": "2026-08-14T12:00:02Z"
+}

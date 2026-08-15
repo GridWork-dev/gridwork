@@ -38,6 +38,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--event-type",
     "--expected-version",
     "--file",
+    "--from",
     "--head",
     "--key",
     "--kind",
@@ -56,6 +57,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--scratch-database",
     "--strategy",
     "--title",
+    "--to",
     "--until",
     "--view",
 ];
@@ -113,6 +115,12 @@ pub enum Verb {
     },
     AdminBlob {
         what: crate::admin::Retention,
+    },
+    /// The machine half of a driving-window receipt. `to` absent means the
+    /// database's clock at read time.
+    AdminReceipt {
+        from: String,
+        to: Option<String>,
     },
 
     Health,
@@ -252,6 +260,7 @@ gw — the GridWork kernel's command line
   gw admin init
   gw admin verify
   gw admin rebuild-projections --scratch-database <name>
+  gw admin receipt --from <rfc3339> [--to <rfc3339>]
   gw admin blob pin <address> <evidence-id>
   gw admin blob unpin <address> <evidence-id>
   gw admin blob sweep
@@ -531,6 +540,13 @@ fn admin(rest: &mut Rest) -> Result<Verb, Failure> {
         "verify" => Ok(Verb::AdminVerify),
         "rebuild-projections" => Ok(Verb::AdminRebuildProjections {
             scratch: rest.required("--scratch-database")?,
+        }),
+        // Here and not on the client socket because the figures are SQL
+        // aggregations over the log, and the wire grammar has no reason to
+        // grow a query it exists to serve exactly once per driving window.
+        "receipt" => Ok(Verb::AdminReceipt {
+            from: rest.required("--from")?,
+            to: rest.flag("--to"),
         }),
         // Retention, which is why it is here and not on the client socket: no
         // wire request removes a blob.
@@ -1139,6 +1155,29 @@ mod tests {
             parsed("attention snooze a-1").is_err(),
             "no second spelling"
         );
+
+        assert_eq!(
+            parsed("admin receipt --from 2026-08-11T03:08:23Z")
+                .expect("parse")
+                .verb,
+            Verb::AdminReceipt {
+                from: "2026-08-11T03:08:23Z".to_owned(),
+                to: None
+            }
+        );
+        assert_eq!(
+            parsed("admin receipt --from 2026-08-11T03:08:23Z --to 2026-09-01T00:00:00Z")
+                .expect("parse")
+                .verb,
+            Verb::AdminReceipt {
+                from: "2026-08-11T03:08:23Z".to_owned(),
+                to: Some("2026-09-01T00:00:00Z".to_owned())
+            }
+        );
+        // A window with no start is refused rather than defaulted: "since
+        // genesis" is a figure nobody asked for, and the receipt's window
+        // start is a recorded fact, not a guess.
+        assert!(parsed("admin receipt").is_err());
 
         assert_eq!(
             parsed("event follow --cursor 42").expect("parse").verb,

@@ -244,6 +244,184 @@ pub async fn runtime_privileges<'e>(
     })
 }
 
+/// A receipt window, both ends resolved by the database exactly once.
+///
+/// Resolution is what makes a receipt reproducible: PostgreSQL accepts
+/// relative timestamp literals (`yesterday`, `now`), and `now` in particular
+/// is cast per statement — a bound that floated across the figure queries
+/// would hand each figure a slightly different span. The resolved texts are
+/// what every query binds and what the receipt records, so a relative input
+/// leaves as the concrete instant it meant at read time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceiptWindow {
+    pub start: String,
+    pub end: String,
+}
+
+/// Resolve `from ..= to` against the database's clock, `to` defaulting to
+/// `now()`.
+///
+/// An inverted window refuses rather than resolving: a transposed flag pair
+/// would otherwise produce a receipt of zeros byte-identical to a
+/// legitimately quiet one. Errors here are input errors — the query does
+/// nothing but cast the two values — which is what lets a caller class them
+/// as usage rather than storage.
+pub async fn resolve_window(pool: &PgPool, from: &str, to: Option<&str>) -> Result<ReceiptWindow> {
+    let row = sqlx::query(
+        "SELECT x.ws::text AS ws, x.we::text AS we, x.ws > x.we AS inverted \
+         FROM (SELECT $1::timestamptz AS ws, COALESCE($2::timestamptz, now()) AS we) x",
+    )
+    .bind(from)
+    .bind(to)
+    .fetch_one(pool)
+    .await?;
+    let inverted: bool = row.try_get("inverted")?;
+    let window = ReceiptWindow {
+        start: row.try_get("ws")?,
+        end: row.try_get("we")?,
+    };
+    if inverted {
+        return Err(KernelError::Config(format!(
+            "the window ends before it starts ({} > {})",
+            window.start, window.end
+        )));
+    }
+    Ok(window)
+}
+
+/// The machine half of a driving-window receipt, read from the log.
+///
+/// The four figures a cutover receipt defines, over `gwk.pty_session` and
+/// `gwk.event`. Reading them here rather than from a psql scrollback is what
+/// makes a receipt's figures reproducible: the queries are these, not
+/// whatever was typed at the prompt.
+///
+/// Two session counts ride along because a fold cannot tell "summed to zero"
+/// from "summed over nothing" — and the folds here have two different
+/// denominators, so one count cannot vouch for the other's figures.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DrivingFigures {
+    /// Sessions OPENED inside the window — the set `generations` and
+    /// `restarts` fold over. Says nothing about `peak_concurrent` or the
+    /// counters, which fold over the alive set below.
+    pub sessions_in_window: i64,
+    /// Sessions alive at any point in the window (opened before its end,
+    /// not closed before its start) — the set `peak_concurrent`,
+    /// `attaches`, and `detaches` fold over. Zeros beside a zero here are
+    /// an empty window, not a quiet one.
+    pub sessions_alive_in_window: i64,
+    /// Distinct days with any pty-session ledger activity in the window.
+    pub days_driven: i64,
+    /// Sweep-line maximum of concurrently open sessions, intervals clipped to
+    /// the window. At one instant an open sorts before a close, so a session
+    /// starting the moment another ends counts both.
+    pub peak_concurrent: i64,
+    /// Distinct host generations among the window's sessions.
+    pub generations: i64,
+    /// Generation boundaries observed in the window: one less than
+    /// [`generations`](Self::generations), floored at zero in Rust rather
+    /// than `- 1` in SQL so an empty window reads 0, not -1.
+    pub restarts: i64,
+    /// Superseded generations that left sessions running — retire never
+    /// arrived before the successor. Read over the whole ledger rather than
+    /// the window, because a generation's crash is visible only against the
+    /// generation that superseded it.
+    pub crashed_generations: i64,
+    /// Attach counter, summed over sessions alive at any point in the window.
+    /// Counters accumulate per session lifetime, so a session spanning a
+    /// window edge contributes its full totals.
+    pub attaches: i64,
+    /// Detach counter, on the same terms as `attaches`.
+    pub detaches: i64,
+}
+
+/// Read [`DrivingFigures`] for an already-resolved window.
+///
+/// Every query binds [`ReceiptWindow`]'s resolved texts, so all figures
+/// share one exact span by construction.
+pub async fn driving_figures(pool: &PgPool, window: &ReceiptWindow) -> Result<DrivingFigures> {
+    let opened = sqlx::query(
+        "SELECT count(*) AS sessions, count(DISTINCT generation) AS generations \
+         FROM gwk.pty_session \
+         WHERE opened_at BETWEEN $1::timestamptz AND $2::timestamptz",
+    )
+    .bind(&window.start)
+    .bind(&window.end)
+    .fetch_one(pool)
+    .await?;
+    let sessions_in_window: i64 = opened.try_get("sessions")?;
+    let generations: i64 = opened.try_get("generations")?;
+
+    let days_driven: i64 = sqlx::query_scalar(
+        "SELECT count(DISTINCT date(occurred_at)) FROM gwk.event \
+         WHERE aggregate_type = 'pty_session' \
+           AND occurred_at BETWEEN $1::timestamptz AND $2::timestamptz",
+    )
+    .bind(&window.start)
+    .bind(&window.end)
+    .fetch_one(pool)
+    .await?;
+
+    let peak_concurrent: i64 = sqlx::query_scalar(
+        "WITH bounds AS ( \
+           SELECT greatest(opened_at, $1::timestamptz) AS t, 1 AS d \
+           FROM gwk.pty_session \
+           WHERE opened_at <= $2::timestamptz \
+             AND (closed_at IS NULL OR closed_at >= $1::timestamptz) \
+           UNION ALL \
+           SELECT least(closed_at, $2::timestamptz), -1 \
+           FROM gwk.pty_session \
+           WHERE closed_at IS NOT NULL \
+             AND closed_at >= $1::timestamptz AND opened_at <= $2::timestamptz \
+         ) \
+         SELECT coalesce(max(running), 0)::bigint \
+         FROM (SELECT sum(d) OVER (ORDER BY t, d DESC) AS running FROM bounds) s",
+    )
+    .bind(&window.start)
+    .bind(&window.end)
+    .fetch_one(pool)
+    .await?;
+
+    // No window clause, deliberately: see the field's doc. The subquery's row
+    // is the newest session overall; on an empty table it yields no row, the
+    // comparison is NULL, and the count is honestly zero.
+    let crashed_generations: i64 = sqlx::query_scalar(
+        "SELECT count(DISTINCT generation) FROM gwk.pty_session \
+         WHERE closed_at IS NULL \
+           AND generation <> (SELECT generation FROM gwk.pty_session \
+                              ORDER BY opened_at DESC LIMIT 1)",
+    )
+    .fetch_one(pool)
+    .await?;
+
+    // The alive count comes from the same statement as the sums it vouches
+    // for, so the denominator and the folds cannot read different sets.
+    let counters = sqlx::query(
+        "SELECT count(*) AS alive, \
+                coalesce(sum(attach_count), 0)::bigint AS attaches, \
+                coalesce(sum(detach_count), 0)::bigint AS detaches \
+         FROM gwk.pty_session \
+         WHERE opened_at <= $2::timestamptz \
+           AND (closed_at IS NULL OR closed_at >= $1::timestamptz)",
+    )
+    .bind(&window.start)
+    .bind(&window.end)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(DrivingFigures {
+        sessions_in_window,
+        sessions_alive_in_window: counters.try_get("alive")?,
+        days_driven,
+        peak_concurrent,
+        generations,
+        restarts: (generations - 1).max(0),
+        crashed_generations,
+        attaches: counters.try_get("attaches")?,
+        detaches: counters.try_get("detaches")?,
+    })
+}
+
 /// The backend mechanics, the fingerprint row, and the runtime grants, as one
 /// script.
 ///
@@ -260,6 +438,16 @@ pub async fn runtime_privileges<'e>(
 /// ever by inserting, so granting them UPDATE would widen the role for a write
 /// no code path makes. `transition` is the FSM seed the contract ships — the
 /// kernel only ever reads it, so it loses every write.
+///
+/// The four Context truth records lose UPDATE for a stronger reason than the
+/// others: immutability is their definition, not an optimization. A resolved
+/// manifest is what an independent verifier checks and what Explain and Compare
+/// reconstruct from; a manifest that can be edited after the fact verifies
+/// nothing, because the row a verifier reads is no longer the row the attempt
+/// ran against. The blanket `GRANT ... UPDATE ON ALL TABLES` reaches every new
+/// table in the schema by construction, so a record is mutable the moment it is
+/// created unless this line names it. That default is the right one for a
+/// schema that is mostly rebuildable projections, and it is exactly wrong here.
 ///
 /// The blob tables are the one place DELETE is granted, and only inside
 /// `gwk_internal`: sweep reclaims unreferenced blobs, evidence pins are
@@ -283,6 +471,8 @@ pub fn backend_script(role: &str, contract_sha256: &str) -> String {
          GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA gwk TO {role};\n\
          REVOKE UPDATE ON gwk.event, gwk.receipt, gwk.ingested_record, \
            gwk.cost_entry FROM {role};\n\
+         REVOKE UPDATE ON gwk.context_manifest, gwk.context_release, \
+           gwk.context_observation, gwk.context_finalization FROM {role};\n\
          REVOKE INSERT, UPDATE ON gwk.transition FROM {role};\n\
          GRANT DELETE ON gwk.workspace_node TO {role};\n\
          GRANT SELECT ON gwk_internal.schema_fingerprint TO {role};\n\
@@ -435,6 +625,8 @@ mod tests {
         assert!(script.contains("VALUES (1, '"));
         assert!(script.contains("GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA gwk"));
         assert!(script.contains("REVOKE UPDATE ON gwk.event, gwk.receipt"));
+        assert!(script.contains("REVOKE UPDATE ON gwk.context_manifest, gwk.context_release"));
+        assert!(script.contains("gwk.context_observation, gwk.context_finalization FROM"));
         assert!(script.contains("REVOKE INSERT, UPDATE ON gwk.transition"));
         assert!(script.contains("GRANT SELECT, INSERT, UPDATE ON gwk_internal.pty_delivery"));
         assert!(!script.contains("TRUNCATE"), "{script}");

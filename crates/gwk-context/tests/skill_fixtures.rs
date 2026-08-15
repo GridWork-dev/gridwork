@@ -1,0 +1,180 @@
+//! The skill-fixture catalog, walked rather than listed.
+//!
+//! `include_str!` would be simpler and would prove less. A fixture added to the
+//! tree and never named in a test is invisible to a compile-time include: the
+//! suite stays green and the case nobody runs looks exactly like the case that
+//! passes. So this reads the directory at run time and requires the two sets to
+//! agree in both directions — a file with no declared expectation reds, and a
+//! declared expectation with no file reds.
+//!
+//! It also asserts the count before anything else. A walk over a directory that
+//! moved returns an empty iterator, every `for` body is skipped, and a suite
+//! that inspected nothing reports the same success as one that inspected
+//! everything.
+
+use std::collections::BTreeMap;
+use std::path::Path;
+
+use gwk_context::skill::{SkillError, SkillManifest};
+
+const SKILLS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/skills");
+
+/// What one fixture must do: `None` parses, `Some(pred)` is refused by shape.
+///
+/// A predicate rather than an `Eq` comparison because the refusal is matched on
+/// its variant, not its message — rewording a `Display` arm should not red the
+/// suite, and asserting on prose would make it.
+type Expectation = Option<fn(&SkillError) -> bool>;
+
+/// The declared outcome of every fixture, keyed by `<dir>/<file>`.
+type Catalog = BTreeMap<&'static str, Expectation>;
+
+fn catalog() -> Catalog {
+    let mut c: Catalog = BTreeMap::new();
+    c.insert("accepted/minimal.md", None);
+    c.insert("accepted/full-portable.md", None);
+    c.insert("accepted/unknown-portable-field.md", None);
+    c.insert("accepted/gridwork-extension.md", None);
+    c.insert(
+        "refused/duplicate-key.md",
+        Some(|e| matches!(e, SkillError::DuplicateKey(k) if k == "name")),
+    );
+    c.insert(
+        "refused/anchor.md",
+        Some(|e| matches!(e, SkillError::UnsupportedYaml("anchor"))),
+    );
+    c.insert(
+        "refused/alias.md",
+        Some(|e| matches!(e, SkillError::UnsupportedYaml("alias"))),
+    );
+    c.insert(
+        "refused/merge-key.md",
+        Some(|e| matches!(e, SkillError::UnsupportedYaml("merge key"))),
+    );
+    c.insert(
+        "refused/tab-indent.md",
+        Some(|e| matches!(e, SkillError::TabIndentation)),
+    );
+    c.insert(
+        "refused/non-string-metadata.md",
+        Some(|e| matches!(e, SkillError::MetadataValueNotString(k) if k == "count")),
+    );
+    c.insert(
+        "refused/unknown-gridwork-key.md",
+        Some(|e| matches!(e, SkillError::InvalidGridworkExtension(_))),
+    );
+    c.insert(
+        "refused/invalid-name.md",
+        Some(|e| matches!(e, SkillError::InvalidName)),
+    );
+    c.insert(
+        "refused/no-frontmatter.md",
+        Some(|e| matches!(e, SkillError::MissingFrontmatter)),
+    );
+    c
+}
+
+fn walk() -> Vec<String> {
+    let mut found = Vec::new();
+    for group in ["accepted", "refused"] {
+        let dir = Path::new(SKILLS_DIR).join(group);
+        let entries = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("fixture directory {} is unreadable: {e}", dir.display()));
+        for entry in entries {
+            let entry = entry.expect("directory entry");
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".md") {
+                found.push(format!("{group}/{name}"));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+#[test]
+fn every_fixture_on_disk_is_exercised_and_every_expectation_has_a_fixture() {
+    let found = walk();
+    let catalog = catalog();
+
+    // The count first. Everything below is a fold, and a fold over nothing
+    // agrees with itself.
+    assert!(
+        found.len() >= 13,
+        "expected at least 13 skill fixtures, walked {}",
+        found.len()
+    );
+    assert_eq!(
+        found.len(),
+        catalog.len(),
+        "fixture files on disk: {found:?}\ndeclared: {:?}",
+        catalog.keys().collect::<Vec<_>>()
+    );
+    for name in &found {
+        assert!(
+            catalog.contains_key(name.as_str()),
+            "{name} is on disk with no declared expectation"
+        );
+    }
+}
+
+#[test]
+fn each_fixture_does_what_the_catalog_says() {
+    let catalog = catalog();
+    let mut checked = 0usize;
+
+    for (name, expectation) in &catalog {
+        let path = Path::new(SKILLS_DIR).join(name);
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{} is unreadable: {e}", path.display()));
+        let outcome = SkillManifest::parse(&raw);
+        match expectation {
+            None => {
+                let manifest =
+                    outcome.unwrap_or_else(|e| panic!("{name} was expected to parse, got {e:?}"));
+                // A fixture's own name is its declared identity; the parser
+                // must agree with it, which also proves the file was read.
+                let stem = name
+                    .rsplit_once('/')
+                    .map(|(_, f)| f.trim_end_matches(".md"))
+                    .expect("group-qualified name");
+                if stem != "minimal" {
+                    assert_eq!(manifest.name, stem, "{name}");
+                }
+            }
+            Some(matches_refusal) => {
+                let err = outcome
+                    .err()
+                    .unwrap_or_else(|| panic!("{name} was expected to be refused"));
+                assert!(matches_refusal(&err), "{name} refused as {err:?}");
+            }
+        }
+        checked += 1;
+    }
+
+    assert_eq!(checked, catalog.len());
+    assert!(checked > 0, "the catalog inspected nothing");
+}
+
+#[test]
+fn the_accepted_fixtures_carry_the_evidence_the_asymmetry_promises() {
+    let opaque =
+        std::fs::read_to_string(Path::new(SKILLS_DIR).join("accepted/unknown-portable-field.md"))
+            .expect("readable");
+    let manifest = SkillManifest::parse(&opaque).expect("parses");
+    assert_eq!(manifest.opaque.len(), 1);
+    assert_eq!(manifest.opaque[0].key, "invocation-hint");
+    assert_eq!(manifest.opaque[0].value, "proactive");
+
+    let ext = std::fs::read_to_string(Path::new(SKILLS_DIR).join("accepted/gridwork-extension.md"))
+        .expect("readable");
+    let manifest = SkillManifest::parse(&ext).expect("parses");
+    let gridwork = manifest.gridwork.expect("extension decoded");
+    assert_eq!(gridwork.routes, ["code_review"]);
+    assert_eq!(gridwork.budget_tokens, Some(8192));
+    assert!(!manifest.metadata.contains_key("gridwork"));
+    assert_eq!(
+        manifest.metadata.get("team").map(String::as_str),
+        Some("infra")
+    );
+}

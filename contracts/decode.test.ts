@@ -103,6 +103,10 @@ const _batchShape: Pick<Extract<B.ServerControl_Serialize, { type: "event_batch"
 const _gateActorShape: Pick<B.Gate_Serialize, "decided_by"> = {
   decided_by: { kind: "operator" },
 };
+const _activeParticipationDecode: B.Participation_Deserialize = {
+  digest: "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+  state: "active",
+};
 const _openPtyShape: Extract<B.KernelCommand_Serialize, { type: "open_pty_session" }> = {
   type: "open_pty_session",
   pty_session_id: "pty-1",
@@ -139,6 +143,62 @@ test("event-envelope-minimal: absent optionals are ABSENT, not null", async () =
   if (!isRecord(actor)) throw new Error("actor missing");
   expect("id" in actor).toBe(false);
   await reemit("event-envelope-minimal.json", raw as B.EventEnvelope_Serialize);
+});
+
+test("context manifest: bounded facts, participation, and implicit stage", async () => {
+  const raw = await golden("context-resolved-manifest.json");
+  if (!isRecord(raw)) throw new Error("golden is not an object");
+  const manifest = raw as B.ResolvedManifest_Serialize;
+  const sourceCount: number = manifest.source_count;
+  const sourceBytes: string = manifest.source_bytes;
+  expect(sourceCount).toBe(2);
+  expect(sourceBytes).toBe("768");
+  expect(manifest.participations).toHaveLength(2);
+  expect(manifest.participations[1]?.state).toBe("excluded");
+  expect(manifest.participations[1]?.reason).toBe("budget_cut");
+  for (const forbidden of ["stage", "prompt", "body"]) {
+    expect(forbidden in raw).toBe(false);
+  }
+  await reemit("context-resolved-manifest.json", manifest);
+});
+
+test("context release: digests identify released bytes without carrying them", async () => {
+  const raw = await golden("context-release-supplement.json");
+  if (!isRecord(raw)) throw new Error("golden is not an object");
+  const release = raw as B.ReleaseSupplement;
+  const renderedBytes: string = release.rendered_bytes;
+  expect(renderedBytes).toBe("512");
+  expect(release.tool_schema_count).toBe(3);
+  expect(release.rendered_digest).toMatch(/^sha256:[0-9a-f]{64}$/);
+  for (const forbidden of ["stage", "prompt", "body", "rendered"]) {
+    expect(forbidden in raw).toBe(false);
+  }
+  await reemit("context-release-supplement.json", release);
+});
+
+test("context observation: stable nonzero order and explicit truncation", async () => {
+  const raw = await golden("context-observation-supplement.json");
+  if (!isRecord(raw)) throw new Error("golden is not an object");
+  const observation = raw as B.ObservationSupplement;
+  const index: number = observation.observation_index;
+  expect(index).toBe(1);
+  expect(observation.visible_source_count).toBe(1);
+  expect(observation.truncated).toBe(false);
+  expect("stage" in raw).toBe(false);
+  await reemit("context-observation-supplement.json", observation);
+});
+
+test("context finalization: lifecycle root and assurance are explicit", async () => {
+  const raw = await golden("context-finalization-supplement.json");
+  if (!isRecord(raw)) throw new Error("golden is not an object");
+  const finalization = raw as B.FinalizationSupplement;
+  const assurance: B.Assurance = finalization.assurance;
+  expect(assurance).toBe("trace");
+  expect(finalization.lifecycle_complete).toBe(true);
+  expect(finalization.observation_count).toBe(1);
+  expect(finalization.final_event_root).toMatch(/^sha256:[0-9a-f]{64}$/);
+  expect("stage" in raw).toBe(false);
+  await reemit("context-finalization-supplement.json", finalization);
 });
 
 test("command-envelope: required idempotency key", async () => {

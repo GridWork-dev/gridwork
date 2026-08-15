@@ -4,12 +4,17 @@
 //! the compiler resolves one immutable manifest per spawn attempt, an
 //! independent verifier checks it, and Explain/Compare reconstruct what
 //! happened from immutable projections. This crate holds the words all of that
-//! agrees on — stages, participation, precedence, and content digests.
+//! agrees on — stages, truth records, participation, precedence, and content
+//! digests.
 //!
-//! What is here is deliberately narrow. The compiler, the verifier, the CAS
-//! layer, the supplement entities, and the wire-v2 grammar are the rest of 8A
-//! and 8B. This is the vocabulary they will be written in, landed first so
-//! they cannot each invent their own.
+//! What is here is deliberately narrow. The compiler, verifier, and CAS layer
+//! remain later 8A/8B work. This is the vocabulary, the immutable truth-record
+//! spine, and — since E3 — the wire-v2 grammar they will be written against.
+//!
+//! The grammar being present is not the grammar being live. [`wire`] publishes
+//! shapes for a protocol major that [`gwk_domain::ProtocolVersion`] names and
+//! the kernel refuses; freezing it under review before anything speaks it is
+//! the reason to publish it early rather than alongside its first caller.
 //!
 //! ## Rulings this crate encodes
 //!
@@ -31,21 +36,39 @@
 //!   it across thousands of manifests; open strings work for `Gate.kind` only
 //!   because nothing branches on that.
 //!
-//! ## Not here yet
-//!
-//! No `specta::Type` derives and no contract-root registration: these types
-//! have not crossed a wire, and generating TypeScript for them would publish a
-//! shape as settled when its grammar (F7–F9) is still open. They join the
-//! generated contract when the wire does.
+//! The four truth records and the wire-v2 grammar are generated public contract
+//! roots. Publishing those data shapes does not change the kernel's accepted
+//! protocol major, and `CONTRACT_VERSION` stays `1` — the wire major and the
+//! domain contract are separate axes, and only the first of them moved (R10).
 
 pub mod digest;
+pub mod manifest;
 pub mod participation;
 pub mod precedence;
+pub mod skill;
 pub mod stage;
+pub mod wire;
 
 pub use digest::{DIGEST_SCHEME, Digest, DigestError};
+pub use manifest::{
+    Assurance, CONTEXT_EVIDENCE_MAX_COUNT, CONTEXT_ID_MAX_BYTES,
+    CONTEXT_PARTICIPATION_DETAIL_MAX_BYTES, CONTEXT_PARTICIPATION_MAX_COUNT,
+    CONTEXT_RECORD_COUNT_MAX, EvidenceRefs, FinalizationSupplement, FinalizationSupplementId,
+    ManifestId, ObservationIndex, ObservationSupplement, ObservationSupplementId,
+    ParticipationRecords, RecordCount, ReleaseSupplement, ReleaseSupplementId, ResolvedManifest,
+    TruthRecordError,
+};
 pub use participation::{
     Participation, ParticipationError, ParticipationReason, ParticipationState,
 };
 pub use precedence::{Contribution, PrecedenceConflict, PrecedenceTier, resolve};
 pub use stage::ContextStage;
+pub use wire::{
+    AttributionPart, CONTEXT_ATTRIBUTION_MAX_BYTES, CONTEXT_CANDIDATE_ROUTE_MAX_COUNT,
+    CONTEXT_COMPARE_STAGE_MAX_COUNT, CONTEXT_GRAPH_DEPTH_MAX, CONTEXT_MANDATORY_FROM,
+    CONTEXT_QUERY_LIMIT_MAX, CandidateDisposition, CompareSubject, ContextAggregate,
+    ContextAttribution, ContextEventName, ContextEventPayload, ContextFact, ContextQuery,
+    ContextRunId, ContextWireError, ExplainSubject, GraphDepth, ManifestSelector,
+    OptimizationCandidateId, QueryLimit, RecordContextFact, RouteCount, SupplementKind,
+    VerificationVerdict,
+};
