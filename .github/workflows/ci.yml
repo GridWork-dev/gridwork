@@ -783,10 +783,19 @@ jobs:
           # gwk-pty-host joined the list when it took the engine and adapter
           # path dependencies: packaging demands version requirements those
           # unpublished siblings do not have.
+          #
+          # xtask joined for the same reason by the same route, one crate later:
+          # it took a path dependency on gwk-context, which is `publish = false`
+          # until E3 lands the wire-v2 grammar. Both ways out of that bind are
+          # closed, which is why the exclusion is the answer and not a manifest
+          # tweak — declare a version on gwk-context and packaging resolves it
+          # from the crates.io index, where an unpublished crate is not; omit
+          # the version and packaging refuses the dependency for having none. A
+          # crate that is never uploaded owes neither check an answer.
           cargo package --workspace --exclude gwk-pty \
             --exclude gwk-adapter-opencode --exclude gwk-adapter-claude \
             --exclude gwk-adapter-codex --exclude gwk-parity \
-            --exclude gwk-pty-host --locked
+            --exclude gwk-pty-host --exclude xtask --locked
 
           # Every publishable member, straight from the manifest graph:
           # `publish = false` shows up as an empty array, so xtask drops out and

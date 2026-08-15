@@ -185,7 +185,7 @@ async fn init_applies_the_contract_is_idempotent_and_refuses_a_stranger() {
         .fetch_all(&mut conn)
         .await
         .expect("query the grant matrix");
-        assert_eq!(rows.len(), 22, "the contract schema changed shape");
+        assert_eq!(rows.len(), 26, "the contract schema changed shape");
         for row in &rows {
             let table: String = row.try_get("relname").expect("relname");
             let get = |col| -> bool { row.try_get(col).expect("bool") };
@@ -196,7 +196,22 @@ async fn init_applies_the_contract_is_idempotent_and_refuses_a_stranger() {
                 // `ingested_record` and `cost_entry` sit here rather than with
                 // the projections because a replay rebuilds them by INSERT
                 // alone — no version to move, no state to advance.
-                "event" | "receipt" | "ingested_record" | "cost_entry" => {
+                //
+                // The four Context truth records sit here because immutability
+                // is what they ARE. A resolved manifest is the artifact an
+                // independent verifier checks; one that can be edited afterward
+                // proves nothing, since the row the verifier reads is no longer
+                // the row the attempt ran against. They arrived UPDATE-able
+                // from the blanket grant, which is how this assertion found
+                // them.
+                "event"
+                | "receipt"
+                | "ingested_record"
+                | "cost_entry"
+                | "context_manifest"
+                | "context_release"
+                | "context_observation"
+                | "context_finalization" => {
                     assert!(get("ins"), "{table}: history must be appendable");
                     assert!(!get("upd"), "{table}: history must not be rewritable");
                     assert!(!get("del"), "{table}: DELETE is granted nowhere else");

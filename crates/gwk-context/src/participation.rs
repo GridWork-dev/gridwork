@@ -22,7 +22,17 @@ use crate::digest::Digest;
 ///
 /// Per ADR-0032 D5. Not a state machine: see the module docs.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    specta::Type,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum ParticipationState {
@@ -53,7 +63,17 @@ impl ParticipationState {
 /// A new reason is a contract change with a new binding, never a string a
 /// caller invents — the same rule `KernelCommand` states for itself.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    specta::Type,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum ParticipationReason {
@@ -95,7 +115,7 @@ impl ParticipationReason {
 ///
 /// `deny_unknown_fields` because a field this record does not know is either a
 /// version skew or a caller inventing contract, and both should be loud.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
 #[serde(deny_unknown_fields)]
 pub struct Participation {
     /// What the candidate was, by content — not by name, which can be reused.
@@ -104,11 +124,13 @@ pub struct Participation {
     /// Present exactly when [`ParticipationState::requires_reason`] is true.
     /// Enforced by [`Participation::validate`], not by the type, so a record
     /// off the wire can be inspected before it is rejected.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
     pub reason: Option<ParticipationReason>,
     /// Free text that narrows the reason for a human. Never parsed, never
     /// branched on — that is what the closed enum above is for.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
     pub detail: Option<String>,
 }
 

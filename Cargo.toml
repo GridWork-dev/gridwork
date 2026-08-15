@@ -77,6 +77,12 @@ gwk-adapter-claude = { path = "crates/gwk-adapter-claude" }
 gwk-adapter-codex = { path = "crates/gwk-adapter-codex" }
 gwk-adapter-opencode = { path = "crates/gwk-adapter-opencode" }
 gwk-cert = { path = "crates/gwk-cert", version = "0.0.3" }
+# Path-only for the same reason as `gwk-pty` below, reached by a different
+# route: `gwk-context` is `publish = false` until E3 lands the wire-v2 grammar.
+# A `version` here is not documentation — it makes `cargo package` resolve the
+# dependency from the crates.io index, where an unpublished crate is not, so
+# `xtask` failed to package over a crate that was never going to be there.
+gwk-context = { path = "crates/gwk-context" }
 gwk-domain = { path = "crates/gwk-domain", version = "0.0.3" }
 gwk-kernel = { path = "crates/gwk-kernel", version = "0.0.3" }
 # Path-only, no version: unpublished (`publish = false`), like the adapter

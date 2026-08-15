@@ -1,0 +1,16 @@
+{
+  "id": "finalization-0001",
+  "manifest_id": "manifest-0001",
+  "output_digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+  "verification_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "approval_count": 1,
+  "observation_count": 1,
+  "final_event_root": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "lifecycle_complete": true,
+  "assurance": "trace",
+  "evidence_ids": [
+    "evidence-context-1",
+    "evidence-context-2"
+  ],
+  "finalized_at": "2026-08-14T12:00:03Z"
+}

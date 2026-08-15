@@ -12,6 +12,7 @@ publish = false
 # committed contracts/ artifacts are the product; nothing outside xtask
 # depends on these exporter crates.
 [dependencies]
+gwk-context.workspace = true
 gwk-domain.workspace = true
 gwk-theme.workspace = true
 serde.workspace = true

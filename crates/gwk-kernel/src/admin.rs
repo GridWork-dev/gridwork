@@ -261,6 +261,16 @@ pub async fn runtime_privileges<'e>(
 /// no code path makes. `transition` is the FSM seed the contract ships — the
 /// kernel only ever reads it, so it loses every write.
 ///
+/// The four Context truth records lose UPDATE for a stronger reason than the
+/// others: immutability is their definition, not an optimization. A resolved
+/// manifest is what an independent verifier checks and what Explain and Compare
+/// reconstruct from; a manifest that can be edited after the fact verifies
+/// nothing, because the row a verifier reads is no longer the row the attempt
+/// ran against. The blanket `GRANT ... UPDATE ON ALL TABLES` reaches every new
+/// table in the schema by construction, so a record is mutable the moment it is
+/// created unless this line names it. That default is the right one for a
+/// schema that is mostly rebuildable projections, and it is exactly wrong here.
+///
 /// The blob tables are the one place DELETE is granted, and only inside
 /// `gwk_internal`: sweep reclaims unreferenced blobs, evidence pins are
 /// released, and uploads expire. None of that is history — the events that
@@ -283,6 +293,8 @@ pub fn backend_script(role: &str, contract_sha256: &str) -> String {
          GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA gwk TO {role};\n\
          REVOKE UPDATE ON gwk.event, gwk.receipt, gwk.ingested_record, \
            gwk.cost_entry FROM {role};\n\
+         REVOKE UPDATE ON gwk.context_manifest, gwk.context_release, \
+           gwk.context_observation, gwk.context_finalization FROM {role};\n\
          REVOKE INSERT, UPDATE ON gwk.transition FROM {role};\n\
          GRANT DELETE ON gwk.workspace_node TO {role};\n\
          GRANT SELECT ON gwk_internal.schema_fingerprint TO {role};\n\
@@ -435,6 +447,8 @@ mod tests {
         assert!(script.contains("VALUES (1, '"));
         assert!(script.contains("GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA gwk"));
         assert!(script.contains("REVOKE UPDATE ON gwk.event, gwk.receipt"));
+        assert!(script.contains("REVOKE UPDATE ON gwk.context_manifest, gwk.context_release"));
+        assert!(script.contains("gwk.context_observation, gwk.context_finalization FROM"));
         assert!(script.contains("REVOKE INSERT, UPDATE ON gwk.transition"));
         assert!(script.contains("GRANT SELECT, INSERT, UPDATE ON gwk_internal.pty_delivery"));
         assert!(!script.contains("TRUNCATE"), "{script}");
