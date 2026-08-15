@@ -150,11 +150,17 @@ where
         }
     };
 
-    // Redundant today — `ProtocolVersion` refuses an unknown major at
-    // `Deserialize` time, so an unsupported one never reaches here as a value.
-    // Kept because the day a second major exists this becomes the only check
-    // that says "known, but not this connection's", and the `Version` code is
-    // what a client distinguishes that by.
+    // That day arrived. `ProtocolVersion::V2` is named by the grammar and
+    // served by nobody, so a v2 hello now decodes cleanly and lands here — and
+    // this is the only check that can say "known, but not this connection's".
+    // The line above is unchanged from when it was written as dead code for
+    // exactly this, which is the whole argument for having written it then.
+    //
+    // A major outside the grammar entirely still fails earlier, inside
+    // `Deserialize`, and still surfaces as `Validation`. The two refusals carry
+    // different codes on purpose: one means "that version does not exist", the
+    // other means "it exists and this kernel does not speak it", and a client
+    // deciding whether to upgrade or to give up needs to tell them apart.
     if protocol_major != ProtocolVersion::V1 {
         return Err(WireError::new(
             KernelErrorCode::UnsupportedVersion,
@@ -304,24 +310,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unknown_major_is_refused_in_words_the_client_can_read() {
+    async fn a_known_but_unserved_major_is_refused_as_unsupported() {
         // Not a dropped socket: a peer that guessed the major wrong must be
         // able to tell that from a daemon that was never listening.
+        //
+        // This assertion used to accept `UnsupportedVersion | Validation`,
+        // because major 2 was unknown and died inside `Deserialize`. Naming V2
+        // is what collapses the alternation: it decodes, reaches the explicit
+        // guard, and gets the code that means "this kernel does not serve it".
         let (outcome, answer) = handshake(
             r#"{"type":"hello","protocol_major":2,"protocol_minor":0,"capabilities":[]}"#,
         )
         .await;
         let error = outcome.expect_err("major 2 accepted");
-        assert!(matches!(
-            error.code,
-            KernelErrorCode::UnsupportedVersion | KernelErrorCode::Validation
-        ));
+        assert_eq!(error.code, KernelErrorCode::UnsupportedVersion);
         match answer {
             ServerControl::HelloRefusal { message, .. } => {
                 assert!(message.contains('2'), "{message}");
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn a_major_outside_the_grammar_is_refused_as_malformed() {
+        // The other half of the pair, and the reason the pair exists. A client
+        // that sent a version this build has never heard of gets a different
+        // code from one that sent a real-but-unserved version, so "upgrade the
+        // kernel" and "you are speaking nonsense" are distinguishable. Asserted
+        // together with the test above; separately, either could drift into
+        // agreeing with the other and nothing would notice.
+        let (outcome, answer) = handshake(
+            r#"{"type":"hello","protocol_major":3,"protocol_minor":0,"capabilities":[]}"#,
+        )
+        .await;
+        let error = outcome.expect_err("major 3 accepted");
+        assert_eq!(error.code, KernelErrorCode::Validation);
+        assert!(matches!(answer, ServerControl::HelloRefusal { .. }));
     }
 
     #[tokio::test]

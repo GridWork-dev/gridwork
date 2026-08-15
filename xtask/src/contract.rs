@@ -14,10 +14,11 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use gwk_context::{
-    Assurance, Digest as ContextDigest, EvidenceRefs, FinalizationSupplement,
-    FinalizationSupplementId, ManifestId, ObservationIndex, ObservationSupplement,
-    ObservationSupplementId, Participation, ParticipationReason, ParticipationRecords, RecordCount,
-    ReleaseSupplement, ReleaseSupplementId, ResolvedManifest,
+    Assurance, ContextAggregate, ContextEventName, ContextEventPayload, ContextFact, ContextQuery,
+    Digest as ContextDigest, EvidenceRefs, FinalizationSupplement, FinalizationSupplementId,
+    ManifestId, ObservationIndex, ObservationSupplement, ObservationSupplementId, Participation,
+    ParticipationReason, ParticipationRecords, RecordContextFact, RecordCount, ReleaseSupplement,
+    ReleaseSupplementId, ResolvedManifest,
 };
 use gwk_domain::blob::{BlobAddress, BlobDescriptor};
 use gwk_domain::checkpoint::{CHECKPOINT_SCHEMA_VERSION, Checkpoint};
@@ -262,6 +263,22 @@ fn bindings() -> String {
         .register::<ReleaseSupplement>()
         .register::<ObservationSupplement>()
         .register::<FinalizationSupplement>()
+        // The wire-v2 Context grammar. Published shapes for a protocol major
+        // the kernel refuses — a TS consumer needs the types to be written
+        // against before anything speaks them, which is the point of freezing
+        // the grammar a phase ahead of its first caller.
+        //
+        // `ContextFact` and `ContextEventName` are reachable through the two
+        // wrappers and would be emitted regardless; they are named anyway
+        // because a consumer branches on both, and a type that appears in
+        // bindings.ts only as a side effect of something else's reachability is
+        // one refactor away from vanishing without a registry diff.
+        .register::<RecordContextFact>()
+        .register::<ContextEventPayload>()
+        .register::<ContextFact>()
+        .register::<ContextEventName>()
+        .register::<ContextAggregate>()
+        .register::<ContextQuery>()
         .register::<gwk_theme::Token>();
     // PhasesFormat, not the unified Format: `skip_serializing_if` (the
     // tri-state omission) is direction-dependent, which unified mode refuses
@@ -1582,7 +1599,7 @@ mod tests {
     /// manual root registry described in its doc comment. Update this
     /// constant AND the `.register()` chain together in the same change;
     /// a mismatch means one moved without the other.
-    const REGISTERED_ROOT_COUNT: usize = 32;
+    const REGISTERED_ROOT_COUNT: usize = 38;
 
     #[test]
     fn bindings_registry_matches_its_pin() {

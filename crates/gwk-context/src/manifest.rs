@@ -63,7 +63,7 @@ impl std::fmt::Display for TruthRecordError {
 
 impl std::error::Error for TruthRecordError {}
 
-fn id_is_valid(value: &str) -> Result<(), TruthRecordError> {
+pub(crate) fn id_is_valid(value: &str) -> Result<(), TruthRecordError> {
     if value.is_empty() {
         return Err(TruthRecordError::EmptyId);
     }
@@ -87,8 +87,11 @@ macro_rules! context_id {
         pub struct $name(String);
 
         impl $name {
-            pub fn parse(value: &str) -> Result<Self, TruthRecordError> {
-                id_is_valid(value)?;
+            // Both paths are absolute: this macro expands in `wire.rs` as well
+            // as here, and an unqualified name that happens to be in scope at
+            // the definition site is not in scope at every expansion site.
+            pub fn parse(value: &str) -> Result<Self, $crate::manifest::TruthRecordError> {
+                $crate::manifest::id_is_valid(value)?;
                 Ok(Self(value.to_owned()))
             }
 
@@ -118,6 +121,12 @@ macro_rules! context_id {
         }
     };
 }
+
+// Visible to `crate::wire`, which mints the run and candidate identifiers the
+// lifecycle grammar needs. One macro rather than a second copy of the same
+// validation: wire identifiers and truth-record identifiers ARE the same
+// identifiers, and two definitions of one charset is how they stop being.
+pub(crate) use context_id;
 
 context_id!(
     /// One immutable resolved manifest.
