@@ -232,6 +232,53 @@ pub async fn init(pretty: bool) -> Result<(), Failure> {
     Ok(())
 }
 
+/// Read the machine half of a driving-window receipt.
+///
+/// Lockless like `verify`, because it only reads — a receipt read that could
+/// fence the daemon writing the rows it reads would be a strange instrument.
+/// Off the client socket because the figures are SQL aggregations over the
+/// log, which the wire grammar has no reason to grow.
+pub async fn receipt(from: &str, to: Option<&str>, pretty: bool) -> Result<(), Failure> {
+    let config = AdminConfig::from_env().map_err(configuration)?;
+    let pool = gwk_kernel::connect_pool(config.admin_database_url(), 2)
+        .await
+        .map_err(configuration)?;
+
+    // Resolution failures are input failures — the resolve query does
+    // nothing but cast the caller's two values — so they exit as usage, not
+    // as the retryable storage class a wrapper would loop on.
+    let window = admin::resolve_window(&pool, from, to)
+        .await
+        .map_err(|error| Failure::usage(format!("the window did not resolve: {error}")))?;
+    let figures = admin::driving_figures(&pool, &window)
+        .await
+        .map_err(configuration)?;
+    emit(
+        &json!({
+            "type": "receipt_figures",
+            // Both bounds as the database resolved them, in one format: a
+            // relative input like `yesterday` leaves as the instant it
+            // meant, which is what makes the receipt reproducible.
+            "window_start": window.start,
+            "window_end": window.end,
+            // The counts first, so the zeros below are legible: each fold's
+            // own denominator sits beside it, and zeros beside a zero
+            // denominator mean an empty window, not a quiet one.
+            "sessions_in_window": figures.sessions_in_window,
+            "sessions_alive_in_window": figures.sessions_alive_in_window,
+            "days_driven": figures.days_driven,
+            "peak_concurrent": figures.peak_concurrent,
+            "generations": figures.generations,
+            "restarts": figures.restarts,
+            "crashed_generations": figures.crashed_generations,
+            "attaches": figures.attaches,
+            "detaches": figures.detaches,
+        }),
+        pretty,
+    );
+    Ok(())
+}
+
 /// Say what the target database is and whether the runtime role is safe.
 pub async fn verify(pretty: bool) -> Result<(), Failure> {
     let config = AdminConfig::from_env().map_err(configuration)?;
