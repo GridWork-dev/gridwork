@@ -1,0 +1,6 @@
+# A locally authored declaration: no origin at all, because nothing fetched it.
+# Kept alongside the two third-party shapes so the corpus covers both sides of
+# the trust boundary rather than only the interesting one.
+name: fixture-local-declaration
+description: A hand-authored declaration with no upstream to drift from.
+trust: local

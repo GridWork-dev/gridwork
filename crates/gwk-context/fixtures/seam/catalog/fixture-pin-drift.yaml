@@ -1,0 +1,9 @@
+# The upstream moved and the pin did not. This is the shape that must NOT
+# silently update an active run: a new digest at a known origin creates a new
+# quarantined candidate, it does not re-bless the old one in place.
+name: fixture-pin-drift
+description: A known origin serving bytes the pin does not name.
+origin: https://catalog.example.invalid/fixture-pin-drift
+pin: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+trust: quarantined
+note: the served digest differs from the pin; the pin is what participates

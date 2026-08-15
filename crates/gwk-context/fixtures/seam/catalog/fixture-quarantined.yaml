@@ -1,0 +1,9 @@
+# A third-party candidate as it arrives: quarantined, pinned to one digest, and
+# claiming nothing about who wrote it. Trust state is separate from
+# participation state — this entry is present in a catalog and eligible for
+# nothing until something else verifies that exact digest.
+name: fixture-quarantined
+description: A third-party candidate at the moment it enters the catalog.
+origin: https://catalog.example.invalid/fixture-quarantined
+pin: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+trust: quarantined
