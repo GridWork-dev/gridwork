@@ -22,6 +22,13 @@ The two codes are distinct on purpose: one means the version does not exist, the
 it exists and this kernel does not speak it, and a client deciding between upgrading and
 giving up needs to tell them apart.
 
+Refusal is stated on both ends. Naming a second major turns "an ack at an unexpected major
+cannot decode" into "an ack at an unexpected major decodes and something must look at it", so
+the `gridwork` client and the PTY host's kernel client each check the acknowledged major and
+refuse a mismatch. A kernel that refuses a v2 client is half a negotiation; a client that
+accepts whatever it is answered with is the downgrade that threat 9 in the threat model
+exists to prevent.
+
 Framing is unchanged. `[u32 body_length][u8 frame_kind][body]` and the `1..=4,194,304` bound
 from ADR 0001 carry v2 exactly as they carry v1. This is a grammar change, not a codec
 change, and nothing about the byte layout is reopened.
@@ -46,7 +53,8 @@ narrower and structural: a client cannot supply source attribution. The command 
 the fact and nothing else, and the compiler derives attribution by re-reading its own
 resolved manifest rather than by trusting a caller's claim about itself.
 
-Serving major 2 is a separate, operator-gated act. Until it happens, the types published here
+Serving major 2 is a separate, operator-gated act — element E20 of the Context Runtime
+phase, which owns the cutover and is not this decision. Until it happens, the types published here
 are shapes with no handlers, and adding one is an ordinary contract change. After it happens,
 rollback is bounded by what the log already holds: recorded Context events do not disappear
 when the accepted major moves back, so reverting the cutover restores the served version and

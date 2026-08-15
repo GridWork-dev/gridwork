@@ -65,9 +65,10 @@ pub use precedence::{Contribution, PrecedenceConflict, PrecedenceTier, resolve};
 pub use stage::ContextStage;
 pub use wire::{
     AttributionPart, CONTEXT_ATTRIBUTION_MAX_BYTES, CONTEXT_CANDIDATE_ROUTE_MAX_COUNT,
-    CONTEXT_CANDIDATE_SUMMARY_MAX_BYTES, CONTEXT_COMPARE_SUBJECT_COUNT, CONTEXT_GRAPH_DEPTH_MAX,
-    CONTEXT_MANDATORY_FROM, CONTEXT_QUERY_LIMIT_MAX, CandidateDisposition, CompareSubject,
-    ContextAggregate, ContextAttribution, ContextEventName, ContextEventPayload, ContextFact,
-    ContextQuery, ContextRunId, ContextWireError, ExplainSubject, GraphDepth, ManifestSelector,
-    OptimizationCandidateId, QueryLimit, RecordContextFact, SupplementKind, VerificationVerdict,
+    CONTEXT_COMPARE_STAGE_MAX_COUNT, CONTEXT_GRAPH_DEPTH_MAX, CONTEXT_MANDATORY_FROM,
+    CONTEXT_QUERY_LIMIT_MAX, CandidateDisposition, CompareSubject, ContextAggregate,
+    ContextAttribution, ContextEventName, ContextEventPayload, ContextFact, ContextQuery,
+    ContextRunId, ContextWireError, ExplainSubject, GraphDepth, ManifestSelector,
+    OptimizationCandidateId, QueryLimit, RecordContextFact, RouteCount, SupplementKind,
+    VerificationVerdict,
 };
