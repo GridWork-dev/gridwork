@@ -1,0 +1,958 @@
+//! Portable Agent Skill manifests, parsed asymmetrically.
+//!
+//! A skill arrives as third-party YAML frontmatter authored by somebody else,
+//! for a format somebody else versions. Two pressures point in opposite
+//! directions: a field this parser does not recognize might be legitimate
+//! upstream drift, and it might be a caller inventing contract inside a
+//! namespace we own. Ruling R13 resolves that by refusing to answer both with
+//! one policy.
+//!
+//! - **Portable core** — unknown fields are captured as bounded opaque
+//!   evidence. Never dropped, because a dropped field is a silent difference
+//!   between what the author wrote and what the compiler saw. Never trusted,
+//!   because nothing branches on them. Never fatal, because upstream shipping a
+//!   new field is not an attack.
+//! - **The GridWork namespace** — [`GridworkExt`] is `deny_unknown_fields`. A
+//!   key we do not know inside a namespace we own is a version skew or an
+//!   invention, and both should be loud (R35).
+//!
+//! The extension rides as a bounded JSON string at `metadata.gridwork`, which
+//! is closer to forced than chosen: upstream `metadata` is `dict[str, str]`, so
+//! structured extension data is either one nested parse or a hand-rolled dotted
+//! key convention that would need its own unknown-key rejection — serde's
+//! `deny_unknown_fields` cannot govern keys collected out of a map, and pairing
+//! it with `flatten` is unsound. A top-level `x-gridwork` key is unavailable:
+//! the reference validator's field set is exhaustive and hard-errors on any
+//! other top-level key.
+//!
+//! ## What this module does not do
+//!
+//! It does not read the filesystem, spawn anything, or sandbox anything.
+//! [`BundleEntry::classify`] takes the entry kind from its caller precisely so
+//! that parsing a hostile manifest cannot itself become the thing that touches
+//! a hostile tree. It also does not decide authority: `allowed-tools` becomes
+//! [`AllowedToolsEvidence`], which is a record of what a manifest *claimed* and
+//! exposes no way to become a grant. Authority is resolved upstream of context
+//! compilation and context may narrow it, never widen it.
+//!
+//! A manifest's own claim of first-party authorship is ignored here. Origin is
+//! a caller-owned input; R29 enforces it in 8C.
+//!
+//! ## What sits underneath, and why the subset gate is first
+//!
+//! `yaml_serde` parses through `libyaml-rs`, which is libyaml transpiled from C
+//! by c2rust. This workspace forbids `unsafe_code` in its own crates and that
+//! rule does not reach a dependency: the bytes of a hostile skill manifest end
+//! up inside machine-translated C, keeping C's memory model without C's decades
+//! of fuzzing aimed at this particular artifact. Every serde-shaped YAML crate
+//! in Rust shares that lineage, so this is the state of the art rather than a
+//! poor pick — but it is worth writing down where someone weighing the trust
+//! boundary will read it.
+//!
+//! It is also the second reason `scan_subset` runs before the deserializer
+//! rather than after it. The first is that the accepted subset becomes a
+//! property of this file instead of a property of whichever YAML crate is
+//! pinned — and that is not theoretical here. Removing the duplicate-key check
+//! from the scan makes the duplicate-key test pass, which is to say `yaml_serde`
+//! accepts a repeated key and keeps the last one, silently. The second reason is
+//! that the gate bounds what reaches the transpiled parser at all: no anchors,
+//! no aliases, no merge keys, no tags, no directives, and at most
+//! [`SKILL_FRONTMATTER_MAX_BYTES`]. It narrows the surface; it does not remove
+//! it.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+/// Maximum bytes in a whole `SKILL.md` before the parser refuses to look.
+pub const SKILL_INPUT_MAX_BYTES: usize = 64 * 1024;
+/// Maximum bytes in the YAML frontmatter block alone.
+pub const SKILL_FRONTMATTER_MAX_BYTES: usize = 8 * 1024;
+/// Maximum bytes in a skill name.
+pub const SKILL_NAME_MAX_BYTES: usize = 64;
+/// Maximum bytes in a skill description.
+pub const SKILL_DESCRIPTION_MAX_BYTES: usize = 1024;
+/// Maximum bytes in the `license` field.
+pub const SKILL_LICENSE_MAX_BYTES: usize = 128;
+/// Maximum `metadata` entries, `gridwork` included.
+pub const SKILL_METADATA_MAX_ENTRIES: usize = 32;
+/// Maximum bytes in one metadata key.
+pub const SKILL_METADATA_KEY_MAX_BYTES: usize = 64;
+/// Maximum bytes in one metadata value, including the GridWork JSON string.
+pub const SKILL_METADATA_VALUE_MAX_BYTES: usize = 4 * 1024;
+/// Maximum entries in `allowed-tools`.
+pub const SKILL_ALLOWED_TOOLS_MAX_COUNT: usize = 64;
+/// Maximum bytes in one `allowed-tools` entry.
+pub const SKILL_ALLOWED_TOOL_MAX_BYTES: usize = 128;
+/// Maximum unrecognized portable-core fields kept as opaque evidence.
+pub const SKILL_OPAQUE_FIELD_MAX_COUNT: usize = 32;
+/// Maximum bytes in one opaque field's rendered value.
+pub const SKILL_OPAQUE_VALUE_MAX_BYTES: usize = 1024;
+/// Maximum indentation depth inside the frontmatter mapping.
+pub const SKILL_MAX_NESTING_DEPTH: usize = 2;
+/// Maximum bundle entries inventoried for one skill.
+pub const SKILL_BUNDLE_MAX_ENTRIES: usize = 256;
+/// Maximum bytes in a bundle entry's relative path.
+pub const SKILL_BUNDLE_PATH_MAX_BYTES: usize = 256;
+
+/// The exhaustive upstream portable-core field set.
+///
+/// Exhaustive is the operative word and it is why `x-gridwork` is not an
+/// option: the reference validator hard-errors on any top-level key outside
+/// this list, so an extension key alongside them is rejected before this parser
+/// ever sees the document. Fields absent here are still *accepted* — they land
+/// in [`SkillManifest::opaque`] — because this list records what upstream
+/// defines today, not what upstream is allowed to define tomorrow.
+pub const PORTABLE_CORE_FIELDS: [&str; 6] = [
+    "allowed-tools",
+    "compatibility",
+    "description",
+    "license",
+    "metadata",
+    "name",
+];
+
+/// The one metadata key GridWork owns.
+pub const GRIDWORK_METADATA_KEY: &str = "gridwork";
+
+/// Why a skill manifest was refused.
+///
+/// Closed, and each variant names one refusal rather than one location, so a
+/// caller can branch on what was wrong without parsing a message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillError {
+    /// The input exceeds [`SKILL_INPUT_MAX_BYTES`].
+    InputTooLarge,
+    /// No `---` frontmatter block, or it is never closed.
+    MissingFrontmatter,
+    /// The frontmatter block exceeds [`SKILL_FRONTMATTER_MAX_BYTES`].
+    FrontmatterTooLarge,
+    /// A C0/C1 control character outside tab and newline.
+    ControlCharacter,
+    /// A tab used for indentation, which YAML forbids outright.
+    TabIndentation,
+    /// The same top-level key appears twice.
+    DuplicateKey(String),
+    /// An anchor, alias, tag, merge key, or directive.
+    UnsupportedYaml(&'static str),
+    /// Mapping nesting beyond [`SKILL_MAX_NESTING_DEPTH`].
+    TooDeeplyNested,
+    /// A top-level line that is not `key:` at column zero.
+    MalformedTopLevelKey,
+    /// The YAML did not decode into the expected shape.
+    Malformed(String),
+    /// `name` is empty, oversized, or outside `[a-z0-9-]`.
+    InvalidName,
+    /// `name` disagrees with the directory containing the manifest.
+    NameDirectoryMismatch,
+    /// A bounded string field exceeded its limit.
+    FieldTooLong(&'static str),
+    /// A count field exceeded its limit.
+    TooManyEntries(&'static str),
+    /// A `metadata` value that is not a string.
+    MetadataValueNotString(String),
+    /// `metadata.gridwork` is not valid JSON, or carries an unknown key.
+    InvalidGridworkExtension(String),
+    /// A bundle entry that is not declarative content.
+    RefusedBundleEntry(BundleRefusal),
+}
+
+impl std::fmt::Display for SkillError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InputTooLarge => f.write_str("skill manifest exceeds its byte bound"),
+            Self::MissingFrontmatter => {
+                f.write_str("skill manifest has no closed `---` frontmatter block")
+            }
+            Self::FrontmatterTooLarge => f.write_str("skill frontmatter exceeds its byte bound"),
+            Self::ControlCharacter => f.write_str("skill frontmatter carries a control character"),
+            Self::TabIndentation => f.write_str("skill frontmatter indents with a tab"),
+            Self::DuplicateKey(key) => write!(f, "skill frontmatter repeats the key `{key}`"),
+            Self::UnsupportedYaml(what) => {
+                write!(
+                    f,
+                    "skill frontmatter uses an unsupported YAML feature: {what}"
+                )
+            }
+            Self::TooDeeplyNested => f.write_str("skill frontmatter nests beyond its depth bound"),
+            Self::MalformedTopLevelKey => {
+                f.write_str("skill frontmatter has a top-level line that is not `key:`")
+            }
+            Self::Malformed(why) => write!(f, "skill frontmatter did not decode: {why}"),
+            Self::InvalidName => {
+                f.write_str("skill name must be 1-64 bytes of lowercase letters, digits, and `-`")
+            }
+            Self::NameDirectoryMismatch => {
+                f.write_str("skill name must match the directory that contains it")
+            }
+            Self::FieldTooLong(field) => write!(f, "skill field `{field}` exceeds its byte bound"),
+            Self::TooManyEntries(field) => write!(f, "skill field `{field}` has too many entries"),
+            Self::MetadataValueNotString(key) => {
+                write!(f, "skill metadata value for `{key}` is not a string")
+            }
+            Self::InvalidGridworkExtension(why) => {
+                write!(
+                    f,
+                    "skill `metadata.gridwork` is not a valid extension: {why}"
+                )
+            }
+            Self::RefusedBundleEntry(refusal) => write!(f, "skill bundle entry refused: {refusal}"),
+        }
+    }
+}
+
+impl std::error::Error for SkillError {}
+
+/// What a manifest claimed under `allowed-tools`.
+///
+/// A newtype with no conversion, and the absence is the design. Upstream treats
+/// this field as a permission list; here it is one third party's claim about
+/// itself, recorded so Explain can show it and a reviewer can read it. Anything
+/// that turned it into a grant would let a manifest widen its own authority by
+/// asserting it, which inverts the direction D3 fixes: context narrows
+/// authority, never widens it. There is deliberately no `into_grants`, no
+/// `Deref`, and no `IntoIterator` yielding a capability type.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct AllowedToolsEvidence {
+    claimed: Vec<String>,
+}
+
+impl AllowedToolsEvidence {
+    /// The raw claimed strings, for display and review only.
+    pub fn claimed(&self) -> &[String] {
+        &self.claimed
+    }
+
+    /// How many tools the manifest claimed.
+    pub fn len(&self) -> usize {
+        self.claimed.len()
+    }
+
+    /// True when the manifest claimed no tools.
+    pub fn is_empty(&self) -> bool {
+        self.claimed.is_empty()
+    }
+}
+
+/// One unrecognized portable-core field, kept rather than dropped.
+///
+/// `value` is a rendered, bounded, lossy string — the point is evidence that
+/// the field was present and roughly what it said, not a re-parsable copy.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OpaquePortableField {
+    pub key: String,
+    pub value: String,
+}
+
+/// GridWork's own extension block, decoded from `metadata.gridwork`.
+///
+/// `deny_unknown_fields` is the whole asymmetry: this namespace is ours, so an
+/// unrecognized key here is never upstream drift.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GridworkExt {
+    /// Route names this skill declares itself eligible for. Advisory: 8C
+    /// decides eligibility, this only records the claim.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub routes: Vec<String>,
+    /// A declared token budget hint, if the author stated one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_tokens: Option<u32>,
+    /// Free-text note carried into Explain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// A parsed portable skill manifest.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SkillManifest {
+    pub name: String,
+    pub description: String,
+    pub license: Option<String>,
+    pub compatibility: Option<String>,
+    /// Claimed, never granted. See [`AllowedToolsEvidence`].
+    pub allowed_tools: AllowedToolsEvidence,
+    /// Upstream metadata with the GridWork key removed — it is decoded into
+    /// `gridwork` instead of sitting here twice under two interpretations.
+    pub metadata: BTreeMap<String, String>,
+    /// Present only when the author wrote `metadata.gridwork`.
+    pub gridwork: Option<GridworkExt>,
+    /// Unrecognized portable-core fields, in key order.
+    pub opaque: Vec<OpaquePortableField>,
+}
+
+/// The kind of a bundle entry, as reported by whatever walked the tree.
+///
+/// Supplied by the caller rather than read here: classification must be able to
+/// refuse a symlink or a device without this module ever having touched one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RawEntryKind {
+    File { executable: bool },
+    Directory,
+    Symlink,
+    Other,
+}
+
+/// Why a bundle entry is not declarative content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BundleRefusal {
+    /// `..` anywhere in the path.
+    ParentTraversal,
+    /// A leading `/`, or a Windows-style drive prefix.
+    AbsolutePath,
+    /// A symlink, device, socket, or fifo.
+    NotARegularFile,
+    /// The executable bit is set.
+    Executable,
+    /// A suffix this parser knows to be code.
+    ExecutableSuffix(String),
+    /// A suffix with no declarative meaning assigned.
+    Unclassified(String),
+    /// The path exceeds [`SKILL_BUNDLE_PATH_MAX_BYTES`], is empty, or carries a
+    /// control character or a `\` separator.
+    MalformedPath,
+}
+
+impl std::fmt::Display for BundleRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ParentTraversal => f.write_str("path escapes the skill directory"),
+            Self::AbsolutePath => f.write_str("path is absolute"),
+            Self::NotARegularFile => f.write_str("entry is not a regular file"),
+            Self::Executable => f.write_str("entry is executable"),
+            Self::ExecutableSuffix(s) => write!(f, "`{s}` is code, not declarative content"),
+            Self::Unclassified(s) => write!(f, "`{s}` has no declared content kind"),
+            Self::MalformedPath => f.write_str("path is empty, oversized, or malformed"),
+        }
+    }
+}
+
+/// What a bundle entry is, once it has been allowed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BundleEntryKind {
+    /// Markdown prose the skill points a reader at.
+    Reference,
+    /// Structured declarative data.
+    Data,
+    /// Plain text.
+    Text,
+}
+
+/// One inventoried bundle entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BundleEntry {
+    pub path: String,
+    pub kind: BundleEntryKind,
+}
+
+/// Suffixes that are code. Refused by name so the refusal reads as a decision
+/// rather than as a gap in the allow list.
+const EXECUTABLE_SUFFIXES: [&str; 12] = [
+    "bat", "cmd", "com", "dll", "exe", "js", "mjs", "pl", "ps1", "py", "rb", "sh",
+];
+
+impl BundleEntry {
+    /// Classify one entry by its relative path and caller-reported kind.
+    ///
+    /// Refusal is the default. An unknown suffix is [`BundleRefusal::Unclassified`]
+    /// rather than a permissive fallthrough, because the failure mode of the
+    /// other choice is a payload riding in under a suffix nobody thought of.
+    pub fn classify(path: &str, kind: RawEntryKind) -> Result<Self, SkillError> {
+        let refuse = |r: BundleRefusal| Err(SkillError::RefusedBundleEntry(r));
+
+        if path.is_empty()
+            || path.len() > SKILL_BUNDLE_PATH_MAX_BYTES
+            || path.contains('\\')
+            || path.chars().any(|c| c.is_control())
+        {
+            return refuse(BundleRefusal::MalformedPath);
+        }
+        if path.starts_with('/') || path.chars().nth(1) == Some(':') {
+            return refuse(BundleRefusal::AbsolutePath);
+        }
+        if path.split('/').any(|segment| segment == "..") {
+            return refuse(BundleRefusal::ParentTraversal);
+        }
+        match kind {
+            RawEntryKind::Symlink | RawEntryKind::Other | RawEntryKind::Directory => {
+                return refuse(BundleRefusal::NotARegularFile);
+            }
+            RawEntryKind::File { executable: true } => return refuse(BundleRefusal::Executable),
+            RawEntryKind::File { executable: false } => {}
+        }
+
+        let suffix = path
+            .rsplit_once('.')
+            .map(|(_, s)| s.to_ascii_lowercase())
+            .unwrap_or_default();
+        if EXECUTABLE_SUFFIXES.contains(&suffix.as_str()) {
+            return refuse(BundleRefusal::ExecutableSuffix(suffix));
+        }
+        let kind = match suffix.as_str() {
+            "md" | "markdown" => BundleEntryKind::Reference,
+            "json" | "yaml" | "yml" | "toml" => BundleEntryKind::Data,
+            "txt" => BundleEntryKind::Text,
+            _ => return refuse(BundleRefusal::Unclassified(suffix)),
+        };
+        Ok(Self {
+            path: path.to_owned(),
+            kind,
+        })
+    }
+
+    /// Inventory a whole bundle, refusing on the first entry that is not
+    /// declarative content.
+    pub fn inventory<'a>(
+        entries: impl IntoIterator<Item = (&'a str, RawEntryKind)>,
+    ) -> Result<Vec<Self>, SkillError> {
+        let mut out = Vec::new();
+        for (path, kind) in entries {
+            if out.len() == SKILL_BUNDLE_MAX_ENTRIES {
+                return Err(SkillError::TooManyEntries("bundle"));
+            }
+            out.push(Self::classify(path, kind)?);
+        }
+        Ok(out)
+    }
+}
+
+/// Split a `SKILL.md` into its frontmatter and its body.
+///
+/// The body is returned untouched and unparsed. Markdown is the author's, and
+/// nothing downstream of this module interprets it — a parser that started
+/// reading the body would be inventing a second, undocumented surface for a
+/// hostile document to reach.
+pub fn split_frontmatter(input: &str) -> Result<(&str, &str), SkillError> {
+    if input.len() > SKILL_INPUT_MAX_BYTES {
+        return Err(SkillError::InputTooLarge);
+    }
+    let rest = input
+        .strip_prefix("---\n")
+        .or_else(|| input.strip_prefix("---\r\n"))
+        .ok_or(SkillError::MissingFrontmatter)?;
+    // The closing fence is a `---` line of its own, which is why this looks for
+    // the newline-prefixed form: a `---` inside a value must not end the block.
+    let (front, body) = rest
+        .split_once("\n---\n")
+        .or_else(|| rest.split_once("\n---\r\n"))
+        .or_else(|| rest.strip_suffix("\n---").map(|front| (front, "")))
+        .ok_or(SkillError::MissingFrontmatter)?;
+    if front.len() > SKILL_FRONTMATTER_MAX_BYTES {
+        return Err(SkillError::FrontmatterTooLarge);
+    }
+    Ok((front, body))
+}
+
+/// Enforce the accepted YAML subset before a YAML parser ever sees the input.
+///
+/// This runs first on purpose. Every property below could in principle be
+/// asked of the deserializer, and each answer would then be a property of
+/// whichever YAML crate is pinned this month — duplicate-key handling in
+/// particular is a place serde-shaped YAML libraries have historically differed
+/// and changed. Checking here makes the accepted subset a property of this
+/// file, verifiable by reading it, and it makes the refusals nameable.
+///
+/// Returns the top-level keys in document order.
+fn scan_subset(front: &str) -> Result<Vec<String>, SkillError> {
+    let mut keys = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for raw in front.lines() {
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        if line.chars().any(|c| c.is_control() && c != '\t') {
+            return Err(SkillError::ControlCharacter);
+        }
+        let indent = line.len() - line.trim_start_matches(' ').len();
+        if line[..indent].is_empty() && line.starts_with('\t') || line[..indent].contains('\t') {
+            return Err(SkillError::TabIndentation);
+        }
+        if line.trim_start().starts_with('\t') {
+            return Err(SkillError::TabIndentation);
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if trimmed == "---" || trimmed == "..." || trimmed.starts_with('%') {
+            return Err(SkillError::UnsupportedYaml("document marker or directive"));
+        }
+        if trimmed.starts_with("<<:") {
+            return Err(SkillError::UnsupportedYaml("merge key"));
+        }
+        // Anchors, aliases, and tags are rejected wherever a node can start:
+        // after `key:`, after `- `, or at the head of the line.
+        let node = trimmed
+            .split_once(": ")
+            .map(|(_, v)| v)
+            .or_else(|| trimmed.strip_prefix("- "))
+            .unwrap_or(trimmed);
+        let node = node.trim_start();
+        if node.starts_with('&') {
+            return Err(SkillError::UnsupportedYaml("anchor"));
+        }
+        if node.starts_with('*') {
+            return Err(SkillError::UnsupportedYaml("alias"));
+        }
+        if node.starts_with('!') {
+            return Err(SkillError::UnsupportedYaml("tag"));
+        }
+
+        if indent == 0 {
+            let key = trimmed
+                .split_once(':')
+                .map(|(k, _)| k.trim())
+                .filter(|k| !k.is_empty() && !k.contains(' '))
+                .ok_or(SkillError::MalformedTopLevelKey)?;
+            if !seen.insert(key.to_owned()) {
+                return Err(SkillError::DuplicateKey(key.to_owned()));
+            }
+            keys.push(key.to_owned());
+        } else if indent > SKILL_MAX_NESTING_DEPTH * 2 {
+            return Err(SkillError::TooDeeplyNested);
+        }
+    }
+
+    if keys.is_empty() {
+        return Err(SkillError::MalformedTopLevelKey);
+    }
+    Ok(keys)
+}
+
+/// Render one YAML value as bounded, lossy evidence.
+fn render_opaque(value: &yaml_serde::Value) -> String {
+    let mut rendered = match value {
+        yaml_serde::Value::String(s) => s.clone(),
+        other => yaml_serde::to_string(other)
+            .unwrap_or_else(|_| "<unrenderable>".to_owned())
+            .trim_end()
+            .to_owned(),
+    };
+    if rendered.len() > SKILL_OPAQUE_VALUE_MAX_BYTES {
+        rendered.truncate(
+            (0..=SKILL_OPAQUE_VALUE_MAX_BYTES)
+                .rev()
+                .find(|&i| rendered.is_char_boundary(i))
+                .unwrap_or(0),
+        );
+    }
+    rendered
+}
+
+fn bounded(field: &'static str, value: String, max: usize) -> Result<String, SkillError> {
+    if value.len() > max {
+        return Err(SkillError::FieldTooLong(field));
+    }
+    Ok(value)
+}
+
+impl SkillManifest {
+    /// Parse a `SKILL.md`, without checking it against a directory name.
+    pub fn parse(input: &str) -> Result<Self, SkillError> {
+        let (front, _body) = split_frontmatter(input)?;
+        let keys = scan_subset(front)?;
+        let doc: yaml_serde::Mapping =
+            yaml_serde::from_str(front).map_err(|e| SkillError::Malformed(e.to_string()))?;
+
+        let take = |k: &str| doc.get(yaml_serde::Value::String(k.to_owned())).cloned();
+        let string = |field: &'static str, v: Option<yaml_serde::Value>| match v {
+            None => Ok(None),
+            Some(yaml_serde::Value::String(s)) => Ok(Some(s)),
+            Some(_) => Err(SkillError::Malformed(format!("`{field}` must be a string"))),
+        };
+
+        let name = string("name", take("name"))?
+            .ok_or_else(|| SkillError::Malformed("`name` is required".to_owned()))?;
+        if name.is_empty()
+            || name.len() > SKILL_NAME_MAX_BYTES
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        {
+            return Err(SkillError::InvalidName);
+        }
+
+        let description = bounded(
+            "description",
+            string("description", take("description"))?
+                .ok_or_else(|| SkillError::Malformed("`description` is required".to_owned()))?,
+            SKILL_DESCRIPTION_MAX_BYTES,
+        )?;
+        let license = string("license", take("license"))?
+            .map(|v| bounded("license", v, SKILL_LICENSE_MAX_BYTES))
+            .transpose()?;
+        let compatibility = string("compatibility", take("compatibility"))?;
+
+        let allowed_tools = match take("allowed-tools") {
+            None => AllowedToolsEvidence::default(),
+            Some(yaml_serde::Value::Sequence(items)) => {
+                if items.len() > SKILL_ALLOWED_TOOLS_MAX_COUNT {
+                    return Err(SkillError::TooManyEntries("allowed-tools"));
+                }
+                let mut claimed = Vec::with_capacity(items.len());
+                for item in items {
+                    let yaml_serde::Value::String(tool) = item else {
+                        return Err(SkillError::Malformed(
+                            "`allowed-tools` entries must be strings".to_owned(),
+                        ));
+                    };
+                    claimed.push(bounded(
+                        "allowed-tools",
+                        tool,
+                        SKILL_ALLOWED_TOOL_MAX_BYTES,
+                    )?);
+                }
+                AllowedToolsEvidence { claimed }
+            }
+            Some(_) => {
+                return Err(SkillError::Malformed(
+                    "`allowed-tools` must be a sequence".to_owned(),
+                ));
+            }
+        };
+
+        let mut metadata = BTreeMap::new();
+        let mut gridwork = None;
+        if let Some(value) = take("metadata") {
+            let yaml_serde::Value::Mapping(map) = value else {
+                return Err(SkillError::Malformed(
+                    "`metadata` must be a mapping".to_owned(),
+                ));
+            };
+            if map.len() > SKILL_METADATA_MAX_ENTRIES {
+                return Err(SkillError::TooManyEntries("metadata"));
+            }
+            for (k, v) in map {
+                let yaml_serde::Value::String(key) = k else {
+                    return Err(SkillError::Malformed(
+                        "`metadata` keys must be strings".to_owned(),
+                    ));
+                };
+                if key.len() > SKILL_METADATA_KEY_MAX_BYTES {
+                    return Err(SkillError::FieldTooLong("metadata key"));
+                }
+                // Upstream types this as dict[str, str]; a number or a nested
+                // mapping here is either a different format or an author
+                // assuming a richer one, and both are worth saying out loud.
+                let yaml_serde::Value::String(value) = v else {
+                    return Err(SkillError::MetadataValueNotString(key));
+                };
+                if value.len() > SKILL_METADATA_VALUE_MAX_BYTES {
+                    return Err(SkillError::FieldTooLong("metadata value"));
+                }
+                if key == GRIDWORK_METADATA_KEY {
+                    gridwork = Some(
+                        serde_json::from_str::<GridworkExt>(&value)
+                            .map_err(|e| SkillError::InvalidGridworkExtension(e.to_string()))?,
+                    );
+                } else {
+                    metadata.insert(key, value);
+                }
+            }
+        }
+
+        let mut opaque = Vec::new();
+        for key in keys {
+            if PORTABLE_CORE_FIELDS.contains(&key.as_str()) {
+                continue;
+            }
+            if opaque.len() == SKILL_OPAQUE_FIELD_MAX_COUNT {
+                return Err(SkillError::TooManyEntries("unrecognized fields"));
+            }
+            let value = take(&key).map(|v| render_opaque(&v)).unwrap_or_default();
+            opaque.push(OpaquePortableField { key, value });
+        }
+
+        Ok(Self {
+            name,
+            description,
+            license,
+            compatibility,
+            allowed_tools,
+            metadata,
+            gridwork,
+            opaque,
+        })
+    }
+
+    /// Parse a `SKILL.md` that lives in `directory`, requiring the two to agree.
+    ///
+    /// The mismatch matters because the directory name is how a skill is
+    /// addressed and the manifest `name` is how it identifies itself. Letting
+    /// them differ means one skill answers to two names, and the one a
+    /// reviewer read is not necessarily the one a route resolved.
+    pub fn parse_in(directory: &str, input: &str) -> Result<Self, SkillError> {
+        let manifest = Self::parse(input)?;
+        if manifest.name != directory {
+            return Err(SkillError::NameDirectoryMismatch);
+        }
+        Ok(manifest)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MINIMAL: &str = "---\nname: review-diff\ndescription: Review a diff.\n---\nBody.\n";
+
+    fn manifest(front: &str) -> Result<SkillManifest, SkillError> {
+        SkillManifest::parse(&format!("---\n{front}\n---\nBody.\n"))
+    }
+
+    #[test]
+    fn a_minimal_portable_manifest_parses() {
+        let skill = SkillManifest::parse(MINIMAL).expect("minimal manifest");
+        assert_eq!(skill.name, "review-diff");
+        assert_eq!(skill.description, "Review a diff.");
+        assert!(skill.license.is_none());
+        assert!(skill.gridwork.is_none());
+        assert!(skill.opaque.is_empty());
+        assert!(skill.allowed_tools.is_empty());
+    }
+
+    #[test]
+    fn the_body_is_returned_untouched_and_never_interpreted() {
+        let input = "---\nname: n\ndescription: d\n---\n# Heading\n\nname: not-a-field\n";
+        let (_front, body) = split_frontmatter(input).expect("split");
+        assert_eq!(body, "# Heading\n\nname: not-a-field\n");
+        // The body's `name:` line is prose, and the parser must not have read it.
+        assert_eq!(SkillManifest::parse(input).expect("parse").name, "n");
+    }
+
+    #[test]
+    fn an_unknown_portable_field_is_kept_as_evidence_not_dropped_or_refused() {
+        let skill = manifest("name: n\ndescription: d\nfuture-field: hello").expect("accepted");
+        assert_eq!(
+            skill.opaque,
+            vec![OpaquePortableField {
+                key: "future-field".to_owned(),
+                value: "hello".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn an_unknown_gridwork_extension_field_is_a_hard_error() {
+        // The asymmetry, in one test: the same document shape is accepted with
+        // an unknown key in the portable core and refused with one in ours.
+        let err =
+            manifest("name: n\ndescription: d\nmetadata:\n  gridwork: '{\"invented\": true}'")
+                .expect_err("refused");
+        assert!(
+            matches!(err, SkillError::InvalidGridworkExtension(_)),
+            "{err:?}"
+        );
+
+        let ok =
+            manifest("name: n\ndescription: d\nmetadata:\n  gridwork: '{\"routes\": [\"a\"]}'")
+                .expect("known key accepted");
+        assert_eq!(ok.gridwork.expect("present").routes, vec!["a".to_owned()]);
+    }
+
+    #[test]
+    fn the_gridwork_key_does_not_also_survive_as_raw_metadata() {
+        let skill = manifest("name: n\ndescription: d\nmetadata:\n  gridwork: '{}'\n  team: infra")
+            .expect("accepted");
+        assert!(skill.gridwork.is_some());
+        assert_eq!(
+            skill.metadata.get("team").map(String::as_str),
+            Some("infra")
+        );
+        assert!(!skill.metadata.contains_key("gridwork"));
+    }
+
+    #[test]
+    fn duplicate_top_level_keys_are_refused() {
+        let err = manifest("name: first\ndescription: d\nname: second").expect_err("refused");
+        assert_eq!(err, SkillError::DuplicateKey("name".to_owned()));
+    }
+
+    #[test]
+    fn anchors_aliases_tags_and_merge_keys_are_refused() {
+        for (front, what) in [
+            ("name: n\ndescription: &a d", "anchor"),
+            ("name: n\ndescription: *a", "alias"),
+            ("name: n\ndescription: !!str d", "tag"),
+            ("name: n\ndescription: d\n<<: *base", "merge key"),
+            (
+                "name: n\ndescription: d\n%YAML 1.2",
+                "document marker or directive",
+            ),
+        ] {
+            assert_eq!(
+                manifest(front).expect_err("refused"),
+                SkillError::UnsupportedYaml(what),
+                "{front}"
+            );
+        }
+    }
+
+    #[test]
+    fn oversized_inputs_are_refused_before_parsing() {
+        let huge = "x".repeat(SKILL_INPUT_MAX_BYTES + 1);
+        assert_eq!(
+            SkillManifest::parse(&huge).expect_err("refused"),
+            SkillError::InputTooLarge
+        );
+        let long_description = format!("name: n\ndescription: {}", "d".repeat(2000));
+        assert_eq!(
+            manifest(&long_description).expect_err("refused"),
+            SkillError::FieldTooLong("description")
+        );
+    }
+
+    #[test]
+    fn invalid_names_are_refused() {
+        for name in ["", "Review", "review diff", "review_diff", &"a".repeat(65)] {
+            let front = format!("name: '{name}'\ndescription: d");
+            assert_eq!(
+                manifest(&front).expect_err("refused"),
+                SkillError::InvalidName,
+                "{name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_that_disagrees_with_its_directory_is_refused() {
+        assert_eq!(
+            SkillManifest::parse_in("other-dir", MINIMAL).expect_err("refused"),
+            SkillError::NameDirectoryMismatch
+        );
+        assert!(SkillManifest::parse_in("review-diff", MINIMAL).is_ok());
+    }
+
+    #[test]
+    fn non_string_metadata_values_are_refused() {
+        let err = manifest("name: n\ndescription: d\nmetadata:\n  count: 3").expect_err("refused");
+        assert_eq!(err, SkillError::MetadataValueNotString("count".to_owned()));
+    }
+
+    #[test]
+    fn control_characters_and_tab_indentation_are_refused() {
+        assert_eq!(
+            manifest("name: n\ndescription: d\u{0007}").expect_err("refused"),
+            SkillError::ControlCharacter
+        );
+        assert_eq!(
+            manifest("name: n\ndescription: d\nmetadata:\n\tteam: infra").expect_err("refused"),
+            SkillError::TabIndentation
+        );
+    }
+
+    #[test]
+    fn missing_frontmatter_is_refused() {
+        assert_eq!(
+            SkillManifest::parse("name: n\n").expect_err("refused"),
+            SkillError::MissingFrontmatter
+        );
+        assert_eq!(
+            SkillManifest::parse("---\nname: n\n").expect_err("refused"),
+            SkillError::MissingFrontmatter
+        );
+    }
+
+    #[test]
+    fn allowed_tools_is_evidence_with_no_route_to_a_grant() {
+        let skill = manifest("name: n\ndescription: d\nallowed-tools:\n  - Read\n  - Bash")
+            .expect("accepted");
+        assert_eq!(skill.allowed_tools.len(), 2);
+        assert_eq!(skill.allowed_tools.claimed(), ["Read", "Bash"]);
+        // The type exposes `claimed()` and nothing that yields a capability.
+        // A mutation that added such a method has to be written by hand, which
+        // is the point: there is no accidental path from claim to grant.
+    }
+
+    /// Stand-in for the authority resolved upstream of context compilation.
+    ///
+    /// Deliberately takes `&[String]` rather than `AllowedToolsEvidence`: the
+    /// evidence type has no conversion into this, and writing one is the
+    /// mutation this test exists to catch.
+    fn effective_tools<'a>(granted: &[&'a str], claimed: &'a [String]) -> BTreeSet<&'a str> {
+        let granted: BTreeSet<&str> = granted.iter().copied().collect();
+        let claimed: BTreeSet<&str> = claimed.iter().map(String::as_str).collect();
+        // INTERSECTION, not union. D3: context narrows authority, never widens
+        // it. Swapping this one operator is the whole attack — a manifest would
+        // then grant itself whatever it asked for by asking.
+        claimed.intersection(&granted).copied().collect()
+    }
+
+    #[test]
+    fn a_manifest_cannot_widen_the_authority_it_was_handed() {
+        let skill = manifest("name: n\ndescription: d\nallowed-tools:\n  - Read\n  - Bash")
+            .expect("accepted");
+        let granted = ["Read", "Grep"];
+        let effective = effective_tools(&granted, skill.allowed_tools.claimed());
+
+        assert_eq!(effective, BTreeSet::from(["Read"]));
+        assert!(
+            !effective.contains("Bash"),
+            "a tool the manifest claimed but was never granted became effective"
+        );
+        assert!(
+            !effective.contains("Grep"),
+            "a granted tool the manifest never claimed became effective"
+        );
+        // And the narrowing holds when the manifest claims everything.
+        let greedy =
+            manifest("name: n\ndescription: d\nallowed-tools:\n  - Read\n  - Grep\n  - Bash")
+                .expect("accepted");
+        assert_eq!(
+            effective_tools(&granted, greedy.allowed_tools.claimed()),
+            BTreeSet::from(["Read", "Grep"])
+        );
+    }
+
+    #[test]
+    fn bundle_entries_are_inventoried_by_kind_and_refused_by_default() {
+        let ok = BundleEntry::inventory([
+            ("REFERENCE.md", RawEntryKind::File { executable: false }),
+            ("data/table.json", RawEntryKind::File { executable: false }),
+        ])
+        .expect("declarative bundle");
+        assert_eq!(ok[0].kind, BundleEntryKind::Reference);
+        assert_eq!(ok[1].kind, BundleEntryKind::Data);
+
+        for (path, kind, refusal) in [
+            (
+                "run.sh",
+                RawEntryKind::File { executable: false },
+                BundleRefusal::ExecutableSuffix("sh".to_owned()),
+            ),
+            (
+                "notes.md",
+                RawEntryKind::File { executable: true },
+                BundleRefusal::Executable,
+            ),
+            (
+                "link.md",
+                RawEntryKind::Symlink,
+                BundleRefusal::NotARegularFile,
+            ),
+            (
+                "../escape.md",
+                RawEntryKind::File { executable: false },
+                BundleRefusal::ParentTraversal,
+            ),
+            (
+                "/etc/passwd",
+                RawEntryKind::File { executable: false },
+                BundleRefusal::AbsolutePath,
+            ),
+            (
+                "payload.bin",
+                RawEntryKind::File { executable: false },
+                BundleRefusal::Unclassified("bin".to_owned()),
+            ),
+            (
+                "no-suffix",
+                RawEntryKind::File { executable: false },
+                BundleRefusal::Unclassified(String::new()),
+            ),
+        ] {
+            assert_eq!(
+                BundleEntry::classify(path, kind).expect_err("refused"),
+                SkillError::RefusedBundleEntry(refusal),
+                "{path}"
+            );
+        }
+    }
+}

@@ -159,6 +159,15 @@ tracing = "0.1.44"
 unicode-properties = "0.1.4"
 unicode-segmentation = "=1.13.3"
 unicode-width = "=0.2.2"
+# The YAML Organization's maintained fork of the archived `serde_yaml`, and the
+# reason the pin is 0.10.4 rather than the newest release is worth stating: the
+# newest two landed 2026-08-11 and 2026-08-12, inside the seven-day
+# `minimumReleaseAge` this repository's own Renovate policy applies to every
+# update. Taking one of them by hand would be routing around a hold that exists
+# for exactly the window a fresh publish sits in. Renovate proposes the bump
+# through review once it ages out. NOT `serde_yml`: a different fork, and the
+# deprecated `serde_yaml` it replaces is archived upstream.
+yaml_serde = "=0.10.4"
 zeroize = "1.9.0"
 
 [workspace.lints.rust]
