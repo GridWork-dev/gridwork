@@ -183,7 +183,25 @@ impl KernelClient {
             })
             .await?;
         match client.receive_with_timeout("the hello").await? {
-            Some(ServerControl::HelloAck { capabilities, .. }) => {
+            Some(ServerControl::HelloAck {
+                protocol_major,
+                capabilities,
+                ..
+            }) => {
+                // The same check `gridwork`'s client makes, for the same
+                // reason: naming a second major turned "an ack at another major
+                // cannot decode" into "an ack at another major decodes and
+                // nothing looks at it". The host would have gone on publishing
+                // v1 frames to a peer that had declared v2.
+                if protocol_major != ProtocolVersion::V1 {
+                    return Err(KernelClientError::HelloRefused {
+                        code: gwk_domain::KernelErrorCode::UnsupportedVersion,
+                        message: format!(
+                            "the kernel acknowledged at protocol major {protocol_major}, not {}",
+                            ProtocolVersion::V1
+                        ),
+                    });
+                }
                 client.raw_enabled = capabilities
                     .iter()
                     .any(|capability| capability.as_str() == PTY_RAW_CAPABILITY);
@@ -934,6 +952,83 @@ mod tests {
             .await
             .expect_err("no daemon is listening here");
         assert!(matches!(error, KernelClientError::Connect { .. }));
+    }
+
+    #[tokio::test]
+    async fn a_kernel_that_acknowledges_at_another_major_is_refused_not_followed() {
+        // Until a second major was named this was unreachable: `ProtocolVersion`
+        // refused anything but 1 at `Deserialize`, so an ack at another major
+        // never decoded and `connect` failed without having to look at it.
+        // Naming V2 made it decode, and without an explicit check the host
+        // would publish v1 frames to a peer that had just declared v2.
+        async fn ack_at(
+            tag: &str,
+            major: ProtocolVersion,
+        ) -> Result<KernelClient, KernelClientError> {
+            let dir = std::env::temp_dir()
+                .join(format!("gwk-pty-host-major-{}-{tag}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("create dir");
+            let path = dir.join("k.sock");
+            let listener = tokio::net::UnixListener::bind(&path).expect("bind fake kernel");
+
+            let served = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.expect("accept");
+                let mut budget = Budget::new(usize::MAX / 2, usize::MAX / 2);
+                let Incoming::Frame(frame) =
+                    read_frame(&mut stream, FRAME_BODY_MAX_BYTES, &mut budget)
+                        .await
+                        .expect("hello frame")
+                else {
+                    panic!("closed before the hello");
+                };
+                let ClientControl::Hello { .. } =
+                    serde_json::from_slice(&frame.body).expect("decode hello")
+                else {
+                    panic!("first frame was not a hello");
+                };
+                let ack = ServerControl::HelloAck {
+                    protocol_major: major,
+                    protocol_minor: 0,
+                    capabilities: Vec::new(),
+                    sealed: false,
+                    watermark: None,
+                };
+                write_frame(
+                    &mut stream,
+                    FrameKind::Json,
+                    &serde_json::to_vec(&ack).expect("encode ack"),
+                    &mut budget,
+                )
+                .await
+                .expect("write ack");
+                // Hold the connection open so the client's failure is its own
+                // verdict on the ack rather than a hang-up it noticed first.
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            });
+
+            let outcome = KernelClient::connect(&path).await;
+            served.abort();
+            let _ = std::fs::remove_dir_all(&dir);
+            outcome
+        }
+
+        match ack_at("v2", ProtocolVersion::V2).await {
+            Err(KernelClientError::HelloRefused { code, message }) => {
+                assert_eq!(code, gwk_domain::KernelErrorCode::UnsupportedVersion);
+                assert!(message.contains('2'), "{message}");
+            }
+            other => panic!("a v2 ack was not refused as a version mismatch: {other:?}"),
+        }
+
+        // The positive control, and the sharper half: the SAME fake kernel
+        // answering at v1 connects. Asserting only that the v2 run failed would
+        // pass against a client that refuses every handshake, or against one
+        // that failed because the fake hung up.
+        assert!(
+            ack_at("v1", ProtocolVersion::V1).await.is_ok(),
+            "a v1 ack from the same fake kernel did not connect"
+        );
     }
 
     #[tokio::test]

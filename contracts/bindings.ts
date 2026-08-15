@@ -719,7 +719,7 @@ export type Command_Serialize = {
 /**  One side of a comparison. */
 export type CompareSubject = { of: "manifest"; manifest_id: string } | { of: "run"; run_id: string };
 
-/**  The three `aggregate_type` families Context writes into the one kernel log. */
+/**  The `aggregate_type` families Context writes into the one kernel log. */
 export type ContextAggregate =
 /**  Resolution and release of one immutable manifest. */
 "context_manifest" |
@@ -754,11 +754,17 @@ export type ContextAttribution = {
 /**
  *  The ten D4 lifecycle `event_type` values.
  *
- *  Ten because ADR-0032 decision 4 names ten, and the count is pinned by test
- *  rather than left to whoever next reads the list. Verification and rejection
- *  are ONE name carrying a verdict, which is how the ADR names them too — the
- *  alternative spends a name on a field and makes "was it verified?" a question
- *  about which of two event types arrived.
+ *  Ten because ADR-0032 decision 4 names ten. Verification and rejection
+ *  are ONE name carrying a verdict, which is how the ADR names them too —
+ *  the alternative spends a name on a field and makes "was it verified?"
+ *  a question about which of two event types arrived.
+ *
+ *  The wire string is written once per variant and reaches both the
+ *  serde tag and `as_str` from there. It used to be written twice, and
+ *  `rename_all = "snake_case"` derived one of them from the VARIANT name
+ *  while `as_str` spelled out the aggregate-prefixed one — the same value
+ *  under two names, the envelope carrying one and the payload beside it
+ *  carrying the other.
  */
 export type ContextEventName = "context_manifest_compilation_requested" | "context_manifest_resolved" | "context_manifest_verification_recorded" | "context_manifest_release_recorded" | "context_run_opened" | "context_run_observation_appended" | "context_run_closed" | "context_run_assurance_certified" | "context_optimization_candidate_proposed" | "context_optimization_candidate_dispositioned";
 

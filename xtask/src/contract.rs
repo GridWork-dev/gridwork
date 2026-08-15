@@ -14,11 +14,13 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use gwk_context::{
-    Assurance, ContextAggregate, ContextEventName, ContextEventPayload, ContextFact, ContextQuery,
-    Digest as ContextDigest, EvidenceRefs, FinalizationSupplement, FinalizationSupplementId,
-    ManifestId, ObservationIndex, ObservationSupplement, ObservationSupplementId, Participation,
-    ParticipationReason, ParticipationRecords, RecordContextFact, RecordCount, ReleaseSupplement,
-    ReleaseSupplementId, ResolvedManifest,
+    Assurance, CandidateDisposition, CompareSubject, ContextAggregate, ContextAttribution,
+    ContextEventName, ContextEventPayload, ContextFact, ContextQuery, ContextStage,
+    Digest as ContextDigest, EvidenceRefs, ExplainSubject, FinalizationSupplement,
+    FinalizationSupplementId, ManifestId, ManifestSelector, ObservationIndex,
+    ObservationSupplement, ObservationSupplementId, Participation, ParticipationReason,
+    ParticipationRecords, RecordContextFact, RecordCount, ReleaseSupplement, ReleaseSupplementId,
+    ResolvedManifest, SupplementKind, VerificationVerdict,
 };
 use gwk_domain::blob::{BlobAddress, BlobDescriptor};
 use gwk_domain::checkpoint::{CHECKPOINT_SCHEMA_VERSION, Checkpoint};
@@ -101,6 +103,84 @@ const CONTEXT_MUTATION_TRIGGERS: [&str; 8] = [
     "context_finalization_append_only",
     "context_finalization_no_truncate",
 ];
+
+/// Field names that would let a caller assert who it is.
+///
+/// Compared against whole TypeScript property names, never as substrings. A
+/// substring sweep for `author` matches inside `authority_digest`, and the
+/// tempting repair is to drop the word — which deletes the check for one of the
+/// names a spoofed record is most likely to use.
+const CONTEXT_ATTRIBUTION_FIELDS: [&str; 8] = [
+    "actor",
+    "author",
+    "principal",
+    "identity",
+    "user",
+    "requested_by",
+    "submitted_by",
+    "on_behalf_of",
+];
+
+/// The generated types a client can construct and submit.
+const CONTEXT_CLIENT_SUBMITTABLE: [&str; 4] = [
+    "RecordContextFact_Serialize",
+    "RecordContextFact_Deserialize",
+    "ContextFact_Serialize",
+    "ContextFact_Deserialize",
+];
+
+/// CTX-12, enforced against the GENERATED surface rather than against a list.
+///
+/// The Rust-side test that preceded this swept a hand-written `vec![]` holding
+/// one fact per variant. An eleventh variant carrying an `actor: String`, mapped
+/// onto an existing event name, passed every test in the crate: the vec still
+/// held ten entries so the count assertion still held, and the sweep never saw
+/// the new shape. The guard covered the variants somebody remembered.
+///
+/// The generated TypeScript enumerates every variant and every field by
+/// construction, so reading it covers the eleventh variant the day it is added
+/// without anyone maintaining a second list. Returns the number of declarations
+/// inspected: zero means this stopped finding its subject, which is a broken
+/// guard rather than a clean grammar.
+fn inspect_context_attribution(exported: &str) -> Result<usize, String> {
+    assert!(
+        !CONTEXT_CLIENT_SUBMITTABLE.is_empty() && !CONTEXT_ATTRIBUTION_FIELDS.is_empty(),
+        "the CTX-12 expectation sets must not be empty"
+    );
+    let mut inspected = 0usize;
+    for name in CONTEXT_CLIENT_SUBMITTABLE {
+        let needle = format!("export type {name} =");
+        let Some(start) = exported.find(&needle) else {
+            return Err(format!(
+                "inspected {inspected} client-submittable context types; {name} is missing"
+            ));
+        };
+        let rest = &exported[start + needle.len()..];
+        let end = rest.find("\nexport ").unwrap_or(rest.len());
+        let decl = &rest[..end];
+        for field in CONTEXT_ATTRIBUTION_FIELDS {
+            // Whole property names only: a token that IS `field:` or `field?:`,
+            // never a substring of a longer identifier.
+            let declared = decl.split_whitespace().any(|token| {
+                let token = token.trim_start_matches(['{', '(', '|']);
+                token == format!("{field}:") || token == format!("{field}?:")
+            });
+            if declared {
+                return Err(format!(
+                    "{name} declares `{field}`: a client could assert its own provenance (CTX-12)"
+                ));
+            }
+        }
+        inspected += 1;
+    }
+    if inspected != CONTEXT_CLIENT_SUBMITTABLE.len() {
+        return Err(format!(
+            "inspected {inspected} client-submittable context types; expected {}",
+            CONTEXT_CLIENT_SUBMITTABLE.len()
+        ));
+    }
+    Ok(inspected)
+}
 
 fn bindings_body(source: &str) -> Result<&str, String> {
     // Include real newlines so this search cannot match this string literal.
@@ -268,17 +348,28 @@ fn bindings() -> String {
         // against before anything speaks them, which is the point of freezing
         // the grammar a phase ahead of its first caller.
         //
-        // `ContextFact` and `ContextEventName` are reachable through the two
-        // wrappers and would be emitted regardless; they are named anyway
-        // because a consumer branches on both, and a type that appears in
-        // bindings.ts only as a side effect of something else's reachability is
-        // one refactor away from vanishing without a registry diff.
+        // A type that reaches bindings.ts only as a side effect of something
+        // else's reachability is one refactor away from vanishing without a
+        // registry diff. That argument was made here and then applied to two
+        // types out of ten — every one of these was already being emitted by
+        // reachability, and a TS consumer branches on each. `ContextStage` was
+        // the sharp case: new to bindings.ts, carried in solely by
+        // `Compare.stages`, and restructuring that one field would have removed
+        // it from the public surface with nothing in the registry to show it.
         .register::<RecordContextFact>()
         .register::<ContextEventPayload>()
         .register::<ContextFact>()
         .register::<ContextEventName>()
         .register::<ContextAggregate>()
         .register::<ContextQuery>()
+        .register::<ContextAttribution>()
+        .register::<ContextStage>()
+        .register::<SupplementKind>()
+        .register::<ManifestSelector>()
+        .register::<ExplainSubject>()
+        .register::<CompareSubject>()
+        .register::<VerificationVerdict>()
+        .register::<CandidateDisposition>()
         .register::<gwk_theme::Token>();
     // PhasesFormat, not the unified Format: `skip_serializing_if` (the
     // tri-state omission) is direction-dependent, which unified mode refuses
@@ -295,6 +386,7 @@ fn bindings() -> String {
         .collect::<Vec<_>>()
         .join("\n");
     inspect_context_truth_roots(&normalized).unwrap_or_else(|message| panic!("{message}"));
+    inspect_context_attribution(&normalized).unwrap_or_else(|message| panic!("{message}"));
     normalized
 }
 
@@ -1599,7 +1691,7 @@ mod tests {
     /// manual root registry described in its doc comment. Update this
     /// constant AND the `.register()` chain together in the same change;
     /// a mismatch means one moved without the other.
-    const REGISTERED_ROOT_COUNT: usize = 38;
+    const REGISTERED_ROOT_COUNT: usize = 46;
 
     #[test]
     fn bindings_registry_matches_its_pin() {
@@ -1620,6 +1712,58 @@ mod tests {
              the registry in bindings() and this constant, and confirm the \
              type you added or removed actually needed a manual root (see \
              bindings()'s doc comment)"
+        );
+    }
+
+    #[test]
+    fn the_attribution_guard_refuses_a_client_submittable_actor_field() {
+        // The guard this replaces swept a hand-written list of fact instances,
+        // and an eleventh variant carrying an actor — mapped onto an existing
+        // event name — passed it with every test green. This one reads the
+        // generated surface, so the eleventh variant is covered the day it
+        // exists without anyone maintaining a second list.
+        let exported = bindings();
+        let inspected =
+            inspect_context_attribution(&exported).expect("the real grammar carries no actor");
+        assert_eq!(
+            inspected,
+            CONTEXT_CLIENT_SUBMITTABLE.len(),
+            "the guard did not inspect every client-submittable type"
+        );
+
+        // Seeded: an actor field on a client-submittable type must be refused.
+        let needle = "export type RecordContextFact_Serialize = {";
+        assert_eq!(
+            exported.matches(needle).count(),
+            1,
+            "mutation target drifted"
+        );
+        let mutated = exported.replacen(needle, &format!("{needle} actor: string;"), 1);
+        let error = inspect_context_attribution(&mutated)
+            .expect_err("an actor on a client-submittable type must be refused");
+        assert!(error.contains("actor"), "{error}");
+        assert!(error.contains("CTX-12"), "{error}");
+
+        // And a missing subject is a broken guard, never a clean grammar.
+        let error = inspect_context_attribution("export type Unrelated = number;")
+            .expect_err("a missing subject must not read as clean");
+        assert!(error.contains("inspected 0"), "{error}");
+    }
+
+    #[test]
+    fn the_attribution_guard_does_not_fire_on_a_name_that_merely_contains_the_word() {
+        // `author` is in the forbidden set and `authority_digest` contains it.
+        // The Rust-side version of this check compared substrings and tripped on
+        // exactly that; the tempting repair is to drop `author` from the set,
+        // which deletes the check for one of the names a spoofed record is most
+        // likely to use. Property names are compared whole instead.
+        let sample = "export type RecordContextFact_Serialize = { authority_digest: string }\n\
+                      export type RecordContextFact_Deserialize = { authority_digest: string }\n\
+                      export type ContextFact_Serialize = { authored_at: string }\n\
+                      export type ContextFact_Deserialize = { user_facing_note: string }\n";
+        assert_eq!(
+            inspect_context_attribution(sample).expect("neighbours are not matches"),
+            CONTEXT_CLIENT_SUBMITTABLE.len()
         );
     }
 

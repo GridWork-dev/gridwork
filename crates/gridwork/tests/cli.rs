@@ -143,6 +143,99 @@ async fn serve_empty_projection_pages(listener: UnixListener, connections: usize
     }
 }
 
+/// Answer one hello with an ack at the major given, then hang up.
+///
+/// A daemon that acknowledges at a major the client did not ask for. Until a
+/// second major was named this shape was unreachable: `ProtocolVersion` refused
+/// anything but 1 at `Deserialize`, so such an ack never decoded and the client
+/// errored without ever having to look. Naming `V2` made it decode, and the
+/// client has to refuse it explicitly or speak v1 over a connection the peer
+/// declared v2 — the downgrade threat 9 exists to prevent.
+async fn serve_one_ack_at(listener: UnixListener, major: ProtocolVersion) {
+    let (mut stream, _) = listener.accept().await.expect("accept CLI client");
+    let mut budget = Budget::new(
+        CONNECTION_INGRESS_BYTES_PER_WINDOW,
+        CONNECTION_EGRESS_BYTES_PER_WINDOW,
+    );
+    let hello = read_frame(&mut stream, FRAME_BODY_MAX_BYTES, &mut budget)
+        .await
+        .expect("read hello");
+    let Incoming::Frame(hello) = hello else {
+        panic!("CLI closed before hello");
+    };
+    assert!(matches!(
+        serde_json::from_slice::<ClientControl>(&hello.body).expect("decode hello"),
+        ClientControl::Hello { .. }
+    ));
+    let ack = ServerControl::HelloAck {
+        protocol_major: major,
+        protocol_minor: 0,
+        capabilities: Vec::new(),
+        sealed: true,
+        watermark: Some(gwk_domain::ids::Seq::new(1)),
+    };
+    write_frame(
+        &mut stream,
+        FrameKind::Json,
+        &serde_json::to_vec(&ack).expect("encode hello ack"),
+        &mut budget,
+    )
+    .await
+    .expect("write hello ack");
+}
+
+/// Run `gw attempt list` against a fake daemon that acks at `major`.
+async fn stderr_of_ack_at(tag: &str, major: ProtocolVersion) -> String {
+    let dir = private_dir(tag);
+    let socket = dir.join("k.sock");
+    let listener = UnixListener::bind(&socket).expect("bind fake kernel");
+    let server = tokio::spawn(serve_one_ack_at(listener, major));
+    let output = tokio::task::spawn_blocking({
+        let socket = socket.clone();
+        move || gw(&socket, "attempt list")
+    })
+    .await
+    .expect("join gw");
+    // Bounded, like every other fake-kernel case here: if the client never
+    // connects, `accept` waits forever and the failure reads as a hang rather
+    // than as a test that could not run.
+    tokio::time::timeout(std::time::Duration::from_secs(5), server)
+        .await
+        .expect("fake kernel timed out")
+        .expect("join fake kernel");
+    assert_ne!(code(&output), 0, "gw succeeded against a one-ack daemon");
+    // Both streams: `gw` reports a refusal on whichever the surface chose, and
+    // a test that read only one would call an unprinted message a missing check.
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+#[tokio::test]
+async fn a_daemon_that_acknowledges_at_another_major_is_refused_not_followed() {
+    let refused = stderr_of_ack_at("ack-major-v2", ProtocolVersion::V2).await;
+    assert!(
+        refused.contains("acknowledged at protocol major"),
+        "a v2 ack was not refused as a version mismatch: {refused}"
+    );
+    assert!(
+        refused.contains('2'),
+        "the refusal must name the major it refused: {refused}"
+    );
+
+    // The positive control, on the same harness. Both runs fail — the fake
+    // daemon hangs up after one ack — so asserting only that the v2 run failed
+    // would pass against a client that refuses every handshake. What separates
+    // them is WHY: the v1 run must fail somewhere later than the version check.
+    let accepted = stderr_of_ack_at("ack-major-v1", ProtocolVersion::V1).await;
+    assert!(
+        !accepted.contains("acknowledged at protocol major"),
+        "a v1 ack was refused as a version mismatch: {accepted}"
+    );
+}
+
 fn code(output: &Output) -> i32 {
     output.status.code().expect("gw exited on a signal")
 }

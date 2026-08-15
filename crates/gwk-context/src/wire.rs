@@ -47,9 +47,15 @@
 //! it by re-reading its own resolved manifest rather than by trusting anything
 //! a caller said about itself.
 //!
-//! The asymmetry is the mitigation, so it is asserted rather than described:
-//! `no_context_command_can_carry_attribution` walks every variant's serialized
-//! form and fails if an actor-shaped key appears in any of them.
+//! The asymmetry is the mitigation, so it is asserted rather than described —
+//! and asserted against the GENERATED surface rather than a list. The unit test
+//! here walks a hand-written sample of each fact, which is a fast local check
+//! and was, on its own, a guard with a hole the size of the next variant: an
+//! eleventh fact carrying an `actor` and mapped onto an existing event name
+//! passed it, because the sample list still held ten entries. The binding check
+//! is `inspect_context_attribution` in `xtask`, which reads the generated
+//! TypeScript — every variant and every field, by construction — and fails if
+//! any client-submittable type declares an attribution-shaped property.
 //!
 //! ## Events ride the existing envelope
 //!
@@ -66,9 +72,9 @@ use gwk_domain::{AttemptId, ByteCount, ProtocolVersion, Timestamp};
 
 use crate::manifest::context_id;
 use crate::{
-    Assurance, CONTEXT_ID_MAX_BYTES, ContextStage, Digest, EvidenceRefs, FinalizationSupplementId,
-    ManifestId, ObservationIndex, ObservationSupplementId, ParticipationRecords, RecordCount,
-    ReleaseSupplementId, TruthRecordError,
+    Assurance, ContextStage, Digest, EvidenceRefs, FinalizationSupplementId, ManifestId,
+    ObservationIndex, ObservationSupplementId, ParticipationRecords, RecordCount,
+    ReleaseSupplementId,
 };
 
 // ============================================================
@@ -91,15 +97,17 @@ pub const CONTEXT_MANDATORY_FROM: ProtocolVersion = ProtocolVersion::V2;
 pub const CONTEXT_ATTRIBUTION_MAX_BYTES: usize = 128;
 /// Maximum routes one optimization candidate may declare it affects.
 pub const CONTEXT_CANDIDATE_ROUTE_MAX_COUNT: usize = 64;
-/// Maximum UTF-8 bytes in an optimization candidate's human-facing summary.
-pub const CONTEXT_CANDIDATE_SUMMARY_MAX_BYTES: usize = 2_048;
 /// Maximum rows one projection read may ask for.
 pub const CONTEXT_QUERY_LIMIT_MAX: u32 = 1_000;
 /// Maximum edge hops a graph read may traverse.
 pub const CONTEXT_GRAPH_DEPTH_MAX: u32 = 16;
-/// How many subjects a comparison takes. Compare is binary by definition:
-/// three-way diff has no defined answer for "which one is the baseline".
-pub const CONTEXT_COMPARE_SUBJECT_COUNT: usize = 2;
+/// Maximum stages one comparison may ask for.
+///
+/// `ContextStage::ALL` has five members, so anything past five is redundant by
+/// construction and zero asks a comparison to compare nothing. Without this the
+/// field was bounded only by the 4 MiB frame, in a module whose header claims
+/// every count on this wire is bounded.
+pub const CONTEXT_COMPARE_STAGE_MAX_COUNT: usize = 5;
 
 // ============================================================
 // Errors
@@ -114,14 +122,16 @@ pub enum ContextWireError {
     AttributionTooLong,
     /// A candidate declared more affected routes than the bound allows.
     TooManyCandidateRoutes,
-    /// A candidate summary exceeded its byte bound.
-    CandidateSummaryTooLong,
     /// A projection read asked for zero rows or more than the bound allows.
     QueryLimitOutOfRange,
     /// A graph read asked for zero hops or more than the bound allows.
     GraphDepthOutOfRange,
     /// A comparison named the same subject twice.
     CompareSubjectsIdentical,
+    /// A comparison asked for no stages, or more than there are.
+    CompareStagesOutOfRange,
+    /// A comparison named the same stage more than once.
+    CompareStagesRepeated,
 }
 
 impl std::fmt::Display for ContextWireError {
@@ -130,10 +140,13 @@ impl std::fmt::Display for ContextWireError {
             Self::EmptyAttribution => "attribution component must not be empty",
             Self::AttributionTooLong => "attribution component exceeds its byte bound",
             Self::TooManyCandidateRoutes => "candidate declares too many affected routes",
-            Self::CandidateSummaryTooLong => "candidate summary exceeds its byte bound",
             Self::QueryLimitOutOfRange => "projection limit must be nonzero and inside its bound",
             Self::GraphDepthOutOfRange => "graph depth must be nonzero and inside its bound",
             Self::CompareSubjectsIdentical => "comparison requires two distinct subjects",
+            Self::CompareStagesOutOfRange => {
+                "comparison must name at least one stage and no more than there are"
+            }
+            Self::CompareStagesRepeated => "comparison named the same stage twice",
         })
     }
 }
@@ -234,6 +247,42 @@ impl specta::Type for QueryLimit {
     }
 }
 
+/// A bounded count of routes one optimization candidate declares it affects.
+///
+/// A newtype rather than a `RecordCount` plus a free checking function, because
+/// the free function had no call site and `RecordCount` bounds at 65,535 — so a
+/// candidate could declare sixty-five thousand affected routes past a constant
+/// that said sixty-four. A bound the wire does not enforce is not a bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
+#[serde(transparent)]
+pub struct RouteCount(u32);
+
+impl RouteCount {
+    pub fn new(value: u32) -> Result<Self, ContextWireError> {
+        if value as usize > CONTEXT_CANDIDATE_ROUTE_MAX_COUNT {
+            return Err(ContextWireError::TooManyCandidateRoutes);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for RouteCount {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Self::new(u32::deserialize(d)?).map_err(serde::de::Error::custom)
+    }
+}
+
+// A validated count on the wire.
+impl specta::Type for RouteCount {
+    fn definition(types: &mut specta::Types) -> specta::datatype::DataType {
+        <u32 as specta::Type>::definition(types)
+    }
+}
+
 /// A bounded hop count for a graph read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
 #[serde(transparent)]
@@ -269,45 +318,66 @@ impl specta::Type for GraphDepth {
 // Aggregates and event names
 // ============================================================
 
-/// The three `aggregate_type` families Context writes into the one kernel log.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-    specta::Type,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum ContextAggregate {
-    /// Resolution and release of one immutable manifest.
-    ContextManifest,
-    /// The observed lifetime around one rendered manifest.
-    ContextRun,
-    /// Proposed and dispositioned optimization candidates.
-    ContextOptimization,
+// Both closed sets below are generated from ONE list each, and that is the
+// whole reason the macros exist.
+//
+// The previous shape declared the variants, then declared `ALL` as a second
+// array literal, then wrote `as_str` and `aggregate` as third and fourth
+// exhaustive matches. Adding a variant broke the matches — but `ALL` was just
+// an array, and `ALL.len()` on a `[Self; 10]` is `10` BY TYPE. So
+// `assert_eq!(ALL.len(), 10)` compiled to `assert_eq!(10, 10)`: it pinned the
+// array's declared arity against a literal and could not observe the enum at
+// all. An eleventh variant, added to every match and left out of `ALL`, passed
+// every test in this file including the one whose comment claims to catch
+// exactly that.
+//
+// A macro is more machinery than an enum deserves. It is here because one list
+// is the only version of "these agree" that does not depend on four places
+// being edited together, and the count assertion that was supposed to enforce
+// that turned out to assert nothing.
+
+macro_rules! context_aggregates {
+    ($($(#[$doc:meta])* $variant:ident => $wire:literal),* $(,)?) => {
+        /// The `aggregate_type` families Context writes into the one kernel log.
+        #[derive(
+            Debug,
+            Clone,
+            Copy,
+            PartialEq,
+            Eq,
+            PartialOrd,
+            Ord,
+            Hash,
+            serde::Serialize,
+            serde::Deserialize,
+            specta::Type,
+        )]
+        pub enum ContextAggregate {
+            $(
+                $(#[$doc])*
+                #[serde(rename = $wire)]
+                $variant,
+            )*
+        }
+
+        impl ContextAggregate {
+            pub const ALL: [Self; [$(stringify!($variant)),*].len()] = [$(Self::$variant),*];
+
+            /// The exact `EventEnvelope::aggregate_type` string.
+            pub const fn as_str(self) -> &'static str {
+                match self { $(Self::$variant => $wire,)* }
+            }
+        }
+    };
 }
 
-impl ContextAggregate {
-    pub const ALL: [Self; 3] = [
-        Self::ContextManifest,
-        Self::ContextRun,
-        Self::ContextOptimization,
-    ];
-
-    /// The exact `EventEnvelope::aggregate_type` string.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::ContextManifest => "context_manifest",
-            Self::ContextRun => "context_run",
-            Self::ContextOptimization => "context_optimization",
-        }
-    }
+context_aggregates! {
+    /// Resolution and release of one immutable manifest.
+    ContextManifest => "context_manifest",
+    /// The observed lifetime around one rendered manifest.
+    ContextRun => "context_run",
+    /// Proposed and dispositioned optimization candidates.
+    ContextOptimization => "context_optimization",
 }
 
 impl std::fmt::Display for ContextAggregate {
@@ -316,108 +386,75 @@ impl std::fmt::Display for ContextAggregate {
     }
 }
 
-/// The ten D4 lifecycle `event_type` values.
-///
-/// Ten because ADR-0032 decision 4 names ten, and the count is pinned by test
-/// rather than left to whoever next reads the list. Verification and rejection
-/// are ONE name carrying a verdict, which is how the ADR names them too — the
-/// alternative spends a name on a field and makes "was it verified?" a question
-/// about which of two event types arrived.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-    specta::Type,
-)]
-// Spelled out per variant rather than derived by `rename_all`, because the
-// derived spelling is the VARIANT name and the wire needs the aggregate-prefixed
-// one. `rename_all = "snake_case"` emitted `compilation_requested` into the
-// generated TypeScript while `as_str` emitted
-// `context_manifest_compilation_requested` — one value under two names, the
-// envelope carrying one and the payload beside it carrying the other.
-pub enum ContextEventName {
-    #[serde(rename = "context_manifest_compilation_requested")]
-    CompilationRequested,
-    #[serde(rename = "context_manifest_resolved")]
-    ManifestResolved,
-    #[serde(rename = "context_manifest_verification_recorded")]
-    ManifestVerificationRecorded,
-    #[serde(rename = "context_manifest_release_recorded")]
-    ReleaseRecorded,
-    #[serde(rename = "context_run_opened")]
-    RunOpened,
-    #[serde(rename = "context_run_observation_appended")]
-    ObservationAppended,
-    #[serde(rename = "context_run_closed")]
-    RunClosed,
-    #[serde(rename = "context_run_assurance_certified")]
-    AssuranceCertified,
-    #[serde(rename = "context_optimization_candidate_proposed")]
-    OptimizationCandidateProposed,
-    #[serde(rename = "context_optimization_candidate_dispositioned")]
-    OptimizationCandidateDispositioned,
+macro_rules! context_event_names {
+    ($($(#[$doc:meta])* $variant:ident => $wire:literal @ $aggregate:ident),* $(,)?) => {
+        /// The ten D4 lifecycle `event_type` values.
+        ///
+        /// Ten because ADR-0032 decision 4 names ten. Verification and rejection
+        /// are ONE name carrying a verdict, which is how the ADR names them too —
+        /// the alternative spends a name on a field and makes "was it verified?"
+        /// a question about which of two event types arrived.
+        ///
+        /// The wire string is written once per variant and reaches both the
+        /// serde tag and `as_str` from there. It used to be written twice, and
+        /// `rename_all = "snake_case"` derived one of them from the VARIANT name
+        /// while `as_str` spelled out the aggregate-prefixed one — the same value
+        /// under two names, the envelope carrying one and the payload beside it
+        /// carrying the other.
+        #[derive(
+            Debug,
+            Clone,
+            Copy,
+            PartialEq,
+            Eq,
+            PartialOrd,
+            Ord,
+            Hash,
+            serde::Serialize,
+            serde::Deserialize,
+            specta::Type,
+        )]
+        pub enum ContextEventName {
+            $(
+                $(#[$doc])*
+                #[serde(rename = $wire)]
+                $variant,
+            )*
+        }
+
+        impl ContextEventName {
+            pub const ALL: [Self; [$(stringify!($variant)),*].len()] = [$(Self::$variant),*];
+
+            /// The exact `EventEnvelope::event_type` string.
+            ///
+            /// Prefixed by its aggregate, matching `task` / `task_state_changed`
+            /// in the existing log. The prefix is not decoration: `event_type` is
+            /// globally open, so an unprefixed `run_closed` would collide with
+            /// the first other aggregate that closes a run.
+            pub const fn as_str(self) -> &'static str {
+                match self { $(Self::$variant => $wire,)* }
+            }
+
+            /// The aggregate family this event belongs to.
+            pub const fn aggregate(self) -> ContextAggregate {
+                match self { $(Self::$variant => ContextAggregate::$aggregate,)* }
+            }
+        }
+    };
 }
 
-impl ContextEventName {
-    pub const ALL: [Self; 10] = [
-        Self::CompilationRequested,
-        Self::ManifestResolved,
-        Self::ManifestVerificationRecorded,
-        Self::ReleaseRecorded,
-        Self::RunOpened,
-        Self::ObservationAppended,
-        Self::RunClosed,
-        Self::AssuranceCertified,
-        Self::OptimizationCandidateProposed,
-        Self::OptimizationCandidateDispositioned,
-    ];
-
-    /// The exact `EventEnvelope::event_type` string.
-    ///
-    /// Prefixed by its aggregate, matching `task` / `task_state_changed` in the
-    /// existing log. The prefix is not decoration: `event_type` is globally
-    /// open, so an unprefixed `run_closed` would collide with the first other
-    /// aggregate that closes a run.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::CompilationRequested => "context_manifest_compilation_requested",
-            Self::ManifestResolved => "context_manifest_resolved",
-            Self::ManifestVerificationRecorded => "context_manifest_verification_recorded",
-            Self::ReleaseRecorded => "context_manifest_release_recorded",
-            Self::RunOpened => "context_run_opened",
-            Self::ObservationAppended => "context_run_observation_appended",
-            Self::RunClosed => "context_run_closed",
-            Self::AssuranceCertified => "context_run_assurance_certified",
-            Self::OptimizationCandidateProposed => "context_optimization_candidate_proposed",
-            Self::OptimizationCandidateDispositioned => {
-                "context_optimization_candidate_dispositioned"
-            }
-        }
-    }
-
-    /// The aggregate family this event belongs to.
-    pub const fn aggregate(self) -> ContextAggregate {
-        match self {
-            Self::CompilationRequested
-            | Self::ManifestResolved
-            | Self::ManifestVerificationRecorded
-            | Self::ReleaseRecorded => ContextAggregate::ContextManifest,
-            Self::RunOpened
-            | Self::ObservationAppended
-            | Self::RunClosed
-            | Self::AssuranceCertified => ContextAggregate::ContextRun,
-            Self::OptimizationCandidateProposed | Self::OptimizationCandidateDispositioned => {
-                ContextAggregate::ContextOptimization
-            }
-        }
-    }
+context_event_names! {
+    CompilationRequested => "context_manifest_compilation_requested" @ ContextManifest,
+    ManifestResolved => "context_manifest_resolved" @ ContextManifest,
+    ManifestVerificationRecorded => "context_manifest_verification_recorded" @ ContextManifest,
+    ReleaseRecorded => "context_manifest_release_recorded" @ ContextManifest,
+    RunOpened => "context_run_opened" @ ContextRun,
+    ObservationAppended => "context_run_observation_appended" @ ContextRun,
+    RunClosed => "context_run_closed" @ ContextRun,
+    AssuranceCertified => "context_run_assurance_certified" @ ContextRun,
+    OptimizationCandidateProposed => "context_optimization_candidate_proposed" @ ContextOptimization,
+    OptimizationCandidateDispositioned
+        => "context_optimization_candidate_dispositioned" @ ContextOptimization,
 }
 
 impl std::fmt::Display for ContextEventName {
@@ -567,7 +604,7 @@ pub enum ContextFact {
         candidate_id: OptimizationCandidateId,
         patch_digest: Digest,
         expected_effect_digest: Digest,
-        affected_route_count: RecordCount,
+        affected_route_count: RouteCount,
         evidence_ids: EvidenceRefs,
         proposed_at: Timestamp,
     },
@@ -784,45 +821,51 @@ impl ContextQuery {
     /// the rule is about their relationship. A self-comparison is always an
     /// empty diff, so answering it costs a projection read to learn nothing.
     pub fn validate(&self) -> Result<(), ContextWireError> {
-        if let Self::Compare { left, right, .. } = self
-            && left == right
-        {
+        let Self::Compare {
+            left,
+            right,
+            stages,
+        } = self
+        else {
+            return Ok(());
+        };
+        if left == right {
             return Err(ContextWireError::CompareSubjectsIdentical);
+        }
+        if stages.is_empty() || stages.len() > CONTEXT_COMPARE_STAGE_MAX_COUNT {
+            return Err(ContextWireError::CompareStagesOutOfRange);
+        }
+        // Duplicates are their own refusal rather than folded into the bound.
+        // Five copies of one stage is inside the count and still asks the same
+        // question five times, which a projection would answer five times.
+        let mut seen = Vec::with_capacity(stages.len());
+        for stage in stages {
+            if seen.contains(&stage) {
+                return Err(ContextWireError::CompareStagesRepeated);
+            }
+            seen.push(stage);
         }
         Ok(())
     }
 }
 
-/// Reject an oversized affected-route declaration.
-///
-/// A free function because the count rides a `RecordCount` inside a fact
-/// variant, and the bound is a Context-plane rule rather than a property of
-/// counts in general.
-pub fn check_candidate_routes(count: RecordCount) -> Result<(), ContextWireError> {
-    if count.value() as usize > CONTEXT_CANDIDATE_ROUTE_MAX_COUNT {
-        return Err(ContextWireError::TooManyCandidateRoutes);
-    }
-    Ok(())
-}
-
-/// Reject an oversized candidate summary.
-pub fn check_candidate_summary(summary: &str) -> Result<(), ContextWireError> {
-    if summary.len() > CONTEXT_CANDIDATE_SUMMARY_MAX_BYTES {
-        return Err(ContextWireError::CandidateSummaryTooLong);
-    }
-    Ok(())
-}
-
-/// Reject an identifier that would not fit the record-id bound.
-///
-/// Re-exported reasoning rather than a second rule: wire identifiers and truth
-/// record identifiers are the same identifiers, so they share one bound.
-pub fn check_wire_id(value: &str) -> Result<(), TruthRecordError> {
-    if value.len() > CONTEXT_ID_MAX_BYTES {
-        return Err(TruthRecordError::IdTooLong);
-    }
-    Ok(())
-}
+// Three free functions stood here — `check_candidate_routes`,
+// `check_candidate_summary`, and `check_wire_id` — and all three were dead.
+//
+// They are gone rather than wired up, because each was a different way of
+// advertising a bound that did not exist. `check_candidate_routes` had no call
+// site, so `affected_route_count` was bounded only by `RecordCount`'s 65,535: a
+// candidate could declare sixty-five thousand affected routes past a constant
+// that said sixty-four. `check_candidate_summary` guarded a `summary` field the
+// grammar does not have. And `check_wire_id` re-implemented the LENGTH half of
+// `id_is_valid`, which every `context_id!` type already runs in full — a
+// weaker second copy of a rule, added in the same change whose message argued
+// that a second copy is how one rule becomes two.
+//
+// The route bound is now enforced where a bound has to be, on the way in: see
+// `RouteCount`. The other two are deleted along with their constants and error
+// variants. A constant nothing consults is not documentation; it reads as a
+// promise the wire does not keep.
 
 #[cfg(test)]
 mod tests {
@@ -910,7 +953,7 @@ mod tests {
                 candidate_id: OptimizationCandidateId::parse("candidate-1").expect("valid id"),
                 patch_digest: digest(),
                 expected_effect_digest: digest(),
-                affected_route_count: RecordCount::new(1).expect("valid count"),
+                affected_route_count: RouteCount::new(1).expect("valid count"),
                 evidence_ids: EvidenceRefs::new(Vec::new()).expect("empty is valid"),
                 proposed_at: timestamp(),
             },
@@ -1089,6 +1132,29 @@ mod tests {
             .is_err(),
             "an unknown field must not deserialize onto a query"
         );
+
+        // The positive controls. Both assertions above are `is_err`, so if
+        // either shape stopped deserializing for an unrelated reason the test
+        // would pass having proved nothing.
+        serde_json::from_str::<RecordContextFact>(
+            r#"{"fact":{"fact":"run_opened","run_id":"r","manifest_id":"m","release_id":"x","opened_at":"2026-08-14T00:00:00Z"}}"#,
+        )
+        .expect("the same command without the stray field must parse");
+        serde_json::from_str::<ContextQuery>(
+            r#"{"query":"manifest","select":{"by":"id","manifest_id":"m"}}"#,
+        )
+        .expect("the same query without the stray field must parse");
+
+        // And one level down: a stray field inside the selector, not just
+        // beside it. A guard that only reads the outermost object is one
+        // nesting level from useless.
+        assert!(
+            serde_json::from_str::<ContextQuery>(
+                r#"{"query":"manifest","select":{"by":"id","manifest_id":"m","actor":"me"}}"#
+            )
+            .is_err(),
+            "an unknown field nested in a selector must not deserialize"
+        );
     }
 
     #[test]
@@ -1128,23 +1194,125 @@ mod tests {
     }
 
     #[test]
-    fn candidate_bounds_reject_past_their_edge() {
+    fn the_route_bound_is_enforced_on_the_wire_and_not_only_in_a_helper() {
+        // The previous version of this test called a free function that had no
+        // call site anywhere. It proved the function and nothing about the
+        // grammar: `affected_route_count` was a `RecordCount`, so a candidate
+        // declaring 65,535 affected routes deserialized clean past a constant
+        // that said 64. The bound now lives on the way in, which is the only
+        // place a wire bound is a bound.
         assert_eq!(
-            check_candidate_routes(
-                RecordCount::new(CONTEXT_CANDIDATE_ROUTE_MAX_COUNT as u32).expect("valid")
-            ),
-            Ok(())
+            RouteCount::new(CONTEXT_CANDIDATE_ROUTE_MAX_COUNT as u32).map(RouteCount::get),
+            Ok(CONTEXT_CANDIDATE_ROUTE_MAX_COUNT as u32)
         );
         assert_eq!(
-            check_candidate_routes(
-                RecordCount::new(CONTEXT_CANDIDATE_ROUTE_MAX_COUNT as u32 + 1).expect("valid")
-            ),
+            RouteCount::new(CONTEXT_CANDIDATE_ROUTE_MAX_COUNT as u32 + 1),
             Err(ContextWireError::TooManyCandidateRoutes)
         );
-        assert_eq!(
-            check_candidate_summary(&"a".repeat(CONTEXT_CANDIDATE_SUMMARY_MAX_BYTES + 1)),
-            Err(ContextWireError::CandidateSummaryTooLong)
+
+        // And through the deserializer, which is the path an attacker uses.
+        let over = CONTEXT_CANDIDATE_ROUTE_MAX_COUNT + 1;
+        let fact = format!(
+            r#"{{"fact":"optimization_candidate_proposed","candidate_id":"c","patch_digest":"sha256:{h}","expected_effect_digest":"sha256:{h}","affected_route_count":{over},"evidence_ids":[],"proposed_at":"2026-08-14T00:00:00Z"}}"#,
+            h = "a".repeat(64)
         );
+        assert!(
+            serde_json::from_str::<ContextFact>(&fact).is_err(),
+            "a candidate past the route bound deserialized"
+        );
+        // The positive control: the same document at the bound must parse, or
+        // the assertion above passes because the whole shape is unparseable.
+        let at_edge = fact.replace(
+            &format!(r#""affected_route_count":{over}"#),
+            &format!(
+                r#""affected_route_count":{}"#,
+                CONTEXT_CANDIDATE_ROUTE_MAX_COUNT
+            ),
+        );
+        serde_json::from_str::<ContextFact>(&at_edge).expect("the exact bound must parse");
+    }
+
+    #[test]
+    fn the_read_grammar_is_eight_reads_and_the_count_is_pinned() {
+        // The module doc says eight. Nothing asserted it, so "eight" was a
+        // claim in prose next to a grammar that could have grown a ninth.
+        let reads = [
+            r#"{"query":"manifest","select":{"by":"id","manifest_id":"m"}}"#,
+            r#"{"query":"supplement","manifest_id":"m","kind":"release","limit":5}"#,
+            &format!(
+                r#"{{"query":"source","manifest_id":"m","digest":"sha256:{}"}}"#,
+                "a".repeat(64)
+            ),
+            r#"{"query":"provenance_graph","root":"m","depth":2}"#,
+            &format!(
+                r#"{{"query":"semantic_graph","root":"sha256:{}","depth":2}}"#,
+                "a".repeat(64)
+            ),
+            r#"{"query":"execution_dag","run_id":"r","depth":2}"#,
+            r#"{"query":"explain","manifest_id":"m","subject":{"subject":"precedence"}}"#,
+            r#"{"query":"compare","left":{"of":"manifest","manifest_id":"m"},"right":{"of":"run","run_id":"r"},"stages":["resolved"]}"#,
+        ];
+        assert_eq!(reads.len(), 8, "the read grammar is eight reads");
+
+        let mut decoded = Vec::new();
+        for raw in reads {
+            decoded.push(
+                serde_json::from_str::<ContextQuery>(raw)
+                    .unwrap_or_else(|e| panic!("{raw} did not decode: {e}")),
+            );
+        }
+        // Every one of them a DISTINCT variant: eight documents that all decoded
+        // to the same read would satisfy the count and prove nothing.
+        for (i, left) in decoded.iter().enumerate() {
+            for right in decoded.iter().skip(i + 1) {
+                assert_ne!(
+                    std::mem::discriminant(left),
+                    std::mem::discriminant(right),
+                    "two reads decoded to the same variant"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_comparison_must_name_stages_and_must_not_repeat_them() {
+        let subjects = || {
+            (
+                CompareSubject::Manifest {
+                    manifest_id: manifest_id(),
+                },
+                CompareSubject::Run { run_id: run_id() },
+            )
+        };
+        let compare = |stages: Vec<ContextStage>| {
+            let (left, right) = subjects();
+            ContextQuery::Compare {
+                left,
+                right,
+                stages,
+            }
+        };
+
+        assert_eq!(
+            compare(Vec::new()).validate(),
+            Err(ContextWireError::CompareStagesOutOfRange)
+        );
+        assert_eq!(
+            compare(vec![
+                ContextStage::Resolved;
+                CONTEXT_COMPARE_STAGE_MAX_COUNT + 1
+            ])
+            .validate(),
+            Err(ContextWireError::CompareStagesOutOfRange)
+        );
+        assert_eq!(
+            compare(vec![ContextStage::Resolved, ContextStage::Resolved]).validate(),
+            Err(ContextWireError::CompareStagesRepeated)
+        );
+        // The positive control, and the bound's own edge: all five distinct
+        // stages is the largest legal comparison.
+        assert_eq!(compare(ContextStage::ALL.to_vec()).validate(), Ok(()));
+        assert_eq!(ContextStage::ALL.len(), CONTEXT_COMPARE_STAGE_MAX_COUNT);
     }
 
     #[test]

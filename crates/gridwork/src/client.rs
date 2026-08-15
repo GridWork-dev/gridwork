@@ -118,7 +118,31 @@ impl Client {
             .await?
             .ok_or_else(|| Failure::unreachable("the daemon closed before acknowledging"))?;
         match &ack {
-            ServerControl::HelloAck { capabilities, .. } => {
+            ServerControl::HelloAck {
+                protocol_major,
+                capabilities,
+                ..
+            } => {
+                // Until a second major existed this was checked by
+                // construction: `ProtocolVersion` refused anything but 1 at
+                // `Deserialize`, so an ack at another major never decoded and
+                // this arm was unreachable for one. Naming V2 made it decode,
+                // and without this line the client would go on to speak v1
+                // commands over a connection the peer had just declared v2.
+                //
+                // Refusal has to be stated on both sides. A kernel refusing a
+                // v2 client is half a negotiation; a client that accepts
+                // whatever it is answered with is the downgrade the threat
+                // model names.
+                if *protocol_major != ProtocolVersion::V1 {
+                    return Err(Failure::new(
+                        gwk_domain::KernelErrorCode::UnsupportedVersion,
+                        format!(
+                            "the daemon acknowledged at protocol major {protocol_major}, not {}",
+                            ProtocolVersion::V1
+                        ),
+                    ));
+                }
                 client.raw_enabled = capabilities
                     .iter()
                     .any(|capability| capability.as_str() == PTY_RAW_CAPABILITY);
