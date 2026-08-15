@@ -244,18 +244,28 @@ pub async fn receipt(from: &str, to: Option<&str>, pretty: bool) -> Result<(), F
         .await
         .map_err(configuration)?;
 
-    let figures = admin::driving_figures(&pool, from, to)
+    // Resolution failures are input failures — the resolve query does
+    // nothing but cast the caller's two values — so they exit as usage, not
+    // as the retryable storage class a wrapper would loop on.
+    let window = admin::resolve_window(&pool, from, to)
+        .await
+        .map_err(|error| Failure::usage(format!("the window did not resolve: {error}")))?;
+    let figures = admin::driving_figures(&pool, &window)
         .await
         .map_err(configuration)?;
     emit(
         &json!({
             "type": "receipt_figures",
-            "window_start": from,
-            "window_end": figures.window_end,
-            // The count first, so the zeros below are legible: beside
-            // `sessions_in_window: 0` they mean an empty window, not a
-            // quiet one.
+            // Both bounds as the database resolved them, in one format: a
+            // relative input like `yesterday` leaves as the instant it
+            // meant, which is what makes the receipt reproducible.
+            "window_start": window.start,
+            "window_end": window.end,
+            // The counts first, so the zeros below are legible: each fold's
+            // own denominator sits beside it, and zeros beside a zero
+            // denominator mean an empty window, not a quiet one.
             "sessions_in_window": figures.sessions_in_window,
+            "sessions_alive_in_window": figures.sessions_alive_in_window,
             "days_driven": figures.days_driven,
             "peak_concurrent": figures.peak_concurrent,
             "generations": figures.generations,
