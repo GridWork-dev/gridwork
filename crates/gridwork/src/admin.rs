@@ -232,6 +232,43 @@ pub async fn init(pretty: bool) -> Result<(), Failure> {
     Ok(())
 }
 
+/// Read the machine half of a driving-window receipt.
+///
+/// Lockless like `verify`, because it only reads — a receipt read that could
+/// fence the daemon writing the rows it reads would be a strange instrument.
+/// Off the client socket because the figures are SQL aggregations over the
+/// log, which the wire grammar has no reason to grow.
+pub async fn receipt(from: &str, to: Option<&str>, pretty: bool) -> Result<(), Failure> {
+    let config = AdminConfig::from_env().map_err(configuration)?;
+    let pool = gwk_kernel::connect_pool(config.admin_database_url(), 2)
+        .await
+        .map_err(configuration)?;
+
+    let figures = admin::driving_figures(&pool, from, to)
+        .await
+        .map_err(configuration)?;
+    emit(
+        &json!({
+            "type": "receipt_figures",
+            "window_start": from,
+            "window_end": figures.window_end,
+            // The count first, so the zeros below are legible: beside
+            // `sessions_in_window: 0` they mean an empty window, not a
+            // quiet one.
+            "sessions_in_window": figures.sessions_in_window,
+            "days_driven": figures.days_driven,
+            "peak_concurrent": figures.peak_concurrent,
+            "generations": figures.generations,
+            "restarts": figures.restarts,
+            "crashed_generations": figures.crashed_generations,
+            "attaches": figures.attaches,
+            "detaches": figures.detaches,
+        }),
+        pretty,
+    );
+    Ok(())
+}
+
 /// Say what the target database is and whether the runtime role is safe.
 pub async fn verify(pretty: bool) -> Result<(), Failure> {
     let config = AdminConfig::from_env().map_err(configuration)?;

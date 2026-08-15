@@ -118,6 +118,7 @@ async fn execute(verb: Verb, pretty: bool, human_tables: bool) -> Result<(), Fai
             admin::rebuild_projections(&scratch, pretty).await
         }
         Verb::AdminBlob { what } => admin::retention(&what, pretty).await,
+        Verb::AdminReceipt { from, to } => admin::receipt(&from, to.as_deref(), pretty).await,
 
         // Everything below needs the daemon.
         Verb::Health => ask(KernelRequest::Health {}, pretty).await,

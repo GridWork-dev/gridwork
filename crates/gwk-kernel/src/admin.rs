@@ -244,6 +244,142 @@ pub async fn runtime_privileges<'e>(
     })
 }
 
+/// The machine half of a driving-window receipt, read from the log.
+///
+/// The four figures a cutover receipt defines, over `gwk.pty_session` and
+/// `gwk.event`. Reading them here rather than from a psql scrollback is what
+/// makes a receipt's figures reproducible: the queries are these, not
+/// whatever was typed at the prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DrivingFigures {
+    /// The window end every figure was computed against — the caller's, or
+    /// the database's `now()` when none was given, resolved ONCE so the five
+    /// queries cannot each read a slightly different instant.
+    pub window_end: String,
+    /// Sessions opened inside the window. Carried because a fold cannot tell
+    /// "summed to zero" from "summed over nothing": zeros beside
+    /// `sessions_in_window: 0` are an empty window, not a quiet one.
+    pub sessions_in_window: i64,
+    /// Distinct days with any pty-session ledger activity in the window.
+    pub days_driven: i64,
+    /// Sweep-line maximum of concurrently open sessions, intervals clipped to
+    /// the window. At one instant an open sorts before a close, so a session
+    /// starting the moment another ends counts both.
+    pub peak_concurrent: i64,
+    /// Distinct host generations among the window's sessions.
+    pub generations: i64,
+    /// Generation boundaries observed in the window: one less than
+    /// [`generations`](Self::generations), floored at zero in Rust rather
+    /// than `- 1` in SQL so an empty window reads 0, not -1.
+    pub restarts: i64,
+    /// Superseded generations that left sessions running — retire never
+    /// arrived before the successor. Read over the whole ledger rather than
+    /// the window, because a generation's crash is visible only against the
+    /// generation that superseded it.
+    pub crashed_generations: i64,
+    /// Attach counter, summed over sessions alive at any point in the window.
+    /// Counters accumulate per session lifetime, so a session spanning a
+    /// window edge contributes its full totals.
+    pub attaches: i64,
+    /// Detach counter, on the same terms as `attaches`.
+    pub detaches: i64,
+}
+
+/// Read [`DrivingFigures`] for the window `from ..= to`, `to` defaulting to
+/// the database's clock.
+///
+/// Timestamps arrive as text and are cast in SQL, so anything PostgreSQL
+/// accepts as a `timestamptz` literal works and anything else refuses with
+/// the server's own message naming the value.
+pub async fn driving_figures(
+    pool: &PgPool,
+    from: &str,
+    to: Option<&str>,
+) -> Result<DrivingFigures> {
+    let window_end: String = sqlx::query_scalar("SELECT COALESCE($1::timestamptz, now())::text")
+        .bind(to)
+        .fetch_one(pool)
+        .await?;
+
+    let opened = sqlx::query(
+        "SELECT count(*) AS sessions, count(DISTINCT generation) AS generations \
+         FROM gwk.pty_session \
+         WHERE opened_at BETWEEN $1::timestamptz AND $2::timestamptz",
+    )
+    .bind(from)
+    .bind(&window_end)
+    .fetch_one(pool)
+    .await?;
+    let sessions_in_window: i64 = opened.try_get("sessions")?;
+    let generations: i64 = opened.try_get("generations")?;
+
+    let days_driven: i64 = sqlx::query_scalar(
+        "SELECT count(DISTINCT date(occurred_at)) FROM gwk.event \
+         WHERE aggregate_type = 'pty_session' \
+           AND occurred_at BETWEEN $1::timestamptz AND $2::timestamptz",
+    )
+    .bind(from)
+    .bind(&window_end)
+    .fetch_one(pool)
+    .await?;
+
+    let peak_concurrent: i64 = sqlx::query_scalar(
+        "WITH bounds AS ( \
+           SELECT greatest(opened_at, $1::timestamptz) AS t, 1 AS d \
+           FROM gwk.pty_session \
+           WHERE opened_at <= $2::timestamptz \
+             AND (closed_at IS NULL OR closed_at >= $1::timestamptz) \
+           UNION ALL \
+           SELECT least(closed_at, $2::timestamptz), -1 \
+           FROM gwk.pty_session \
+           WHERE closed_at IS NOT NULL \
+             AND closed_at >= $1::timestamptz AND opened_at <= $2::timestamptz \
+         ) \
+         SELECT coalesce(max(running), 0)::bigint \
+         FROM (SELECT sum(d) OVER (ORDER BY t, d DESC) AS running FROM bounds) s",
+    )
+    .bind(from)
+    .bind(&window_end)
+    .fetch_one(pool)
+    .await?;
+
+    // No window clause, deliberately: see the field's doc. The subquery's row
+    // is the newest session overall; on an empty table it yields no row, the
+    // comparison is NULL, and the count is honestly zero.
+    let crashed_generations: i64 = sqlx::query_scalar(
+        "SELECT count(DISTINCT generation) FROM gwk.pty_session \
+         WHERE closed_at IS NULL \
+           AND generation <> (SELECT generation FROM gwk.pty_session \
+                              ORDER BY opened_at DESC LIMIT 1)",
+    )
+    .fetch_one(pool)
+    .await?;
+
+    let counters = sqlx::query(
+        "SELECT coalesce(sum(attach_count), 0)::bigint AS attaches, \
+                coalesce(sum(detach_count), 0)::bigint AS detaches \
+         FROM gwk.pty_session \
+         WHERE opened_at <= $2::timestamptz \
+           AND (closed_at IS NULL OR closed_at >= $1::timestamptz)",
+    )
+    .bind(from)
+    .bind(&window_end)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(DrivingFigures {
+        window_end,
+        sessions_in_window,
+        days_driven,
+        peak_concurrent,
+        generations,
+        restarts: (generations - 1).max(0),
+        crashed_generations,
+        attaches: counters.try_get("attaches")?,
+        detaches: counters.try_get("detaches")?,
+    })
+}
+
 /// The backend mechanics, the fingerprint row, and the runtime grants, as one
 /// script.
 ///
