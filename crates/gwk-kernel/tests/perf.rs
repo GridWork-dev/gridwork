@@ -6,10 +6,12 @@
 //! not the first, because a run that stops at the first miss costs a second run
 //! to learn the rest.
 //!
-//! The receipt carries one number that is not an accepted bound: the load the
-//! latency phase actually offered. It rides in the same list so that a run which
-//! failed to set up its own experiment still writes a receipt and still fails,
-//! rather than aborting into silence — see [`latency_measurements`].
+//! The receipt carries numbers that are not accepted bounds: whether the
+//! latency phase's offered load and the throughput phase's checkpoint barrier
+//! actually happened. Each rides in the same list as the bound it guards, so a
+//! run that failed to set up its own experiment still writes a receipt and
+//! still fails, rather than aborting into silence — see
+//! [`latency_measurements`] and [`throughput_measurements`].
 //!
 //! ```text
 //! GWK_TEST_ADMIN_DATABASE_URL=postgres://postgres@localhost:55432/postgres \
@@ -200,7 +202,7 @@ async fn the_phase_performance_envelope_holds() {
 
     let mut measurements = Vec::new();
     measurements.extend(command_latency(&maintenance).await);
-    measurements.push(sustained_throughput(&maintenance).await);
+    measurements.extend(sustained_throughput(&maintenance).await);
     measurements.extend(cold_recovery(&maintenance).await);
     measurements.push(verification(&maintenance).await);
     measurements.push(subscription_delivery(&maintenance).await);
@@ -370,7 +372,14 @@ fn latency_measurements(rate: f64, millis: &[f64], method: String) -> Vec<Measur
 /// [`CHECKPOINT_EVENT_INTERVAL`] several times, and each crossing hashes every
 /// projection row while holding the writer lock. Measuring without it would
 /// report a throughput no deployment can reach.
-async fn sustained_throughput(maintenance: &PgPool) -> Measurement {
+///
+/// Whether the barrier crossed at all is reported, not asserted — see
+/// [`throughput_measurements`] — for the same reason as the latency phase's
+/// offered rate: a runner too contended to sustain the rate for
+/// [`THROUGHPUT_SECONDS`] can apply fewer than [`CHECKPOINT_EVENT_INTERVAL`]
+/// events and never arm the thing this phase exists to measure, and an
+/// assertion at that point would abort before the receipt is written.
+async fn sustained_throughput(maintenance: &PgPool) -> Vec<Measurement> {
     let (name, store) = fresh_store(maintenance, "perf_throughput", MAX_INFLIGHT_APPENDS).await;
     let (root, blobs) = blob_store(&store, "perf_throughput").await;
     let store = Arc::new(store.with_blobs(blobs));
@@ -407,31 +416,74 @@ async fn sustained_throughput(maintenance: &PgPool) -> Measurement {
     // produce.
     let logged = event_count(&store).await as u64;
     assert_eq!(events, logged, "counted appends disagree with the log");
-    // The barrier has to have FIRED, or this measured a kernel without one.
     let snapshots: i64 = sqlx::query_scalar("SELECT count(*) FROM gwk_internal.checkpoint")
         .fetch_one(store.pool())
         .await
         .expect("count checkpoints");
-    assert!(
-        snapshots > 0,
-        "the checkpoint barrier never crossed an interval: {events} events, {snapshots} snapshots"
-    );
     drop_database(maintenance, &name).await;
     let _ = std::fs::remove_dir_all(&root);
 
-    Measurement::new(
-        "sustained_events_per_second",
-        "events/s",
-        events as f64 / elapsed.as_secs_f64(),
-        1_000.0,
+    let method = format!(
+        "{events} single-event commands through `submit` — events and projections in one \
+         transaction — from {THROUGHPUT_WORKERS} concurrent clients over {:.1}s, with the \
+         checkpoint barrier armed and {snapshots} snapshots taken inside the window",
+        elapsed.as_secs_f64()
+    );
+    throughput_measurements(events, elapsed, snapshots, method)
+}
+
+/// The throughput phase's verdict, separated from its measurement for the same
+/// reason as [`latency_measurements`]: testable without a database and a
+/// minute of wall clock, and a run that could not run its own experiment still
+/// writes a receipt instead of aborting into silence.
+///
+/// **Whether the barrier crossed is reported, not asserted.** The barrier only
+/// fires once [`CHECKPOINT_EVENT_INTERVAL`] events have landed; a fresh runner
+/// too contended to sustain the offered rate for the full window can apply
+/// fewer than that and never cross it. An assertion at that point fires before
+/// the receipt is written, so the run produces no artifact — the same failure
+/// the latency phase's offered-rate assertion used to produce, and for the
+/// same reason: contention, the exact noise the second runner exists to
+/// absorb, would hard-fail the build instead of scoring a tolerated miss.
+///
+/// It is exempt from `GWK_PERF_SLACK` because it is not a hardware bound: it
+/// asks whether the checkpoint barrier — the thing this phase exists to
+/// measure — armed at all, and no multiple of a run that never armed it makes
+/// it a valid one.
+///
+/// When it misses, the throughput number is **withheld**: events applied
+/// without the barrier ever crossing measured a kernel with none of the
+/// hashing overhead the bound is about, and reporting that number against the
+/// 1,000 events/s bound would send the next reader after a throughput
+/// regression that never happened.
+fn throughput_measurements(
+    events: u64,
+    elapsed: Duration,
+    snapshots: i64,
+    method: String,
+) -> Vec<Measurement> {
+    let barrier = Measurement::harness(
+        "checkpoint_barrier_crossings",
+        "snapshots",
+        snapshots as f64,
+        1.0,
         Direction::AtLeast,
-        format!(
-            "{events} single-event commands through `submit` — events and projections in one \
-             transaction — from {THROUGHPUT_WORKERS} concurrent clients over {:.1}s, with the \
-             checkpoint barrier armed and {snapshots} snapshots taken inside the window",
-            elapsed.as_secs_f64()
+        method.clone(),
+    );
+    if !barrier.holds {
+        return vec![barrier];
+    }
+    vec![
+        barrier,
+        Measurement::new(
+            "sustained_events_per_second",
+            "events/s",
+            events as f64 / elapsed.as_secs_f64(),
+            1_000.0,
+            Direction::AtLeast,
+            method,
         ),
-    )
+    ]
 }
 
 /// **Replay ≥1,000 events/second; 100,000-event cold recovery ≤120 seconds.**
@@ -815,5 +867,53 @@ mod tests {
         // The floor is 95% of the target, and it is inclusive.
         assert!(latency_measurements(95.0, &millis, String::new())[0].holds);
         assert_eq!(latency_measurements(94.9, &millis, String::new()).len(), 1);
+    }
+
+    #[test]
+    fn a_throughput_run_that_never_arms_the_barrier_withholds_its_rate_and_no_slack_rescues_it() {
+        let elapsed = Duration::from_secs(THROUGHPUT_SECONDS);
+        // Fast enough to clear the 1,000 events/s bound on its own — the only
+        // thing under test is the barrier-crossing decision, not the rate.
+        let events = 1_000 * THROUGHPUT_SECONDS;
+
+        // Zero snapshots is the shape a runner too contended to apply
+        // CHECKPOINT_EVENT_INTERVAL events inside the window produces, and the
+        // shape that used to abort before the receipt was written.
+        let missed = throughput_measurements(events, elapsed, 0, String::new());
+        assert_eq!(
+            missed.len(),
+            1,
+            "a throughput number measured without the barrier ever crossing \
+             describes a different experiment and must not reach the receipt"
+        );
+        assert_eq!(missed[0].name, "checkpoint_barrier_crossings");
+        assert!(
+            !missed[0].holds,
+            "zero snapshots means the barrier never armed"
+        );
+        // The one that matters: CI runs GWK_PERF_SLACK=3. Slack must not turn a
+        // harness failure into a pass over a rate nobody should read.
+        assert!(
+            !missed[0].passes(3.0),
+            "slack rescued an invalid experiment"
+        );
+        assert!(!missed[0].passes(1_000.0));
+
+        let clean = throughput_measurements(events, elapsed, 1, String::new());
+        assert_eq!(
+            clean.len(),
+            2,
+            "a run that armed the barrier reports the crossing and the rate"
+        );
+        assert!(clean.iter().all(|m| m.holds));
+        assert_eq!(clean[1].name, "sustained_events_per_second");
+        assert!(
+            !clean[1].slack_exempt,
+            "a hardware bound still takes the runner's slack"
+        );
+        assert!(
+            clean[0].slack_exempt,
+            "the barrier check is a harness validity claim, not a hardware bound"
+        );
     }
 }
