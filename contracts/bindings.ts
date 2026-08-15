@@ -315,6 +315,15 @@ export type Budget_Serialize = {
 	max_cost_micros?: string | null,
 };
 
+/**  What an authored review decided about an optimization candidate. */
+export type CandidateDisposition =
+/**  Accepted for application through the authored review path. */
+"applied" |
+/**  Declined. The candidate stays immutable and recorded. */
+"declined" |
+/**  Superseded by a later candidate over the same subject. */
+"superseded";
+
 /**
  *  One color a cell's foreground or background carries, in the tier the
  *  terminal engine reported it at — exactly what the engine parsed off the
@@ -707,6 +716,247 @@ export type Command_Serialize = {
 	updated_at: Timestamp,
 };
 
+/**  One side of a comparison. */
+export type CompareSubject = { of: "manifest"; manifest_id: string } | { of: "run"; run_id: string };
+
+/**  The three `aggregate_type` families Context writes into the one kernel log. */
+export type ContextAggregate =
+/**  Resolution and release of one immutable manifest. */
+"context_manifest" |
+/**  The observed lifetime around one rendered manifest. */
+"context_run" |
+/**  Proposed and dispositioned optimization candidates. */
+"context_optimization";
+
+/**
+ *  Source attribution for one Context lifecycle event.
+ *
+ *  Compiler-DERIVED. Every field is re-read from the resolved manifest the
+ *  compiler itself produced; none is copied from a request. That is the whole
+ *  of the CTX-12 control, and it is why this type appears on the event payload
+ *  and nowhere in [`RecordContextFact`].
+ *
+ *  This is provenance, not authorization. It answers "which compiler run
+ *  produced this, against which route and authority" — it never answers "was
+ *  this permitted", which stays same-EUID at the socket.
+ */
+export type ContextAttribution = {
+	/**  The compiler build that resolved the manifest. */
+	compiler: string,
+	/**  The route the manifest was resolved against. */
+	route_digest: string,
+	/**  The authority set in force at resolution. */
+	authority_digest: string,
+	/**  The manifest the compiler re-read to derive the fields above. */
+	derived_from: string,
+};
+
+/**
+ *  The ten D4 lifecycle `event_type` values.
+ *
+ *  Ten because ADR-0032 decision 4 names ten, and the count is pinned by test
+ *  rather than left to whoever next reads the list. Verification and rejection
+ *  are ONE name carrying a verdict, which is how the ADR names them too — the
+ *  alternative spends a name on a field and makes "was it verified?" a question
+ *  about which of two event types arrived.
+ */
+export type ContextEventName = "context_manifest_compilation_requested" | "context_manifest_resolved" | "context_manifest_verification_recorded" | "context_manifest_release_recorded" | "context_run_opened" | "context_run_observation_appended" | "context_run_closed" | "context_run_assurance_certified" | "context_optimization_candidate_proposed" | "context_optimization_candidate_dispositioned";
+
+/**
+ *  One Context lifecycle event's payload, as it lands in the kernel log.
+ *
+ *  Rides [`gwk_domain::EventEnvelope`]'s generic `payload`; the envelope's own
+ *  `aggregate_type` and `event_type` carry [`ContextEventName::aggregate`] and
+ *  [`ContextEventName::as_str`]. `name` is repeated inside the payload on
+ *  purpose: the envelope's copy is an open string a non-GridWork reader may
+ *  have written, and a projection that branches on the payload should branch on
+ *  the closed value it can exhaust.
+ */
+export type ContextEventPayload = ContextEventPayload_Serialize | ContextEventPayload_Deserialize;
+
+/**
+ *  One Context lifecycle event's payload, as it lands in the kernel log.
+ *
+ *  Rides [`gwk_domain::EventEnvelope`]'s generic `payload`; the envelope's own
+ *  `aggregate_type` and `event_type` carry [`ContextEventName::aggregate`] and
+ *  [`ContextEventName::as_str`]. `name` is repeated inside the payload on
+ *  purpose: the envelope's copy is an open string a non-GridWork reader may
+ *  have written, and a projection that branches on the payload should branch on
+ *  the closed value it can exhaust.
+ */
+export type ContextEventPayload_Deserialize = {
+	name: ContextEventName,
+	attribution: ContextAttribution,
+	fact: ContextFact_Deserialize,
+};
+
+/**
+ *  One Context lifecycle event's payload, as it lands in the kernel log.
+ *
+ *  Rides [`gwk_domain::EventEnvelope`]'s generic `payload`; the envelope's own
+ *  `aggregate_type` and `event_type` carry [`ContextEventName::aggregate`] and
+ *  [`ContextEventName::as_str`]. `name` is repeated inside the payload on
+ *  purpose: the envelope's copy is an open string a non-GridWork reader may
+ *  have written, and a projection that branches on the payload should branch on
+ *  the closed value it can exhaust.
+ */
+export type ContextEventPayload_Serialize = {
+	name: ContextEventName,
+	attribution: ContextAttribution,
+	fact: ContextFact_Serialize,
+};
+
+/**
+ *  One Context lifecycle fact, in the ten shapes D4 names.
+ *
+ *  This single enum is the vocabulary for BOTH directions: it is what a client
+ *  asks the kernel to record ([`RecordContextFact`]) and what the log holds
+ *  ([`ContextEventPayload`]). One enum rather than two parallel ones, because
+ *  two would drift and the drift would be invisible — the wrapper types are
+ *  where the two directions legitimately differ, and the only difference is
+ *  attribution.
+ *
+ *  Every variant is a terminal fact. Nothing here transitions a state machine,
+ *  which is why the command wrapper is `Record*` and not `Transition*`.
+ */
+export type ContextFact = ContextFact_Serialize | ContextFact_Deserialize;
+
+/**
+ *  One Context lifecycle fact, in the ten shapes D4 names.
+ *
+ *  This single enum is the vocabulary for BOTH directions: it is what a client
+ *  asks the kernel to record ([`RecordContextFact`]) and what the log holds
+ *  ([`ContextEventPayload`]). One enum rather than two parallel ones, because
+ *  two would drift and the drift would be invisible — the wrapper types are
+ *  where the two directions legitimately differ, and the only difference is
+ *  attribution.
+ *
+ *  Every variant is a terminal fact. Nothing here transitions a state machine,
+ *  which is why the command wrapper is `Record*` and not `Transition*`.
+ */
+export type ContextFact_Deserialize =
+/**  A compilation was asked for, before any manifest exists. */
+({ fact: "compilation_requested"; attempt_id: AttemptId; route_digest: string; authority_digest: string; requested_at: Timestamp }) & { affected_route_count?: never; assurance?: never; candidate_id?: never; certified_at?: never; closed_at?: never; disposition?: never; dispositioned_at?: never; evidence_ids?: never; expected_effect_digest?: never; fact_digest?: never; final_event_root?: never; finalization_id?: never; lifecycle_complete?: never; manifest_digest?: never; manifest_id?: never; observation_count?: never; observation_id?: never; observation_index?: never; observed_at?: never; opened_at?: never; output_digest?: never; participations?: never; patch_digest?: never; proposed_at?: never; release_id?: never; released_at?: never; rendered_bytes?: never; rendered_digest?: never; resolved_at?: never; review_digest?: never; run_id?: never; source_bytes?: never; source_count?: never; tool_schema_digest?: never; truncated?: never; verdict?: never; verification_digest?: never; verified_at?: never } |
+/**  The compiler emitted one immutable manifest. */
+({ fact: "manifest_resolved"; manifest_id: string; attempt_id: AttemptId; manifest_digest: string; source_count: number; source_bytes: string; participations: Participation_Deserialize[]; resolved_at: Timestamp }) & { affected_route_count?: never; assurance?: never; authority_digest?: never; candidate_id?: never; certified_at?: never; closed_at?: never; disposition?: never; dispositioned_at?: never; evidence_ids?: never; expected_effect_digest?: never; fact_digest?: never; final_event_root?: never; finalization_id?: never; lifecycle_complete?: never; observation_count?: never; observation_id?: never; observation_index?: never; observed_at?: never; opened_at?: never; output_digest?: never; patch_digest?: never; proposed_at?: never; release_id?: never; released_at?: never; rendered_bytes?: never; rendered_digest?: never; requested_at?: never; review_digest?: never; route_digest?: never; run_id?: never; tool_schema_digest?: never; truncated?: never; verdict?: never; verification_digest?: never; verified_at?: never } |
+/**  The independent verifier answered for one exact digest. */
+({ fact: "manifest_verification_recorded"; manifest_id: string; manifest_digest: string; verdict: VerificationVerdict; verification_digest: string; evidence_ids: EvidenceId[]; verified_at: Timestamp }) & { affected_route_count?: never; assurance?: never; attempt_id?: never; authority_digest?: never; candidate_id?: never; certified_at?: never; closed_at?: never; disposition?: never; dispositioned_at?: never; expected_effect_digest?: never; fact_digest?: never; final_event_root?: never; finalization_id?: never; lifecycle_complete?: never; observation_count?: never; observation_id?: never; observation_index?: never; observed_at?: never; opened_at?: never; output_digest?: never; participations?: never; patch_digest?: never; proposed_at?: never; release_id?: never; released_at?: never; rendered_bytes?: never; rendered_digest?: never; requested_at?: never; resolved_at?: never; review_digest?: never; route_digest?: never; run_id?: never; source_bytes?: never; source_count?: never; tool_schema_digest?: never; truncated?: never } |
+/**  Exactly what was rendered and released to an engine. */
+({ fact: "release_recorded"; manifest_id: string; release_id: string; rendered_digest: string; tool_schema_digest: string; rendered_bytes: string; released_at: Timestamp }) & { affected_route_count?: never; assurance?: never; attempt_id?: never; authority_digest?: never; candidate_id?: never; certified_at?: never; closed_at?: never; disposition?: never; dispositioned_at?: never; evidence_ids?: never; expected_effect_digest?: never; fact_digest?: never; final_event_root?: never; finalization_id?: never; lifecycle_complete?: never; manifest_digest?: never; observation_count?: never; observation_id?: never; observation_index?: never; observed_at?: never; opened_at?: never; output_digest?: never; participations?: never; patch_digest?: never; proposed_at?: never; requested_at?: never; resolved_at?: never; review_digest?: never; route_digest?: never; run_id?: never; source_bytes?: never; source_count?: never; truncated?: never; verdict?: never; verification_digest?: never; verified_at?: never } |
+/**  A Context run opened around a released manifest. */
+({ fact: "run_opened"; run_id: string; manifest_id: string; release_id: string; opened_at: Timestamp }) & { affected_route_count?: never; assurance?: never; attempt_id?: never; authority_digest?: never; candidate_id?: never; certified_at?: never; closed_at?: never; disposition?: never; dispositioned_at?: never; evidence_ids?: never; expected_effect_digest?: never; fact_digest?: never; final_event_root?: never; finalization_id?: never; lifecycle_complete?: never; manifest_digest?: never; observation_count?: never; observation_id?: never; observation_index?: never; observed_at?: never; output_digest?: never; participations?: never; patch_digest?: never; proposed_at?: never; released_at?: never; rendered_bytes?: never; rendered_digest?: never; requested_at?: never; resolved_at?: never; review_digest?: never; route_digest?: never; source_bytes?: never; source_count?: never; tool_schema_digest?: never; truncated?: never; verdict?: never; verification_digest?: never; verified_at?: never } |
+/**  One ordered post-boundary observation was appended. */
+({ fact: "observation_appended"; run_id: string; observation_id: string; observation_index: number; fact_digest: string; truncated: boolean; observed_at: Timestamp }) & { affected_route_count?: never; assurance?: never; attempt_id?: never; authority_digest?: never; candidate_id?: never; certified_at?: never; closed_at?: never; disposition?: never; dispositioned_at?: never; evidence_ids?: never; expected_effect_digest?: never; final_event_root?: never; finalization_id?: never; lifecycle_complete?: never; manifest_digest?: never; manifest_id?: never; observation_count?: never; opened_at?: never; output_digest?: never; participations?: never; patch_digest?: never; proposed_at?: never; release_id?: never; released_at?: never; rendered_bytes?: never; rendered_digest?: never; requested_at?: never; resolved_at?: never; review_digest?: never; route_digest?: never; source_bytes?: never; source_count?: never; tool_schema_digest?: never; verdict?: never; verification_digest?: never; verified_at?: never } |
+/**  The run closed. Assurance is a separate later fact. */
+({ fact: "run_closed"; run_id: string; finalization_id: string; output_digest: string; observation_count: number; lifecycle_complete: boolean; closed_at: Timestamp }) & { affected_route_count?: never; assurance?: never; attempt_id?: never; authority_digest?: never; candidate_id?: never; certified_at?: never; disposition?: never; dispositioned_at?: never; evidence_ids?: never; expected_effect_digest?: never; fact_digest?: never; final_event_root?: never; manifest_digest?: never; manifest_id?: never; observation_id?: never; observation_index?: never; observed_at?: never; opened_at?: never; participations?: never; patch_digest?: never; proposed_at?: never; release_id?: never; released_at?: never; rendered_bytes?: never; rendered_digest?: never; requested_at?: never; resolved_at?: never; review_digest?: never; route_digest?: never; source_bytes?: never; source_count?: never; tool_schema_digest?: never; truncated?: never; verdict?: never; verification_digest?: never; verified_at?: never } |
+/**  A closed run was certified at an assurance level. */
+({ fact: "assurance_certified"; run_id: string; finalization_id: string; assurance: Assurance; final_event_root: string; certified_at: Timestamp }) & { affected_route_count?: never; attempt_id?: never; authority_digest?: never; candidate_id?: never; closed_at?: never; disposition?: never; dispositioned_at?: never; evidence_ids?: never; expected_effect_digest?: never; fact_digest?: never; lifecycle_complete?: never; manifest_digest?: never; manifest_id?: never; observation_count?: never; observation_id?: never; observation_index?: never; observed_at?: never; opened_at?: never; output_digest?: never; participations?: never; patch_digest?: never; proposed_at?: never; release_id?: never; released_at?: never; rendered_bytes?: never; rendered_digest?: never; requested_at?: never; resolved_at?: never; review_digest?: never; route_digest?: never; source_bytes?: never; source_count?: never; tool_schema_digest?: never; truncated?: never; verdict?: never; verification_digest?: never; verified_at?: never } |
+/**  Optimization proposed an immutable candidate. It writes no truth. */
+({ fact: "optimization_candidate_proposed"; candidate_id: string; patch_digest: string; expected_effect_digest: string; affected_route_count: number; evidence_ids: EvidenceId[]; proposed_at: Timestamp }) & { assurance?: never; attempt_id?: never; authority_digest?: never; certified_at?: never; closed_at?: never; disposition?: never; dispositioned_at?: never; fact_digest?: never; final_event_root?: never; finalization_id?: never; lifecycle_complete?: never; manifest_digest?: never; manifest_id?: never; observation_count?: never; observation_id?: never; observation_index?: never; observed_at?: never; opened_at?: never; output_digest?: never; participations?: never; release_id?: never; released_at?: never; rendered_bytes?: never; rendered_digest?: never; requested_at?: never; resolved_at?: never; review_digest?: never; route_digest?: never; run_id?: never; source_bytes?: never; source_count?: never; tool_schema_digest?: never; truncated?: never; verdict?: never; verification_digest?: never; verified_at?: never } |
+/**  An authored review dispositioned a candidate. */
+({ fact: "optimization_candidate_dispositioned"; candidate_id: string; disposition: CandidateDisposition; review_digest: string; dispositioned_at: Timestamp }) & { affected_route_count?: never; assurance?: never; attempt_id?: never; authority_digest?: never; certified_at?: never; closed_at?: never; evidence_ids?: never; expected_effect_digest?: never; fact_digest?: never; final_event_root?: never; finalization_id?: never; lifecycle_complete?: never; manifest_digest?: never; manifest_id?: never; observation_count?: never; observation_id?: never; observation_index?: never; observed_at?: never; opened_at?: never; output_digest?: never; participations?: never; patch_digest?: never; proposed_at?: never; release_id?: never; released_at?: never; rendered_bytes?: never; rendered_digest?: never; requested_at?: never; resolved_at?: never; route_digest?: never; run_id?: never; source_bytes?: never; source_count?: never; tool_schema_digest?: never; truncated?: never; verdict?: never; verification_digest?: never; verified_at?: never };
+
+/**
+ *  One Context lifecycle fact, in the ten shapes D4 names.
+ *
+ *  This single enum is the vocabulary for BOTH directions: it is what a client
+ *  asks the kernel to record ([`RecordContextFact`]) and what the log holds
+ *  ([`ContextEventPayload`]). One enum rather than two parallel ones, because
+ *  two would drift and the drift would be invisible — the wrapper types are
+ *  where the two directions legitimately differ, and the only difference is
+ *  attribution.
+ *
+ *  Every variant is a terminal fact. Nothing here transitions a state machine,
+ *  which is why the command wrapper is `Record*` and not `Transition*`.
+ */
+export type ContextFact_Serialize =
+/**  A compilation was asked for, before any manifest exists. */
+({ fact: "compilation_requested"; attempt_id: AttemptId; route_digest: string; authority_digest: string; requested_at: Timestamp }) & { affected_route_count?: never; assurance?: never; candidate_id?: never; certified_at?: never; closed_at?: never; disposition?: never; dispositioned_at?: never; evidence_ids?: never; expected_effect_digest?: never; fact_digest?: never; final_event_root?: never; finalization_id?: never; lifecycle_complete?: never; manifest_digest?: never; manifest_id?: never; observation_count?: never; observation_id?: never; observation_index?: never; observed_at?: never; opened_at?: never; output_digest?: never; participations?: never; patch_digest?: never; proposed_at?: never; release_id?: never; released_at?: never; rendered_bytes?: never; rendered_digest?: never; resolved_at?: never; review_digest?: never; run_id?: never; source_bytes?: never; source_count?: never; tool_schema_digest?: never; truncated?: never; verdict?: never; verification_digest?: never; verified_at?: never } |
+/**  The compiler emitted one immutable manifest. */
+({ fact: "manifest_resolved"; manifest_id: string; attempt_id: AttemptId; manifest_digest: string; source_count: number; source_bytes: string; participations: Participation_Serialize[]; resolved_at: Timestamp }) & { affected_route_count?: never; assurance?: never; authority_digest?: never; candidate_id?: never; certified_at?: never; closed_at?: never; disposition?: never; dispositioned_at?: never; evidence_ids?: never; expected_effect_digest?: never; fact_digest?: never; final_event_root?: never; finalization_id?: never; lifecycle_complete?: never; observation_count?: never; observation_id?: never; observation_index?: never; observed_at?: never; opened_at?: never; output_digest?: never; patch_digest?: never; proposed_at?: never; release_id?: never; released_at?: never; rendered_bytes?: never; rendered_digest?: never; requested_at?: never; review_digest?: never; route_digest?: never; run_id?: never; tool_schema_digest?: never; truncated?: never; verdict?: never; verification_digest?: never; verified_at?: never } |
+/**  The independent verifier answered for one exact digest. */
+({ fact: "manifest_verification_recorded"; manifest_id: string; manifest_digest: string; verdict: VerificationVerdict; verification_digest: string; evidence_ids: EvidenceId[]; verified_at: Timestamp }) & { affected_route_count?: never; assurance?: never; attempt_id?: never; authority_digest?: never; candidate_id?: never; certified_at?: never; closed_at?: never; disposition?: never; dispositioned_at?: never; expected_effect_digest?: never; fact_digest?: never; final_event_root?: never; finalization_id?: never; lifecycle_complete?: never; observation_count?: never; observation_id?: never; observation_index?: never; observed_at?: never; opened_at?: never; output_digest?: never; participations?: never; patch_digest?: never; proposed_at?: never; release_id?: never; released_at?: never; rendered_bytes?: never; rendered_digest?: never; requested_at?: never; resolved_at?: never; review_digest?: never; route_digest?: never; run_id?: never; source_bytes?: never; source_count?: never; tool_schema_digest?: never; truncated?: never } |
+/**  Exactly what was rendered and released to an engine. */
+({ fact: "release_recorded"; manifest_id: string; release_id: string; rendered_digest: string; tool_schema_digest: string; rendered_bytes: string; released_at: Timestamp }) & { affected_route_count?: never; assurance?: never; attempt_id?: never; authority_digest?: never; candidate_id?: never; certified_at?: never; closed_at?: never; disposition?: never; dispositioned_at?: never; evidence_ids?: never; expected_effect_digest?: never; fact_digest?: never; final_event_root?: never; finalization_id?: never; lifecycle_complete?: never; manifest_digest?: never; observation_count?: never; observation_id?: never; observation_index?: never; observed_at?: never; opened_at?: never; output_digest?: never; participations?: never; patch_digest?: never; proposed_at?: never; requested_at?: never; resolved_at?: never; review_digest?: never; route_digest?: never; run_id?: never; source_bytes?: never; source_count?: never; truncated?: never; verdict?: never; verification_digest?: never; verified_at?: never } |
+/**  A Context run opened around a released manifest. */
+({ fact: "run_opened"; run_id: string; manifest_id: string; release_id: string; opened_at: Timestamp }) & { affected_route_count?: never; assurance?: never; attempt_id?: never; authority_digest?: never; candidate_id?: never; certified_at?: never; closed_at?: never; disposition?: never; dispositioned_at?: never; evidence_ids?: never; expected_effect_digest?: never; fact_digest?: never; final_event_root?: never; finalization_id?: never; lifecycle_complete?: never; manifest_digest?: never; observation_count?: never; observation_id?: never; observation_index?: never; observed_at?: never; output_digest?: never; participations?: never; patch_digest?: never; proposed_at?: never; released_at?: never; rendered_bytes?: never; rendered_digest?: never; requested_at?: never; resolved_at?: never; review_digest?: never; route_digest?: never; source_bytes?: never; source_count?: never; tool_schema_digest?: never; truncated?: never; verdict?: never; verification_digest?: never; verified_at?: never } |
+/**  One ordered post-boundary observation was appended. */
+({ fact: "observation_appended"; run_id: string; observation_id: string; observation_index: number; fact_digest: string; truncated: boolean; observed_at: Timestamp }) & { affected_route_count?: never; assurance?: never; attempt_id?: never; authority_digest?: never; candidate_id?: never; certified_at?: never; closed_at?: never; disposition?: never; dispositioned_at?: never; evidence_ids?: never; expected_effect_digest?: never; final_event_root?: never; finalization_id?: never; lifecycle_complete?: never; manifest_digest?: never; manifest_id?: never; observation_count?: never; opened_at?: never; output_digest?: never; participations?: never; patch_digest?: never; proposed_at?: never; release_id?: never; released_at?: never; rendered_bytes?: never; rendered_digest?: never; requested_at?: never; resolved_at?: never; review_digest?: never; route_digest?: never; source_bytes?: never; source_count?: never; tool_schema_digest?: never; verdict?: never; verification_digest?: never; verified_at?: never } |
+/**  The run closed. Assurance is a separate later fact. */
+({ fact: "run_closed"; run_id: string; finalization_id: string; output_digest: string; observation_count: number; lifecycle_complete: boolean; closed_at: Timestamp }) & { affected_route_count?: never; assurance?: never; attempt_id?: never; authority_digest?: never; candidate_id?: never; certified_at?: never; disposition?: never; dispositioned_at?: never; evidence_ids?: never; expected_effect_digest?: never; fact_digest?: never; final_event_root?: never; manifest_digest?: never; manifest_id?: never; observation_id?: never; observation_index?: never; observed_at?: never; opened_at?: never; participations?: never; patch_digest?: never; proposed_at?: never; release_id?: never; released_at?: never; rendered_bytes?: never; rendered_digest?: never; requested_at?: never; resolved_at?: never; review_digest?: never; route_digest?: never; source_bytes?: never; source_count?: never; tool_schema_digest?: never; truncated?: never; verdict?: never; verification_digest?: never; verified_at?: never } |
+/**  A closed run was certified at an assurance level. */
+({ fact: "assurance_certified"; run_id: string; finalization_id: string; assurance: Assurance; final_event_root: string; certified_at: Timestamp }) & { affected_route_count?: never; attempt_id?: never; authority_digest?: never; candidate_id?: never; closed_at?: never; disposition?: never; dispositioned_at?: never; evidence_ids?: never; expected_effect_digest?: never; fact_digest?: never; lifecycle_complete?: never; manifest_digest?: never; manifest_id?: never; observation_count?: never; observation_id?: never; observation_index?: never; observed_at?: never; opened_at?: never; output_digest?: never; participations?: never; patch_digest?: never; proposed_at?: never; release_id?: never; released_at?: never; rendered_bytes?: never; rendered_digest?: never; requested_at?: never; resolved_at?: never; review_digest?: never; route_digest?: never; source_bytes?: never; source_count?: never; tool_schema_digest?: never; truncated?: never; verdict?: never; verification_digest?: never; verified_at?: never } |
+/**  Optimization proposed an immutable candidate. It writes no truth. */
+({ fact: "optimization_candidate_proposed"; candidate_id: string; patch_digest: string; expected_effect_digest: string; affected_route_count: number; evidence_ids: EvidenceId[]; proposed_at: Timestamp }) & { assurance?: never; attempt_id?: never; authority_digest?: never; certified_at?: never; closed_at?: never; disposition?: never; dispositioned_at?: never; fact_digest?: never; final_event_root?: never; finalization_id?: never; lifecycle_complete?: never; manifest_digest?: never; manifest_id?: never; observation_count?: never; observation_id?: never; observation_index?: never; observed_at?: never; opened_at?: never; output_digest?: never; participations?: never; release_id?: never; released_at?: never; rendered_bytes?: never; rendered_digest?: never; requested_at?: never; resolved_at?: never; review_digest?: never; route_digest?: never; run_id?: never; source_bytes?: never; source_count?: never; tool_schema_digest?: never; truncated?: never; verdict?: never; verification_digest?: never; verified_at?: never } |
+/**  An authored review dispositioned a candidate. */
+({ fact: "optimization_candidate_dispositioned"; candidate_id: string; disposition: CandidateDisposition; review_digest: string; dispositioned_at: Timestamp }) & { affected_route_count?: never; assurance?: never; attempt_id?: never; authority_digest?: never; certified_at?: never; closed_at?: never; evidence_ids?: never; expected_effect_digest?: never; fact_digest?: never; final_event_root?: never; finalization_id?: never; lifecycle_complete?: never; manifest_digest?: never; manifest_id?: never; observation_count?: never; observation_id?: never; observation_index?: never; observed_at?: never; opened_at?: never; output_digest?: never; participations?: never; patch_digest?: never; proposed_at?: never; release_id?: never; released_at?: never; rendered_bytes?: never; rendered_digest?: never; requested_at?: never; resolved_at?: never; route_digest?: never; run_id?: never; source_bytes?: never; source_count?: never; tool_schema_digest?: never; truncated?: never; verdict?: never; verification_digest?: never; verified_at?: never };
+
+/**
+ *  The v2 Context read grammar.
+ *
+ *  Eight reads, matching ADR-0032's three projections plus the four record
+ *  reads and Compare. These are published shapes, not live handlers: 8A
+ *  publishes the grammar, and the projections behind it are later work.
+ *
+ *  Explain and Compare are powered by immutable projections linked to source
+ *  commits and CAS objects. Neither recomputes a historical manifest from
+ *  current files — a recomputed manifest answers a question about today and is
+ *  presented as an answer about the past, which is worse than no answer.
+ */
+export type ContextQuery =
+/**  One resolved manifest. */
+{ query: "manifest"; select: ManifestSelector } |
+/**  Supplements of one manifest, of one kind. */
+{ query: "supplement"; manifest_id: string; kind: SupplementKind; limit: number } |
+/**  One source as the manifest saw it, by content digest. */
+{ query: "source"; manifest_id: string; digest: string } |
+/**
+ *  Sources, revisions, manifests, releases, observations, verifier
+ *  receipts, and candidates — the provenance projection.
+ */
+{ query: "provenance_graph"; root: string; depth: number } |
+/**
+ *  Skills, memories, notes, concepts, symbols, files, and their citation
+ *  and semantic relationships.
+ */
+{ query: "semantic_graph"; root: string; depth: number } |
+/**
+ *  Tasks, attempts, sessions, messages, tools, evidence, interventions,
+ *  outcomes, and costs — execution causality, kept separate from the two
+ *  above so nothing flattens into one ambiguous graph.
+ */
+{ query: "execution_dag"; run_id: string; depth: number } |
+/**  Why sources participated, or did not. */
+{ query: "explain"; manifest_id: string; subject: ExplainSubject } |
+/**
+ *  Declared, resolved, released, observed and final states across two
+ *  subjects, at the stages asked for.
+ */
+{ query: "compare"; left: CompareSubject; right: CompareSubject; stages: ContextStage[] };
+
+/**
+ *  The five named stages a Context record can belong to.
+ *
+ *  Ordered as the pipeline runs, so `PartialOrd` means "no later than".
+ */
+export type ContextStage =
+/**
+ *  What was asked for, before resolution: run declarations, requested
+ *  skills, route hints. Not yet authority-checked.
+ */
+"declared" |
+/**
+ *  The immutable compiled manifest for one spawn attempt — the single
+ *  artifact the verifier checks and the adapter renders from.
+ */
+"resolved" |
+/**  The append-only release supplement, written exactly once at render. */
+"released" |
+/**  Zero or more observation supplements written while the attempt runs. */
+"observed" |
+/**  The one finalization supplement, written when the attempt settles. */
+"finalized";
+
 /**  Correlates every event/command in one logical flow. */
 export type CorrelationId = string;
 
@@ -969,6 +1219,15 @@ export type Evidence_Serialize = {
 	byte_size?: string | null,
 	created_at: Timestamp,
 };
+
+/**  What an Explain read is asking about. */
+export type ExplainSubject =
+/**  Why this source did or did not participate. */
+{ subject: "source"; digest: string } |
+/**  Why the precedence resolution landed where it did. */
+{ subject: "precedence" } |
+/**  Why the manifest carries the participation set it carries. */
+{ subject: "participation" };
 
 /**  The completed run's outputs, verification, lifecycle root, and assurance. */
 export type FinalizationSupplement = {
@@ -2132,6 +2391,9 @@ export type Lease_Serialize = {
 	updated_at: Timestamp,
 };
 
+/**  How a read names the manifest it wants. */
+export type ManifestSelector = { by: "id"; manifest_id: string } | { by: "attempt"; attempt_id: AttemptId };
+
 /**
  *  Governed inter-party message. `delivery_refs` maps a delivery channel name
  *  to an opaque per-channel reference (replaces any single-vendor ref column).
@@ -2907,6 +3169,52 @@ export type Receipt_Serialize = {
 	ts: Timestamp,
 };
 
+/**
+ *  The v2 Context write grammar, in full.
+ *
+ *  One shape, one field. Recording a fact is the ONLY Context write, because
+ *  Context may compile, verify, attest, project, explain, compare and suggest —
+ *  and may not independently authorize work or write execution truth outside
+ *  kernel commands (ADR-0032). A grammar with a second verb would be a second
+ *  write authority wearing a smaller name.
+ *
+ *  **There is no actor field here and there must never be one.** See CTX-12 in
+ *  the module docs; the omission is asserted by test, not left to review.
+ */
+export type RecordContextFact = RecordContextFact_Serialize | RecordContextFact_Deserialize;
+
+/**
+ *  The v2 Context write grammar, in full.
+ *
+ *  One shape, one field. Recording a fact is the ONLY Context write, because
+ *  Context may compile, verify, attest, project, explain, compare and suggest —
+ *  and may not independently authorize work or write execution truth outside
+ *  kernel commands (ADR-0032). A grammar with a second verb would be a second
+ *  write authority wearing a smaller name.
+ *
+ *  **There is no actor field here and there must never be one.** See CTX-12 in
+ *  the module docs; the omission is asserted by test, not left to review.
+ */
+export type RecordContextFact_Deserialize = {
+	fact: ContextFact_Deserialize,
+};
+
+/**
+ *  The v2 Context write grammar, in full.
+ *
+ *  One shape, one field. Recording a fact is the ONLY Context write, because
+ *  Context may compile, verify, attest, project, explain, compare and suggest —
+ *  and may not independently authorize work or write execution truth outside
+ *  kernel commands (ADR-0032). A grammar with a second verb would be a second
+ *  write authority wearing a smaller name.
+ *
+ *  **There is no actor field here and there must never be one.** See CTX-12 in
+ *  the module docs; the omission is asserted by test, not left to review.
+ */
+export type RecordContextFact_Serialize = {
+	fact: ContextFact_Serialize,
+};
+
 /**  The exact adapter-rendered material and tool schemas released to an engine. */
 export type ReleaseSupplement = {
 	id: string,
@@ -3104,6 +3412,9 @@ capabilities: string[]; sealed: boolean; watermark?: string | null }) & { byte_s
  */
 ({ type: "pty_raw_stream_closed"; request_id: RequestId; generation: PtySessionGeneration; code: KernelErrorCode; last_seq?: string | null }) & { byte_size?: never; capabilities?: never; cols?: never; command_id?: never; cursor?: never; data_base64?: never; delivery_id?: never; deltas?: never; events?: never; last_cursor?: never; message?: never; protocol_major?: never; protocol_minor?: never; result?: never; rows?: never; sealed?: never; seq?: never; session_id?: never; template_name?: never; watermark?: never };
 
+/**  Which supplement of a manifest a read wants. */
+export type SupplementKind = "release" | "observation" | "finalization";
+
 /**  Tracker-visible work item. */
 export type Task = Task_Serialize | Task_Deserialize;
 
@@ -3214,6 +3525,13 @@ export type Token = {
 
 /**  What `apply` decided, as a tagged wire value. */
 export type TransitionResult<S> = { kind: "applied"; state: S; version: number } | { kind: "illegal_edge"; from: S; to: S } | { kind: "stale_version"; actual: number; expected: number } | { kind: "unauthorized_actor"; reason: string };
+
+/**  The independent verifier's answer for one exact manifest digest. */
+export type VerificationVerdict =
+/**  Every checked property held for this digest. */
+"verified" |
+/**  At least one checked property failed. The verifier records which. */
+"rejected";
 
 /**
  *  One run of a workflow: the choreography as a kernel ledger object.

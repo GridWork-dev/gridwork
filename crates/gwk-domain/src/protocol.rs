@@ -46,21 +46,39 @@ use crate::inherited::OrchestratorCheckpoint;
 ///
 /// On the wire it is a plain JSON number: the value is small and bounded, so
 /// the decimal-string rule for 64-bit counters does not apply.
+///
+/// **Known is not served.** A major listed here is one the grammar can NAME.
+/// Which major a connection actually gets is the kernel's separate decision,
+/// and it serves `V1` alone. `V2` is known so that a v2 peer is refused with
+/// [`KernelErrorCode::UnsupportedVersion`] — "known, but not this connection's"
+/// — rather than failing inside `Deserialize` as a generic validation error
+/// indistinguishable from malformed JSON. That distinction is the whole reason
+/// to name a major before serving it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ProtocolVersion {
     V1,
+    /// The Context major. At V2 the Context commands, queries, events, and
+    /// handshake semantics in `gwk_context::wire` are MANDATORY — there is no
+    /// optional V1 Context mode and no capability name that enables one.
+    /// Nothing serves this yet.
+    V2,
 }
 
 impl ProtocolVersion {
+    /// Every major the grammar knows, ascending. Not every major served.
+    pub const ALL: [Self; 2] = [Self::V1, Self::V2];
+
     pub const fn as_u32(self) -> u32 {
         match self {
             Self::V1 => 1,
+            Self::V2 => 2,
         }
     }
 
     pub const fn from_u32(value: u32) -> Option<Self> {
         match value {
             1 => Some(Self::V1),
+            2 => Some(Self::V2),
             _ => None,
         }
     }
@@ -1337,18 +1355,41 @@ mod tests {
 
     #[test]
     fn protocol_major_is_exact_and_unknown_majors_are_refused() {
-        assert_eq!(ProtocolVersion::V1.as_u32(), 1);
-        assert_eq!(ProtocolVersion::from_u32(1), Some(ProtocolVersion::V1));
-        assert_eq!(ProtocolVersion::from_u32(0), None);
-        assert_eq!(ProtocolVersion::from_u32(2), None);
+        // The count first: every arm below is a lookup, and a lookup table with
+        // a missing entry answers `None` exactly like an unknown major does.
+        assert_eq!(ProtocolVersion::ALL.len(), 2);
+        for version in ProtocolVersion::ALL {
+            assert_eq!(
+                ProtocolVersion::from_u32(version.as_u32()),
+                Some(version),
+                "{version} does not round-trip through its own number"
+            );
+        }
 
-        // A plain JSON number on the wire, and an unknown major is a typed
-        // refusal at DECODE time — not a best-effort session.
+        assert_eq!(ProtocolVersion::V1.as_u32(), 1);
+        assert_eq!(ProtocolVersion::V2.as_u32(), 2);
+        assert_eq!(ProtocolVersion::from_u32(0), None);
+
+        // 3 stands where 2 used to. The property under test was never "2 is
+        // unknown" — it was "a major outside the grammar is refused at DECODE
+        // time, not best-effort" — so it needs a number genuinely outside the
+        // grammar, and 2 stopped being one when V2 was named.
+        assert_eq!(ProtocolVersion::from_u32(3), None);
+
+        // A plain JSON number on the wire.
         assert_eq!(
             serde_json::to_value(ProtocolVersion::V1).expect("serialize"),
             serde_json::json!(1)
         );
-        assert!(serde_json::from_value::<ProtocolVersion>(serde_json::json!(2)).is_err());
+        assert!(serde_json::from_value::<ProtocolVersion>(serde_json::json!(3)).is_err());
+
+        // And the distinction naming V2 bought: it decodes cleanly, so the
+        // kernel refuses it with a code that says "not this connection's"
+        // rather than one that cannot be told from malformed JSON.
+        assert_eq!(
+            serde_json::from_value::<ProtocolVersion>(serde_json::json!(2)).expect("V2 decodes"),
+            ProtocolVersion::V2
+        );
     }
 
     #[test]

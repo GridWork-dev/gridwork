@@ -29,7 +29,17 @@
 ///
 /// Ordered as the pipeline runs, so `PartialOrd` means "no later than".
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    specta::Type,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum ContextStage {
