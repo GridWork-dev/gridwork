@@ -39,6 +39,7 @@ pub mod digest;
 pub mod manifest;
 pub mod participation;
 pub mod precedence;
+pub mod skill;
 pub mod stage;
 
 pub use digest::{DIGEST_SCHEME, Digest, DigestError};

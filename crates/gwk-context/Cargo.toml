@@ -20,7 +20,18 @@ publish = false
 # meaning — but re-implementing the hex check would be two places for one rule.
 gwk-domain.workspace = true
 serde.workspace = true
+# Not a dev-dependency any more: `metadata.gridwork` is decoded with
+# `serde_json::from_str` at parse time, because upstream metadata is
+# `dict[str, str]` and a bounded JSON string is the only place structured
+# extension data can live inside one (R35).
+serde_json.workspace = true
 specta = { workspace = true, features = ["serde_json"] }
+# Skill manifests are YAML frontmatter. The accepted subset is enforced by
+# `skill::scan_subset` BEFORE this crate sees a document, so duplicate keys,
+# anchors, aliases, tags, and merge keys are properties of our own file rather
+# than of whichever YAML crate is pinned — the historical divergence between
+# serde-shaped YAML libraries is exactly on those points.
+yaml_serde.workspace = true
 
 [dev-dependencies]
 # Serde round-trips only. The types above must survive the wire they are not on
