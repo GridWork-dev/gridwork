@@ -86,7 +86,12 @@ pub const SKILL_ALLOWED_TOOL_MAX_BYTES: usize = 128;
 pub const SKILL_OPAQUE_FIELD_MAX_COUNT: usize = 32;
 /// Maximum bytes in one opaque field's rendered value.
 pub const SKILL_OPAQUE_VALUE_MAX_BYTES: usize = 1024;
-/// Maximum indentation depth inside the frontmatter mapping.
+/// Maximum open nesting levels inside the frontmatter mapping.
+///
+/// Levels, not indentation columns. Measuring it as a column count divided by
+/// an assumed two-space step made the bound a property of the author's
+/// formatting: a one-space ladder reached four levels against this two while
+/// its two-space twin was refused at three.
 pub const SKILL_MAX_NESTING_DEPTH: usize = 2;
 /// Maximum bundle entries inventoried for one skill.
 pub const SKILL_BUNDLE_MAX_ENTRIES: usize = 256;
@@ -454,10 +459,20 @@ pub fn split_frontmatter(input: &str) -> Result<(&str, &str), SkillError> {
 fn scan_subset(front: &str) -> Result<Vec<String>, SkillError> {
     let mut keys = Vec::new();
     let mut seen = BTreeSet::new();
+    // The indentation column of each currently open level.
+    let mut stack: Vec<usize> = Vec::new();
 
     for raw in front.lines() {
         let line = raw.strip_suffix('\r').unwrap_or(raw);
-        if line.chars().any(|c| c.is_control() && c != '\t') {
+        // U+2028 and U+2029 are category Zl/Zp, so `is_control` does not see
+        // them — and `str::lines()` does not break on them while libyaml does.
+        // That disagreement is a whole second line this scan never inspects:
+        // `z: a\u{2028}w: &a b` presented one line here and two to the parser,
+        // anchor included.
+        if line
+            .chars()
+            .any(|c| (c.is_control() && c != '\t') || matches!(c, '\u{2028}' | '\u{2029}'))
+        {
             return Err(SkillError::ControlCharacter);
         }
         // The indentation run measured with tabs included, so a tab anywhere in
@@ -479,57 +494,38 @@ fn scan_subset(front: &str) -> Result<Vec<String>, SkillError> {
         if trimmed == "---" || trimmed == "..." || trimmed.starts_with('%') {
             return Err(SkillError::UnsupportedYaml("document marker or directive"));
         }
-        if trimmed.starts_with("<<:") {
-            return Err(SkillError::UnsupportedYaml("merge key"));
-        }
-        // Anchors, aliases, and tags are rejected wherever a node can start:
-        // after `key:`, after `- `, or at the head of the line.
-        let node = trimmed
-            .split_once(": ")
-            .map(|(_, v)| v)
-            .or_else(|| trimmed.strip_prefix("- "))
-            .unwrap_or(trimmed);
-        let node = node.trim_start();
-        if node.starts_with('&') {
-            return Err(SkillError::UnsupportedYaml("anchor"));
-        }
-        if node.starts_with('*') {
-            return Err(SkillError::UnsupportedYaml("alias"));
-        }
-        if node.starts_with('!') {
-            return Err(SkillError::UnsupportedYaml("tag"));
-        }
-        // A flow collection carries its nodes INSIDE this slice rather than at
-        // its head, so none of the three checks above can see them: the `&` in
-        // `x: {v: &a b}` is not at position zero, `<<:` is not at the head of
-        // the line, and `indent` counts leading spaces so a one-line flow
-        // document never reaches the depth bound either. Every indicator the
-        // block-style cases refuse was therefore reachable in flow style.
-        //
-        // A flow mapping is refused outright — nothing in the accepted subset
-        // needs one, and it is the shape that nests. A flow sequence survives
-        // only as one level of plain scalars, because that is how upstream
-        // spells `allowed-tools: [Read, Grep]` and refusing it would narrow
-        // what "portable" means here. Anything inside one that could reference
-        // or nest goes with the mappings.
-        if node.starts_with('{') {
-            return Err(SkillError::UnsupportedYaml("flow mapping"));
-        }
-        if node.starts_with('[') && node[1..].contains(['&', '*', '!', '{', '[']) {
-            return Err(SkillError::UnsupportedYaml("flow sequence node"));
-        }
+        let facts = scan_line(trimmed)?;
 
         if indent == 0 {
             let key = trimmed
-                .split_once(':')
-                .map(|(k, _)| k.trim())
-                .filter(|k| !k.is_empty() && !k.contains(' '))
+                .get(..facts.key_end.ok_or(SkillError::MalformedTopLevelKey)?)
                 .ok_or(SkillError::MalformedTopLevelKey)?;
+            if !is_plain_key(key) {
+                return Err(SkillError::MalformedTopLevelKey);
+            }
             if !seen.insert(key.to_owned()) {
                 return Err(SkillError::DuplicateKey(key.to_owned()));
             }
             keys.push(key.to_owned());
-        } else if indent > SKILL_MAX_NESTING_DEPTH * 2 {
+        }
+        // Depth is the number of OPEN levels, not a column count. Dividing the
+        // column by an assumed two-space step made the bound a property of the
+        // author's formatting: a one-space ladder reached four levels against a
+        // declared bound of two, while its two-space twin was refused at three.
+        // The stack holds the indentation of each open level, so any consistent
+        // step measures the same depth.
+        while stack.last().is_some_and(|&open| indent < open) {
+            stack.pop();
+        }
+        match stack.last() {
+            Some(&open) if indent > open => stack.push(indent),
+            None => stack.push(indent),
+            _ => {}
+        }
+        // `- ` markers open a level each without moving the column, which is how
+        // `z:\n - - - - 1` nested four deep at indentation 1.
+        let depth = stack.len().saturating_sub(1) + facts.sequence_depth;
+        if depth > SKILL_MAX_NESTING_DEPTH {
             return Err(SkillError::TooDeeplyNested);
         }
     }
@@ -538,6 +534,169 @@ fn scan_subset(front: &str) -> Result<Vec<String>, SkillError> {
         return Err(SkillError::MalformedTopLevelKey);
     }
     Ok(keys)
+}
+
+/// What one scanned line yields to its caller.
+struct LineFacts {
+    /// Byte offset of the `:` terminating a top-level key, when the line has one.
+    key_end: Option<usize>,
+    /// `- ` element markers opened on this line, which nest without indenting.
+    sequence_depth: usize,
+}
+
+/// Is this a plain, unquoted, unadorned mapping key?
+///
+/// Narrow on purpose. A quoted key is legal YAML and no portable manifest uses
+/// one, and admitting it cost more than it was worth: `"x: y": &anc HIDDEN`
+/// parsed, and the evidence record came back keyed `"x` with an empty value
+/// because the later lookup searched for a key that was never in the document.
+/// A silently dropped field is the one outcome this module's own header rules
+/// out.
+fn is_plain_key(key: &str) -> bool {
+    !key.is_empty()
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// Walk one frontmatter line, refusing every node indicator at a node start.
+///
+/// The predecessor derived a single candidate node as everything after the
+/// FIRST `": "` in the line and tested only that slice's first character. Three
+/// independent reviews landed on the same line, and the escape is one inert
+/// leading pair: in `- {u: 1, v: &a hello}` the first `": "` belongs to `u`, so
+/// the slice begins `1, v: &a hello}` and the head test examines a digit. An
+/// anchor and its alias reached the transpiled-C parser and were RESOLVED
+/// across two top-level keys — `v: *z` came back carrying the anchored value —
+/// which is precisely the expansion this gate exists to prevent.
+///
+/// So there is no candidate slice any more. This walks the line left to right
+/// tracking quote state and flow depth, and refuses an indicator wherever a
+/// node can begin: at the head, after `- `, after a key terminator, and after
+/// `[`, `{`, or `,` inside a flow collection.
+///
+/// Quote-awareness is load-bearing rather than decoration. A blanket search for
+/// `{` would refuse `gridwork: '{"budget_tokens": 4096}'`, the single-quoted
+/// JSON string the whole GridWork extension rides on. Token-awareness earns the
+/// other direction too: `*` inside `[Bash(git *)]` is a glob in a plain scalar,
+/// not an alias, and is left alone.
+fn scan_line(trimmed: &str) -> Result<LineFacts, SkillError> {
+    let chars: Vec<(usize, char)> = trimmed.char_indices().collect();
+    let mut quote: Option<char> = None;
+    let mut flow: usize = 0;
+    let mut sequence_depth = 0usize;
+    let mut key_end: Option<usize> = None;
+    // The head of the line is a node start; so is every position below that
+    // sets this back to true.
+    let mut node_start = true;
+    let mut i = 0usize;
+
+    while i < chars.len() {
+        let (at, c) = chars[i];
+
+        if let Some(q) = quote {
+            if q == '"' && c == '\\' {
+                i += 2;
+                continue;
+            }
+            if c == q {
+                // `''` inside a single-quoted scalar is an escaped quote, not
+                // the end of one.
+                if q == '\'' && chars.get(i + 1).map(|&(_, n)| n) == Some('\'') {
+                    i += 2;
+                    continue;
+                }
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+
+        if c == '\'' || c == '"' {
+            quote = Some(c);
+            node_start = false;
+            i += 1;
+            continue;
+        }
+
+        // A `#` opening a comment ends the line. It only opens one after
+        // whitespace or at the head — `a#b` is a plain scalar.
+        if c == '#' && (i == 0 || matches!(chars[i - 1].1, ' ' | '\t')) {
+            break;
+        }
+
+        // Whitespace separates a node start from its node without ending it.
+        if c == ' ' || c == '\t' {
+            i += 1;
+            continue;
+        }
+
+        if node_start {
+            match c {
+                '&' => return Err(SkillError::UnsupportedYaml("anchor")),
+                '*' => return Err(SkillError::UnsupportedYaml("alias")),
+                '!' => return Err(SkillError::UnsupportedYaml("tag")),
+                '{' => return Err(SkillError::UnsupportedYaml("flow mapping")),
+                '<' if chars.get(i + 1).map(|&(_, n)| n) == Some('<') => {
+                    return Err(SkillError::UnsupportedYaml("merge key"));
+                }
+                '[' if flow > 0 => return Err(SkillError::UnsupportedYaml("flow sequence node")),
+                _ => {}
+            }
+        }
+        // Inside a flow collection these are structural wherever they appear —
+        // a plain scalar in flow context cannot contain them — so a `{` that is
+        // not at a node start is still a mapping there, while in block context
+        // `description: use {braces}` is an ordinary scalar.
+        if flow > 0 {
+            match c {
+                '{' => return Err(SkillError::UnsupportedYaml("flow mapping")),
+                '[' => return Err(SkillError::UnsupportedYaml("flow sequence node")),
+                _ => {}
+            }
+        }
+
+        match c {
+            '[' => {
+                flow += 1;
+                node_start = true;
+            }
+            ']' | '}' => {
+                flow = flow.saturating_sub(1);
+                node_start = false;
+            }
+            ',' => node_start = flow > 0,
+            ':' => {
+                // A key terminator is `:` followed by whitespace or end of
+                // line. `12:30` and `http://x` are scalars, not mappings.
+                let next = chars.get(i + 1).map(|&(_, n)| n);
+                if next.is_none() || matches!(next, Some(' ') | Some('\t')) {
+                    if flow == 0 && key_end.is_none() {
+                        key_end = Some(at);
+                    }
+                    node_start = true;
+                } else {
+                    node_start = false;
+                }
+            }
+            '-' => {
+                let next = chars.get(i + 1).map(|&(_, n)| n);
+                if node_start && (next.is_none() || matches!(next, Some(' ') | Some('\t'))) {
+                    sequence_depth += 1;
+                    // `- ` opens an element, so what follows is a node start.
+                } else {
+                    node_start = false;
+                }
+            }
+            _ => node_start = false,
+        }
+        i += 1;
+    }
+
+    Ok(LineFacts {
+        key_end,
+        sequence_depth,
+    })
 }
 
 /// Render one YAML value as bounded, lossy evidence.
@@ -825,15 +984,39 @@ mod tests {
                 "name: n\ndescription: d\nx: {a: {b: {c: 1}}}",
                 "flow mapping",
             ),
-            (
-                "name: n\ndescription: d\nboom: [*a, *a]",
-                "flow sequence node",
-            ),
-            (
-                "name: n\ndescription: d\nt: [!!str 5]",
-                "flow sequence node",
-            ),
+            // These two now name the indicator itself rather than the shape
+            // carrying it: the walk sees the `*` and the `!` where they sit,
+            // instead of inferring "something is in here somewhere".
+            ("name: n\ndescription: d\nboom: [*a, *a]", "alias"),
+            ("name: n\ndescription: d\nt: [!!str 5]", "tag"),
             ("name: n\ndescription: d\nn: [[1, 2]]", "flow sequence node"),
+            // The escapes round two found. One inert leading pair moves the
+            // first `": "` off the flow collection, and the predecessor derived
+            // its entire candidate node from that offset — so the head test
+            // examined a digit and every indicator behind it went through.
+            (
+                "name: n\ndescription: d\nx:\n  - {u: 1, v: &a hello}",
+                "flow mapping",
+            ),
+            ("name: n\ndescription: d\nx:\n  - [1, &a hello]", "anchor"),
+            (
+                "name: n\ndescription: d\nx:\n  - {u: 1, <<: q}",
+                "flow mapping",
+            ),
+            // A tab as the key separator leaves no `": "` in the line at all,
+            // so the candidate node fell back to the whole line.
+            ("name: n\ndescription: d\nx:\t&a hello", "anchor"),
+            // A quoted key containing a separator put the split inside the key,
+            // so the anchor after the REAL separator was never examined.
+            ("name: n\ndescription: d\n\"x: y\": &anc HIDDEN", "anchor"),
+            // Inside a flow collection a brace or bracket is structural
+            // wherever it appears, because a plain scalar in flow context
+            // cannot contain one — unlike `extra: use {braces} here` in block
+            // context, which is an ordinary scalar and stays accepted. Without
+            // these two the in-flow branch was covered by nothing: deleting it
+            // left the whole suite green.
+            ("name: n\ndescription: d\nx: [a{b: c}]", "flow mapping"),
+            ("name: n\ndescription: d\nx: [a[b]]", "flow sequence node"),
         ] {
             assert_eq!(
                 manifest(front).expect_err("refused"),
@@ -841,6 +1024,72 @@ mod tests {
                 "{front}"
             );
         }
+    }
+
+    #[test]
+    fn indicators_inside_a_plain_scalar_are_not_indicators() {
+        // The gate refuses `&`, `*`, `!`, `{` where a node can START. In the
+        // middle of a plain scalar they are text. This is the half a positional
+        // scan buys that a blanket search cannot: without it the gate refuses
+        // ordinary prose and ordinary tool globs, and the pressure to loosen it
+        // lands on the indicator list rather than on the position logic.
+        for front in [
+            "name: n\ndescription: d\nlicense: Read & write",
+            "name: n\ndescription: d\nallowed-tools: [Bash(git *), Read]",
+            "name: n\ndescription: d\nextra: use {braces} here",
+            "name: n\ndescription: d\nextra: glob*pattern",
+            "name: n\ndescription: d\nextra: hey!there",
+            "name: n\ndescription: d\nextra: see http://example.com/x",
+            "name: n\ndescription: d\nextra: 12:30",
+            // The single-quoted JSON the whole GridWork extension rides on. A
+            // blanket `contains('{')` would refuse this document.
+            "name: n\ndescription: d\nmetadata:\n  gridwork: '{\"note\": \"x: y\"}'",
+        ] {
+            manifest(front).unwrap_or_else(|e| panic!("{front}\nrefused as {e:?}"));
+        }
+    }
+
+    #[test]
+    fn depth_is_open_levels_rather_than_indentation_columns() {
+        // Dividing the column by an assumed two-space step made the bound a
+        // property of the author's formatting: this ladder reached four levels
+        // against a declared bound of two, while its two-space twin was refused
+        // at three.
+        assert_eq!(
+            manifest("name: n\ndescription: d\nm:\n a:\n  b:\n   c:\n    d: 1")
+                .expect_err("refused"),
+            SkillError::TooDeeplyNested
+        );
+        // A compact block sequence nests without moving the column at all.
+        assert_eq!(
+            manifest("name: n\ndescription: d\nz:\n - - - - 1").expect_err("refused"),
+            SkillError::TooDeeplyNested
+        );
+        // The accepted control, so the bound is not just "refuse sequences".
+        manifest("name: n\ndescription: d\nallowed-tools:\n  - Read\n  - Grep")
+            .expect("an ordinary block sequence is one level");
+    }
+
+    #[test]
+    fn a_line_terminator_libyaml_splits_on_is_refused() {
+        // `str::lines()` does not break on U+2028 and libyaml does, so one line
+        // here was two lines there — a whole document line this scan never
+        // inspected, anchor included.
+        assert_eq!(
+            manifest("name: n\ndescription: d\nz: a\u{2028}w: &a b").expect_err("refused"),
+            SkillError::ControlCharacter
+        );
+    }
+
+    #[test]
+    fn a_quoted_top_level_key_is_refused_rather_than_repaired() {
+        // Legal YAML no portable manifest uses, and admitting it dropped the
+        // field: the record came back keyed `"x` with an empty value because the
+        // later lookup searched for a key the document does not contain.
+        assert_eq!(
+            manifest("name: n\ndescription: d\n\"x: y\": plain").expect_err("refused"),
+            SkillError::MalformedTopLevelKey
+        );
     }
 
     #[test]

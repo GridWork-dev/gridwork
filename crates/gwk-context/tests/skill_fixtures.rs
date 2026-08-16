@@ -81,11 +81,28 @@ fn catalog() -> Catalog {
     );
     c.insert(
         "refused/flow-sequence-alias.md",
-        Some(|e| matches!(e, SkillError::UnsupportedYaml("flow sequence node"))),
+        Some(|e| matches!(e, SkillError::UnsupportedYaml("alias"))),
     );
     c.insert(
         "refused/deep-nesting.md",
         Some(|e| matches!(e, SkillError::TooDeeplyNested)),
+    );
+    // The offset axis. Every flow case above sits in the top-level
+    // `key: <flow>` position, where a head-of-node test lands on the collection
+    // by positional luck; each of these moves the indicator off that offset,
+    // and all three were accepted until the scan stopped deriving one candidate
+    // slice from the first `": "`.
+    c.insert(
+        "refused/flow-in-sequence-item.md",
+        Some(|e| matches!(e, SkillError::UnsupportedYaml("flow mapping"))),
+    );
+    c.insert(
+        "refused/quoted-key.md",
+        Some(|e| matches!(e, SkillError::MalformedTopLevelKey)),
+    );
+    c.insert(
+        "refused/tab-separator.md",
+        Some(|e| matches!(e, SkillError::UnsupportedYaml("anchor"))),
     );
     c
 }
@@ -116,8 +133,8 @@ fn every_fixture_on_disk_is_exercised_and_every_expectation_has_a_fixture() {
     // The count first. Everything below is a fold, and a fold over nothing
     // agrees with itself.
     assert!(
-        found.len() >= 17,
-        "expected at least 17 skill fixtures, walked {}",
+        found.len() >= 20,
+        "expected at least 20 skill fixtures, walked {}",
         found.len()
     );
     assert_eq!(
