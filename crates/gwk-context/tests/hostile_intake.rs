@@ -29,7 +29,8 @@ use gwk_context::skill::{
     SKILL_ALLOWED_TOOLS_MAX_COUNT, SKILL_BUNDLE_MAX_ENTRIES, SKILL_BUNDLE_PATH_MAX_BYTES,
     SKILL_DESCRIPTION_MAX_BYTES, SKILL_FRONTMATTER_MAX_BYTES, SKILL_INPUT_MAX_BYTES,
     SKILL_LICENSE_MAX_BYTES, SKILL_METADATA_KEY_MAX_BYTES, SKILL_METADATA_MAX_ENTRIES,
-    SKILL_METADATA_VALUE_MAX_BYTES, SKILL_NAME_MAX_BYTES, SkillError, SkillManifest,
+    SKILL_METADATA_VALUE_MAX_BYTES, SKILL_NAME_MAX_BYTES, SKILL_OPAQUE_FIELD_MAX_COUNT, SkillError,
+    SkillManifest,
 };
 use gwk_context::{
     CONTEXT_EVIDENCE_MAX_COUNT, Contribution, Digest, EvidenceRefs, Participation,
@@ -243,9 +244,26 @@ struct BoundCase {
     refusal: fn(&SkillError) -> bool,
 }
 
+/// `n` unrecognized top-level fields, each inside every per-field limit, so the
+/// only bound the document can trip is the opaque field COUNT.
+fn opaque_fields(n: usize) -> String {
+    let mut front = String::from("name: fixture-bounds\ndescription: d");
+    for i in 0..n {
+        front.push_str(&format!("\nopaque-{i}: v"));
+    }
+    front
+}
+
 fn bound_cases() -> Vec<BoundCase> {
     let base = "name: fixture-bounds\ndescription: d";
     vec![
+        BoundCase {
+            // `SKILL_OPAQUE_FIELD_MAX_COUNT` had no test reference anywhere.
+            label: "unrecognized fields",
+            at_edge: opaque_fields(SKILL_OPAQUE_FIELD_MAX_COUNT),
+            past_edge: opaque_fields(SKILL_OPAQUE_FIELD_MAX_COUNT + 1),
+            refusal: |e| matches!(e, SkillError::TooManyEntries("unrecognized fields")),
+        },
         BoundCase {
             label: "name",
             at_edge: format!("name: {}\ndescription: d", "a".repeat(SKILL_NAME_MAX_BYTES)),
@@ -358,8 +376,8 @@ fn every_upstream_bound_accepts_its_edge_and_refuses_one_past_it() {
     // The count first. A generator that returned an empty vector would make
     // every assertion below vacuous, and the loop would report success.
     assert!(
-        cases.len() >= 8,
-        "expected at least 8 bound cases, generated {}",
+        cases.len() >= 9,
+        "expected at least 9 bound cases, generated {}",
         cases.len()
     );
 
@@ -394,14 +412,31 @@ fn the_whole_document_bounds_refuse_before_parsing() {
         Err(SkillError::InputTooLarge)
     ));
 
-    let big_front = format!(
-        "name: fixture-a\ndescription: {}",
-        "d".repeat(SKILL_FRONTMATTER_MAX_BYTES)
-    );
+    // Legal in every other respect, so only the document bound can refuse it.
+    // The previous spelling put an 8,192-byte `description` here — eight times
+    // past the description bound — and asserted
+    // `FrontmatterTooLarge | FieldTooLong(_)`, so the second arm answered and
+    // deleting the byte bound entirely left the suite green. `FieldTooLong` is
+    // also precisely the outcome proving structure WAS read, which is what the
+    // comment above forbids.
+    let head = "name: fixture-a\ndescription: d\npadding: ";
+    let big_front = format!("{head}{}", "x".repeat(SKILL_FRONTMATTER_MAX_BYTES));
+    assert!(big_front.len() > SKILL_FRONTMATTER_MAX_BYTES);
     assert!(matches!(
         manifest_with(&big_front),
-        Err(SkillError::FrontmatterTooLarge | SkillError::FieldTooLong(_))
+        Err(SkillError::FrontmatterTooLarge)
     ));
+
+    // The accepted edge, which the neighbouring battery models for all eight of
+    // its cases and this bound did not have. `padding` is an unrecognized
+    // portable field, so it is kept as opaque evidence and truncated rather
+    // than refused — nothing but the document bound can speak here.
+    let at_edge = format!(
+        "{head}{}",
+        "x".repeat(SKILL_FRONTMATTER_MAX_BYTES - head.len())
+    );
+    assert_eq!(at_edge.len(), SKILL_FRONTMATTER_MAX_BYTES);
+    manifest_with(&at_edge).expect("a frontmatter of exactly the bound is accepted");
 }
 
 // ============================================================

@@ -182,6 +182,34 @@ fn the_accepted_fixtures_carry_the_evidence_the_asymmetry_promises() {
     assert_eq!(manifest.opaque[0].key, "invocation-hint");
     assert_eq!(manifest.opaque[0].value, "proactive");
 
+    // The other half of the asymmetry, and the half nothing asserted: a
+    // manifest whose every key is in `PORTABLE_CORE_FIELDS` puts NOTHING in the
+    // evidence bucket. `full-portable.md` has claimed exactly that in its own
+    // prose since it was written, and only `manifest.name` was ever checked —
+    // so dropping a member from `PORTABLE_CORE_FIELDS` left the suite green
+    // while that field quietly became opaque evidence instead of a typed read.
+    let full = std::fs::read_to_string(Path::new(SKILLS_DIR).join("accepted/full-portable.md"))
+        .expect("readable");
+    let manifest = SkillManifest::parse(&full).expect("parses");
+    assert!(
+        manifest.opaque.is_empty(),
+        "every key is portable-core, so nothing is evidence: {:?}",
+        manifest.opaque
+    );
+    assert_eq!(manifest.license.as_deref(), Some("Apache-2.0"));
+    assert_eq!(manifest.compatibility.as_deref(), Some(">=1.0"));
+    let claimed: Vec<&str> = manifest
+        .allowed_tools
+        .claimed()
+        .iter()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(claimed, ["Read", "Grep"]);
+    assert_eq!(
+        manifest.metadata.get("team").map(String::as_str),
+        Some("infra")
+    );
+
     let ext = std::fs::read_to_string(Path::new(SKILLS_DIR).join("accepted/gridwork-extension.md"))
         .expect("readable");
     let manifest = SkillManifest::parse(&ext).expect("parses");
