@@ -71,6 +71,22 @@ fn catalog() -> Catalog {
         "refused/no-frontmatter.md",
         Some(|e| matches!(e, SkillError::MissingFrontmatter)),
     );
+    // The flow-style axis. `refused/{anchor,alias,merge-key}.md` are all block
+    // style, and every one of those properties was reachable in flow style, so
+    // the corpus reported three refusals it could not tell from three escapes.
+    c.insert("accepted/flow-allowed-tools.md", None);
+    c.insert(
+        "refused/flow-mapping.md",
+        Some(|e| matches!(e, SkillError::UnsupportedYaml("flow mapping"))),
+    );
+    c.insert(
+        "refused/flow-sequence-alias.md",
+        Some(|e| matches!(e, SkillError::UnsupportedYaml("flow sequence node"))),
+    );
+    c.insert(
+        "refused/deep-nesting.md",
+        Some(|e| matches!(e, SkillError::TooDeeplyNested)),
+    );
     c
 }
 
@@ -100,8 +116,8 @@ fn every_fixture_on_disk_is_exercised_and_every_expectation_has_a_fixture() {
     // The count first. Everything below is a fold, and a fold over nothing
     // agrees with itself.
     assert!(
-        found.len() >= 13,
-        "expected at least 13 skill fixtures, walked {}",
+        found.len() >= 17,
+        "expected at least 17 skill fixtures, walked {}",
         found.len()
     );
     assert_eq!(

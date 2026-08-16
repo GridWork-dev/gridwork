@@ -460,11 +460,16 @@ fn scan_subset(front: &str) -> Result<Vec<String>, SkillError> {
         if line.chars().any(|c| c.is_control() && c != '\t') {
             return Err(SkillError::ControlCharacter);
         }
-        let indent = line.len() - line.trim_start_matches(' ').len();
-        if line[..indent].is_empty() && line.starts_with('\t') || line[..indent].contains('\t') {
-            return Err(SkillError::TabIndentation);
-        }
-        if line.trim_start().starts_with('\t') {
+        // The indentation run measured with tabs included, so a tab anywhere in
+        // it is refused rather than only at column zero. Measuring it with
+        // spaces alone made both of the conditions that used to stand here
+        // unreachable — `line[..indent]` was all spaces by construction, and
+        // `trim_start` eats tabs before `starts_with('\t')` can see one — so
+        // `  \tteam: infra` reached the deserializer and came back as a
+        // shapeless `Malformed` instead of the named refusal this gate exists
+        // to give.
+        let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+        if line[..indent].contains('\t') {
             return Err(SkillError::TabIndentation);
         }
         let trimmed = line.trim();
@@ -493,6 +498,25 @@ fn scan_subset(front: &str) -> Result<Vec<String>, SkillError> {
         }
         if node.starts_with('!') {
             return Err(SkillError::UnsupportedYaml("tag"));
+        }
+        // A flow collection carries its nodes INSIDE this slice rather than at
+        // its head, so none of the three checks above can see them: the `&` in
+        // `x: {v: &a b}` is not at position zero, `<<:` is not at the head of
+        // the line, and `indent` counts leading spaces so a one-line flow
+        // document never reaches the depth bound either. Every indicator the
+        // block-style cases refuse was therefore reachable in flow style.
+        //
+        // A flow mapping is refused outright — nothing in the accepted subset
+        // needs one, and it is the shape that nests. A flow sequence survives
+        // only as one level of plain scalars, because that is how upstream
+        // spells `allowed-tools: [Read, Grep]` and refusing it would narrow
+        // what "portable" means here. Anything inside one that could reference
+        // or nest goes with the mappings.
+        if node.starts_with('{') {
+            return Err(SkillError::UnsupportedYaml("flow mapping"));
+        }
+        if node.starts_with('[') && node[1..].contains(['&', '*', '!', '{', '[']) {
+            return Err(SkillError::UnsupportedYaml("flow sequence node"));
         }
 
         if indent == 0 {
@@ -780,6 +804,87 @@ mod tests {
             assert_eq!(
                 manifest(front).expect_err("refused"),
                 SkillError::UnsupportedYaml(what),
+                "{front}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_same_indicators_are_refused_in_flow_style() {
+        // Every case above was reachable in flow style, where the indicator
+        // sits inside the node instead of at its head. Each case here is the
+        // flow spelling of one the block-style test refuses, so the two read as
+        // one property rather than two lists that can drift apart.
+        for (front, what) in [
+            (
+                "name: n\ndescription: d\nextra: {v: &a hello}",
+                "flow mapping",
+            ),
+            ("name: n\ndescription: d\nm: {<<: *base}", "flow mapping"),
+            (
+                "name: n\ndescription: d\nx: {a: {b: {c: 1}}}",
+                "flow mapping",
+            ),
+            (
+                "name: n\ndescription: d\nboom: [*a, *a]",
+                "flow sequence node",
+            ),
+            (
+                "name: n\ndescription: d\nt: [!!str 5]",
+                "flow sequence node",
+            ),
+            ("name: n\ndescription: d\nn: [[1, 2]]", "flow sequence node"),
+        ] {
+            assert_eq!(
+                manifest(front).expect_err("refused"),
+                SkillError::UnsupportedYaml(what),
+                "{front}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_flat_flow_sequence_of_plain_scalars_is_still_accepted() {
+        // The positive control those refusals need. Without it the branch would
+        // pass just as well if it refused every flow sequence — and that would
+        // refuse `allowed-tools: [Read, Grep]`, the spelling upstream uses and
+        // the whole reason this is not a blanket refusal.
+        let skill = manifest("name: n\ndescription: d\nallowed-tools: [Read, Grep]")
+            .expect("a flat flow sequence of plain scalars parses");
+        let claimed: Vec<&str> = skill
+            .allowed_tools
+            .claimed()
+            .iter()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(claimed, ["Read", "Grep"]);
+    }
+
+    #[test]
+    fn nesting_past_the_depth_bound_is_refused() {
+        // `SKILL_MAX_NESTING_DEPTH` had no test at all: deleting the branch
+        // that enforces it left the suite green, so the bound was decoration.
+        assert_eq!(
+            manifest("name: n\ndescription: d\nmetadata:\n  a:\n    b:\n      c: 1")
+                .expect_err("refused"),
+            SkillError::TooDeeplyNested
+        );
+        manifest("name: n\ndescription: d\nmetadata:\n  team: infra")
+            .expect("the accepted edge, so the bound is pinned from both sides");
+    }
+
+    #[test]
+    fn a_tab_anywhere_in_the_indentation_run_is_refused_by_name() {
+        // Not only at column zero. Measured with spaces alone, the second case
+        // reached the deserializer and came back `Malformed`, which is the
+        // refusal this gate exists to replace with a named one.
+        for front in [
+            "name: n\ndescription: d\n\tteam: infra",
+            "name: n\ndescription: d\nmetadata:\n  \tteam: infra",
+        ] {
+            assert_eq!(
+                manifest(front).expect_err("refused"),
+                SkillError::TabIndentation,
                 "{front}"
             );
         }
