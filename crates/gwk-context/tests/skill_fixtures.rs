@@ -104,6 +104,25 @@ fn catalog() -> Catalog {
         "refused/tab-separator.md",
         Some(|e| matches!(e, SkillError::UnsupportedYaml("anchor"))),
     );
+    // The line axis. Every fixture above is one line per construct, so the whole
+    // corpus could only ever exercise a first line — and the scan is handed each
+    // line with its state reset. All three of these were accepted, and in all
+    // three the parser resolved an alias across two top-level keys.
+    c.insert(
+        "refused/multi-line-flow.md",
+        Some(|e| matches!(e, SkillError::UnsupportedYaml("multi-line flow collection"))),
+    );
+    c.insert(
+        "refused/apostrophe-anchor.md",
+        Some(|e| matches!(e, SkillError::UnsupportedYaml("anchor"))),
+    );
+    c.insert(
+        "refused/explicit-key.md",
+        Some(|e| matches!(e, SkillError::UnsupportedYaml("explicit key"))),
+    );
+    // The accepted side of the same axis: content that spans lines and must NOT
+    // be read as YAML, so the refusals above are not paid for by refusing prose.
+    c.insert("accepted/block-scalar-prose.md", None);
     c
 }
 
@@ -133,8 +152,8 @@ fn every_fixture_on_disk_is_exercised_and_every_expectation_has_a_fixture() {
     // The count first. Everything below is a fold, and a fold over nothing
     // agrees with itself.
     assert!(
-        found.len() >= 20,
-        "expected at least 20 skill fixtures, walked {}",
+        found.len() >= 24,
+        "expected at least 24 skill fixtures, walked {}",
         found.len()
     );
     assert_eq!(

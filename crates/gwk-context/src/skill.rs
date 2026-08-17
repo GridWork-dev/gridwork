@@ -459,8 +459,12 @@ pub fn split_frontmatter(input: &str) -> Result<(&str, &str), SkillError> {
 fn scan_subset(front: &str) -> Result<Vec<String>, SkillError> {
     let mut keys = Vec::new();
     let mut seen = BTreeSet::new();
-    // The indentation column of each currently open level.
-    let mut stack: Vec<usize> = Vec::new();
+    // Each open level, and whether a `- ` marker opened it. One column can hold
+    // two, because a block sequence may sit at its parent mapping's indentation.
+    let mut stack: Vec<(usize, bool)> = Vec::new();
+    // The indentation of an open block scalar header. Its content is literal
+    // text rather than YAML.
+    let mut block_scalar: Option<usize> = None;
 
     for raw in front.lines() {
         let line = raw.strip_suffix('\r').unwrap_or(raw);
@@ -484,6 +488,19 @@ fn scan_subset(front: &str) -> Result<Vec<String>, SkillError> {
         // shapeless `Malformed` instead of the named refusal this gate exists
         // to give.
         let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+
+        // A block scalar's content is a string to the parser, so scanning it as
+        // YAML refused ordinary prose: a description beginning `*bold*` was an
+        // alias, `&c` an anchor, `!important` a tag, and a nested markdown
+        // bullet list ran past the depth bound. It ends where the indentation
+        // returns to the header's, which is the rule the parser applies too.
+        if let Some(header) = block_scalar {
+            if line.trim().is_empty() || indent > header {
+                continue;
+            }
+            block_scalar = None;
+        }
+
         if line[..indent].contains('\t') {
             return Err(SkillError::TabIndentation);
         }
@@ -495,36 +512,68 @@ fn scan_subset(front: &str) -> Result<Vec<String>, SkillError> {
             return Err(SkillError::UnsupportedYaml("document marker or directive"));
         }
         let facts = scan_line(trimmed)?;
+        if facts.block_scalar {
+            block_scalar = Some(indent);
+        }
 
         if indent == 0 {
-            let key = trimmed
-                .get(..facts.key_end.ok_or(SkillError::MalformedTopLevelKey)?)
-                .ok_or(SkillError::MalformedTopLevelKey)?;
-            if !is_plain_key(key) {
-                return Err(SkillError::MalformedTopLevelKey);
+            match facts.key_end {
+                Some(end) => {
+                    let key = trimmed.get(..end).ok_or(SkillError::MalformedTopLevelKey)?;
+                    if !is_plain_key(key) {
+                        return Err(SkillError::MalformedTopLevelKey);
+                    }
+                    if !seen.insert(key.to_owned()) {
+                        return Err(SkillError::DuplicateKey(key.to_owned()));
+                    }
+                    keys.push(key.to_owned());
+                }
+                // A block sequence may sit at its parent mapping's indentation,
+                // so a column-zero `- ` line is the value of the key above it
+                // rather than a malformed key of its own.
+                None if facts.sequence_markers > 0 && !keys.is_empty() => {}
+                None => return Err(SkillError::MalformedTopLevelKey),
             }
-            if !seen.insert(key.to_owned()) {
-                return Err(SkillError::DuplicateKey(key.to_owned()));
-            }
-            keys.push(key.to_owned());
         }
+
         // Depth is the number of OPEN levels, not a column count. Dividing the
         // column by an assumed two-space step made the bound a property of the
         // author's formatting: a one-space ladder reached four levels against a
         // declared bound of two, while its two-space twin was refused at three.
-        // The stack holds the indentation of each open level, so any consistent
-        // step measures the same depth.
-        while stack.last().is_some_and(|&open| indent < open) {
+        while stack.last().is_some_and(|&(open, _)| indent < open) {
             stack.pop();
         }
-        match stack.last() {
-            Some(&open) if indent > open => stack.push(indent),
-            None => stack.push(indent),
-            _ => {}
+        // A line at this column closes any sequence open AT it, and its own
+        // markers reopen one. Without this, consecutive `- ` items each stacked
+        // another level and a three-item list read as three deep.
+        while stack
+            .last()
+            .is_some_and(|&(open, seq)| seq && open == indent)
+        {
+            stack.pop();
         }
+        let opened_by_indent = match stack.last() {
+            Some(&(open, _)) if open >= indent => false,
+            _ => {
+                stack.push((indent, false));
+                true
+            }
+        };
         // `- ` markers open a level each without moving the column, which is how
-        // `z:\n - - - - 1` nested four deep at indentation 1.
-        let depth = stack.len().saturating_sub(1) + facts.sequence_depth;
+        // `z:\n - - - - 1` nested four deep at indentation 1. The first one
+        // names the level the indentation increase already opened, if it did:
+        // `a:\n    - 1` and `a:\n  - 1` are the same document, and counting both
+        // measured them three levels and two.
+        for _ in 0..facts
+            .sequence_markers
+            .saturating_sub(usize::from(opened_by_indent))
+        {
+            stack.push((indent, true));
+        }
+        // A flow collection nests exactly as a block one does. Leaving it out
+        // let `a:\n  b:\n    c: [1, 2]` through at three levels while its block
+        // spelling was refused at three.
+        let depth = stack.len().saturating_sub(1) + facts.flow_depth;
         if depth > SKILL_MAX_NESTING_DEPTH {
             return Err(SkillError::TooDeeplyNested);
         }
@@ -541,7 +590,12 @@ struct LineFacts {
     /// Byte offset of the `:` terminating a top-level key, when the line has one.
     key_end: Option<usize>,
     /// `- ` element markers opened on this line, which nest without indenting.
-    sequence_depth: usize,
+    sequence_markers: usize,
+    /// Deepest flow collection reached on this line. Flow nests like block.
+    flow_depth: usize,
+    /// The line ends with a block scalar header, so what follows it at a deeper
+    /// indentation is literal text rather than YAML.
+    block_scalar: bool,
 }
 
 /// Is this a plain, unquoted, unadorned mapping key?
@@ -573,7 +627,15 @@ fn is_plain_key(key: &str) -> bool {
 /// So there is no candidate slice any more. This walks the line left to right
 /// tracking quote state and flow depth, and refuses an indicator wherever a
 /// node can begin: at the head, after `- `, after a key terminator, and after
-/// `[`, `{`, or `,` inside a flow collection.
+/// `[`, `{`, or `,` inside a flow collection. `? ` opens a node too and is
+/// refused outright; a block scalar header ends the line's YAML.
+///
+/// One line is the whole unit. Every construct that would carry state onto the
+/// next line — an unclosed flow collection, an unclosed quoted scalar — is
+/// refused at the end of this function, because the caller scans line by line
+/// and hands this one a fresh state each time. Treating a continuation line as
+/// a first line is what let `aa: [` / `  0, &s SECRET]` through after every
+/// single-line spelling of it was closed.
 ///
 /// Quote-awareness is load-bearing rather than decoration. A blanket search for
 /// `{` would refuse `gridwork: '{"budget_tokens": 4096}'`, the single-quoted
@@ -584,8 +646,10 @@ fn scan_line(trimmed: &str) -> Result<LineFacts, SkillError> {
     let chars: Vec<(usize, char)> = trimmed.char_indices().collect();
     let mut quote: Option<char> = None;
     let mut flow: usize = 0;
-    let mut sequence_depth = 0usize;
+    let mut flow_depth = 0usize;
+    let mut sequence_markers = 0usize;
     let mut key_end: Option<usize> = None;
+    let mut block_scalar = false;
     // The head of the line is a node start; so is every position below that
     // sets this back to true.
     let mut node_start = true;
@@ -612,7 +676,12 @@ fn scan_line(trimmed: &str) -> Result<LineFacts, SkillError> {
             continue;
         }
 
-        if c == '\'' || c == '"' {
+        // A quote opens a scalar only where a node can begin. YAML permits `'`
+        // and `"` inside a plain scalar and forbids them only at its head, so
+        // opening quote state at any position handed the rest of the line to a
+        // branch that examines nothing: `[don't, &a hello]` was accepted, and
+        // the alias in its twin key was RESOLVED.
+        if (c == '\'' || c == '"') && node_start {
             quote = Some(c);
             node_start = false;
             i += 1;
@@ -641,6 +710,24 @@ fn scan_line(trimmed: &str) -> Result<LineFacts, SkillError> {
                     return Err(SkillError::UnsupportedYaml("merge key"));
                 }
                 '[' if flow > 0 => return Err(SkillError::UnsupportedYaml("flow sequence node")),
+                // `? ` opens a node exactly as `- ` does, and had no arm here:
+                // `?` fell through to the catch-all, cleared `node_start`, and
+                // the whitespace skip below does not restore it — so the anchor
+                // in `? &s SECRET` was never examined.
+                '?' if matches!(
+                    chars.get(i + 1).map(|&(_, n)| n),
+                    None | Some(' ') | Some('\t')
+                ) =>
+                {
+                    return Err(SkillError::UnsupportedYaml("explicit key"));
+                }
+                // A block scalar header ends the line's YAML; what follows is
+                // literal text that `scan_subset` steps over.
+                '|' | '>' if flow == 0 => {
+                    check_block_scalar_header(&chars, i)?;
+                    block_scalar = true;
+                    break;
+                }
                 _ => {}
             }
         }
@@ -659,6 +746,7 @@ fn scan_line(trimmed: &str) -> Result<LineFacts, SkillError> {
         match c {
             '[' => {
                 flow += 1;
+                flow_depth = flow_depth.max(flow);
                 node_start = true;
             }
             ']' | '}' => {
@@ -682,7 +770,7 @@ fn scan_line(trimmed: &str) -> Result<LineFacts, SkillError> {
             '-' => {
                 let next = chars.get(i + 1).map(|&(_, n)| n);
                 if node_start && (next.is_none() || matches!(next, Some(' ') | Some('\t'))) {
-                    sequence_depth += 1;
+                    sequence_markers += 1;
                     // `- ` opens an element, so what follows is a node start.
                 } else {
                     node_start = false;
@@ -693,10 +781,59 @@ fn scan_line(trimmed: &str) -> Result<LineFacts, SkillError> {
         i += 1;
     }
 
+    // State left open at the end of a line is a construct that continues onto
+    // the next one, and this scan is line-at-a-time: `scan_subset` hands it each
+    // line with the state reset. That gap admitted everything the walk above
+    // refuses. `aa: [` then `  0, &s SECRET]` presented a continuation line
+    // whose `flow` read zero, so the `,` cleared `node_start` instead of setting
+    // it and the anchor went through — resolved, again, into a second key. A
+    // quoted scalar spanning two lines did the mirror of it, registering a
+    // top-level key the document does not contain.
+    //
+    // Refusing here is what keeps the accepted subset line-local, so no reader
+    // has to reason about state crossing a line to know what this admits.
+    if quote.is_some() {
+        return Err(SkillError::UnsupportedYaml("multi-line quoted scalar"));
+    }
+    if flow > 0 {
+        return Err(SkillError::UnsupportedYaml("multi-line flow collection"));
+    }
+
     Ok(LineFacts {
         key_end,
-        sequence_depth,
+        sequence_markers,
+        flow_depth,
+        block_scalar,
     })
+}
+
+/// Check the tail of a block scalar header (`|`, `>`, chomping, indentation).
+///
+/// The explicit indentation indicator (`|2`) is refused. With it, content
+/// indentation is a number in the header rather than the first content line's
+/// own indentation, and `scan_subset` ends the scalar where the indentation
+/// returns to the header's — a rule that agrees with the parser only while both
+/// detect that indentation the same way.
+fn check_block_scalar_header(chars: &[(usize, char)], start: usize) -> Result<(), SkillError> {
+    let mut i = start + 1;
+    while let Some(&(_, c)) = chars.get(i) {
+        match c {
+            '-' | '+' => i += 1,
+            '0'..='9' => {
+                return Err(SkillError::UnsupportedYaml(
+                    "block scalar indentation indicator",
+                ));
+            }
+            _ => break,
+        }
+    }
+    while matches!(chars.get(i), Some(&(_, ' ' | '\t'))) {
+        i += 1;
+    }
+    match chars.get(i) {
+        None | Some(&(_, '#')) => Ok(()),
+        Some(_) => Err(SkillError::UnsupportedYaml("block scalar header")),
+    }
 }
 
 /// Render one YAML value as bounded, lossy evidence.
@@ -1120,6 +1257,189 @@ mod tests {
         );
         manifest("name: n\ndescription: d\nmetadata:\n  team: infra")
             .expect("the accepted edge, so the bound is pinned from both sides");
+    }
+
+    #[test]
+    fn a_construct_that_continues_onto_the_next_line_is_refused() {
+        // This scan is line-at-a-time and YAML is not. `scan_line` is handed
+        // each line with its state reset, so on a continuation line inside an
+        // open flow collection `flow` read zero: the `,` cleared `node_start`
+        // instead of setting it, every indicator branch went dead, and the
+        // anchor reached the parser — which RESOLVED it into a second key.
+        // Every single-line spelling below was already refused. The line break
+        // was the whole escape, and no fixture in the corpus had one.
+        for (front, what) in [
+            (
+                "name: n\ndescription: d\naa: [\n  0, &s SECRET]\nbb: [\n  0, *s]",
+                "multi-line flow collection",
+            ),
+            (
+                "name: n\ndescription: d\nz: [\n  1, !!str 5]",
+                "multi-line flow collection",
+            ),
+            (
+                "name: n\ndescription: d\nz: [\n  1, {a: 1}]",
+                "multi-line flow collection",
+            ),
+            // The alias landing in the one field with security meaning.
+            (
+                "name: n\ndescription: d\nz: [\n  0, &t Bash(rm -rf /)]\nallowed-tools: [\n  Read, *t]",
+                "multi-line flow collection",
+            ),
+            // A column-zero continuation additionally registered a top-level key
+            // the document does not contain.
+            (
+                "name: n\ndescription: d\nz: [a,\nb: c]",
+                "multi-line flow collection",
+            ),
+            // The mirror of it in a quoted scalar: the parser folds these two
+            // lines into one and never produces `def`, while the scan recorded
+            // `def` as a field, with an empty value, that nothing backs.
+            (
+                "name: n\ndescription: \"abc\ndef: hello\"",
+                "multi-line quoted scalar",
+            ),
+        ] {
+            assert_eq!(
+                manifest(front).expect_err("refused"),
+                SkillError::UnsupportedYaml(what),
+                "{front}"
+            );
+        }
+        // The accepted control, so this is a refusal of the line break and not
+        // of the collection.
+        manifest("name: n\ndescription: d\nz: [0, 1]")
+            .expect("a flow sequence on one line is the subset");
+    }
+
+    #[test]
+    fn a_quote_inside_a_plain_scalar_is_text_rather_than_a_quoted_scalar() {
+        // YAML permits `'` and `"` inside a plain scalar and forbids them only
+        // at its head, so opening quote state at any position handed the rest of
+        // the line to the one region the indicator branches do not examine. The
+        // control differs by a single character and refuses correctly.
+        for (front, what) in [
+            ("name: n\ndescription: d\nx: [don't, &a hello]", "anchor"),
+            ("name: n\ndescription: d\nx: [say\"hi, &a hello]", "anchor"),
+            (
+                "name: n\ndescription: d\nx: it's fine\ny: &a hello",
+                "anchor",
+            ),
+            (
+                "name: n\ndescription: d\nx: [don't, {a: {b: 1}}]",
+                "flow mapping",
+            ),
+        ] {
+            assert_eq!(
+                manifest(front).expect_err("refused"),
+                SkillError::UnsupportedYaml(what),
+                "{front}"
+            );
+        }
+        // The other direction, which is why this is a position gate rather than
+        // a refusal: an apostrophe in prose is text, and a quote where a node
+        // does begin still opens a scalar.
+        manifest("name: n\ndescription: d\nextra: it's fine")
+            .expect("an apostrophe inside a plain scalar is text");
+        manifest("name: n\ndescription: d\nextra: 'quoted, {braces}'")
+            .expect("a quote at a node start still opens a scalar");
+    }
+
+    #[test]
+    fn an_explicit_key_is_refused_rather_than_walked_past() {
+        // `- ` has its own arm because it opens a node. `? ` opens one too and
+        // had none: it fell to the catch-all that clears `node_start`, and the
+        // whitespace skip does not restore it, so the anchor after it was never
+        // examined. In the `metadata:` spelling the anchored value reaches TYPED
+        // output rather than opaque evidence.
+        for front in [
+            "name: n\ndescription: d\naa:\n  ? &s SECRET\n  : 1\nbb:\n  ? *s\n  : 2",
+            "name: n\ndescription: d\nmetadata:\n  ? &s hello\n  : v",
+            "name: n\ndescription: d\nz:\n  ? !!str k\n  : v",
+        ] {
+            assert_eq!(
+                manifest(front).expect_err("refused"),
+                SkillError::UnsupportedYaml("explicit key"),
+                "{front}"
+            );
+        }
+        // `?` is an indicator only where a node begins; inside a scalar it is
+        // text, and refusing it there would refuse ordinary prose.
+        manifest("name: n\ndescription: d\nextra: really?")
+            .expect("a question mark inside a scalar is text");
+    }
+
+    #[test]
+    fn block_scalar_content_is_text_rather_than_yaml() {
+        // Scanning literal content as YAML refused ordinary prose, and every one
+        // of those refusals put pressure on the indicator list — the one place
+        // where relieving it reopens the escapes the list exists to close.
+        for (front, want) in [
+            (
+                "name: n\ndescription: d\nnote: |\n  &c is an entity.",
+                "&c is an entity.",
+            ),
+            (
+                "name: n\ndescription: d\nnote: |\n  *bold* start of line.",
+                "*bold* start of line.",
+            ),
+            (
+                "name: n\ndescription: d\nnote: |\n  !important note.",
+                "!important note.",
+            ),
+            (
+                "name: n\ndescription: d\nnote: |\n  ---\n  still content",
+                "---\nstill content",
+            ),
+            (
+                "name: n\ndescription: d\nnote: |\n  - a\n    - b\n      - c",
+                "- a\n  - b\n    - c",
+            ),
+        ] {
+            let skill = manifest(front).unwrap_or_else(|e| panic!("{front}\nrefused as {e:?}"));
+            assert_eq!(skill.opaque[0].value, want, "{front}");
+        }
+        // The explicit indentation indicator is refused: with it the content
+        // indentation is a number in the header rather than the first content
+        // line's own, and the rule that ends the scalar here would stop agreeing
+        // with the parser's.
+        assert_eq!(
+            manifest("name: n\ndescription: d\nnote: |2\n  explicit").expect_err("refused"),
+            SkillError::UnsupportedYaml("block scalar indentation indicator")
+        );
+        // And the skip ENDS: an indicator after the scalar is still an indicator.
+        // Without this the fix would be a hole rather than a repair.
+        assert_eq!(
+            manifest("name: n\ndescription: d\nnote: |\n  text\nz: &a hello").expect_err("refused"),
+            SkillError::UnsupportedYaml("anchor")
+        );
+    }
+
+    #[test]
+    fn the_same_document_measures_the_same_depth_in_either_spelling() {
+        // A block sequence may sit at its parent mapping's indentation or
+        // deeper; both spellings are the same document. Counting the indentation
+        // push and the `- ` marker separately measured them three levels and
+        // two, so the bound was still a property of the author's formatting —
+        // the thing the stack replaced column division to stop being.
+        manifest("name: n\ndescription: d\nm:\n  a:\n    - 1").expect("the indented spelling");
+        manifest("name: n\ndescription: d\nm:\n  a:\n  - 1").expect("the compact spelling");
+        // Consecutive items are one sequence, not one level each.
+        manifest("name: n\ndescription: d\na:\n- 1\n- 2\n- 3")
+            .expect("a column-zero block sequence is the value of the key above it");
+        // A flow collection nests exactly as its block spelling does. This pair
+        // disagreed: the flow one was accepted at three levels while the block
+        // one was refused at three.
+        for front in [
+            "name: n\ndescription: d\nm:\n  a:\n    b: [1, 2]",
+            "name: n\ndescription: d\nm:\n  a:\n    b:\n    - 1",
+        ] {
+            assert_eq!(
+                manifest(front).expect_err("refused"),
+                SkillError::TooDeeplyNested,
+                "{front}"
+            );
+        }
     }
 
     #[test]
