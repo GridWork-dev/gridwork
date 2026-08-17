@@ -123,6 +123,18 @@ fn catalog() -> Catalog {
     // The accepted side of the same axis: content that spans lines and must NOT
     // be read as YAML, so the refusals above are not paid for by refusing prose.
     c.insert("accepted/block-scalar-prose.md", None);
+    // The column axis. Every block scalar above sits at column zero — the one
+    // position where the header line's indentation and the owning node's column
+    // coincide — so the corpus could not see a skip armed at the wrong floor.
+    c.insert(
+        "refused/block-scalar-in-sequence-item.md",
+        Some(|e| {
+            matches!(
+                e,
+                SkillError::UnsupportedYaml("block scalar behind a sequence marker")
+            )
+        }),
+    );
     c
 }
 
@@ -152,8 +164,8 @@ fn every_fixture_on_disk_is_exercised_and_every_expectation_has_a_fixture() {
     // The count first. Everything below is a fold, and a fold over nothing
     // agrees with itself.
     assert!(
-        found.len() >= 24,
-        "expected at least 24 skill fixtures, walked {}",
+        found.len() >= 25,
+        "expected at least 25 skill fixtures, walked {}",
         found.len()
     );
     assert_eq!(

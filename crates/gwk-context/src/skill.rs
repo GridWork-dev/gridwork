@@ -59,6 +59,19 @@
 //! no aliases, no merge keys, no tags, no directives, and at most
 //! [`SKILL_FRONTMATTER_MAX_BYTES`]. It narrows the surface; it does not remove
 //! it.
+//!
+//! One accepted cost, named here so nobody relieves it in the wrong place. The
+//! scan is line-local: it refuses any construct that carries state past the end
+//! of a line, because handing a continuation line to a scanner whose state had
+//! been reset is what admitted every escape the first four rounds of review
+//! found. The price is that a plain scalar wrapped onto a second line is
+//! refused when the continuation begins with `'`, `"` or `*` — the parser reads
+//! that as text, and this names its own state instead. Both shapes have an
+//! accepted spelling (a block scalar for prose, a block sequence for
+//! `allowed-tools`), so no real manifest is blocked. Repairing it needs exactly
+//! the cross-line state whose absence is the property above, so the trade is
+//! deliberate: relieve it with a block scalar, never by loosening the indicator
+//! list.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -513,6 +526,25 @@ fn scan_subset(front: &str) -> Result<Vec<String>, SkillError> {
         }
         let facts = scan_line(trimmed)?;
         if facts.block_scalar {
+            // The skip floor is the line's indentation, and that is the column
+            // of the node owning the scalar only when nothing on this line
+            // moved it right. A `- ` marker does: in `  - k: |` the line
+            // indents 2 while the mapping holding `k` starts at 4, and the
+            // parser ends the scalar at the content indentation it detects (8).
+            // A sibling key at column 4 then satisfies 4 > 2 and was skipped
+            // here, while 4 < 8 kept it live there — so an anchor and its alias
+            // were hidden from this scan and RESOLVED by the parser.
+            //
+            // Refused rather than measured, for the same reason `|2` is: the
+            // skip agrees with the parser only while both find the same
+            // indentation, and with no marker on the line that agreement holds
+            // by construction. No portable manifest spells a block scalar this
+            // way.
+            if facts.sequence_markers > 0 {
+                return Err(SkillError::UnsupportedYaml(
+                    "block scalar behind a sequence marker",
+                ));
+            }
             block_scalar = Some(indent);
         }
 
@@ -569,6 +601,17 @@ fn scan_subset(front: &str) -> Result<Vec<String>, SkillError> {
             .saturating_sub(usize::from(opened_by_indent))
         {
             stack.push((indent, true));
+        }
+        // A `key:` sharing a line with a `- ` marker opens a block mapping
+        // inside that item, at a column no line of its own ever announces. Left
+        // out, the bound stayed a property of the spelling in the other
+        // direction: `aa:\n  - - bb: 1` measured two while its byte-different,
+        // semantically identical expansion measured three, and
+        // `aa:\n  - bb:\n      - cc: 1` carried five containers against a bound
+        // of two. The mapping a marker-less line opens is already the level its
+        // own indentation pushed, which is why this is conditional.
+        if facts.sequence_markers > 0 && facts.key_end.is_some() {
+            stack.push((indent, false));
         }
         // A flow collection nests exactly as a block one does. Leaving it out
         // let `a:\n  b:\n    c: [1, 2]` through at three levels while its block
@@ -744,7 +787,13 @@ fn scan_line(trimmed: &str) -> Result<LineFacts, SkillError> {
         }
 
         match c {
-            '[' => {
+            // Only where a node begins, exactly as `{` already is. A block
+            // context plain scalar may contain `[` — the parser reads
+            // `a[&b c]` as the text `a[&b c]`, anchor and all — so opening flow
+            // at any position refused ordinary prose: `values in [0, 1)` came
+            // back as a multi-line flow collection. The in-flow refusals above
+            // still fire, because reaching them requires flow to be open.
+            '[' if node_start => {
                 flow += 1;
                 flow_depth = flow_depth.max(flow);
                 node_start = true;
@@ -1181,6 +1230,15 @@ mod tests {
             // The single-quoted JSON the whole GridWork extension rides on. A
             // blanket `contains('{')` would refuse this document.
             "name: n\ndescription: d\nmetadata:\n  gridwork: '{\"note\": \"x: y\"}'",
+            // `[` was the one indicator missing from this list, and it opened
+            // flow state at any position while `{` was already position-gated.
+            // The parser reads every line below as an ordinary plain scalar —
+            // `a[&b c]` is the text `a[&b c]`, anchor and all — so refusing
+            // them named this scanner's state rather than the document.
+            "name: n\ndescription: d\nnote: accepts values in [0, 1) inclusive",
+            "name: n\ndescription: d\nnote: a range of 1 [to 5",
+            "name: n\ndescription: d\nnote: see array[0] for the index",
+            "name: n\ndescription: d\nnote: a[&b c]",
         ] {
             manifest(front).unwrap_or_else(|e| panic!("{front}\nrefused as {e:?}"));
         }
@@ -1416,6 +1474,48 @@ mod tests {
     }
 
     #[test]
+    fn a_block_scalar_behind_a_sequence_marker_is_refused() {
+        // The skip floor was the LINE's indentation, which is the column of the
+        // node owning the scalar only when nothing on the line moved it right.
+        // In `  - k: |` the line indents 2 while the mapping holding `k` starts
+        // at 4, and the parser ends the scalar at the content indentation it
+        // detects, 8. A sibling at column 4 satisfies 4 > 2 and was skipped
+        // here, while 4 < 8 kept it live there — so these hid an anchor, an
+        // alias, a tag, a merge key and four levels of nesting from the scan,
+        // and the parser RESOLVED the alias across two top-level keys.
+        for front in [
+            "name: n\ndescription: d\naa:\n  - k: |\n      t\n    m: &zz S\nbb:\n  - k: |\n      t\n    m: *zz",
+            "name: n\ndescription: d\naa:\n  - k: |\n      t\n    m: !!str 5",
+            "name: n\ndescription: d\naa:\n  - k: |\n      t\n    <<: {a: 1}",
+            "name: n\ndescription: d\naa:\n  - k: |\n      t\n    p:\n      q:\n        r:\n          s: 1",
+            // The folded spelling reaches it identically.
+            "name: n\ndescription: d\naa:\n  - k: >\n      t\n    m: &zz S",
+        ] {
+            assert_eq!(
+                manifest(front).expect_err("refused"),
+                SkillError::UnsupportedYaml("block scalar behind a sequence marker"),
+                "{front}"
+            );
+        }
+        // The two controls that isolate the cause to the marker offset alone:
+        // the same anchor without the block scalar, and the same block scalar
+        // without the marker, are both already refused for their own reasons.
+        assert_eq!(
+            manifest("name: n\ndescription: d\naa:\n  - k: t\n    m: &zz S").expect_err("refused"),
+            SkillError::UnsupportedYaml("anchor")
+        );
+        assert_eq!(
+            manifest("name: n\ndescription: d\naa:\n  k: |\n    t\n  m: &zz S")
+                .expect_err("refused"),
+            SkillError::UnsupportedYaml("anchor")
+        );
+        // And the accepted side is untouched: with no marker on the header line
+        // the skip floor IS the owning node's column, by construction.
+        manifest("name: n\ndescription: d\nmetadata:\n  note: |\n    text")
+            .expect("an indented block scalar with no marker still parses");
+    }
+
+    #[test]
     fn the_same_document_measures_the_same_depth_in_either_spelling() {
         // A block sequence may sit at its parent mapping's indentation or
         // deeper; both spellings are the same document. Counting the indentation
@@ -1427,6 +1527,27 @@ mod tests {
         // Consecutive items are one sequence, not one level each.
         manifest("name: n\ndescription: d\na:\n- 1\n- 2\n- 3")
             .expect("a column-zero block sequence is the value of the key above it");
+        // A `key:` sharing a line with a `- ` marker opens a mapping at a column
+        // no line announces. Left uncounted, these byte-different but
+        // semantically identical twins measured two levels and three, and the
+        // error compounded: the last document below carries five containers
+        // against a bound of two.
+        for front in [
+            "name: n\ndescription: d\naa:\n  - - bb: 1",
+            "name: n\ndescription: d\naa:\n  -\n    -\n      bb: 1",
+            "name: n\ndescription: d\naa:\n  - bb:\n      cc: 1",
+            "name: n\ndescription: d\naa:\n  - bb:\n      - cc: 1",
+        ] {
+            assert_eq!(
+                manifest(front).expect_err("refused"),
+                SkillError::TooDeeplyNested,
+                "{front}"
+            );
+        }
+        // The accepted control for that arm, so it is not "refuse any item
+        // carrying a key": one mapping inside one sequence item is two levels.
+        manifest("name: n\ndescription: d\naa:\n  - bb: 1")
+            .expect("a mapping inside a sequence item is within the bound");
         // A flow collection nests exactly as its block spelling does. This pair
         // disagreed: the flow one was accepted at three levels while the block
         // one was refused at three.
