@@ -64,9 +64,16 @@
 //! scan is line-local: it refuses any construct that carries state past the end
 //! of a line, because handing a continuation line to a scanner whose state had
 //! been reset is what admitted every escape the first four rounds of review
-//! found. The price is that a plain scalar wrapped onto a second line is
-//! refused when the continuation begins with `'`, `"` or `*` — the parser reads
-//! that as text, and this names its own state instead. Both shapes have an
+//! found. Every line is therefore scanned as if it began a node, and the price
+//! is paid by a plain scalar wrapped onto a second line: the continuation is
+//! refused when it leaves quote or flow state open, or when its first token is
+//! a node indicator. The parser reads such a line as text, so these refusals
+//! name this scanner's state rather than the document.
+//!
+//! State the rule rather than a list of the characters it happens to catch —
+//! an earlier revision of this paragraph listed three and got two of them
+//! wrong, because a BALANCED quote on a continuation (`'quoted' bit`) is
+//! accepted and it is the unclosed one that is refused. Every shape has an
 //! accepted spelling (a block scalar for prose, a block sequence for
 //! `allowed-tools`), so no real manifest is blocked. Repairing it needs exactly
 //! the cross-line state whose absence is the property above, so the trade is
@@ -549,69 +556,56 @@ fn scan_subset(front: &str) -> Result<Vec<String>, SkillError> {
         }
 
         if indent == 0 {
-            match facts.key_end {
-                Some(end) => {
-                    let key = trimmed.get(..end).ok_or(SkillError::MalformedTopLevelKey)?;
-                    if !is_plain_key(key) {
-                        return Err(SkillError::MalformedTopLevelKey);
-                    }
-                    if !seen.insert(key.to_owned()) {
-                        return Err(SkillError::DuplicateKey(key.to_owned()));
-                    }
-                    keys.push(key.to_owned());
-                }
+            if facts.sequence_markers > 0 {
                 // A block sequence may sit at its parent mapping's indentation,
                 // so a column-zero `- ` line is the value of the key above it
-                // rather than a malformed key of its own.
-                None if facts.sequence_markers > 0 && !keys.is_empty() => {}
-                None => return Err(SkillError::MalformedTopLevelKey),
+                // rather than a key of its own — whatever the item holds. Read
+                // as a key, `- k: 1` sliced to `- k` and refused for the space,
+                // while its plain-scalar twin `- 1` was accepted.
+                if keys.is_empty() {
+                    return Err(SkillError::MalformedTopLevelKey);
+                }
+            } else {
+                let end = facts.key_end.ok_or(SkillError::MalformedTopLevelKey)?;
+                let key = trimmed.get(..end).ok_or(SkillError::MalformedTopLevelKey)?;
+                if !is_plain_key(key) {
+                    return Err(SkillError::MalformedTopLevelKey);
+                }
+                if !seen.insert(key.to_owned()) {
+                    return Err(SkillError::DuplicateKey(key.to_owned()));
+                }
+                keys.push(key.to_owned());
             }
         }
 
-        // Depth is the number of OPEN levels, not a column count. Dividing the
-        // column by an assumed two-space step made the bound a property of the
-        // author's formatting: a one-space ladder reached four levels against a
-        // declared bound of two, while its two-space twin was refused at three.
-        while stack.last().is_some_and(|&(open, _)| indent < open) {
-            stack.pop();
-        }
-        // A line at this column closes any sequence open AT it, and its own
-        // markers reopen one. Without this, consecutive `- ` items each stacked
-        // another level and a three-item list read as three deep.
-        while stack
-            .last()
-            .is_some_and(|&(open, seq)| seq && open == indent)
-        {
-            stack.pop();
-        }
-        let opened_by_indent = match stack.last() {
-            Some(&(open, _)) if open >= indent => false,
-            _ => {
-                stack.push((indent, false));
-                true
+        // Depth is the number of OPEN collection levels, and every level is
+        // named by the COLUMN its content starts at — the sequence a `- ` opens
+        // at the marker's own column, the mapping a `key:` opens at the key's.
+        // `scan_line` reports those columns; this only has to keep the stack.
+        //
+        // Counting anything else made the bound a property of the spelling, and
+        // three rounds of review each found another spelling it could not tell
+        // apart. Dividing the column by an assumed two-space step let a
+        // one-space ladder reach four levels against a declared bound of two.
+        // Counting `- ` markers at the line's indentation instead of their own
+        // measured `- - bb: 1` and its expansion two levels and three. Pushing
+        // an unpoppable level for a mapping inside an item counted ITEMS, so a
+        // two-entry list of mappings — `authors:` with two `- name:` — refused
+        // a document its one-entry twin accepted.
+        //
+        // A level continues when a later line names the same column with the
+        // same kind, and closes when a line names a column at or inside it with
+        // a different kind. That is one rule for both collections, and it is
+        // the reason the two spellings of every pair below now agree.
+        for &(offset, is_sequence) in &facts.openings {
+            let column = indent + offset;
+            while stack.last().is_some_and(|&(open, _)| open > column) {
+                stack.pop();
             }
-        };
-        // `- ` markers open a level each without moving the column, which is how
-        // `z:\n - - - - 1` nested four deep at indentation 1. The first one
-        // names the level the indentation increase already opened, if it did:
-        // `a:\n    - 1` and `a:\n  - 1` are the same document, and counting both
-        // measured them three levels and two.
-        for _ in 0..facts
-            .sequence_markers
-            .saturating_sub(usize::from(opened_by_indent))
-        {
-            stack.push((indent, true));
-        }
-        // A `key:` sharing a line with a `- ` marker opens a block mapping
-        // inside that item, at a column no line of its own ever announces. Left
-        // out, the bound stayed a property of the spelling in the other
-        // direction: `aa:\n  - - bb: 1` measured two while its byte-different,
-        // semantically identical expansion measured three, and
-        // `aa:\n  - bb:\n      - cc: 1` carried five containers against a bound
-        // of two. The mapping a marker-less line opens is already the level its
-        // own indentation pushed, which is why this is conditional.
-        if facts.sequence_markers > 0 && facts.key_end.is_some() {
-            stack.push((indent, false));
+            match stack.last() {
+                Some(&(open, kind)) if open == column && kind == is_sequence => {}
+                _ => stack.push((column, is_sequence)),
+            }
         }
         // A flow collection nests exactly as a block one does. Leaving it out
         // let `a:\n  b:\n    c: [1, 2]` through at three levels while its block
@@ -632,9 +626,16 @@ fn scan_subset(front: &str) -> Result<Vec<String>, SkillError> {
 struct LineFacts {
     /// Byte offset of the `:` terminating a top-level key, when the line has one.
     key_end: Option<usize>,
-    /// `- ` element markers opened on this line, which nest without indenting.
+    /// `- ` element markers on this line. Only whether there are any matters to
+    /// the caller; the levels they open are in `openings`.
     sequence_markers: usize,
-    /// Deepest flow collection reached on this line. Flow nests like block.
+    /// Collection levels this line names, in order, as `(offset from the line's
+    /// first non-space byte, opened by a `- ` marker)`. A sequence is named at
+    /// its marker's column and a mapping at its key's, which is what makes the
+    /// bound independent of how the document is spelled.
+    openings: Vec<(usize, bool)>,
+    /// Deepest flow collection reached on this line. Flow nests like block, and
+    /// a `:` inside one opens an implicit mapping that counts too.
     flow_depth: usize,
     /// The line ends with a block scalar header, so what follows it at a deeper
     /// indentation is literal text rather than YAML.
@@ -691,6 +692,8 @@ fn scan_line(trimmed: &str) -> Result<LineFacts, SkillError> {
     let mut flow: usize = 0;
     let mut flow_depth = 0usize;
     let mut sequence_markers = 0usize;
+    let mut openings: Vec<(usize, bool)> = Vec::new();
+    let mut node_offset = 0usize;
     let mut key_end: Option<usize> = None;
     let mut block_scalar = false;
     // The head of the line is a node start; so is every position below that
@@ -741,6 +744,14 @@ fn scan_line(trimmed: &str) -> Result<LineFacts, SkillError> {
         if c == ' ' || c == '\t' {
             i += 1;
             continue;
+        }
+
+        // Where the node starting here begins. A level is named by its own
+        // column — the sequence by its marker's, the mapping by its key's — so
+        // that `- - bb: 1` and the same document written down the page measure
+        // the same three levels.
+        if node_start {
+            node_offset = at;
         }
 
         if node_start {
@@ -808,8 +819,19 @@ fn scan_line(trimmed: &str) -> Result<LineFacts, SkillError> {
                 // line. `12:30` and `http://x` are scalars, not mappings.
                 let next = chars.get(i + 1).map(|&(_, n)| n);
                 if next.is_none() || matches!(next, Some(' ') | Some('\t')) {
-                    if flow == 0 && key_end.is_none() {
-                        key_end = Some(at);
+                    if flow == 0 {
+                        if key_end.is_none() {
+                            key_end = Some(at);
+                        }
+                        // The mapping this key belongs to opens at the key, not
+                        // at the line's indentation.
+                        openings.push((node_offset, false));
+                    } else {
+                        // An implicit mapping inside a flow collection is a
+                        // level with no column of its own. Uncounted, the flow
+                        // spelling `- [bb: 1]` measured one level fewer than the
+                        // block spelling of the same document.
+                        flow_depth = flow_depth.max(flow + 1);
                     }
                     node_start = true;
                 } else {
@@ -820,6 +842,7 @@ fn scan_line(trimmed: &str) -> Result<LineFacts, SkillError> {
                 let next = chars.get(i + 1).map(|&(_, n)| n);
                 if node_start && (next.is_none() || matches!(next, Some(' ') | Some('\t'))) {
                     sequence_markers += 1;
+                    openings.push((node_offset, true));
                     // `- ` opens an element, so what follows is a node start.
                 } else {
                     node_start = false;
@@ -851,6 +874,7 @@ fn scan_line(trimmed: &str) -> Result<LineFacts, SkillError> {
     Ok(LineFacts {
         key_end,
         sequence_markers,
+        openings,
         flow_depth,
         block_scalar,
     })
@@ -1554,6 +1578,10 @@ mod tests {
         for front in [
             "name: n\ndescription: d\nm:\n  a:\n    b: [1, 2]",
             "name: n\ndescription: d\nm:\n  a:\n    b:\n    - 1",
+            // A flow collection's implicit mapping is a level with no column of
+            // its own. Counting only the brackets measured this one level fewer
+            // than `aa:\n  - - bb: 1`, the block spelling refused above.
+            "name: n\ndescription: d\naa:\n  - [bb: 1]",
         ] {
             assert_eq!(
                 manifest(front).expect_err("refused"),
@@ -1561,6 +1589,37 @@ mod tests {
                 "{front}"
             );
         }
+    }
+
+    #[test]
+    fn depth_counts_open_levels_rather_than_sequence_items() {
+        // The level a mapping opens inside a sequence item used to be pushed at
+        // the LINE's indentation, where no later line could pop it, so every
+        // further item stacked two more: a list of mappings was accepted at one
+        // entry and refused at two. An `authors:` list is the ordinary spelling
+        // of that, and refusing it also made an unrecognized portable field
+        // fatal — which this module's header rules out, because upstream
+        // shipping a new field is not an attack.
+        for front in [
+            "name: n\ndescription: d\nextra:\n  - k: 1\n  - k: 2",
+            "name: n\ndescription: d\nextra:\n  - k: 1\n  - k: 2\n  - k: 3",
+            "name: n\ndescription: d\nauthors:\n  - name: a\n  - name: b",
+            // One item carrying two keys reached it the same way: the
+            // continuation key opened a level the item's own push had claimed.
+            "name: n\ndescription: d\nextra:\n  - k: 1\n    j: 2",
+            // And at column zero the item line was read as a key, sliced to
+            // `- k`, and refused for the space — while `- 1` was accepted.
+            "name: n\ndescription: d\nextra:\n- k: 1\n- k: 2",
+        ] {
+            manifest(front).unwrap_or_else(|e| panic!("{front}\nrefused as {e:?}"));
+        }
+        // The bound still bites on the accepted shape above, so this is not
+        // "stop counting what sequences hold".
+        assert_eq!(
+            manifest("name: n\ndescription: d\nextra:\n  - k:\n      j:\n        i: 1")
+                .expect_err("refused"),
+            SkillError::TooDeeplyNested
+        );
     }
 
     #[test]

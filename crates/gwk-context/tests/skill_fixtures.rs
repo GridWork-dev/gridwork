@@ -126,6 +126,10 @@ fn catalog() -> Catalog {
     // The column axis. Every block scalar above sits at column zero — the one
     // position where the header line's indentation and the owning node's column
     // coincide — so the corpus could not see a skip armed at the wrong floor.
+    // The item axis. Every accepted sequence above holds plain scalars, so the
+    // corpus could not tell a depth bound from an item counter: a sequence of
+    // mappings was accepted at one entry and refused at two.
+    c.insert("accepted/sequence-of-mappings.md", None);
     c.insert(
         "refused/block-scalar-in-sequence-item.md",
         Some(|e| {
@@ -164,8 +168,8 @@ fn every_fixture_on_disk_is_exercised_and_every_expectation_has_a_fixture() {
     // The count first. Everything below is a fold, and a fold over nothing
     // agrees with itself.
     assert!(
-        found.len() >= 25,
-        "expected at least 25 skill fixtures, walked {}",
+        found.len() >= 26,
+        "expected at least 26 skill fixtures, walked {}",
         found.len()
     );
     assert_eq!(
