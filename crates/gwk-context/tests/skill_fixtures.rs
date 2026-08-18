@@ -135,6 +135,14 @@ fn catalog() -> Catalog {
     // indistinguishable from a level nothing needed to close; the construct
     // after this one refused a fully portable manifest at a true depth of one.
     c.insert("accepted/column-zero-tools.md", None);
+    // The quote-adjacency axis. Every flow-style refusal above puts its
+    // indicator behind a PLAIN key, where the scan's whitespace rule finds the
+    // node start; a JSON-style quoted key needs no space after its `:`, so the
+    // same alias sat one character past everything the corpus exercised.
+    c.insert(
+        "refused/quoted-flow-key-alias.md",
+        Some(|e| matches!(e, SkillError::UnsupportedYaml("alias"))),
+    );
     c.insert(
         "refused/block-scalar-in-sequence-item.md",
         Some(|e| {
@@ -173,8 +181,8 @@ fn every_fixture_on_disk_is_exercised_and_every_expectation_has_a_fixture() {
     // The count first. Everything below is a fold, and a fold over nothing
     // agrees with itself.
     assert!(
-        found.len() >= 27,
-        "expected at least 27 skill fixtures, walked {}",
+        found.len() >= 28,
+        "expected at least 28 skill fixtures, walked {}",
         found.len()
     );
     assert_eq!(

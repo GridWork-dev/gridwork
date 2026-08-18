@@ -697,6 +697,9 @@ fn is_plain_key(key: &str) -> bool {
 fn scan_line(trimmed: &str) -> Result<LineFacts, SkillError> {
     let chars: Vec<(usize, char)> = trimmed.char_indices().collect();
     let mut quote: Option<char> = None;
+    // The last non-blank thing consumed was a closing quote. Blanks do not
+    // clear it, because the parser reads `["a" :&x S]` exactly as `["a":&x S]`.
+    let mut after_quoted = false;
     let mut flow: usize = 0;
     let mut flow_depth = 0usize;
     let mut sequence_markers = 0usize;
@@ -725,6 +728,7 @@ fn scan_line(trimmed: &str) -> Result<LineFacts, SkillError> {
                     continue;
                 }
                 quote = None;
+                after_quoted = true;
             }
             i += 1;
             continue;
@@ -834,9 +838,18 @@ fn scan_line(trimmed: &str) -> Result<LineFacts, SkillError> {
             ',' => node_start = flow > 0,
             ':' => {
                 // A key terminator is `:` followed by whitespace or end of
-                // line. `12:30` and `http://x` are scalars, not mappings.
+                // line. `12:30` and `http://x` are scalars, not mappings. One
+                // exception, in flow context only: after a quoted scalar the
+                // parser takes `:` as a key indicator with nothing required
+                // behind it — `["a":&x S]` is a mapping, blanks before the `:`
+                // or not — so the anchor there was never at what this scan
+                // considered a node start, and the parser RESOLVED its alias
+                // into a second key's evidence.
                 let next = chars.get(i + 1).map(|&(_, n)| n);
-                if next.is_none() || matches!(next, Some(' ') | Some('\t')) {
+                if next.is_none()
+                    || matches!(next, Some(' ') | Some('\t'))
+                    || (after_quoted && flow > 0)
+                {
                     if flow == 0 {
                         if key_end.is_none() {
                             key_end = Some(at);
@@ -868,6 +881,7 @@ fn scan_line(trimmed: &str) -> Result<LineFacts, SkillError> {
             }
             _ => node_start = false,
         }
+        after_quoted = false;
         i += 1;
     }
 
@@ -1701,6 +1715,45 @@ mod tests {
         for front in [
             "name: n\ndescription: d\nx:\n- \"q\":\n    r:\n      s: 1",
             "name: n\ndescription: d\nx:\n- q:\n    r:\n      s: 1",
+        ] {
+            assert_eq!(
+                manifest(front).expect_err("refused"),
+                SkillError::TooDeeplyNested,
+                "{front}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_quoted_flow_key_is_a_key() {
+        // The parser takes `:` after a JSON-style quoted flow key as a key
+        // indicator with no space required, so `&`, `*` and `!` behind one
+        // were never at what the scan considered a node start — and the pinned
+        // parser RESOLVED the alias, handing one key's evidence content its
+        // author wrote under another.
+        for (front, want) in [
+            ("name: n\ndescription: d\nfirst: [\"a\":&anc S]", "anchor"),
+            ("name: n\ndescription: d\nfirst: ['a':*anc]", "alias"),
+            ("name: n\ndescription: d\nfirst: [\"a\":!!str 1]", "tag"),
+            // Blanks between the quote and the `:` do not change the reading.
+            ("name: n\ndescription: d\nfirst: [\"a\" :*anc]", "alias"),
+        ] {
+            assert_eq!(
+                manifest(front).expect_err("refused"),
+                SkillError::UnsupportedYaml(want),
+                "{front}"
+            );
+        }
+        // The controls are plain SCALARS to the parser, ampersand and all: a
+        // `:` not behind a quote still needs its whitespace to be a key.
+        manifest("name: n\ndescription: d\nx: [a:1]").expect("a plain scalar with a colon");
+        manifest("name: n\ndescription: d\nx: [a :&anc S]")
+            .expect("a plain scalar with a blank and an ampersand");
+        // And the implicit mapping a quoted key opens is COUNTED, so the
+        // quoted and plain spellings of one document measure the same depth.
+        for front in [
+            "name: n\ndescription: d\nextra:\n  m: [\"a\":1]",
+            "name: n\ndescription: d\nextra:\n  m: [a: 1]",
         ] {
             assert_eq!(
                 manifest(front).expect_err("refused"),
