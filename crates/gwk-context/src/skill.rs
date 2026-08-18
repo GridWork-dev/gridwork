@@ -763,6 +763,10 @@ fn scan_line(trimmed: &str) -> Result<LineFacts, SkillError> {
                 '<' if chars.get(i + 1).map(|&(_, n)| n) == Some('<') => {
                     return Err(SkillError::UnsupportedYaml("merge key"));
                 }
+                // A deliberate duplicate of the in-flow refusal below: nothing
+                // between here and there mutates `c` or `flow`, so no input can
+                // reach one arm and not the other. Kept so `[` appears in this
+                // indicator table rather than being refused two screens away.
                 '[' if flow > 0 => return Err(SkillError::UnsupportedYaml("flow sequence node")),
                 // `? ` opens a node exactly as `- ` does, and had no arm here:
                 // `?` fell through to the catch-all, cleared `node_start`, and
@@ -1495,6 +1499,18 @@ mod tests {
             manifest("name: n\ndescription: d\nnote: |\n  text\nz: &a hello").expect_err("refused"),
             SkillError::UnsupportedYaml("anchor")
         );
+        // The tail arm itself: junk after the indicator is refused by name, and
+        // a comment there is not junk. Until now nothing red when this arm was
+        // replaced with `Ok(())` — the parser refuses such a header on its own,
+        // so the only delta was a named refusal degrading to a shapeless one,
+        // which is exactly the drift a guard's own test exists to notice.
+        assert_eq!(
+            manifest("name: n\ndescription: d\nnote: | junk\n  text").expect_err("refused"),
+            SkillError::UnsupportedYaml("block scalar header")
+        );
+        let skill = manifest("name: n\ndescription: d\nnote: | # a comment\n  text")
+            .expect("a comment after the header is not junk");
+        assert_eq!(skill.opaque[0].value, "text");
     }
 
     #[test]
