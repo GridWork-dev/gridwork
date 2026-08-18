@@ -524,7 +524,17 @@ fn scan_subset(front: &str) -> Result<Vec<String>, SkillError> {
         if line[..indent].contains('\t') {
             return Err(SkillError::TabIndentation);
         }
-        let trimmed = line.trim();
+        // `str::trim` strips the whole Unicode White_Space class; the
+        // indentation above is ASCII, and the parser agrees with the ASCII
+        // side — U+00A0 is content to it. Trimmed away, `\u{a0}license:` was
+        // scanned under a name the document does not contain: the real field
+        // vanished from the record, a phantom opaque key appeared in its
+        // place, and the `\u{a0}metadata:` spelling skipped the GridWork
+        // namespace's loud refusal entirely. Sliced instead, such a line
+        // starts with a non-ASCII character at column zero, and
+        // `is_plain_key` refuses it by name — exactly as the mid-key
+        // spelling always was.
+        let trimmed = line[indent..].trim_end_matches([' ', '\t']);
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
@@ -680,7 +690,9 @@ fn is_plain_key(key: &str) -> bool {
 /// tracking quote state and flow depth, and refuses an indicator wherever a
 /// node can begin: at the head, after `- `, after a key terminator, and after
 /// `[`, `{`, or `,` inside a flow collection. `? ` opens a node too and is
-/// refused outright; a block scalar header ends the line's YAML.
+/// refused outright — bare `?` as well inside flow, where the parser's
+/// dispatch table drops the blank requirement; a block scalar header ends the
+/// line's YAML.
 ///
 /// One line is the whole unit. Every construct that would carry state onto the
 /// next line — an unclosed flow collection, an unclosed quoted scalar — is
@@ -789,11 +801,18 @@ fn scan_line(trimmed: &str) -> Result<LineFacts, SkillError> {
                 // `? ` opens a node exactly as `- ` does, and had no arm here:
                 // `?` fell through to the catch-all, cleared `node_start`, and
                 // the whitespace skip below does not restore it — so the anchor
-                // in `? &s SECRET` was never examined.
-                '?' if matches!(
-                    chars.get(i + 1).map(|&(_, n)| n),
-                    None | Some(' ') | Some('\t')
-                ) =>
+                // in `? &s SECRET` was never examined. The blank after it is a
+                // BLOCK-context requirement: inside a flow collection the
+                // parser's dispatch table takes bare `?` as a KEY token, so
+                // `[?&anc S]` was an explicit key to the parser and a plain
+                // scalar to this scan, and the anchor rode through again — one
+                // indicator over from the quoted-key spelling of the same
+                // escape.
+                '?' if flow > 0
+                    || matches!(
+                        chars.get(i + 1).map(|&(_, n)| n),
+                        None | Some(' ') | Some('\t')
+                    ) =>
                 {
                     return Err(SkillError::UnsupportedYaml("explicit key"));
                 }
@@ -838,17 +857,24 @@ fn scan_line(trimmed: &str) -> Result<LineFacts, SkillError> {
             ',' => node_start = flow > 0,
             ':' => {
                 // A key terminator is `:` followed by whitespace or end of
-                // line. `12:30` and `http://x` are scalars, not mappings. One
-                // exception, in flow context only: after a quoted scalar the
-                // parser takes `:` as a key indicator with nothing required
-                // behind it — `["a":&x S]` is a mapping, blanks before the `:`
-                // or not — so the anchor there was never at what this scan
-                // considered a node start, and the parser RESOLVED its alias
-                // into a second key's evidence.
+                // line. `12:30` and `http://x` are scalars, not mappings. Two
+                // exceptions, both in flow context only, both the same parser
+                // rule: the dispatch table takes bare `:` as a VALUE token
+                // whenever a flow is open, and it is consulted after a quoted
+                // scalar and wherever a node could start. So `["a":&x S]` is a
+                // mapping, blanks before the `:` or not, and the anchor was
+                // never at what this scan considered a node start — the parser
+                // RESOLVED its alias into a second key's evidence. And in
+                // `[:&a S]` no document parses — a value with no key is a
+                // grammar error — but the parser scanned the anchor as an
+                // ANCHOR TOKEN before refusing, which is what this gate exists
+                // to keep away from the transpiled C. Mid-scalar the `:` is
+                // absorbed by the plain-scalar rule, so `[a:1]` stays the
+                // scalar the parser says it is.
                 let next = chars.get(i + 1).map(|&(_, n)| n);
                 if next.is_none()
                     || matches!(next, Some(' ') | Some('\t'))
-                    || (after_quoted && flow > 0)
+                    || ((after_quoted || node_start) && flow > 0)
                 {
                     if flow == 0 {
                         if key_end.is_none() {
@@ -1761,6 +1787,121 @@ mod tests {
                 "{front}"
             );
         }
+    }
+
+    #[test]
+    fn an_explicit_key_indicator_in_flow_is_refused() {
+        // The blank this scan required after `?` is a block-context rule. The
+        // parser's dispatch table fetches a KEY token on bare `?` whenever a
+        // flow collection is open, so everything the indicator table refuses
+        // rode in behind `[?` at depth one: the anchored key resolved into a
+        // second key's evidence, the tag applied, and the merge indicator
+        // reached the parser.
+        for front in [
+            "name: n\ndescription: d\nfirst: [?&anc SECRET]",
+            "name: n\ndescription: d\nfirst: [?*anc]",
+            "name: n\ndescription: d\nfirst: [?!!str 1]",
+            "name: n\ndescription: d\nfirst: [?<<]",
+            // A comma reopens a node start, so the relaxation fires mid-list.
+            "name: n\ndescription: d\nfirst: [x, ?&anc S]",
+            "name: n\ndescription: d\nfirst: [?q]",
+        ] {
+            assert_eq!(
+                manifest(front).expect_err("refused"),
+                SkillError::UnsupportedYaml("explicit key"),
+                "{front}"
+            );
+        }
+        // In block context the blank rule is the parser's own: `?what` is a
+        // plain scalar there, not a key.
+        manifest("name: n\ndescription: d\nx: ?what").expect("a block-context scalar");
+    }
+
+    #[test]
+    fn a_value_indicator_at_a_flow_node_start_guards_its_node() {
+        // The dispatch table's other flow relaxation, and with `?` fixed the
+        // last one it holds: bare `:` fetches a VALUE token whenever a flow is
+        // open, consulted wherever a node could start. No document in this
+        // class parses — a value with no key is a grammar error — but the
+        // anchor behind the `:` was scanned as an ANCHOR TOKEN by the
+        // transpiled parser before the grammar refused, so the `:` takes the
+        // indicator path here and the anchor is examined where it stands.
+        for (front, want) in [
+            ("name: n\ndescription: d\nx: [:&a S]", "anchor"),
+            ("name: n\ndescription: d\nx: [w, :*a]", "alias"),
+        ] {
+            assert_eq!(
+                manifest(front).expect_err("refused"),
+                SkillError::UnsupportedYaml(want),
+                "{front}"
+            );
+        }
+        // Not at a node start the `:` is scalar content, exactly as the
+        // parser reads it.
+        manifest("name: n\ndescription: d\nx: [a:v]").expect("a plain scalar with a colon");
+    }
+
+    #[test]
+    fn reserved_and_block_only_indicators_in_flow_refuse_downstream() {
+        // The rest of the dispatch table, swept so the two rows above are
+        // provably its only flow relaxations: `|`, `>`, `%`, `@` and backtick
+        // cannot start any token in flow — the parser refuses the document
+        // itself — so a line this scan accepts hands it nothing it resolves.
+        for front in [
+            "name: n\ndescription: d\nx: [| v]",
+            "name: n\ndescription: d\nx: [> v]",
+            "name: n\ndescription: d\nx: [%v]",
+            "name: n\ndescription: d\nx: [@v]",
+            "name: n\ndescription: d\nx: [`v]",
+        ] {
+            manifest(front).expect_err(front);
+        }
+    }
+
+    #[test]
+    fn a_unicode_space_before_a_key_is_refused_not_renamed() {
+        // The indentation run is ASCII and the parser agrees — U+00A0 is
+        // content to both — but `str::trim` swallowed it, so the key was
+        // scanned under a name the document does not contain: the real field
+        // dropped out of the record, a phantom opaque key stood in its place,
+        // a tool claim went invisible, and the `metadata:` spelling skipped
+        // the GridWork namespace's loud refusal.
+        for front in [
+            "name: n\ndescription: d\n\u{a0}license: PROPRIETARY",
+            "name: n\ndescription: d\n\u{a0}allowed-tools:\n  - Read",
+            "name: n\ndescription: d\n\u{a0}metadata:\n  team: x",
+            // The mid-key spelling, pinned as the consistency control.
+            "name: n\ndescription: d\nlic\u{a0}ense: MIT",
+        ] {
+            assert_eq!(
+                manifest(front).expect_err("refused"),
+                SkillError::MalformedTopLevelKey,
+                "{front}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_comma_in_block_context_prose_is_content() {
+        // `,` opens a node only inside a flow collection. Set unconditionally,
+        // it would put the characters the indicator table refuses at a node
+        // start inside ordinary prose — `Read, & write` refused as an anchor.
+        let m = manifest("name: n\ndescription: d\nlicense: Read, & write")
+            .expect("prose with a comma before an ampersand");
+        assert_eq!(m.license.as_deref(), Some("Read, & write"));
+        manifest("name: n\ndescription: d\nnote: hello, *world* is emphasis")
+            .expect("prose with a comma before an asterisk");
+    }
+
+    #[test]
+    fn a_leading_sequence_with_no_key_above_is_refused_by_name() {
+        // Without the guard its job falls to the deserializer, which reports
+        // a shapeless `Malformed` — the refusal this gate exists to replace
+        // with a named one.
+        assert_eq!(
+            manifest("- 1\nname: n").expect_err("refused"),
+            SkillError::MalformedTopLevelKey
+        );
     }
 
     #[test]

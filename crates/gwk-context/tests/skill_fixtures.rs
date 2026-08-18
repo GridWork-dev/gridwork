@@ -139,6 +139,26 @@ fn catalog() -> Catalog {
     // indicator behind a PLAIN key, where the scan's whitespace rule finds the
     // node start; a JSON-style quoted key needs no space after its `:`, so the
     // same alias sat one character past everything the corpus exercised.
+    // The dispatch-table axis. The parser's token dispatch holds exactly two
+    // flow-context relaxations — bare `?` is a KEY token and bare `:` a VALUE
+    // token whenever a flow is open — and every flow-style refusal in the
+    // corpus put its indicator behind a plain key, where the block rules the
+    // scan modeled happen to agree with it.
+    c.insert(
+        "refused/explicit-key-flow.md",
+        Some(|e| matches!(e, SkillError::UnsupportedYaml("explicit key"))),
+    );
+    c.insert(
+        "refused/explicit-key-flow-comma.md",
+        Some(|e| matches!(e, SkillError::UnsupportedYaml("explicit key"))),
+    );
+    // The Unicode-blank axis. Indentation is ASCII, `str::trim` is not, and
+    // the parser sides with ASCII — so a U+00A0-prefixed key was scanned
+    // under a name the document does not contain.
+    c.insert(
+        "refused/unicode-space-key.md",
+        Some(|e| matches!(e, SkillError::MalformedTopLevelKey)),
+    );
     c.insert(
         "refused/quoted-flow-key-alias.md",
         Some(|e| matches!(e, SkillError::UnsupportedYaml("alias"))),
@@ -181,7 +201,7 @@ fn every_fixture_on_disk_is_exercised_and_every_expectation_has_a_fixture() {
     // The count first. Everything below is a fold, and a fold over nothing
     // agrees with itself.
     assert!(
-        found.len() >= 28,
+        found.len() >= 31,
         "expected at least 28 skill fixtures, walked {}",
         found.len()
     );
