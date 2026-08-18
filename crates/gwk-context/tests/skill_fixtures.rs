@@ -130,6 +130,11 @@ fn catalog() -> Catalog {
     // corpus could not tell a depth bound from an item counter: a sequence of
     // mappings was accepted at one entry and refused at two.
     c.insert("accepted/sequence-of-mappings.md", None);
+    // The closing axis. Every column-zero sequence above is the LAST construct
+    // in its document, so a level that could never be closed was
+    // indistinguishable from a level nothing needed to close; the construct
+    // after this one refused a fully portable manifest at a true depth of one.
+    c.insert("accepted/column-zero-tools.md", None);
     c.insert(
         "refused/block-scalar-in-sequence-item.md",
         Some(|e| {
@@ -168,8 +173,8 @@ fn every_fixture_on_disk_is_exercised_and_every_expectation_has_a_fixture() {
     // The count first. Everything below is a fold, and a fold over nothing
     // agrees with itself.
     assert!(
-        found.len() >= 26,
-        "expected at least 26 skill fixtures, walked {}",
+        found.len() >= 27,
+        "expected at least 27 skill fixtures, walked {}",
         found.len()
     );
     assert_eq!(

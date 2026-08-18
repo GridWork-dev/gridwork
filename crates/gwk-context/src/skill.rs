@@ -593,13 +593,21 @@ fn scan_subset(front: &str) -> Result<Vec<String>, SkillError> {
         // two-entry list of mappings — `authors:` with two `- name:` — refused
         // a document its one-entry twin accepted.
         //
-        // A level continues when a later line names the same column with the
-        // same kind, and closes when a line names a column at or inside it with
-        // a different kind. That is one rule for both collections, and it is
-        // the reason the two spellings of every pair below now agree.
+        // A level continues when a later line names its column with its kind,
+        // and closes when a line names a column inside it. At the level's own
+        // column the relation is asymmetric: a sequence named at an open
+        // mapping's column is that mapping's value — a child — while a mapping
+        // named at an open sequence's column ends that sequence, because item
+        // content always sits right of the `- ` marker, so nothing inside an
+        // item can share the sequence's own column. An earlier revision pushed
+        // in both directions, so a column-zero sequence was never closed and a
+        // fully portable manifest whose `allowed-tools:` list preceded
+        // `metadata:` was refused at a true depth of one.
         for &(offset, is_sequence) in &facts.openings {
             let column = indent + offset;
-            while stack.last().is_some_and(|&(open, _)| open > column) {
+            while stack.last().is_some_and(|&(open, kind)| {
+                open > column || (open == column && kind && !is_sequence)
+            }) {
                 stack.pop();
             }
             match stack.last() {
@@ -728,6 +736,12 @@ fn scan_line(trimmed: &str) -> Result<LineFacts, SkillError> {
         // branch that examines nothing: `[don't, &a hello]` was accepted, and
         // the alias in its twin key was RESOLVED.
         if (c == '\'' || c == '"') && node_start {
+            // The quoted scalar IS the node starting here. Skipping the
+            // assignment left `node_offset` at the previous node start — behind
+            // a `- ` marker, the marker's own column — so the mapping a quoted
+            // key opens was named one level too far left, an over-refusal that
+            // the pop rule above would have turned into a bound bypass.
+            node_offset = at;
             quote = Some(c);
             node_start = false;
             i += 1;
@@ -1636,6 +1650,64 @@ mod tests {
                 .expect_err("refused"),
             SkillError::TooDeeplyNested
         );
+    }
+
+    #[test]
+    fn a_column_zero_sequence_closes_when_a_mapping_names_its_column() {
+        // The pop was strictly `open > column`, so nothing pushed at column
+        // zero was ever poppable and the arm below it pushed on a kind
+        // mismatch instead of closing: every construct after a column-zero
+        // sequence stacked on top of it, and a fully portable manifest —
+        // `allowed-tools:` as a column-zero list followed by `metadata:` — was
+        // refused at a true depth of one. Every other column-zero sequence in
+        // the corpus was the last construct in its document, which is why the
+        // suite could not see it.
+        let m = manifest(
+            "name: n\ndescription: d\nallowed-tools:\n- Read\n- Grep\nmetadata:\n  team: infra",
+        )
+        .expect("four portable-core keys at a true depth of one");
+        let claimed: Vec<&str> = m
+            .allowed_tools
+            .claimed()
+            .iter()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(claimed, ["Read", "Grep"]);
+        assert_eq!(m.metadata.get("team").map(String::as_str), Some("infra"));
+        // The block and flow spellings of the same document agree again.
+        manifest("name: n\ndescription: d\naa:\n- 1\nbb:\n  cc: 1").expect("block spelling");
+        manifest("name: n\ndescription: d\naa: [1]\nbb:\n  cc: 1").expect("flow spelling");
+        manifest("name: n\ndescription: d\naa:\n- 1\nbb: 2").expect("a scalar key after");
+        // Genuinely deep documents still refuse, so the pop is directional,
+        // not disabled.
+        assert_eq!(
+            manifest("name: n\ndescription: d\nmetadata:\n  a:\n    b:\n      c: 1")
+                .expect_err("refused"),
+            SkillError::TooDeeplyNested
+        );
+    }
+
+    #[test]
+    fn a_quoted_key_is_named_at_its_own_column() {
+        // The quote branch cleared `node_start` without recording where the
+        // node began, so a quoted key behind a `- ` marker kept the marker's
+        // column. At the old pop rule that was an over-refusal — the quoted
+        // spelling of an accepted document refused — and under the directional
+        // pop it would have become a bound BYPASS, the mapping named at the
+        // marker's column popping the sequence that is genuinely open.
+        manifest("name: n\ndescription: d\nauthors:\n  - \"q\": 1\n    k: 2")
+            .expect("the quoted twin of an accepted document");
+        // The deep pair agrees in the other direction: both spellings refuse.
+        for front in [
+            "name: n\ndescription: d\nx:\n- \"q\":\n    r:\n      s: 1",
+            "name: n\ndescription: d\nx:\n- q:\n    r:\n      s: 1",
+        ] {
+            assert_eq!(
+                manifest(front).expect_err("refused"),
+                SkillError::TooDeeplyNested,
+                "{front}"
+            );
+        }
     }
 
     #[test]
