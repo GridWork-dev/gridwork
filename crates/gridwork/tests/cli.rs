@@ -1399,3 +1399,149 @@ async fn the_admin_door_initializes_a_database_and_the_daemon_serves_it() {
         .await;
     }
 }
+
+/// The repository root, from this crate's manifest directory.
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("crates/gridwork has two ancestors")
+        .to_path_buf()
+}
+
+/// Every `.service` and `.timer` file in the tree.
+fn unit_files(root: &Path) -> Vec<PathBuf> {
+    fn walk(dir: &Path, found: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            // `target` is build output and `.git` is history; neither is the
+            // tree this pin is about, and both are enormous.
+            if path.is_dir() {
+                if name != "target" && name != ".git" && name != "node_modules" {
+                    walk(&path, found);
+                }
+            } else if name.ends_with(".service") || name.ends_with(".timer") {
+                found.push(path);
+            }
+        }
+    }
+    let mut found = Vec::new();
+    walk(root, &mut found);
+    found.sort();
+    found
+}
+
+/// Criterion 9, arm 1: `migrate` reaches the parse tree once.
+///
+/// The verb exists and is reachable — an unreachable verb is a different
+/// failure, and this arm would pass for it too if it only counted absences.
+#[test]
+fn admin_migrate_is_reachable_from_the_parse_tree_and_named_once() {
+    let args = std::fs::read_to_string(repo_root().join("crates/gridwork/src/args.rs"))
+        .expect("read args.rs");
+
+    // One dispatch arm. A second would mean two spellings reaching the same
+    // verb, and one of them would be the one nobody reviewed.
+    let arms = args.matches("\"migrate\" =>").count();
+    assert_eq!(
+        arms, 1,
+        "`\"migrate\" =>` appears {arms} times in the parse tree"
+    );
+    assert!(
+        args.contains("Verb::AdminMigrate"),
+        "the parse tree does not construct Verb::AdminMigrate at all"
+    );
+}
+
+/// Criterion 9, arm 2: no unit file invokes it.
+///
+/// A migration is an operator act taken with the daemon down and the writer
+/// lock held. A systemd unit that could reach it is a migration that runs
+/// because a machine rebooted.
+#[test]
+fn no_unit_file_invokes_admin_migrate() {
+    let root = repo_root();
+    let units = unit_files(&root);
+
+    // COUNT first. A glob that matched nothing sweeps nothing and passes
+    // forever, and this arm would then be a guarantee about a set that does not
+    // exist. The number is a floor rather than an equality: adding a unit is
+    // routine, and the per-file assertion below is what covers a new one.
+    assert!(
+        !units.is_empty(),
+        "no .service or .timer files were found under {}: this pin is about what they contain, \
+         and over an empty sweep every one of them is innocent",
+        root.display()
+    );
+
+    for unit in &units {
+        let text = std::fs::read_to_string(unit)
+            .unwrap_or_else(|err| panic!("read {}: {err}", unit.display()));
+        assert!(
+            !text.contains("admin migrate"),
+            "{} invokes `admin migrate`: a migration is an operator act, not something a \
+             machine does on its own",
+            unit.display()
+        );
+    }
+}
+
+/// Criterion 9, arm 3: the wire cannot ask for it.
+///
+/// `contracts/bindings.ts` already records the neighbouring refusal in prose —
+/// "There is deliberately NO `import`, `migrate`, `backfill`, or `legacy` kind"
+/// on `IngestionKind`. A sentence in a generated file is a wish; this makes it
+/// a check. The command union is read from the domain crate rather than from
+/// the generated bindings, because the bindings are downstream of it and a
+/// variant would reach the union first.
+#[test]
+fn the_command_union_has_no_migrate_variant() {
+    let command = std::fs::read_to_string(repo_root().join("crates/gwk-domain/src/command.rs"))
+        .expect("read command.rs");
+
+    let union = command
+        .split_once("pub enum KernelCommand {")
+        .expect("KernelCommand is declared")
+        .1;
+
+    // Counted before it is searched, for the same reason as the sweep above: a
+    // split that found an empty tail would contain no forbidden variant either.
+    let variants = union
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            line.len() - trimmed.len() == 4
+                && trimmed
+                    .split(['{', ',', ' '])
+                    .next()
+                    .is_some_and(|word| word.chars().next().is_some_and(char::is_uppercase))
+        })
+        .count();
+    assert!(
+        variants > 40,
+        "found {variants} variants in KernelCommand, which is too few to be the real union — \
+         this pin would then be searching an empty string"
+    );
+
+    for forbidden in ["Migrate", "ApplyStep", "Backfill", "AlterSchema"] {
+        assert!(
+            !union.contains(&format!("    {forbidden} {{")),
+            "KernelCommand has a `{forbidden}` variant: a DDL act performed with the daemon down \
+             and the writer lock held is not something a client asks for over the wire"
+        );
+    }
+
+    // And the prose the generated contract already carries stays true.
+    let bindings = std::fs::read_to_string(repo_root().join("contracts/bindings.ts"))
+        .expect("read bindings.ts");
+    assert!(
+        bindings
+            .contains("There is deliberately NO `import`, `migrate`, `backfill`, or `legacy` kind"),
+        "the IngestionKind refusal this pin makes enforceable is no longer in the contract"
+    );
+}
