@@ -92,6 +92,8 @@ pub const SKILL_NAME_MAX_BYTES: usize = 64;
 pub const SKILL_DESCRIPTION_MAX_BYTES: usize = 1024;
 /// Maximum bytes in the `license` field.
 pub const SKILL_LICENSE_MAX_BYTES: usize = 128;
+/// Maximum bytes in the `compatibility` field.
+pub const SKILL_COMPATIBILITY_MAX_BYTES: usize = 128;
 /// Maximum `metadata` entries, `gridwork` included.
 pub const SKILL_METADATA_MAX_ENTRIES: usize = 32;
 /// Maximum bytes in one metadata key.
@@ -712,6 +714,10 @@ fn scan_line(trimmed: &str) -> Result<LineFacts, SkillError> {
     // The last non-blank thing consumed was a closing quote. Blanks do not
     // clear it, because the parser reads `["a" :&x S]` exactly as `["a":&x S]`.
     let mut after_quoted = false;
+    // The last non-blank thing consumed closed a flow collection. In block
+    // prose `]` and `}` are ordinary characters — `see {this}` is a scalar —
+    // so only a closer that actually decremented `flow` sets this.
+    let mut after_flow_close = false;
     let mut flow: usize = 0;
     let mut flow_depth = 0usize;
     let mut sequence_markers = 0usize;
@@ -726,6 +732,7 @@ fn scan_line(trimmed: &str) -> Result<LineFacts, SkillError> {
 
     while i < chars.len() {
         let (at, c) = chars[i];
+        let flow_before = flow;
 
         if let Some(q) = quote {
             if q == '"' && c == '\\' {
@@ -764,9 +771,24 @@ fn scan_line(trimmed: &str) -> Result<LineFacts, SkillError> {
             continue;
         }
 
-        // A `#` opening a comment ends the line. It only opens one after
-        // whitespace or at the head — `a#b` is a plain scalar.
-        if c == '#' && (i == 0 || matches!(chars[i - 1].1, ' ' | '\t')) {
+        // Where the parser is between tokens: it skips blanks and consults its
+        // dispatch table here, so an indicator in this position is a token to
+        // it. `node_start` alone marks only the boundaries a node may OPEN at —
+        // a closed quoted scalar and a closer that closed a flow are boundaries
+        // too, and the parser reads them as such.
+        let between_tokens = node_start || after_quoted || after_flow_close;
+
+        // A `#` opening a comment ends the line. The rule is not "after a
+        // blank": the parser skips to the next token before every fetch and
+        // starts a comment at a bare `#` wherever it lands, so `[Read,#]` was a
+        // comment to it and a plain scalar to a blank-only rule. This scan then
+        // walked past the `#`, consumed a `]` the parser never saw, and ended
+        // the line with `flow == 0` — the multi-line refusal below never fired,
+        // the continuation was scanned as a fresh block line where `,` clears
+        // `node_start`, and the alias behind it was RESOLVED into the record.
+        // Mid-scalar is not a boundary, so `a#b` stays the plain scalar the
+        // parser says it is.
+        if c == '#' && (i == 0 || between_tokens || matches!(chars[i - 1].1, ' ' | '\t')) {
             break;
         }
 
@@ -784,7 +806,7 @@ fn scan_line(trimmed: &str) -> Result<LineFacts, SkillError> {
             node_offset = at;
         }
 
-        if node_start {
+        if between_tokens {
             match c {
                 '&' => return Err(SkillError::UnsupportedYaml("anchor")),
                 '*' => return Err(SkillError::UnsupportedYaml("alias")),
@@ -817,8 +839,15 @@ fn scan_line(trimmed: &str) -> Result<LineFacts, SkillError> {
                     return Err(SkillError::UnsupportedYaml("explicit key"));
                 }
                 // A block scalar header ends the line's YAML; what follows is
-                // literal text that `scan_subset` steps over.
-                '|' | '>' if flow == 0 => {
+                // literal text that `scan_subset` steps over. Unlike every arm
+                // above it changes this scan's state instead of refusing it, so
+                // it keeps the narrower `node_start` it has always had: a
+                // header opens a node, and after `]` or a closed quoted scalar
+                // no node can open. No test pins the difference because none
+                // can — a `|` in either of those positions parses nowhere, so
+                // both spellings refuse the same documents. Written down rather
+                // than left as a silent widening.
+                '|' | '>' if node_start && flow == 0 => {
                     check_block_scalar_header(&chars, i)?;
                     block_scalar = true;
                     break;
@@ -908,6 +937,7 @@ fn scan_line(trimmed: &str) -> Result<LineFacts, SkillError> {
             _ => node_start = false,
         }
         after_quoted = false;
+        after_flow_close = matches!(c, ']' | '}') && flow_before > 0;
         i += 1;
     }
 
@@ -1029,7 +1059,12 @@ impl SkillManifest {
         let license = string("license", take("license"))?
             .map(|v| bounded("license", v, SKILL_LICENSE_MAX_BYTES))
             .transpose()?;
-        let compatibility = string("compatibility", take("compatibility"))?;
+        // Every other recognized string carries its own bound; this one fell
+        // closed only at the 8 KiB frontmatter limit, which is a different
+        // question with a different answer.
+        let compatibility = string("compatibility", take("compatibility"))?
+            .map(|v| bounded("compatibility", v, SKILL_COMPATIBILITY_MAX_BYTES))
+            .transpose()?;
 
         let allowed_tools = match take("allowed-tools") {
             None => AllowedToolsEvidence::default(),
@@ -1891,6 +1926,80 @@ mod tests {
         assert_eq!(m.license.as_deref(), Some("Read, & write"));
         manifest("name: n\ndescription: d\nnote: hello, *world* is emphasis")
             .expect("prose with a comma before an asterisk");
+    }
+
+    #[test]
+    fn a_comment_opens_wherever_the_parser_is_between_tokens() {
+        // The parser skips to its next token before every fetch, and a bare `#`
+        // there starts a comment — no preceding blank required. A blank-only
+        // rule read `[Read,#]` as a plain scalar, walked past the `#`, consumed
+        // a `]` the parser had inside a comment, and left the line at
+        // `flow == 0`: the multi-line refusal never fired, and the continuation
+        // was rescanned as a fresh block line where `,` clears `node_start`, so
+        // the alias behind it was RESOLVED into the record. Every spelling of
+        // the hole is the same hole — after `[`, after `,`, after a flow key's
+        // `:`, and after a closed quoted scalar.
+        for front in [
+            "name: n\ndescription: d\nallowed-tools: [Read,#]\n  X, &s SECRET, *s]",
+            "name: n\ndescription: d\nallowed-tools: [#]\n  Read, &s S, *s]",
+            "name: n\ndescription: d\nallowed-tools: [Read,#]\n  X, !!str 7]",
+            "name: n\ndescription: d\nallowed-tools: [Read,#]\n  X, <<]",
+            "name: n\ndescription: d\nallowed-tools: [a, \"b\"#]\n  , &s S, *s]",
+            "name: n\ndescription: d\nallowed-tools: [\"k\":#]\n  S]",
+            "name: n\ndescription: d\nmetadata:\n  team: [a,#]\n    b, &s S, *s]",
+        ] {
+            assert_eq!(
+                manifest(front).expect_err("refused"),
+                SkillError::UnsupportedYaml("multi-line flow collection"),
+                "{front}"
+            );
+        }
+        // Mid-scalar is not a boundary, and the parser agrees: these are the
+        // documents a comment rule that fired anywhere would have refused.
+        let m = manifest("name: n\ndescription: see http://x/y#z\nlicense: a#b")
+            .expect("a fragment and a hash inside plain scalars");
+        assert_eq!(m.description, "see http://x/y#z");
+        assert_eq!(m.license.as_deref(), Some("a#b"));
+        let m = manifest("name: n\ndescription: d\nallowed-tools: [a#b, c]")
+            .expect("a hash inside a flow scalar");
+        assert_eq!(m.allowed_tools.claimed(), ["a#b", "c"]);
+        // A closed flow at depth one leaves nothing open, so a comment after it
+        // ends a line that was already complete.
+        manifest("name: n\ndescription: d\nallowed-tools: [a]#trail").expect("a closed flow");
+    }
+
+    #[test]
+    fn an_indicator_after_a_closed_node_is_refused_by_name() {
+        // `node_start` marks where a node may OPEN, which is narrower than
+        // where the parser is between tokens: a closed quoted scalar and a
+        // closer that closed a flow are boundaries too, and the dispatch table
+        // fetches ANCHOR/ALIAS/TAG there unconditionally. No document in this
+        // class parses, but the transpiled scanner ran on the bytes before the
+        // grammar refused — the same reason the `:` at a flow node start takes
+        // the indicator path.
+        for (front, want) in [
+            ("name: n\ndescription: d\nx: [\"a\" &s S]", "anchor"),
+            ("name: n\ndescription: d\nx: [\"a\" *s]", "alias"),
+            ("name: n\ndescription: d\nx: [\"a\" !!str 1]", "tag"),
+            ("name: n\ndescription: d\nx: \"v\" &s S", "anchor"),
+            ("name: n\ndescription: d\nx: [a] &s S", "anchor"),
+        ] {
+            assert_eq!(
+                manifest(front).expect_err("refused"),
+                SkillError::UnsupportedYaml(want),
+                "{front}"
+            );
+        }
+        // A `]` or `}` in block prose closed nothing, so it is not a boundary
+        // and what follows is content — the reason the flag is set only by a
+        // closer that decremented the depth.
+        let m = manifest("name: n\ndescription: d\nlicense: JSON like {\"a\":1}{\"b\":2} ok")
+            .expect("adjacent braces in prose");
+        assert_eq!(
+            m.license.as_deref(),
+            Some("JSON like {\"a\":1}{\"b\":2} ok")
+        );
+        manifest("name: n\ndescription: d\nx: [\"a\", b]").expect("a quoted flow entry");
     }
 
     #[test]

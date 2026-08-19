@@ -27,10 +27,10 @@ use std::collections::BTreeSet;
 use gwk_context::skill::{
     BundleEntry, BundleRefusal, RawEntryKind, SKILL_ALLOWED_TOOL_MAX_BYTES,
     SKILL_ALLOWED_TOOLS_MAX_COUNT, SKILL_BUNDLE_MAX_ENTRIES, SKILL_BUNDLE_PATH_MAX_BYTES,
-    SKILL_DESCRIPTION_MAX_BYTES, SKILL_FRONTMATTER_MAX_BYTES, SKILL_INPUT_MAX_BYTES,
-    SKILL_LICENSE_MAX_BYTES, SKILL_METADATA_KEY_MAX_BYTES, SKILL_METADATA_MAX_ENTRIES,
-    SKILL_METADATA_VALUE_MAX_BYTES, SKILL_NAME_MAX_BYTES, SKILL_OPAQUE_FIELD_MAX_COUNT, SkillError,
-    SkillManifest,
+    SKILL_COMPATIBILITY_MAX_BYTES, SKILL_DESCRIPTION_MAX_BYTES, SKILL_FRONTMATTER_MAX_BYTES,
+    SKILL_INPUT_MAX_BYTES, SKILL_LICENSE_MAX_BYTES, SKILL_METADATA_KEY_MAX_BYTES,
+    SKILL_METADATA_MAX_ENTRIES, SKILL_METADATA_VALUE_MAX_BYTES, SKILL_NAME_MAX_BYTES,
+    SKILL_OPAQUE_FIELD_MAX_COUNT, SkillError, SkillManifest,
 };
 use gwk_context::{
     CONTEXT_EVIDENCE_MAX_COUNT, Contribution, Digest, EvidenceRefs, Participation,
@@ -295,6 +295,18 @@ fn bound_cases() -> Vec<BoundCase> {
             refusal: |e| matches!(e, SkillError::FieldTooLong("license")),
         },
         BoundCase {
+            label: "compatibility",
+            at_edge: format!(
+                "{base}\ncompatibility: {}",
+                "c".repeat(SKILL_COMPATIBILITY_MAX_BYTES)
+            ),
+            past_edge: format!(
+                "{base}\ncompatibility: {}",
+                "c".repeat(SKILL_COMPATIBILITY_MAX_BYTES + 1)
+            ),
+            refusal: |e| matches!(e, SkillError::FieldTooLong("compatibility")),
+        },
+        BoundCase {
             label: "metadata key",
             at_edge: format!(
                 "{base}\nmetadata:\n  {}: v",
@@ -376,8 +388,8 @@ fn every_upstream_bound_accepts_its_edge_and_refuses_one_past_it() {
     // The count first. A generator that returned an empty vector would make
     // every assertion below vacuous, and the loop would report success.
     assert!(
-        cases.len() >= 9,
-        "expected at least 9 bound cases, generated {}",
+        cases.len() >= 10,
+        "expected at least 10 bound cases, generated {}",
         cases.len()
     );
 

@@ -152,6 +152,18 @@ fn catalog() -> Catalog {
         "refused/explicit-key-flow-comma.md",
         Some(|e| matches!(e, SkillError::UnsupportedYaml("explicit key"))),
     );
+    // The comment-boundary axis. The corpus tested `#` only as prose and as a
+    // whole-line comment; the parser opens one at any token boundary, so a
+    // `#` before a fake closer left the flow open to it and closed to the
+    // scan — the one shape that turns the line-local refusal off.
+    c.insert(
+        "refused/flow-comment-continuation.md",
+        Some(|e| matches!(e, SkillError::UnsupportedYaml("multi-line flow collection"))),
+    );
+    c.insert(
+        "refused/flow-comment-after-quote.md",
+        Some(|e| matches!(e, SkillError::UnsupportedYaml("multi-line flow collection"))),
+    );
     // The Unicode-blank axis. Indentation is ASCII, `str::trim` is not, and
     // the parser sides with ASCII — so a U+00A0-prefixed key was scanned
     // under a name the document does not contain.
@@ -201,8 +213,8 @@ fn every_fixture_on_disk_is_exercised_and_every_expectation_has_a_fixture() {
     // The count first. Everything below is a fold, and a fold over nothing
     // agrees with itself.
     assert!(
-        found.len() >= 31,
-        "expected at least 28 skill fixtures, walked {}",
+        found.len() >= 33,
+        "expected at least 33 skill fixtures, walked {}",
         found.len()
     );
     assert_eq!(
