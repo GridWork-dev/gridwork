@@ -29,6 +29,7 @@ const BACKEND_MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0003_blob.sql"),
     include_str!("../migrations/0004_checkpoint.sql"),
     include_str!("../migrations/0005_pty_delivery.sql"),
+    include_str!("../migrations/0006_schema_migration.sql"),
 ];
 
 // ponytail: still no migration runner, and now for a better reason than "there
@@ -460,6 +461,25 @@ pub async fn driving_figures(pool: &PgPool, window: &ReceiptWindow) -> Result<Dr
 /// the live tree, the `workspace_node_closed` event is the history, and a
 /// replay reproduces the same deletion. The parentage trigger and the parent
 /// FK stay ENABLE ALWAYS, so the grant widens nothing about tree legality.
+///
+/// `gwk_internal.schema_migration` is NAMED rather than covered, and the
+/// distinction is the whole reason it is a separate line. The blanket
+/// `GRANT ... ON ALL TABLES IN SCHEMA gwk` above reaches schema `gwk` and
+/// stops there, so every `gwk_internal` relation starts with no privileges and
+/// receives exactly what some line here hands it. That default is the safe one
+/// and it is also the quiet one: a table nobody grants is a table nobody
+/// notices, which is why `tests/admin_init.rs` now counts this schema's
+/// relations and demands a declared class for each.
+///
+/// SELECT is all the ledger gets. The kernel reports which contract it carries
+/// and how it got there; it does not migrate itself, and a serving process that
+/// could append to its own provenance could also invent one. Withholding the
+/// write is not what makes the ledger append-only, though — a grant binds the
+/// runtime role and nothing else, while the credential that applies a migration
+/// is the admin one and a superuser is bound by neither. The append-only
+/// TRIGGER in migration 0006 is what covers all three, and
+/// `the_ledger_refuses_mutation_from_a_superuser` is what proves the trigger
+/// rather than the grant.
 pub fn backend_script(role: &str, contract_sha256: &str) -> String {
     let migrations = BACKEND_MIGRATIONS.join("\n");
     format!(
@@ -476,6 +496,7 @@ pub fn backend_script(role: &str, contract_sha256: &str) -> String {
          REVOKE INSERT, UPDATE ON gwk.transition FROM {role};\n\
          GRANT DELETE ON gwk.workspace_node TO {role};\n\
          GRANT SELECT ON gwk_internal.schema_fingerprint TO {role};\n\
+         GRANT SELECT ON gwk_internal.schema_migration TO {role};\n\
          GRANT SELECT, UPDATE ON gwk_internal.writer TO {role};\n\
          GRANT SELECT, INSERT, UPDATE ON gwk_internal.pty_delivery TO {role};\n\
          GRANT SELECT, INSERT, UPDATE, DELETE ON \
@@ -629,7 +650,31 @@ mod tests {
         assert!(script.contains("gwk.context_observation, gwk.context_finalization FROM"));
         assert!(script.contains("REVOKE INSERT, UPDATE ON gwk.transition"));
         assert!(script.contains("GRANT SELECT, INSERT, UPDATE ON gwk_internal.pty_delivery"));
-        assert!(!script.contains("TRUNCATE"), "{script}");
+        // Named, not covered. `gwk_internal` has no blanket grant, so the
+        // ledger is unreachable to the runtime role unless this exact line
+        // exists — and SELECT is the whole of what it may have.
+        assert!(script.contains("GRANT SELECT ON gwk_internal.schema_migration TO "));
+        // TRUNCATE is granted nowhere. Scoped to the GRANT lines, which is
+        // narrower than this check used to be and has to be: migration 0006
+        // carries a `BEFORE TRUNCATE` trigger, so the word now appears in the
+        // DDL that FORBIDS truncation — and a bare `!contains("TRUNCATE")`
+        // cannot tell that apart from a line handing it out. The lines are
+        // counted before they are filtered: a fold over a GRANT list that
+        // stopped matching would report zero TRUNCATE grants just as happily
+        // as a script that has none.
+        let grants: Vec<&str> = script
+            .lines()
+            .filter(|line| line.starts_with("GRANT"))
+            .collect();
+        assert_eq!(grants.len(), 10, "the grant matrix changed shape: {script}");
+        assert_eq!(
+            grants
+                .iter()
+                .filter(|line| line.contains("TRUNCATE"))
+                .count(),
+            0,
+            "{script}"
+        );
 
         // Deletion is granted on the blob tables and on gwk.workspace_node —
         // NOWHERE else. The check is spelled as "every DELETE-granting line is

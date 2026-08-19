@@ -75,6 +75,23 @@ const BASE_MIGRATIONS: [&str; 4] = [
     "0004_checkpoint",
 ];
 
+/// Backend migrations that landed AFTER this step's span, and which therefore
+/// nothing carries to a database that already exists.
+///
+/// This constant is a gap made visible, not a fix. `schema/steps/` tracks the
+/// CONTRACT digest; `gwk_internal` has no digest and no chain. `BACKEND_MIGRATIONS`
+/// is applied wholesale at initialization and never again, so a backend
+/// migration added later reaches every NEW database and no existing one.
+/// `0005_pty_delivery` escaped that only by accident of timing — it landed
+/// inside this step's span, so the step inlines it. `0006_schema_migration`
+/// landed after, and there is no step for it to ride.
+///
+/// The applier that task 5 builds has to deliver these for real. Until it
+/// does, this list is what keeps the comparison below at full strength instead
+/// of passing quietly against a narrower schema — and adding a migration
+/// without adding it here reds that comparison rather than going unnoticed.
+const PENDING_BACKEND_MIGRATIONS: [&str; 1] = ["0006_schema_migration"];
+
 /// A fixed `\restrict` key for both dumps.
 ///
 /// pg_dump stamps a random nonce into a `\restrict`/`\unrestrict` pair, which
@@ -237,6 +254,54 @@ async fn apply_step(pool: &PgPool) {
         .execute(pool)
         .await
         .unwrap_or_else(|err| panic!("apply {}: {err}", step.id));
+}
+
+/// Apply the backend migrations no step carries, and the privileges they need.
+///
+/// Both halves, because the second is the one that gets forgotten. A backend
+/// migration creates a relation in `gwk_internal`, where nothing is granted by
+/// default — so the DDL alone leaves a table the runtime role cannot see, and
+/// nothing about the database looks wrong. The ledger arrived here exactly that
+/// way, and the schema comparison below is what noticed.
+///
+/// See [`PENDING_BACKEND_MIGRATIONS`] for why any of this is the test's job.
+async fn apply_pending_backend_migrations(pool: &PgPool, role: &str) {
+    for migration in PENDING_BACKEND_MIGRATIONS {
+        let path = format!("crates/gwk-kernel/migrations/{migration}.sql");
+        let sql = std::fs::read_to_string(repo_root().join(&path))
+            .unwrap_or_else(|err| panic!("read {path}: {err}"));
+        sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+            .execute(pool)
+            .await
+            .unwrap_or_else(|err| panic!("apply {migration}: {err}"));
+    }
+
+    // Filtered out of the real `backend_script` rather than copied from it: a
+    // second hand-maintained list of grants is a second thing to forget. The
+    // digest argument is unused here — only the privilege statements are kept,
+    // and the fingerprint INSERT and the DDL are dropped on the floor.
+    let script = admin::backend_script(role, &"0".repeat(64));
+    let statements: Vec<&str> = script
+        .lines()
+        .filter(|line| line.starts_with("GRANT") || line.starts_with("REVOKE"))
+        .collect();
+    // Counted before it is replayed: a filter that stopped matching would
+    // silently apply nothing, and the schema comparison would then fail
+    // pointing at the ledger instead of at this line.
+    assert!(
+        !statements.is_empty(),
+        "no privilege statements matched in backend_script"
+    );
+    assert!(
+        statements
+            .iter()
+            .any(|line| line.contains("gwk_internal.schema_migration")),
+        "backend_script grants nothing on the ledger: {script}"
+    );
+    sqlx::raw_sql(sqlx::AssertSqlSafe(statements.join("\n")))
+        .execute(pool)
+        .await
+        .expect("replay the privilege matrix");
 }
 
 async fn recorded_contract(pool: &PgPool) -> String {
@@ -441,6 +506,9 @@ async fn the_retroactive_step_reaches_this_binarys_contract() {
             CONTRACT_SQL_SHA256,
             "the step applied but the database still reports the contract it left"
         );
+        // The contract is now current. The backend is not, and no step can make
+        // it so — see PENDING_BACKEND_MIGRATIONS.
+        apply_pending_backend_migrations(&pool, &role).await;
     }
     {
         let pool = PgPool::connect(&url_for(&initialized))
