@@ -106,6 +106,12 @@ const crates = [
     "Pure column arithmetic and extended grapheme boundaries",
     "in tree, unpublished",
   ],
+  [
+    "gwk-context",
+    null,
+    "Context Runtime vocabulary: truth stages, participation, precedence, and content digests",
+    "in tree, unpublished",
+  ],
 ] as const;
 
 export default function HomePage() {
