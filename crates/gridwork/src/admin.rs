@@ -363,24 +363,63 @@ pub async fn migrate(
     .map_err(configuration)?;
 
     emit(
-        &json!({
-            "type": "admin_migrated",
-            "scratch_database": scratch,
-            "recorded_sha256": recorded,
-            "base_sha256": base,
-            "asserted_base": asserted_base,
-            "contract_sha256": applied.result,
-            "steps": applied.steps,
-            "backend_migrations": applied.backend_migrations,
-            "backup_sha256": backup_sha256,
-            "public_revision": revision,
-            "events_before": applied.events_before,
-            "events_after": applied.events_after,
-            "elapsed_ms": applied.elapsed_ms,
-        }),
+        &migrated_receipt(
+            scratch,
+            &recorded,
+            base,
+            asserted_base,
+            &applied,
+            backup_sha256.as_deref(),
+            &revision,
+        ),
         pretty,
     );
     Ok(())
+}
+
+/// The receipt one completed migration leaves behind.
+///
+/// A function rather than an inline `json!` at the `emit` call site, so its
+/// field set can be asserted without capturing stdout. That is not a testing
+/// convenience: this document is the only artifact that will ever say what a
+/// live migration did, and a field that quietly stops being emitted takes its
+/// evidence with it.
+///
+/// Thirteen keys. The SPEC's criterion 8 names eight of them; the other five
+/// are here because the operator reading this afterwards needs them just as
+/// much — which database was rehearsed against, what the fingerprint said
+/// BEFORE the run, and whether the base was asserted rather than read.
+fn migrated_receipt(
+    scratch: &str,
+    recorded: &str,
+    base: &str,
+    asserted_base: bool,
+    applied: &gwk_kernel::migrate::Applied,
+    backup_sha256: Option<&str>,
+    revision: &str,
+) -> Value {
+    json!({
+        "type": "admin_migrated",
+        "scratch_database": scratch,
+        // What the database said before the run, and what the chain was
+        // resolved from. They differ exactly when `--from` overrode the base,
+        // which is why both are here rather than one.
+        "recorded_sha256": recorded,
+        "base_sha256": base,
+        "asserted_base": asserted_base,
+        "contract_sha256": applied.result,
+        "steps": applied.steps,
+        // The step's work and the backend migrations' work, kept apart: the
+        // contract DDL never mentions the relations these create.
+        "backend_migrations": applied.backend_migrations,
+        "backup_sha256": backup_sha256,
+        "public_revision": revision,
+        // The chain writes no events. A difference between these two is a
+        // daemon that was not fenced, and the receipt is where that shows.
+        "events_before": applied.events_before,
+        "events_after": applied.events_after,
+        "elapsed_ms": applied.elapsed_ms,
+    })
 }
 
 /// SHA-256 of the backup file, computed here.
@@ -750,6 +789,79 @@ fn verdict(report: &recover::RecoveryReport) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every key the migrate receipt carries, and no other.
+    ///
+    /// The whole set, not the eight the SPEC names. A field nobody asserts is
+    /// a field that can stop being emitted between one release and the next,
+    /// and this receipt is the only artifact that will ever say what a live
+    /// migration did to a database nobody can re-run the migration against.
+    const RECEIPT_KEYS: [&str; 13] = [
+        "type",
+        "scratch_database",
+        "recorded_sha256",
+        "base_sha256",
+        "asserted_base",
+        "contract_sha256",
+        "steps",
+        "backend_migrations",
+        "backup_sha256",
+        "public_revision",
+        "events_before",
+        "events_after",
+        "elapsed_ms",
+    ];
+
+    #[test]
+    fn the_migrate_receipt_carries_exactly_the_keys_it_promises() {
+        let applied = gwk_kernel::migrate::Applied {
+            base: "a".repeat(64),
+            result: "b".repeat(64),
+            steps: vec!["aaaaaaaa-bbbbbbbb.sql".to_owned()],
+            backend_migrations: vec!["0005_pty_delivery".to_owned()],
+            events_before: 41,
+            events_after: 41,
+            elapsed_ms: 12,
+        };
+        let receipt = migrated_receipt(
+            "probe",
+            &"a".repeat(64),
+            &"a".repeat(64),
+            false,
+            &applied,
+            Some(&"c".repeat(64)),
+            "0000000000000000000000000000000000000000",
+        );
+        let object = receipt.as_object().expect("the receipt is an object");
+
+        // COUNT first, and it is not the same assertion as the membership
+        // sweep below. A renamed field keeps the count and fails membership; a
+        // dropped one fails the count, and the sweep that follows would have
+        // reported only the one key it happened to look for first. Neither
+        // arm alone distinguishes the two.
+        assert_eq!(
+            object.len(),
+            RECEIPT_KEYS.len(),
+            "the receipt carries {} keys, not {}: {:?}",
+            object.len(),
+            RECEIPT_KEYS.len(),
+            object.keys().collect::<Vec<_>>()
+        );
+        for key in RECEIPT_KEYS {
+            assert!(
+                object.contains_key(key),
+                "the receipt no longer carries {key:?}: {:?}",
+                object.keys().collect::<Vec<_>>()
+            );
+        }
+
+        // And the two digests that differ only under `--from` are both really
+        // there, rather than one value emitted twice under two names.
+        assert_eq!(object["type"], "admin_migrated");
+        assert_eq!(object["asserted_base"], false);
+        assert_eq!(object["events_before"], object["events_after"]);
+        assert_eq!(object["contract_sha256"], "b".repeat(64));
+    }
 
     /// RED 2: a backup path that does not exist refuses BEFORE anything is
     /// taken away.
