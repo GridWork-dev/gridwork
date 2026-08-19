@@ -267,6 +267,158 @@ fn walk<'a>(
     Ok(chain)
 }
 
+/// What one applied chain did, for the receipt the operator reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Applied {
+    /// The digest the database recorded before the chain ran.
+    pub base: String,
+    /// The digest it records after.
+    pub result: String,
+    /// The step ids applied, in order.
+    pub steps: Vec<String>,
+    /// The backend migration stems applied, in order.
+    pub backend_migrations: Vec<String>,
+    /// Events in the log before the chain ran.
+    pub events_before: i64,
+    /// Events in the log after. The chain writes none, so a difference here is
+    /// a daemon that was not fenced.
+    pub events_after: i64,
+    /// How long the one transaction took, in milliseconds.
+    pub elapsed_ms: u64,
+}
+
+/// Apply `chain` to `pool` in ONE transaction.
+///
+/// Order, and each part is here because the one before it made it possible:
+/// the step DDL, then the backend migrations the steps declare, then the
+/// privilege matrix wholesale, then the ledger row. Privileges come after the
+/// migrations because `GRANT ... ON ALL TABLES IN SCHEMA gwk` reaches the
+/// relations that exist when it runs, and the ledger row comes last because
+/// `0006_schema_migration` may be one of the migrations that just arrived.
+///
+/// One transaction, so a crash leaves the database at its base fingerprint —
+/// which the binaries that were serving it a moment ago still serve. A
+/// half-applied contract matches no digest at all and there is nothing to
+/// compare it against.
+///
+/// `asserted_base` records whether the operator supplied the base rather than
+/// the applier reading it out of `schema_fingerprint`. It is the one thing that
+/// will ever say the precondition went unchecked, so it is written even though
+/// nothing here reads it back.
+pub async fn apply(
+    pool: &sqlx::PgPool,
+    chain: &[&Step],
+    role: &str,
+    recorded_base: &str,
+    asserted_base: bool,
+    public_revision: &str,
+    backup_sha256: Option<&str>,
+) -> crate::Result<Applied> {
+    // Counted before anything runs: an empty chain would commit a transaction
+    // that changed nothing and return a receipt saying a migration happened.
+    if chain.is_empty() {
+        return Err(crate::KernelError::Schema(
+            "refusing to apply an empty chain: there is no migration to record".to_owned(),
+        ));
+    }
+
+    let started = std::time::Instant::now();
+    let mut tx = pool.begin().await?;
+
+    let events_before: i64 = sqlx::query_scalar("SELECT count(*) FROM gwk.event")
+        .fetch_one(&mut *tx)
+        .await?;
+
+    let mut applied_steps: Vec<String> = Vec::with_capacity(chain.len());
+    let mut applied_migrations: Vec<String> = Vec::new();
+
+    for step in chain {
+        sqlx::raw_sql(sqlx::AssertSqlSafe(step.sql))
+            .execute(&mut *tx)
+            .await?;
+        applied_steps.push(step.id.to_owned());
+
+        for stem in step.backend_migrations {
+            // Resolved from the kernel's own `BACKEND_MIGRATIONS`, so the file
+            // a step names and the file that runs are the same bytes the
+            // initializer would have run. A name with no migration is refused
+            // here rather than becoming a missing relation later.
+            let sql = crate::admin::backend_migration(stem).ok_or_else(|| {
+                crate::KernelError::Schema(format!(
+                    "{} carries backend migration {stem:?}, which this binary does not have",
+                    step.id
+                ))
+            })?;
+            sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+                .execute(&mut *tx)
+                .await?;
+            applied_migrations.push((*stem).to_owned());
+        }
+    }
+
+    // Wholesale, never a delta. The grant surface is a function of the table
+    // set, and the step just changed the table set.
+    //
+    // The audit `AssertSqlSafe` demands: the only runtime-substituted value is
+    // `role`, restricted to `[a-z_][a-z0-9_]*` by `config::validate_role`, so
+    // it can carry no quote, separator, or comment.
+    sqlx::raw_sql(sqlx::AssertSqlSafe(crate::admin::privilege_statements(
+        role,
+    )))
+    .execute(&mut *tx)
+    .await?;
+
+    let result = chain[chain.len() - 1].result;
+
+    // The fingerprint is asserted, not written. Each step stamps it as its last
+    // act, so reading it back here is a check on the chain rather than on this
+    // function's own memory of what it meant to do.
+    let recorded: String = sqlx::query_scalar(
+        "SELECT contract_sha256 FROM gwk_internal.schema_fingerprint WHERE id = 1",
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    if recorded != result {
+        return Err(crate::KernelError::Schema(format!(
+            "the chain ended at {result} and the database records {recorded}: the last step did \
+             not stamp gwk_internal.schema_fingerprint, so nothing rolled back would have been \
+             distinguishable from nothing applied"
+        )));
+    }
+
+    sqlx::query(
+        "INSERT INTO gwk_internal.schema_migration \
+           (base_sha256, result_sha256, step_id, public_revision, backup_sha256, \
+            backend_migrations, asserted_base) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+    )
+    .bind(recorded_base)
+    .bind(result)
+    .bind(applied_steps.join(", "))
+    .bind(public_revision)
+    .bind(backup_sha256)
+    .bind(&applied_migrations)
+    .bind(asserted_base)
+    .execute(&mut *tx)
+    .await?;
+
+    let events_after: i64 = sqlx::query_scalar("SELECT count(*) FROM gwk.event")
+        .fetch_one(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+
+    Ok(Applied {
+        base: recorded_base.to_owned(),
+        result: result.to_owned(),
+        steps: applied_steps,
+        backend_migrations: applied_migrations,
+        events_before,
+        events_after,
+        elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,6 +438,10 @@ mod tests {
             id,
             base,
             result,
+            // The resolver never reads these; the applier does. A fixture that
+            // carried migrations would be asserting the applier's behaviour
+            // from the resolver's tests.
+            backend_migrations: &[],
             sql: "SELECT 1;\n",
         }
     }

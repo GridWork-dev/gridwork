@@ -482,11 +482,63 @@ pub async fn driving_figures(pool: &PgPool, window: &ReceiptWindow) -> Result<Dr
 /// rather than the grant.
 pub fn backend_script(role: &str, contract_sha256: &str) -> String {
     let migrations = BACKEND_MIGRATIONS.join("\n");
+    let privileges = privilege_statements(role);
     format!(
         "{migrations}\n\
          INSERT INTO gwk_internal.schema_fingerprint (id, contract_sha256) \
          VALUES (1, '{contract_sha256}');\n\
-         GRANT USAGE ON SCHEMA gwk TO {role};\n\
+         {privileges}"
+    )
+}
+
+/// One backend migration by its file stem, or `None`.
+///
+/// The applier needs a single migration rather than the whole list:
+/// `BACKEND_MIGRATIONS` runs once at initialization, and everything added after
+/// that reaches an existing database only because a step named it. Looked up by
+/// stem so the name in a step's `-- carries:` header, the name on disk, and the
+/// name in the ledger row are the same string.
+pub fn backend_migration(stem: &str) -> Option<&'static str> {
+    BACKEND_MIGRATION_STEMS
+        .iter()
+        .position(|known| *known == stem)
+        .map(|index| BACKEND_MIGRATIONS[index])
+}
+
+/// The stems of [`BACKEND_MIGRATIONS`], in the same order.
+///
+/// `include_str!` keeps no file name, so the two lists are positional and a
+/// test asserts they stay the same length. Adding a migration means adding a
+/// line to each — which is the one place in this mechanism a second list was
+/// unavoidable, and it is guarded rather than trusted.
+pub const BACKEND_MIGRATION_STEMS: [&str; 6] = [
+    "0001_kernel_internal",
+    "0002_writer",
+    "0003_blob",
+    "0004_checkpoint",
+    "0005_pty_delivery",
+    "0006_schema_migration",
+];
+
+/// The privilege matrix, and nothing else.
+///
+/// Split out of [`backend_script`] because `gw admin migrate` re-applies this
+/// third of it and neither of the other two. It cannot re-run the migrations —
+/// only `CREATE SCHEMA IF NOT EXISTS gwk_internal` is idempotent, and the
+/// dozen bare `CREATE`s after it raise `relation already exists`. It cannot
+/// re-run the fingerprint INSERT either: that row is `id integer PRIMARY KEY
+/// CHECK (id = 1)`, so a migration UPDATEs it.
+///
+/// Re-applied WHOLESALE rather than as a delta, and that is the #147 lesson
+/// stated as code: the grant surface is a function of the table set, because
+/// `GRANT ... ON ALL TABLES IN SCHEMA gwk` reaches every relation that exists
+/// when it runs. A delta would have to know which relations the step created,
+/// which is the migration-to-relation map this mechanism refuses to keep. Every
+/// statement is idempotent; on relations that already carry these grants it
+/// changes nothing.
+pub fn privilege_statements(role: &str) -> String {
+    format!(
+        "GRANT USAGE ON SCHEMA gwk TO {role};\n\
          GRANT USAGE ON SCHEMA gwk_internal TO {role};\n\
          GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA gwk TO {role};\n\
          REVOKE UPDATE ON gwk.event, gwk.receipt, gwk.ingested_record, \
@@ -637,6 +689,33 @@ mod tests {
             privileges.violations(),
             ["DELETE on gwk.event", "CREATE on schema gwk"]
         );
+    }
+
+    #[test]
+    fn every_backend_migration_has_a_stem_and_every_stem_a_migration() {
+        // `include_str!` discards the file name, so the stems are a parallel
+        // list and a parallel list can drift. Lengths first — a zip over two
+        // lists of different length silently stops at the shorter one, which is
+        // exactly how a lookup starts returning the wrong file's SQL.
+        assert_eq!(
+            BACKEND_MIGRATIONS.len(),
+            BACKEND_MIGRATION_STEMS.len(),
+            "a migration was added to one list and not the other"
+        );
+        // And the pairing is right, not merely equinumerous: each migration's
+        // own leading comment names its file.
+        for (stem, sql) in BACKEND_MIGRATION_STEMS.iter().zip(BACKEND_MIGRATIONS) {
+            assert!(
+                sql.starts_with(&format!("-- {stem}.sql")),
+                "{stem} is paired with SQL that opens {:?}",
+                sql.lines().next().unwrap_or_default()
+            );
+        }
+        assert_eq!(
+            backend_migration("0006_schema_migration"),
+            Some(BACKEND_MIGRATIONS[5])
+        );
+        assert_eq!(backend_migration("0099_absent"), None);
     }
 
     #[test]

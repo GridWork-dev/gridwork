@@ -30,6 +30,7 @@ use crate::exit::Failure;
 const VALUE_FLAGS: &[&str] = &[
     "--aggregate-type",
     "--archive-manifest-sha256",
+    "--backup",
     "--base",
     "--body",
     "--body-file",
@@ -66,6 +67,7 @@ const VALUE_FLAGS: &[&str] = &[
 const SWITCHES: &[&str] = &[
     "--dry-run",
     "--help",
+    "--no-backup",
     "--json",
     "--pretty",
     "--version",
@@ -110,6 +112,15 @@ pub enum Verb {
     Daemon,
     AdminInit,
     AdminVerify,
+    /// Carry a database from the contract it records to the one this binary
+    /// carries. `backup` is `None` only when `--no-backup` was passed, which is
+    /// a separate decision from forgetting the flag — see [`admin_migrate`].
+    AdminMigrate {
+        scratch: String,
+        backup: Option<String>,
+        from: Option<String>,
+        dry_run: bool,
+    },
     AdminRebuildProjections {
         scratch: String,
     },
@@ -259,6 +270,8 @@ gw — the GridWork kernel's command line
   gw daemon
   gw admin init
   gw admin verify
+  gw admin migrate --scratch-database <name> (--backup <path> | --no-backup)
+                   [--from <sha256>] [--dry-run]
   gw admin rebuild-projections --scratch-database <name>
   gw admin receipt --from <rfc3339> [--to <rfc3339>]
   gw admin blob pin <address> <evidence-id>
@@ -329,6 +342,12 @@ are gh's own. A body comes from exactly one of its two body flags, and
 `theme` resolves the workspace chrome slot from GWK_CHROME_THEME and asks
 nothing of the socket. Orchestration stays SIGNAL: the slot themes the
 workspace's own furniture, never a lens and never a pane's contents.
+
+`admin migrate` takes no DSN and no credential of its own: it reads the same
+GWK_ADMIN_DATABASE_URL `init` does, takes the writer lock before anything else
+so a live daemon is a refusal rather than a hang, and digests the backup file
+you name rather than producing one — only you know which pg_dump matches the
+server.
 
 `daemon` and `admin` read GWK_DATABASE_URL / GWK_ADMIN_DATABASE_URL and the blob
 KEK. Every other verb uses only the socket. `admin blob rotate` also reads
@@ -534,10 +553,79 @@ fn verb(rest: &mut Rest) -> Result<Verb, Failure> {
     }
 }
 
+/// `gw admin migrate --scratch-database <name> (--backup <path> | --no-backup)
+/// [--from <sha256>] [--dry-run]`
+///
+/// The backup is not optional and not defaulted. `--no-backup` exists, has to
+/// be typed, and is refused with the restore path it removes named in the
+/// refusal — because the operator who has genuinely decided to migrate without
+/// one is rare, and the operator who has not thought about it is not.
+///
+/// No DSN on the command line and no new environment variable:
+/// `AdminConfig::from_env()`, the same credential `init` and `verify` read.
+fn admin_migrate(rest: &mut Rest) -> Result<Verb, Failure> {
+    let scratch = rest.required("--scratch-database")?;
+    let dry_run = rest.switch("--dry-run");
+    let no_backup = rest.switch("--no-backup");
+    let backup = rest.flag("--backup");
+
+    match (&backup, no_backup) {
+        (Some(_), true) => {
+            return Err(Failure::usage(
+                "--backup and --no-backup are the same decision made twice, in opposite \
+                 directions: pass one",
+            ));
+        }
+        (None, false) => {
+            return Err(Failure::usage(
+                "a migration needs --backup <path> naming a dump taken before it runs, or \
+                 --no-backup to say plainly that there is none. There is no default, because \
+                 the default anyone would pick is the one they would regret",
+            ));
+        }
+        _ => {}
+    }
+
+    if let Some(from) = &from_flag(rest)? {
+        return Ok(Verb::AdminMigrate {
+            scratch,
+            backup,
+            from: Some(from.clone()),
+            dry_run,
+        });
+    }
+
+    Ok(Verb::AdminMigrate {
+        scratch,
+        backup,
+        from: None,
+        dry_run,
+    })
+}
+
+/// `--from <sha256>`, validated here rather than at the database.
+///
+/// The override relaxes which base the verb asserts; it does not relax what a
+/// digest is. A value that is not one could only ever match nothing, and
+/// finding that out after the writer lock is taken is worse than finding it out
+/// now.
+fn from_flag(rest: &mut Rest) -> Result<Option<String>, Failure> {
+    let Some(from) = rest.flag("--from") else {
+        return Ok(None);
+    };
+    if !gwk_domain::is_sha256_hex(&from) {
+        return Err(Failure::usage(format!(
+            "--from {from:?} is not a 64-character lowercase hex contract digest"
+        )));
+    }
+    Ok(Some(from))
+}
+
 fn admin(rest: &mut Rest) -> Result<Verb, Failure> {
     match rest.word("admin")?.as_str() {
         "init" => Ok(Verb::AdminInit),
         "verify" => Ok(Verb::AdminVerify),
+        "migrate" => admin_migrate(rest),
         "rebuild-projections" => Ok(Verb::AdminRebuildProjections {
             scratch: rest.required("--scratch-database")?,
         }),
@@ -984,6 +1072,89 @@ impl Rest {
 mod tests {
     use super::*;
 
+    /// RED 1 and RED 3 of the migrate verb, kept together because they are the
+    /// same subject: what the command line will and will not decide for you.
+    #[test]
+    fn admin_migrate_refuses_every_shape_that_leaves_the_backup_unstated() {
+        let ok = parsed("admin migrate --scratch-database probe --backup /tmp/dump.sql")
+            .expect("parse")
+            .verb;
+        assert_eq!(
+            ok,
+            Verb::AdminMigrate {
+                scratch: "probe".into(),
+                backup: Some("/tmp/dump.sql".into()),
+                from: None,
+                dry_run: false,
+            }
+        );
+
+        // Neither flag. The refusal has to say there is no default, because an
+        // operator who sees "missing argument" reasonably assumes one exists.
+        let neither = parsed("admin migrate --scratch-database probe").expect_err("no backup flag");
+        assert!(
+            neither.message.as_str().contains("--no-backup"),
+            "{neither:?}"
+        );
+        assert!(
+            neither.message.as_str().contains("no default"),
+            "{neither:?}"
+        );
+
+        // Both flags: a decision made twice in opposite directions.
+        let both =
+            parsed("admin migrate --scratch-database probe --backup /tmp/dump.sql --no-backup")
+                .expect_err("both flags");
+        assert!(both.message.as_str().contains("pass one"), "{both:?}");
+
+        // And `--scratch-database` is not optional either.
+        parsed("admin migrate --no-backup").expect_err("no scratch database");
+    }
+
+    #[test]
+    fn admin_migrate_takes_no_backup_dry_run_and_a_well_formed_from() {
+        assert_eq!(
+            parsed("admin migrate --scratch-database probe --no-backup --dry-run")
+                .expect("parse")
+                .verb,
+            Verb::AdminMigrate {
+                scratch: "probe".into(),
+                backup: None,
+                from: None,
+                dry_run: true,
+            }
+        );
+
+        let digest = "a".repeat(64);
+        assert_eq!(
+            parsed(&format!(
+                "admin migrate --scratch-database probe --no-backup --from {digest}"
+            ))
+            .expect("parse")
+            .verb,
+            Verb::AdminMigrate {
+                scratch: "probe".into(),
+                backup: None,
+                from: Some(digest),
+                dry_run: false,
+            }
+        );
+
+        // Not 64 lowercase hex. Refused at the command line rather than at the
+        // database, because the writer lock is taken in between and a value
+        // that could only ever match nothing should not cost a fence.
+        for bad in ["deadbeef", &"A".repeat(64), &"g".repeat(64)] {
+            let err = parsed(&format!(
+                "admin migrate --scratch-database probe --no-backup --from {bad}"
+            ))
+            .expect_err("malformed --from");
+            assert!(
+                err.message.as_str().contains("lowercase hex"),
+                "{bad}: {err:?}"
+            );
+        }
+    }
+
     fn parsed(line: &str) -> Result<Invocation, Failure> {
         let argv: Vec<String> = line.split_whitespace().map(str::to_owned).collect();
         parse(&argv)
@@ -1393,14 +1564,13 @@ mod tests {
         // the very binary that advertised it.
         for line in HELP.lines() {
             for word in line.split_whitespace() {
-                let name = word
-                    .trim_start_matches('[')
-                    .trim_end_matches(']')
-                    .split_once('=')
-                    .map_or_else(
-                        || word.trim_start_matches('[').trim_end_matches(']'),
-                        |pair| pair.0,
-                    );
+                // `[optional]` and `(one | the other)` both fence a flag
+                // name, and the second spelling is not decoration: it is how
+                // the help says two flags are alternatives rather than
+                // independent options, which for `--backup` / `--no-backup` is
+                // the whole point.
+                let fenced = word.trim_matches(['[', ']', '(', ')']);
+                let name = fenced.split_once('=').map_or(fenced, |pair| pair.0);
                 if !name.starts_with("--") {
                     continue;
                 }

@@ -15,6 +15,14 @@ pub struct Step {
     pub base: &'static str,
     /// The contract digest a database carries once this step has been applied.
     pub result: &'static str,
+    /// The backend migrations this step carries, in the order they apply.
+    ///
+    /// `gwk_internal` has no digest and no chain of its own, so a migration
+    /// added after a database was initialized reaches it only if something
+    /// carries it. This is that declaration; the applier reads it, and the
+    /// ledger row records it, so a row never credits the step with work the
+    /// step did not do.
+    pub backend_migrations: &'static [&'static str],
     /// Every byte of the step's file, header comments included.
     pub sql: &'static str,
 }
@@ -30,8 +38,10 @@ pub const CONTRACT_STEPS: &[Step] = &[
         id: "aba2f647-7ebb2ada.sql",
         base: "aba2f647bc7bb447e7b53307196f63df0bc718d479ec4693f6dd34ec9bf7b545",
         result: "7ebb2adaad295c28c60f1e789030ceef87d6fdd607b37a1186f173dc22647142",
+        backend_migrations: &["0005_pty_delivery", "0006_schema_migration"],
         sql: r#"-- base:   aba2f647bc7bb447e7b53307196f63df0bc718d479ec4693f6dd34ec9bf7b545
 -- result: 7ebb2adaad295c28c60f1e789030ceef87d6fdd607b37a1186f173dc22647142
+-- carries: 0005_pty_delivery, 0006_schema_migration
 --
 -- The retroactive step: the contract a database initialized at 4d54bba carries,
 -- brought to the one this binary carries.
@@ -419,112 +429,21 @@ ALTER TABLE gwk.context_finalization ENABLE ALWAYS TRIGGER context_finalization_
 
 
 -- ---------------------------------------------------------------------------
--- The backend half — `gwk_internal` and the grant matrix
+-- The backend half — carried by the applier, not by this file
 -- ---------------------------------------------------------------------------
 --
--- `schema/0001_contract.sql` is engine-neutral and deliberately says nothing
--- about either. They arrived over the same three merges through the kernel's
--- own `BACKEND_MIGRATIONS` and `backend_script`, so a database that took only
--- the contract half of this step would be missing a table and would leave five
--- new relations unreachable to the runtime role.
+-- `schema/0001_contract.sql` is engine-neutral and says nothing about
+-- `gwk_internal` or about who may read what. Both moved over these same three
+-- merges, and an earlier draft of this step reproduced them inline: migration
+-- 0005's DDL copied in, and the whole privilege matrix replayed by a DO block
+-- that read the runtime role back off the database.
 --
--- ADDITIVE: `gwk_internal.pty_delivery`, added by #103 as backend migration
--- 0005. Reproduced verbatim from `crates/gwk-kernel/migrations/0005_pty_delivery.sql`.
-
--- Durable post-commit delivery state for PTY controls.
---
--- The command event and this pending row land in one transaction. Delivery
--- attempts take a short durable lease, release the database transaction before
--- touching a host, and settle from the host's application acknowledgement.
-
-CREATE TABLE gwk_internal.pty_delivery (
-  project_id      text NOT NULL,
-  idempotency_key text NOT NULL,
-  command_id      text NOT NULL UNIQUE,
-  event_id        text NOT NULL,
-  event_seq       numeric(20,0) NOT NULL,
-  input_binding   bytea,
-  claim_token     text,
-  claimed_until   timestamptz,
-  delivered_at    timestamptz,
-  failed_at       timestamptz,
-  indeterminate_at timestamptz,
-  failure_code    text,
-  failure_message text,
-  UNIQUE (event_id),
-  CHECK (num_nonnulls(delivered_at, failed_at, indeterminate_at) <= 1),
-  CHECK ((claim_token IS NULL) = (claimed_until IS NULL)),
-  CHECK (num_nonnulls(delivered_at, failed_at, indeterminate_at) = 0 OR claim_token IS NULL),
-  CHECK ((failed_at IS NULL) = (failure_code IS NULL)),
-  CHECK ((failed_at IS NULL) = (failure_message IS NULL)),
-  PRIMARY KEY (project_id, idempotency_key)
-);
-
-CREATE INDEX pty_delivery_pending_seq
-  ON gwk_internal.pty_delivery (event_seq)
-  WHERE delivered_at IS NULL AND failed_at IS NULL AND indeterminate_at IS NULL;
-
--- IN PLACE. The privilege matrix is re-applied whole rather than patched.
---
--- Patching would mean enumerating the five relations this step created and
--- granting each — and that enumeration is exactly the thing that goes stale.
--- The kernel's own `backend_script` grants `SELECT, INSERT, UPDATE ON ALL
--- TABLES IN SCHEMA gwk` and then names the exceptions, so a new table is
--- writable by default and stays that way unless a REVOKE names it. Replaying
--- the whole matrix reaches every relation by construction, which is the
--- property the enumeration cannot have. Every statement is idempotent; on the
--- relations that already carried these grants it changes nothing.
---
--- The role is not written here. It is operator configuration
--- (`GWK_RUNTIME_ROLE`), so the step reads it back off the database it is
--- migrating: the one role besides the owner holding SELECT on `gwk.event`.
--- Counted before it is used — zero means this database was never initialized
--- by the kernel, and more than one means the grant matrix is not what this
--- step is about to overwrite. Either way, guessing would be worse than
--- stopping.
-DO $$
-DECLARE
-  runtime_roles text[];
-  runtime_role  text;
-BEGIN
-  SELECT array_agg(DISTINCT grantee ORDER BY grantee) INTO runtime_roles
-    FROM information_schema.role_table_grants
-   WHERE table_schema = 'gwk'
-     AND table_name = 'event'
-     AND privilege_type = 'SELECT'
-     AND grantee <> grantor;
-
-  IF COALESCE(cardinality(runtime_roles), 0) <> 1 THEN
-    RAISE EXCEPTION
-      'expected exactly one runtime role holding SELECT on gwk.event and found %: %. '
-      'The kernel grants that role at initialization, so none means this database was '
-      'never initialized by it, and several mean the grant matrix this step replays '
-      'is not the one in force',
-      COALESCE(cardinality(runtime_roles), 0), COALESCE(runtime_roles, '{}'::text[]);
-  END IF;
-  runtime_role := runtime_roles[1];
-
-  EXECUTE format('GRANT USAGE ON SCHEMA gwk TO %I', runtime_role);
-  EXECUTE format('GRANT USAGE ON SCHEMA gwk_internal TO %I', runtime_role);
-  EXECUTE format(
-    'GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA gwk TO %I', runtime_role);
-  EXECUTE format(
-    'REVOKE UPDATE ON gwk.event, gwk.receipt, gwk.ingested_record, gwk.cost_entry FROM %I',
-    runtime_role);
-  EXECUTE format(
-    'REVOKE UPDATE ON gwk.context_manifest, gwk.context_release, '
-    'gwk.context_observation, gwk.context_finalization FROM %I', runtime_role);
-  EXECUTE format('REVOKE INSERT, UPDATE ON gwk.transition FROM %I', runtime_role);
-  EXECUTE format('GRANT DELETE ON gwk.workspace_node TO %I', runtime_role);
-  EXECUTE format('GRANT SELECT ON gwk_internal.schema_fingerprint TO %I', runtime_role);
-  EXECUTE format('GRANT SELECT, UPDATE ON gwk_internal.writer TO %I', runtime_role);
-  EXECUTE format(
-    'GRANT SELECT, INSERT, UPDATE ON gwk_internal.pty_delivery TO %I', runtime_role);
-  EXECUTE format(
-    'GRANT SELECT, INSERT, UPDATE, DELETE ON '
-    'gwk_internal.blob, gwk_internal.blob_pin, gwk_internal.blob_upload TO %I', runtime_role);
-  EXECUTE format('GRANT SELECT, INSERT ON gwk_internal.checkpoint TO %I', runtime_role);
-END $$;
+-- Both are gone, and their absence is the point. `gw admin migrate` applies
+-- this file, then the backend migrations named on the `-- carries:` header
+-- above, then the privilege statements — read out of the kernel's own
+-- `backend_script`, so there is exactly one place the grant matrix is written
+-- down. A copy here would have been a second, and the ledger row could not
+-- have said which of the two a database actually took.
 
 -- IN PLACE. The database now carries the contract this step's header names as
 -- its result, and `gwk_internal.schema_fingerprint` is where it says so —

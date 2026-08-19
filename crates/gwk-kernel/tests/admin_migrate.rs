@@ -30,8 +30,9 @@ use gwk_kernel::admin::{self, InitOutcome};
 use gwk_kernel::config::{ADMIN_DATABASE_URL_ENV, AdminConfig, RUNTIME_ROLE_ENV};
 use gwk_kernel::contract_sql::CONTRACT_SQL_SHA256;
 use gwk_kernel::contract_steps::{CONTRACT_STEPS, Step};
+use gwk_kernel::migrate::Applied;
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Row};
+use sqlx::{Connection, PgConnection, PgPool, Row};
 
 const ADMIN_URL_ENV: &str = "GWK_TEST_ADMIN_DATABASE_URL";
 
@@ -74,23 +75,6 @@ const BASE_MIGRATIONS: [&str; 4] = [
     "0003_blob",
     "0004_checkpoint",
 ];
-
-/// Backend migrations that landed AFTER this step's span, and which therefore
-/// nothing carries to a database that already exists.
-///
-/// This constant is a gap made visible, not a fix. `schema/steps/` tracks the
-/// CONTRACT digest; `gwk_internal` has no digest and no chain. `BACKEND_MIGRATIONS`
-/// is applied wholesale at initialization and never again, so a backend
-/// migration added later reaches every NEW database and no existing one.
-/// `0005_pty_delivery` escaped that only by accident of timing — it landed
-/// inside this step's span, so the step inlines it. `0006_schema_migration`
-/// landed after, and there is no step for it to ride.
-///
-/// The applier that task 5 builds has to deliver these for real. Until it
-/// does, this list is what keeps the comparison below at full strength instead
-/// of passing quietly against a narrower schema — and adding a migration
-/// without adding it here reds that comparison rather than going unnoticed.
-const PENDING_BACKEND_MIGRATIONS: [&str; 1] = ["0006_schema_migration"];
 
 /// A fixed `\restrict` key for both dumps.
 ///
@@ -262,7 +246,7 @@ async fn build_base(pool: &PgPool, role: &str) {
 /// Resolved rather than looked up by name, which makes this the one place the
 /// whole mechanism is exercised end to end: the generator emitted the registry,
 /// the resolver walked it, and what came back is what gets applied.
-fn resolved_step() -> &'static Step {
+fn resolved_chain() -> Vec<&'static Step> {
     let chain =
         gwk_kernel::migrate::resolve(CONTRACT_STEPS, BASE_CONTRACT_SHA256, CONTRACT_SQL_SHA256)
             .unwrap_or_else(|refusal| {
@@ -275,63 +259,29 @@ fn resolved_step() -> &'static Step {
          got {:?}",
         chain.iter().map(|step| step.id).collect::<Vec<_>>()
     );
-    chain[0]
+    chain
 }
 
-async fn apply_step(pool: &PgPool) {
-    let step = resolved_step();
-    sqlx::raw_sql(sqlx::AssertSqlSafe(step.sql))
-        .execute(pool)
-        .await
-        .unwrap_or_else(|err| panic!("apply {}: {err}", step.id));
-}
-
-/// Apply the backend migrations no step carries, and the privileges they need.
+/// Run the real `gw admin migrate` transaction against `pool`.
 ///
-/// Both halves, because the second is the one that gets forgotten. A backend
-/// migration creates a relation in `gwk_internal`, where nothing is granted by
-/// default — so the DDL alone leaves a table the runtime role cannot see, and
-/// nothing about the database looks wrong. The ledger arrived here exactly that
-/// way, and the schema comparison below is what noticed.
-///
-/// See [`PENDING_BACKEND_MIGRATIONS`] for why any of this is the test's job.
-async fn apply_pending_backend_migrations(pool: &PgPool, role: &str) {
-    for migration in PENDING_BACKEND_MIGRATIONS {
-        let path = format!("crates/gwk-kernel/migrations/{migration}.sql");
-        let sql = std::fs::read_to_string(repo_root().join(&path))
-            .unwrap_or_else(|err| panic!("read {path}: {err}"));
-        sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
-            .execute(pool)
-            .await
-            .unwrap_or_else(|err| panic!("apply {migration}: {err}"));
-    }
-
-    // Filtered out of the real `backend_script` rather than copied from it: a
-    // second hand-maintained list of grants is a second thing to forget. The
-    // digest argument is unused here — only the privilege statements are kept,
-    // and the fingerprint INSERT and the DDL are dropped on the floor.
-    let script = admin::backend_script(role, &"0".repeat(64));
-    let statements: Vec<&str> = script
-        .lines()
-        .filter(|line| line.starts_with("GRANT") || line.starts_with("REVOKE"))
-        .collect();
-    // Counted before it is replayed: a filter that stopped matching would
-    // silently apply nothing, and the schema comparison would then fail
-    // pointing at the ledger instead of at this line.
-    assert!(
-        !statements.is_empty(),
-        "no privilege statements matched in backend_script"
-    );
-    assert!(
-        statements
-            .iter()
-            .any(|line| line.contains("gwk_internal.schema_migration")),
-        "backend_script grants nothing on the ledger: {script}"
-    );
-    sqlx::raw_sql(sqlx::AssertSqlSafe(statements.join("\n")))
-        .execute(pool)
-        .await
-        .expect("replay the privilege matrix");
+/// The applier, not a model of it. An earlier draft of this file applied the
+/// step by hand and then replayed a filtered grant matrix of its own — which
+/// meant the test could agree with itself while the function it was standing in
+/// for was wrong, and it hid a whole half of the work (the backend migrations
+/// no step's SQL contains) behind a constant the test maintained.
+async fn migrate(pool: &PgPool, role: &str) -> Applied {
+    let chain = resolved_chain();
+    gwk_kernel::migrate::apply(
+        pool,
+        &chain,
+        role,
+        BASE_CONTRACT_SHA256,
+        false,
+        "0000000000000000000000000000000000000000",
+        None,
+    )
+    .await
+    .expect("apply the chain")
 }
 
 async fn recorded_contract(pool: &PgPool) -> String {
@@ -530,15 +480,25 @@ async fn the_retroactive_step_reaches_this_binarys_contract() {
             BASE_CONTRACT_SHA256,
             "the reconstructed base does not record the contract it was built from"
         );
-        apply_step(&pool).await;
+        let applied = migrate(&pool, &role).await;
         assert_eq!(
             recorded_contract(&pool).await,
             CONTRACT_SQL_SHA256,
             "the step applied but the database still reports the contract it left"
         );
-        // The contract is now current. The backend is not, and no step can make
-        // it so — see PENDING_BACKEND_MIGRATIONS.
-        apply_pending_backend_migrations(&pool, &role).await;
+        assert_eq!(applied.result, CONTRACT_SQL_SHA256);
+        // The receipt distinguishes the two halves. Crediting the step with the
+        // backend migrations would make the ledger claim the contract DDL
+        // created relations it never mentions.
+        assert_eq!(applied.steps.len(), 1, "{:?}", applied.steps);
+        assert_eq!(
+            applied.backend_migrations,
+            ["0005_pty_delivery", "0006_schema_migration"],
+            "the applier carried a different set than the step declares"
+        );
+        // The chain writes no events. A difference here is a daemon that was
+        // not fenced, not a migration that logged something.
+        assert_eq!(applied.events_before, applied.events_after);
     }
     {
         let pool = PgPool::connect(&url_for(&initialized))
@@ -646,7 +606,7 @@ async fn a_decided_gate_row_survives_the_step() {
     // Without the backfill this is where the step dies: #103's CHECK demands a
     // `decided_by` on every non-pending row, and PostgreSQL validates an added
     // CHECK against the rows already there.
-    apply_step(&pool).await;
+    migrate(&pool, &role).await;
 
     assert_eq!(
         gate_decided_by(&pool, "gate-decided").await,
@@ -679,12 +639,162 @@ async fn a_regraded_gate_takes_its_latest_decision() {
     seed_gate_decided_event(&pool, 1, "gate-regraded", r#"{"kind": "operator"}"#).await;
     seed_gate_decided_event(&pool, 2, "gate-regraded", r#"{"kind": "engine"}"#).await;
 
-    apply_step(&pool).await;
+    migrate(&pool, &role).await;
 
     assert_eq!(
         gate_decided_by(&pool, "gate-regraded").await,
         serde_json::json!({"kind": "engine"}),
         "the backfill took a superseded decision"
+    );
+
+    drop(pool);
+    drop_database(&maintenance, &database).await;
+    drop_role(&maintenance, &role).await;
+}
+
+/// The ledger row this migration wrote, as (base, result, step_id,
+/// backend_migrations, asserted_base, backup_sha256).
+async fn ledger_row(pool: &PgPool) -> (String, String, String, Vec<String>, bool, Option<String>) {
+    let rows: Vec<_> = sqlx::query(
+        "SELECT base_sha256, result_sha256, step_id, backend_migrations, asserted_base, \
+                backup_sha256 \
+           FROM gwk_internal.schema_migration ORDER BY seq",
+    )
+    .fetch_all(pool)
+    .await
+    .expect("read the ledger");
+    // Counted before it is read out of: `fetch_one` on an empty ledger is an
+    // error with a worse message, and on a ledger with two rows it would
+    // silently describe one of them.
+    assert_eq!(rows.len(), 1, "expected exactly one ledger row");
+    let row = &rows[0];
+    (
+        row.try_get("base_sha256").expect("base"),
+        row.try_get("result_sha256").expect("result"),
+        row.try_get("step_id").expect("step_id"),
+        row.try_get("backend_migrations")
+            .expect("backend_migrations"),
+        row.try_get("asserted_base").expect("asserted_base"),
+        row.try_get("backup_sha256").expect("backup_sha256"),
+    )
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see the module docs"]
+async fn a_carried_backend_migration_lands_is_recorded_and_is_reachable() {
+    // The half no step's SQL contains. `gwk_internal` has no digest and no
+    // chain, so a migration added after a database was initialized arrives only
+    // because the applier carried it — and if it arrives without its grants it
+    // is a relation the runtime role cannot see, which nothing about the
+    // database looks wrong about.
+    let maintenance = maintenance_pool().await;
+    let role = role_for("carried");
+    create_role(&maintenance, &role).await;
+    let database = fresh_database(&maintenance, "carried").await;
+    let pool = PgPool::connect(&url_for(&database)).await.expect("connect");
+
+    build_base(&pool, &role).await;
+    // The base predates both carried migrations, which is the state this is
+    // about: asserted rather than assumed, since a base that already had them
+    // would make everything below vacuous.
+    for relation in ["pty_delivery", "schema_migration"] {
+        let present: bool =
+            sqlx::query_scalar("SELECT to_regclass('gwk_internal.' || $1) IS NOT NULL")
+                .bind(relation)
+                .fetch_one(&pool)
+                .await
+                .expect("probe the base");
+        assert!(!present, "the base already has gwk_internal.{relation}");
+    }
+
+    let applied = migrate(&pool, &role).await;
+
+    assert_eq!(
+        applied.backend_migrations,
+        ["0005_pty_delivery", "0006_schema_migration"]
+    );
+
+    let (base, result, step_id, carried, asserted, backup) = ledger_row(&pool).await;
+    assert_eq!(base, BASE_CONTRACT_SHA256);
+    assert_eq!(result, CONTRACT_SQL_SHA256);
+    assert_eq!(step_id, "aba2f647-7ebb2ada.sql");
+    assert_eq!(
+        carried,
+        ["0005_pty_delivery", "0006_schema_migration"],
+        "the row does not name what the run carried"
+    );
+    assert!(!asserted, "a plain run did not assert its base");
+    assert_eq!(backup, None);
+
+    // Reachable, and counted. "One query succeeded" is what a grant on one
+    // table proves; the question is whether every relation the run created got
+    // one, and only a count answers that.
+    let mut conn = PgConnection::connect(&url_for(&database))
+        .await
+        .expect("dedicated connection");
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("SET ROLE {role};")))
+        .execute(&mut conn)
+        .await
+        .expect("assume the runtime role");
+    let readable: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+          WHERE n.nspname = 'gwk_internal' AND c.relkind = 'r' \
+            AND has_table_privilege(c.oid, 'SELECT')",
+    )
+    .fetch_one(&mut conn)
+    .await
+    .expect("count readable gwk_internal tables");
+    assert_eq!(
+        readable, 8,
+        "every gwk_internal table the run left behind must be readable by the runtime role"
+    );
+    // And the ledger specifically, since it is the one this commit adds.
+    let ledger_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM gwk_internal.schema_migration")
+        .fetch_one(&mut conn)
+        .await
+        .expect("the runtime role reads the ledger");
+    assert_eq!(ledger_rows, 1);
+    conn.close().await.expect("close");
+
+    drop(pool);
+    drop_database(&maintenance, &database).await;
+    drop_role(&maintenance, &role).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see the module docs"]
+async fn an_asserted_base_is_recorded_as_asserted() {
+    // `--from` is the one path where the applier does not check the
+    // precondition it acts on. The row is the only thing that will ever say so,
+    // and it carries the digest the database ACTUALLY recorded beside the flag
+    // — otherwise a later reader cannot tell which claim was overridden.
+    let maintenance = maintenance_pool().await;
+    let role = role_for("asserted");
+    create_role(&maintenance, &role).await;
+    let database = fresh_database(&maintenance, "asserted").await;
+    let pool = PgPool::connect(&url_for(&database)).await.expect("connect");
+
+    build_base(&pool, &role).await;
+    let chain = resolved_chain();
+    let applied = gwk_kernel::migrate::apply(
+        &pool,
+        &chain,
+        &role,
+        BASE_CONTRACT_SHA256,
+        true,
+        "0000000000000000000000000000000000000000",
+        Some(&"c".repeat(64)),
+    )
+    .await
+    .expect("apply with an asserted base");
+    assert_eq!(applied.result, CONTRACT_SQL_SHA256);
+
+    let (_, _, _, _, asserted, backup) = ledger_row(&pool).await;
+    assert!(asserted, "the override left no trace in the ledger");
+    assert_eq!(
+        backup,
+        Some("c".repeat(64)),
+        "the backup digest the verb computed is not what the row records"
     );
 
     drop(pool);

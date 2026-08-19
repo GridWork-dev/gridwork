@@ -553,11 +553,15 @@ async fn the_ledger_refuses_mutation_from_a_superuser() {
 
     sqlx::query(
         "INSERT INTO gwk_internal.schema_migration \
-           (base_sha256, result_sha256, step_id, asserted_base) \
-         VALUES ($1, $2, 'aaaaaaaa-bbbbbbbb.sql', false)",
+           (base_sha256, result_sha256, step_id, backend_migrations, asserted_base) \
+         VALUES ($1, $2, 'aaaaaaaa-bbbbbbbb.sql', $3, false)",
     )
     .bind("a".repeat(64))
     .bind("b".repeat(64))
+    // A step that carried one. Empty would work and would exercise less: the
+    // column is `text[] NOT NULL` with a validating CHECK, and a row that
+    // carries nothing never reaches it.
+    .bind(vec!["0005_pty_delivery".to_owned()])
     .execute(&pool)
     .await
     .expect("append a ledger row");

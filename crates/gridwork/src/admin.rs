@@ -232,6 +232,200 @@ pub async fn init(pretty: bool) -> Result<(), Failure> {
     Ok(())
 }
 
+/// Carry this database from the contract it records to the one this binary
+/// carries.
+///
+/// The order of the first three acts is the whole of the operator-facing
+/// design, and each is before the next because of what going second would cost:
+///
+/// 1. **The backup is read and digested first**, before any lock. A verb that
+///    fences a live daemon and then complains about a typo in a path has taken
+///    something away for nothing. This never shells out to `pg_dump` — the
+///    major-version judgement belongs to the operator, who is the only party
+///    who knows which `pg_dump` matches the server.
+/// 2. **The writer lock**, exactly as `init` takes it, before the pool. It
+///    never waits, so a running kernel is a refusal rather than a hang.
+/// 3. **The chain is resolved** against what the database records, and the
+///    refusal — when there is one — carries the recorded digest, this binary's,
+///    and every base the registry knows, because "no chain" without the
+///    candidates is a sentence an operator cannot act on.
+///
+/// `--from` asserts a base rather than reading one. It is the one path where
+/// the precondition goes unchecked, so both the receipt and the ledger row
+/// carry `asserted_base: true` alongside the digest that was actually recorded
+/// at the time — the row is the only thing that will ever say so. It relaxes
+/// the assertion, not the chain: a `--from` naming a digest no step bases on is
+/// still refused.
+pub async fn migrate(
+    scratch: &str,
+    backup: Option<&str>,
+    from: Option<&str>,
+    dry_run: bool,
+    pretty: bool,
+) -> Result<(), Failure> {
+    // FIRST, before the revision stamp and before anything reads the
+    // environment. It is the cheapest check in the verb and it catches the
+    // most common mistake, and every statement after it costs the operator
+    // something to undo.
+    // See the doc above.
+    let backup_sha256 = match backup {
+        Some(path) => Some(digest_backup(path)?),
+        None => {
+            if !dry_run {
+                // Named, not merely declined: the operator who passed this flag
+                // has to be told what it costs while it still costs nothing.
+                emit(
+                    &json!({
+                        "type": "admin_migrate_unbacked",
+                        "warning": concat!(
+                            "--no-backup: this migration will have no restore path. ",
+                            "If the chain commits and the result is wrong there is ",
+                            "nothing to restore from — the log is intact but the ",
+                            "schema is not the one the old binaries serve",
+                        ),
+                    }),
+                    pretty,
+                );
+            }
+            None
+        }
+    };
+
+    let revision = revision()?;
+    let config = AdminConfig::from_env().map_err(configuration)?;
+    let _lock = WriterLock::acquire(config.admin_database_url())
+        .await
+        .map_err(|e| Failure::new(KernelErrorCode::Fenced, e.to_string()))?;
+    let pool = gwk_kernel::connect_pool(config.admin_database_url(), 4)
+        .await
+        .map_err(configuration)?;
+
+    let recorded = match admin::inspect(&pool).await.map_err(configuration)? {
+        TargetState::Initialized { contract_sha256 } => contract_sha256,
+        other => {
+            return Err(Failure::new(
+                KernelErrorCode::Schema,
+                format!(
+                    "this database is {}, and a migration carries a database that already                      records a contract",
+                    match other {
+                        TargetState::Empty => "empty — `gw admin init` is the verb for that",
+                        _ => "not one this binary recognizes",
+                    }
+                ),
+            ));
+        }
+    };
+
+    let base = from.unwrap_or(recorded.as_str());
+    let asserted_base = from.is_some();
+    let chain = gwk_kernel::migrate::resolve(
+        gwk_kernel::CONTRACT_STEPS,
+        base,
+        gwk_kernel::CONTRACT_SQL_SHA256,
+    )
+    .map_err(|refusal| Failure::new(KernelErrorCode::Schema, refusal.to_string()))?;
+
+    let steps: Vec<&str> = chain.iter().map(|step| step.id).collect();
+    let carried: Vec<&str> = chain
+        .iter()
+        .flat_map(|step| step.backend_migrations.iter().copied())
+        .collect();
+
+    if dry_run {
+        emit(
+            &json!({
+                "type": "admin_migrate_planned",
+                "scratch_database": scratch,
+                "recorded_sha256": recorded,
+                "base_sha256": base,
+                "asserted_base": asserted_base,
+                "contract_sha256": gwk_kernel::CONTRACT_SQL_SHA256,
+                "steps": steps,
+                "backend_migrations": carried,
+                "backup_sha256": backup_sha256,
+                "public_revision": revision,
+            }),
+            pretty,
+        );
+        return Ok(());
+    }
+
+    let applied = gwk_kernel::migrate::apply(
+        &pool,
+        &chain,
+        config.runtime_role(),
+        &recorded,
+        asserted_base,
+        &revision,
+        backup_sha256.as_deref(),
+    )
+    .await
+    .map_err(configuration)?;
+
+    emit(
+        &json!({
+            "type": "admin_migrated",
+            "scratch_database": scratch,
+            "recorded_sha256": recorded,
+            "base_sha256": base,
+            "asserted_base": asserted_base,
+            "contract_sha256": applied.result,
+            "steps": applied.steps,
+            "backend_migrations": applied.backend_migrations,
+            "backup_sha256": backup_sha256,
+            "public_revision": revision,
+            "events_before": applied.events_before,
+            "events_after": applied.events_after,
+            "elapsed_ms": applied.elapsed_ms,
+        }),
+        pretty,
+    );
+    Ok(())
+}
+
+/// SHA-256 of the backup file, computed here.
+///
+/// Computed rather than accepted: a digest the operator supplies is a digest of
+/// whatever they digested, and the receipt's claim is about the file this verb
+/// could actually read at the moment it ran.
+fn digest_backup(path: &str) -> Result<String, Failure> {
+    use sha2::{Digest, Sha256};
+
+    let mut file = std::fs::File::open(path).map_err(|err| {
+        Failure::new(
+            KernelErrorCode::Storage,
+            format!(
+                "--backup {path:?} cannot be read: {err}. Checked before the writer lock is                  taken, so nothing has been fenced and nothing has been applied"
+            ),
+        )
+    })?;
+    // Streamed in fixed-size blocks rather than read whole: a database dump is
+    // exactly the file that does not fit in memory, and the digest is the only
+    // thing wanted out of it.
+    let mut hasher = Sha256::new();
+    let mut block = vec![0u8; 1 << 16];
+    loop {
+        let read = std::io::Read::read(&mut file, &mut block).map_err(|err| {
+            Failure::new(
+                KernelErrorCode::Storage,
+                format!("--backup {path:?} could not be read to the end: {err}"),
+            )
+        })?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&block[..read]);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .fold(String::with_capacity(64), |mut acc, byte| {
+            use std::fmt::Write as _;
+            let _ = write!(acc, "{byte:02x}");
+            acc
+        }))
+}
+
 /// Read the machine half of a driving-window receipt.
 ///
 /// Lockless like `verify`, because it only reads — a receipt read that could
@@ -556,6 +750,44 @@ fn verdict(report: &recover::RecoveryReport) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RED 2: a backup path that does not exist refuses BEFORE anything is
+    /// taken away.
+    ///
+    /// The ordering is the assertion, and it is testable without a database
+    /// precisely because of the ordering: this call reaches the backup check
+    /// before it reads a credential, resolves a DSN, or takes the writer lock,
+    /// so it fails the same way on a machine with no PostgreSQL at all. Move
+    /// the check down and this test stops being about the backup — it starts
+    /// reporting whatever the environment happens to be missing.
+    ///
+    /// A verb that fences a live daemon and then complains about a typo has
+    /// taken the kernel's write authority away for nothing.
+    #[tokio::test]
+    async fn a_missing_backup_refuses_before_the_writer_lock() {
+        let failure = migrate(
+            "probe",
+            Some("/nonexistent/gwk-migrate-backup-that-cannot-be-there.dump"),
+            None,
+            false,
+            false,
+        )
+        .await
+        .expect_err("a backup path that does not exist");
+
+        assert_eq!(failure.code, KernelErrorCode::Storage, "{failure:?}");
+        assert!(failure.message.contains("--backup"), "{failure:?}");
+        assert!(
+            failure.message.contains("before the writer lock"),
+            "the refusal does not say what it protected: {failure:?}"
+        );
+        // And specifically NOT a configuration failure: that is what this
+        // reports the moment the check moves below `AdminConfig::from_env`.
+        assert!(
+            !failure.message.contains("GWK_ADMIN_DATABASE_URL"),
+            "the backup check ran after the credential was read: {failure:?}"
+        );
+    }
 
     #[test]
     fn a_scratch_database_lives_beside_the_one_it_verifies() {

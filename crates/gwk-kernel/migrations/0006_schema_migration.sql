@@ -17,6 +17,26 @@
 -- is the admin one, and a superuser is bound by neither. A trigger declared
 -- ENABLE ALWAYS fires for all of them.
 
+-- Bounded, one-dimensional, and shaped like the file stems on disk. The column
+-- is the only place a later reader learns which files a database took, so a
+-- value that is not a file name is a row that cannot be checked against
+-- anything.
+CREATE FUNCTION gwk_internal.migration_names_are_valid(names text[]) RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+STRICT
+AS $$
+SELECT
+  COALESCE(array_ndims(names), 1) = 1
+  AND (cardinality(names) = 0 OR array_lower(names, 1) = 1)
+  AND cardinality(names) <= 64
+  AND NOT EXISTS (
+    SELECT 1
+    FROM unnest(names) AS migration(name)
+    WHERE name IS NULL OR name !~ '^[0-9]{4}_[a-z_]+$'
+  );
+$$;
+
 CREATE TABLE gwk_internal.schema_migration (
   -- A surrogate key, not `step_id`. A database restored from a backup and
   -- migrated again applies the same step a second time, and that is a second
@@ -36,6 +56,19 @@ CREATE TABLE gwk_internal.schema_migration (
   -- reason: a step applied without one is a real state, and recording that
   -- honestly is worth more than a column that cannot represent it.
   backup_sha256   text CHECK (backup_sha256 ~ '^[0-9a-f]{64}$'),
+  -- The backend migrations this run carried, in the order it applied them.
+  --
+  -- Recorded separately from the step because they are not the step's work.
+  -- `gwk_internal` has no digest and no chain: `BACKEND_MIGRATIONS` runs at
+  -- initialization and never again, so a migration added later reaches every
+  -- new database and no existing one, and the applier closes that by carrying
+  -- the ones a step declares. Crediting them to the step would make the ledger
+  -- claim the contract DDL created relations it never mentions.
+  --
+  -- Empty is a real answer — a step that carries none says so — which is why
+  -- this is NOT NULL over an empty array rather than nullable.
+  backend_migrations text[] NOT NULL
+                      CHECK (gwk_internal.migration_names_are_valid(backend_migrations)),
   -- Whether the operator asserted the base digest by hand rather than the
   -- applier reading it out of `schema_fingerprint`. An asserted base is a
   -- claim about the database; a read one is an observation of it, and a later

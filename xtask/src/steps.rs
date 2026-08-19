@@ -48,6 +48,28 @@ pub const GENERATED_PATH: &str = "crates/gwk-domain/src/contract_steps.rs";
 /// Where the authored steps live, relative to the repo root.
 pub const STEPS_DIR: &str = "schema/steps";
 
+/// Where the kernel's backend migrations live, relative to the repo root.
+pub const MIGRATIONS_DIR: &str = "crates/gwk-kernel/migrations";
+
+/// The backend migrations a database at the chain's base already carries.
+///
+/// `schema/steps/` chains the CONTRACT digest. `gwk_internal` has no digest,
+/// and `BACKEND_MIGRATIONS` is applied at initialization and never again — so a
+/// migration added afterwards reaches every new database and no existing one.
+/// The applier closes that by carrying them, and a step declares which ones it
+/// carries; this constant is the other end of the accounting, the set that was
+/// already in place before the first step could carry anything.
+///
+/// It is a claim about `4d54bba`, checkable with
+/// `git show 4d54bba:crates/gwk-kernel/migrations/`, and it does not move: a
+/// migration added today is claimed by a step, never appended here.
+pub const INITIAL_BACKEND_MIGRATIONS: [&str; 4] = [
+    "0001_kernel_internal",
+    "0002_writer",
+    "0003_blob",
+    "0004_checkpoint",
+];
+
 /// How many characters of each digest a step's file name carries.
 const NAME_PREFIX_LEN: usize = 8;
 
@@ -60,6 +82,13 @@ pub struct ParsedStep {
     pub base: String,
     /// The contract digest a database carries once this step has been applied.
     pub result: String,
+    /// The backend migrations this step carries, in the order they apply.
+    ///
+    /// Declared, never probed. Deciding it by looking for the relations a
+    /// migration creates would need a migration-to-relation map, and a second
+    /// hand-maintained list that can drift from the first is the thing this
+    /// whole mechanism exists to remove.
+    pub carries: Vec<String>,
     /// Every byte of the file.
     pub sql: String,
 }
@@ -80,6 +109,57 @@ fn header_digest(line: Option<&str>, field: &str, id: &str) -> Result<String, St
         ));
     }
     Ok(digest.to_owned())
+}
+
+/// Read the `-- carries:` header line: the backend migrations this step brings.
+///
+/// The line is REQUIRED even when the list is empty. An absent line and a step
+/// that carries nothing are different facts, and only one of them is a step
+/// somebody finished writing — while an empty list is safe to state plainly,
+/// because [`inspect_step_chain`] refuses a migration file no step claims.
+fn header_carries(line: Option<&str>, id: &str) -> Result<Vec<String>, String> {
+    let line = line.ok_or_else(|| {
+        format!(
+            "{id}: has no `-- carries:` header line. Every step declares the backend migrations \
+             it brings forward, and a step that brings none says so with an empty list"
+        )
+    })?;
+    let tail = line.strip_prefix("-- carries:").ok_or_else(|| {
+        format!("{id}: expected a `-- carries: <names>` header line, found {line:?}")
+    })?;
+
+    let mut carries: Vec<String> = Vec::new();
+    for name in tail
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        // The file stem, so the applier can find the file and the ledger row
+        // reads as the thing on disk. Bounded to the shape those files have:
+        // anything else is a typo that would otherwise become a missing file at
+        // migration time, which is the worst moment to discover it.
+        if name.len() < 6
+            || !name.as_bytes()[..4].iter().all(u8::is_ascii_digit)
+            || name.as_bytes()[4] != b'_'
+            || !name
+                .bytes()
+                .skip(5)
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+        {
+            return Err(format!(
+                "{id}: `-- carries:` names {name:?}, which is not a `NNNN_lower_snake` migration \
+                 stem"
+            ));
+        }
+        if carries.iter().any(|seen| seen == name) {
+            return Err(format!(
+                "{id}: `-- carries:` names {name:?} twice — applying a migration twice is not \
+                 something a list can mean"
+            ));
+        }
+        carries.push(name.to_owned());
+    }
+    Ok(carries)
 }
 
 /// Parse one step file. `id` is its file name, `sql` every byte of it.
@@ -105,6 +185,7 @@ pub fn parse_step(id: &str, sql: &str) -> Result<ParsedStep, String> {
     let mut lines = sql.lines();
     let base = header_digest(lines.next(), "base", id)?;
     let result = header_digest(lines.next(), "result", id)?;
+    let carries = header_carries(lines.next(), id)?;
     if base == result {
         return Err(format!(
             "{id}: base and result are both {base} — a step that arrives where it started is not \
@@ -135,6 +216,7 @@ pub fn parse_step(id: &str, sql: &str) -> Result<ParsedStep, String> {
         id: id.to_owned(),
         base,
         result,
+        carries,
         sql: sql.to_owned(),
     })
 }
@@ -297,6 +379,104 @@ pub fn inspect_step_chain(contract_sql: &str, steps: &[ParsedStep]) -> Result<()
     Ok(())
 }
 
+/// Refuse a backend migration no step claims, or one two steps both claim.
+///
+/// `crates/gwk-kernel/migrations/` is applied wholesale at initialization and
+/// never again, so every file in it either was already in place at the chain's
+/// base ([`INITIAL_BACKEND_MIGRATIONS`]) or has to be carried forward by exactly
+/// one step. A file nobody claims reaches new databases and no existing one and
+/// nothing says so; a file two steps claim gets applied twice, and the second
+/// application is an error at the worst possible moment.
+///
+/// `present` is the migration stems found on disk. Counted before anything
+/// folds, because a directory read that returned nothing would make every
+/// "claimed exactly once" question vacuously true.
+pub fn inspect_backend_migration_claims(
+    present: &[String],
+    steps: &[ParsedStep],
+) -> Result<(), String> {
+    if present.is_empty() {
+        return Err(format!(
+            "no backend migrations found under {MIGRATIONS_DIR}: this check is about which of \
+             them a step claims, and over an empty set every answer is yes"
+        ));
+    }
+
+    // Claimed twice, checked across the whole registry rather than per step —
+    // `parse_step` already refuses one step naming a migration twice, and this
+    // is the other shape of the same mistake.
+    let mut claimed: Vec<(&str, &str)> = Vec::new();
+    for step in steps {
+        for name in &step.carries {
+            if let Some((_, first)) = claimed.iter().find(|(seen, _)| seen == name) {
+                return Err(format!(
+                    "backend migration {name:?} is carried by both {first} and {}: applying it \
+                     twice is not something two steps can agree to do",
+                    step.id
+                ));
+            }
+            claimed.push((name.as_str(), step.id.as_str()));
+        }
+    }
+
+    // Every claim names a file that exists. A step carrying a migration that
+    // was renamed or removed fails at migration time otherwise, against a live
+    // database, inside the transaction.
+    for (name, id) in &claimed {
+        if !present.iter().any(|stem| stem == name) {
+            return Err(format!(
+                "{id} carries backend migration {name:?}, and no such file exists under \
+                 {MIGRATIONS_DIR}"
+            ));
+        }
+    }
+
+    // And every file is accounted for, by a step or by the initial set.
+    let unclaimed: Vec<&String> = present
+        .iter()
+        .filter(|stem| {
+            !INITIAL_BACKEND_MIGRATIONS.contains(&stem.as_str())
+                && !claimed.iter().any(|(name, _)| name == *stem)
+        })
+        .collect();
+    if !unclaimed.is_empty() {
+        return Err(format!(
+            "backend migration(s) {} are carried by no step and are not in the set a database at \
+             the chain's base already has. `BACKEND_MIGRATIONS` runs at initialization and never \
+             again, so an unclaimed file reaches every NEW database and no existing one — name it \
+             on a step's `-- carries:` line",
+            unclaimed
+                .iter()
+                .map(|stem| format!("{stem:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+
+    Ok(())
+}
+
+/// The migration stems on disk, in file-name order.
+pub fn read_backend_migrations(dir: &Path) -> Vec<String> {
+    let entries =
+        std::fs::read_dir(dir).unwrap_or_else(|err| panic!("read {}: {err}", dir.display()));
+    let mut stems: Vec<String> = Vec::new();
+    for entry in entries {
+        let path = entry
+            .unwrap_or_else(|err| panic!("read an entry of {}: {err}", dir.display()))
+            .path();
+        if path.extension().is_none_or(|ext| ext != "sql") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            panic!("{}: migration file names are UTF-8", path.display());
+        };
+        stems.push(stem.to_owned());
+    }
+    stems.sort();
+    stems
+}
+
 /// The step ids, for a message that would otherwise name a count and nothing to
 /// look at.
 fn step_ids(steps: &[ParsedStep]) -> String {
@@ -336,6 +516,14 @@ pub fn contract_steps_rs(steps: &[ParsedStep]) -> String {
              pub base: &'static str,\n    \
              /// The contract digest a database carries once this step has been applied.\n    \
              pub result: &'static str,\n    \
+             /// The backend migrations this step carries, in the order they apply.\n    \
+             ///\n    \
+             /// `gwk_internal` has no digest and no chain of its own, so a migration\n    \
+             /// added after a database was initialized reaches it only if something\n    \
+             /// carries it. This is that declaration; the applier reads it, and the\n    \
+             /// ledger row records it, so a row never credits the step with work the\n    \
+             /// step did not do.\n    \
+             pub backend_migrations: &'static [&'static str],\n    \
              /// Every byte of the step's file, header comments included.\n    \
              pub sql: &'static str,\n\
          }\n\
@@ -360,13 +548,27 @@ pub fn contract_steps_rs(steps: &[ParsedStep]) -> String {
             base,
             result,
             sql,
+            ..
         } = step;
+        let carries = if step.carries.is_empty() {
+            "&[]".to_owned()
+        } else {
+            format!(
+                "&[{}]",
+                step.carries
+                    .iter()
+                    .map(|name| format!("{name:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
         let _ = write!(
             out,
             "    Step {{\n        \
                  id: {id:?},\n        \
                  base: {base:?},\n        \
                  result: {result:?},\n        \
+                 backend_migrations: {carries},\n        \
                  sql: r#\"{sql}\"#,\n    \
              }},\n"
         );
@@ -383,8 +585,10 @@ mod tests {
     const B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const C: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 
+    /// A step file carrying no backend migrations — the shape most of these
+    /// cases are about, since the digests and the file name are what they test.
     fn step_file(base: &str, result: &str, body: &str) -> String {
-        format!("-- base:   {base}\n-- result: {result}\n{body}")
+        step_file_carrying(base, result, &format!("-- carries:\n{body}"))
     }
 
     #[test]
@@ -528,6 +732,111 @@ mod tests {
     // anchor and refused off it, and that difference is the entire reason the
     // anchor exists.
 
+    /// A step declaring `carries`, over SQL the claims guard never reads.
+    fn carrying(base: &str, result: &str, carries: &str) -> ParsedStep {
+        let id = format!(
+            "{}-{}.sql",
+            &base[..NAME_PREFIX_LEN],
+            &result[..NAME_PREFIX_LEN]
+        );
+        let body = format!("-- carries: {carries}\nSELECT 1;\n");
+        parse_step(&id, &step_file_carrying(base, result, &body)).expect("well-formed step")
+    }
+
+    fn step_file_carrying(base: &str, result: &str, tail: &str) -> String {
+        format!("-- base:   {base}\n-- result: {result}\n{tail}")
+    }
+
+    #[test]
+    fn a_migration_no_step_claims_is_refused() {
+        // The failure this whole mechanism exists for: `BACKEND_MIGRATIONS`
+        // runs at initialization and never again, so an unclaimed file reaches
+        // every new database and no existing one — and nothing about either
+        // database looks wrong.
+        let present = vec![
+            "0001_kernel_internal".to_owned(),
+            "0002_writer".to_owned(),
+            "0003_blob".to_owned(),
+            "0004_checkpoint".to_owned(),
+            "0005_pty_delivery".to_owned(),
+        ];
+        let steps = [carrying(A, B, "")];
+        let err = inspect_backend_migration_claims(&present, &steps).expect_err("0005 unclaimed");
+        assert!(err.contains("\"0005_pty_delivery\""), "{err}");
+        assert!(err.contains("carried by no step"), "{err}");
+
+        // Claimed, and it passes.
+        let steps = [carrying(A, B, "0005_pty_delivery")];
+        assert_eq!(inspect_backend_migration_claims(&present, &steps), Ok(()));
+    }
+
+    #[test]
+    fn a_migration_two_steps_claim_is_refused_and_names_both() {
+        let present = vec![
+            "0001_kernel_internal".to_owned(),
+            "0002_writer".to_owned(),
+            "0003_blob".to_owned(),
+            "0004_checkpoint".to_owned(),
+            "0005_pty_delivery".to_owned(),
+        ];
+        let steps = [
+            carrying(A, B, "0005_pty_delivery"),
+            carrying(B, C, "0005_pty_delivery"),
+        ];
+        let err = inspect_backend_migration_claims(&present, &steps).expect_err("claimed twice");
+        assert!(err.contains("aaaaaaaa-bbbbbbbb.sql"), "{err}");
+        assert!(err.contains("bbbbbbbb-cccccccc.sql"), "{err}");
+        // Applying a migration twice is the failure; the message has to name
+        // both claimants, because either one could be the one to edit.
+        assert!(err.contains("twice"), "{err}");
+    }
+
+    #[test]
+    fn a_claim_on_a_file_that_does_not_exist_is_refused() {
+        let present = vec!["0001_kernel_internal".to_owned()];
+        let steps = [carrying(A, B, "0009_renamed_away")];
+        let err = inspect_backend_migration_claims(&present, &steps).expect_err("no such file");
+        assert!(err.contains("0009_renamed_away"), "{err}");
+        assert!(err.contains("no such file"), "{err}");
+    }
+
+    #[test]
+    fn an_empty_migration_directory_is_its_own_refusal() {
+        // Count before folding. Over zero files every "claimed exactly once"
+        // question is vacuously satisfied, and the guard would report a clean
+        // set it never looked at.
+        let steps = [carrying(A, B, "")];
+        let err = inspect_backend_migration_claims(&[], &steps).expect_err("nothing present");
+        assert!(err.contains("no backend migrations found"), "{err}");
+        assert!(err.contains("every answer is yes"), "{err}");
+    }
+
+    #[test]
+    fn the_carries_header_is_required_and_bounded() {
+        // Absent is not the same as empty. One is a step that carries nothing;
+        // the other is a step somebody stopped writing.
+        let no_header = format!("-- base:   {A}\n-- result: {B}\nSELECT 1;\n");
+        let err = parse_step("aaaaaaaa-bbbbbbbb.sql", &no_header).expect_err("no carries line");
+        assert!(err.contains("-- carries:"), "{err}");
+
+        // Empty is legal, and safe because the guard above refuses a file no
+        // step claims.
+        let empty = carrying(A, B, "");
+        assert!(empty.carries.is_empty());
+
+        // Shapes that are not migration stems.
+        for bad in ["pty_delivery", "0005-pty-delivery", "0005_PTY", "005_x"] {
+            let sql = step_file_carrying(A, B, &format!("-- carries: {bad}\nSELECT 1;\n"));
+            let err = parse_step("aaaaaaaa-bbbbbbbb.sql", &sql).expect_err("bad stem");
+            assert!(err.contains("NNNN_lower_snake"), "{bad}: {err}");
+        }
+
+        // And one step naming the same migration twice.
+        let sql = step_file_carrying(A, B, "-- carries: 0005_pty_delivery, 0005_pty_delivery\n");
+        let err = parse_step("aaaaaaaa-bbbbbbbb.sql", &sql).expect_err("named twice");
+        assert!(err.contains("twice"), "{err}");
+    }
+
     #[test]
     fn state_1_at_the_anchor_an_empty_registry_is_tolerated() {
         // Nothing has moved that a step would have to describe. This also
@@ -642,6 +951,7 @@ mod tests {
                      id: \"{}\",\n        \
                      base: \"{}\",\n        \
                      result: \"{}\",\n        \
+                     backend_migrations: &[],\n        \
                      sql: r#\"{}\"#,\n    \
                  }},\n",
                 step.id, step.base, step.result, step.sql

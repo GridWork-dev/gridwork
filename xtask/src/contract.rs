@@ -1570,6 +1570,16 @@ pub fn run(check: bool) {
     if let Err(message) = crate::steps::inspect_step_chain(&contract_sql, &parsed_steps) {
         drift.push(message);
     }
+    // Set equality over `crates/gwk-kernel/migrations/`: every file is claimed
+    // by exactly one step or was already in place at the chain's base. Same
+    // shape as the chain check above, over the other half of the schema.
+    let migration_stems =
+        crate::steps::read_backend_migrations(&root.join(crate::steps::MIGRATIONS_DIR));
+    if let Err(message) =
+        crate::steps::inspect_backend_migration_claims(&migration_stems, &parsed_steps)
+    {
+        drift.push(message);
+    }
     check_file(
         &contracts.join("signal-theme.json"),
         &theme_json,
