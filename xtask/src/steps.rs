@@ -186,6 +186,127 @@ pub fn read_steps(dir: &Path) -> Vec<ParsedStep> {
         .collect()
 }
 
+/// The SHA-256 of `schema/0001_contract.sql` as it stood when this gate was
+/// introduced.
+///
+/// It is NOT the first contract this repository shipped, and nothing here
+/// should be read as a claim that it is: `git log schema/0001_contract.sql`
+/// lists more than twenty digests before this one, and a database is running on
+/// one of them. This constant makes no statement about history. It is one fixed
+/// point, and it does one job.
+///
+/// That job is to say when an EMPTY `schema/steps/` is tolerable — which is
+/// only while the contract still carries this exact digest. The moment the SQL
+/// changes, a database on the older contract needs a step, and noticing that
+/// requires something to compare against that this command does not itself
+/// rewrite. `CONTRACT_SQL_SHA256` cannot be that something: it is regenerated
+/// from the same bytes a moment earlier, so comparing the two agrees by
+/// construction and would pass every contract change ever made.
+///
+/// It is a bootstrap and it expires. Once ANY step is registered the
+/// empty-registry branch is unreachable and this value is never read again.
+/// When it stops matching the file, the honest move is to delete it and that
+/// branch — not to refresh it.
+pub const CONTRACT_SHA256_AT_GATE_INTRODUCTION: &str =
+    "7ebb2adaad295c28c60f1e789030ceef87d6fdd607b37a1186f173dc22647142";
+
+/// Refuse a contract digest that no authored step arrives at.
+///
+/// `contract_sql` is the bytes of `schema/0001_contract.sql`; the digest
+/// compared against is computed HERE, from those bytes, and never read back out
+/// of `crates/gwk-domain/src/contract_sql.rs`. See
+/// [`CONTRACT_SHA256_AT_GATE_INTRODUCTION`] for why that distinction is the
+/// whole gate.
+///
+/// Two arms are already settled before anything reaches here, and are not
+/// restated: [`parse_step`] refuses a file whose name disagrees with its header
+/// and a step whose base equals its result, and [`read_steps`] surfaces both as
+/// a hard failure. What is left is what no single file can know — whether the
+/// SET of them is a line, and whether that line ends where this contract is.
+pub fn inspect_step_chain(contract_sql: &str, steps: &[ParsedStep]) -> Result<(), String> {
+    let current = crate::schema::sha256_hex(contract_sql.as_bytes());
+
+    // The count decides first. An empty registry is a state, not a chain, and
+    // walking it would find nothing and report that nothing was wrong — so
+    // whether it is legitimate is settled before anything else looks at it.
+    //
+    // It is legitimate in exactly one case: the contract still carries the
+    // digest it carried when this gate was introduced, so nothing has moved
+    // that a step would have to describe. A registry that HAS steps is not
+    // second-guessed here on either side of that line; it goes to the chain
+    // checks below, where the only question worth asking is whether it arrives
+    // at the contract this repository actually ships.
+    let registered = steps.len();
+
+    if registered == 0 {
+        if current == CONTRACT_SHA256_AT_GATE_INTRODUCTION {
+            return Ok(());
+        }
+        return Err(format!(
+            "no migration step results in {current}, the contract digest \
+             schema/0001_contract.sql now carries: schema/steps/ holds no step files at all. \
+             The contract has moved off {CONTRACT_SHA256_AT_GATE_INTRODUCTION}, the digest it \
+             carried when this gate was introduced, and a database on an older contract has no \
+             way to follow it — author schema/steps/<base8>-{}.sql",
+            &current[..NAME_PREFIX_LEN]
+        ));
+    }
+
+    // A base claimed twice is a fork, and a fork makes the terminal below a
+    // choice rather than a fact. Refused over the whole set, not over the route
+    // anyone happens to want.
+    let mut claimed: Vec<(&str, &str)> = Vec::with_capacity(registered);
+    for step in steps {
+        if let Some((_, first)) = claimed.iter().find(|(base, _)| *base == step.base) {
+            return Err(format!(
+                "steps {first} and {} both base on {}: the migration chain is a line, and two \
+                 ways forward from one digest would make choosing between them a solver",
+                step.id, step.base
+            ));
+        }
+        claimed.push((step.base.as_str(), step.id.as_str()));
+    }
+
+    // The terminal is the one step whose result nothing else bases on. Counted
+    // before it is read: a chain that loops has no terminal and a chain that
+    // forks at the end has two, and `steps.iter().find(..)` would report the
+    // first of them as though it were the only one.
+    let terminals: Vec<&ParsedStep> = steps
+        .iter()
+        .filter(|step| !steps.iter().any(|other| other.base == step.result))
+        .collect();
+    if terminals.len() != 1 {
+        return Err(format!(
+            "expected exactly one terminal step — one whose result no other step bases on — and \
+             found {} among the {registered} registered: {}",
+            terminals.len(),
+            step_ids(steps)
+        ));
+    }
+    let terminal = terminals[0];
+
+    if terminal.result != current {
+        return Err(format!(
+            "no migration step results in {current}, the contract digest \
+             schema/0001_contract.sql now carries: the chain ends at {} ({}). Either the SQL \
+             changed without a step, or the last step records the wrong result",
+            terminal.result, terminal.id
+        ));
+    }
+
+    Ok(())
+}
+
+/// The step ids, for a message that would otherwise name a count and nothing to
+/// look at.
+fn step_ids(steps: &[ParsedStep]) -> String {
+    steps
+        .iter()
+        .map(|step| step.id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// The generated module for `steps`, byte for byte what belongs on disk.
 ///
 /// The slice carries `#[rustfmt::skip]`, which is not decoration. `cargo fmt
@@ -373,6 +494,121 @@ mod tests {
         assert_eq!(steps.len(), 2, "two `.sql` files, and the `.md` is not one");
         assert_eq!(steps[0].id, "aaaaaaaa-bbbbbbbb.sql");
         assert_eq!(steps[1].id, "bbbbbbbb-aaaaaaaa.sql");
+    }
+
+    // The gate's arms, in the order it applies them. CI's seeded control
+    // exercises exactly one of them — the zero-step arm, because that is the
+    // state a real contract change lands in — so the rest are checked here or
+    // nowhere.
+
+    /// A step file whose header and name agree, over SQL the gate never reads.
+    fn parsed(base: &str, result: &str) -> ParsedStep {
+        let id = format!(
+            "{}-{}.sql",
+            &base[..NAME_PREFIX_LEN],
+            &result[..NAME_PREFIX_LEN]
+        );
+        parse_step(&id, &step_file(base, result, "SELECT 1;\n")).expect("well-formed step")
+    }
+
+    /// The real `schema/0001_contract.sql`, whose digest is
+    /// [`CONTRACT_SHA256_AT_GATE_INTRODUCTION`] until somebody changes the
+    /// contract. Read from disk rather than synthesized: the anchor is only
+    /// meaningful against the bytes it was taken from.
+    fn anchored_sql() -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("xtask has a parent dir")
+            .join("schema/0001_contract.sql");
+        std::fs::read_to_string(path).expect("read schema/0001_contract.sql")
+    }
+
+    // The gate has four states, and each has a test below. The two that matter
+    // most are the ones that look alike: an empty registry is tolerated at the
+    // anchor and refused off it, and that difference is the entire reason the
+    // anchor exists.
+
+    #[test]
+    fn state_1_at_the_anchor_an_empty_registry_is_tolerated() {
+        // Nothing has moved that a step would have to describe. This also
+        // catches the anchor drifting from the file, since a mismatch here
+        // takes the refusal branch.
+        //
+        // When the contract does eventually change, this test reds — and the
+        // honest fix is to DELETE it along with the anchor and the branch it
+        // covers, because by then the registry is non-empty and neither is ever
+        // read again. Refreshing the constant is the one move it must not
+        // prompt.
+        assert_eq!(inspect_step_chain(&anchored_sql(), &[]), Ok(()));
+    }
+
+    #[test]
+    fn state_2_at_the_anchor_a_chain_that_arrives_is_allowed() {
+        // A step that reproduces historical DDL migrates a database onto the
+        // contract this repository already ships, WITHOUT touching
+        // `schema/0001_contract.sql` — so the digest stays on the anchor while
+        // the registry stops being empty. The anchor must have nothing to say
+        // about that; the only question worth asking is whether the chain
+        // arrives, and it does.
+        let sql = anchored_sql();
+        let current = crate::schema::sha256_hex(sql.as_bytes());
+        let steps = [parsed(A, &current)];
+        assert_eq!(inspect_step_chain(&sql, &steps), Ok(()));
+    }
+
+    #[test]
+    fn state_3_off_the_anchor_an_empty_registry_names_what_nothing_arrives_at() {
+        let moved = format!("{}-- moved\n", anchored_sql());
+        let err = inspect_step_chain(&moved, &[]).expect_err("the digest moved");
+        assert!(err.contains("no migration step results in"), "{err}");
+        // The digest in the message is the one computed HERE. It equals the one
+        // `contract_sql.rs` records only when the gate is doing nothing.
+        assert!(
+            err.contains(&crate::schema::sha256_hex(moved.as_bytes())),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_forked_registry_is_refused_before_the_terminal_is_looked_for() {
+        // Two ways forward from A. Either branch could be called the terminal,
+        // which is the point: the fork has to be refused before anything picks.
+        let moved = format!("{}-- moved\n", anchored_sql());
+        let err = inspect_step_chain(&moved, &[parsed(A, B), parsed(A, C)])
+            .expect_err("the registry forks at A");
+        assert!(err.contains("both base on"), "{err}");
+        assert!(err.contains(A), "{err}");
+    }
+
+    #[test]
+    fn a_registry_with_no_terminal_is_refused_by_the_count_not_by_the_first_hit() {
+        // A loop: every result is somebody's base, so the filter finds nothing.
+        // `find()` would have returned None here, and a gate that read None as
+        // "no mismatch" would pass a registry that goes nowhere.
+        let moved = format!("{}-- moved\n", anchored_sql());
+        let err =
+            inspect_step_chain(&moved, &[parsed(A, B), parsed(B, A)]).expect_err("A and B loop");
+        assert!(err.contains("expected exactly one terminal step"), "{err}");
+        assert!(err.contains("found 0"), "{err}");
+    }
+
+    #[test]
+    fn state_4_off_the_anchor_a_chain_that_ends_elsewhere_is_refused() {
+        let moved = format!("{}-- moved\n", anchored_sql());
+        let err = inspect_step_chain(&moved, &[parsed(A, B), parsed(B, C)]).expect_err("ends at C");
+        assert!(err.contains("no migration step results in"), "{err}");
+        assert!(err.contains("the chain ends at"), "{err}");
+        assert!(err.contains("bbbbbbbb-cccccccc.sql"), "{err}");
+    }
+
+    #[test]
+    fn a_chain_that_ends_at_the_contract_digest_passes() {
+        // The only shape that gets through: a line ending exactly where the SQL
+        // is now, built by naming the real digest as the last result.
+        let moved = format!("{}-- moved\n", anchored_sql());
+        let target = crate::schema::sha256_hex(moved.as_bytes());
+        let steps = [parsed(A, B), parsed(B, &target)];
+        assert_eq!(inspect_step_chain(&moved, &steps), Ok(()));
     }
 
     #[test]

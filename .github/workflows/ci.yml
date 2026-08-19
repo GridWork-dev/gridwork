@@ -919,6 +919,30 @@ jobs:
         with:
           bun-version: "1.3.14"
       - run: cargo run --locked -p xtask -- contract --check
+      # A guard nobody has watched fail is a guard nobody has tested. Move the
+      # contract digest and confirm --check refuses it for want of a migration
+      # step — the state a real contract change lands in, since the SQL is
+      # edited before the step that carries a database across it is written.
+      - name: prove the missing-step gate can fail (seeded violation)
+        run: |
+          set -euo pipefail
+          log=$(mktemp)
+          printf '\n-- seeded: a contract change with no step\n' >> schema/0001_contract.sql
+          # Regenerate FIRST. A bare --check after an SQL edit is red on
+          # contract_sql.rs drift alone — which would let this control pass while
+          # the missing-step gate is decoration.
+          cargo run --locked -p xtask -- contract
+          if cargo run --locked -p xtask -- contract --check 2>"$log"; then
+            echo 'the contract digest moved and --check stayed green' >&2
+            exit 1
+          fi
+          if ! grep -q 'no migration step results in' "$log"; then
+            echo 'the check failed, but not for want of a step:' >&2
+            cat "$log" >&2
+            exit 1
+          fi
+          git checkout -- schema/0001_contract.sql crates/gwk-domain/src/contract_sql.rs
+          echo "contract: a digest with no step is correctly rejected"
       - run: bun install --frozen-lockfile
         working-directory: contracts
       - run: bun test

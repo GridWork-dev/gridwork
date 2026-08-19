@@ -1563,6 +1563,13 @@ pub fn run(check: bool) {
     check_file(&contracts.join("bindings.ts"), &bindings_ts, &mut drift);
     check_file(&contract_sql_path, &contract_sql_rs, &mut drift);
     check_file(&contract_steps_path, &contract_steps_rs, &mut drift);
+    // Check-only, deliberately. Editing the DDL and regenerating is how a
+    // contract change BEGINS, and a generator that refused it would leave no
+    // way to produce the digest the new step has to name. `--check` is where
+    // the incomplete state stops being a work in progress.
+    if let Err(message) = crate::steps::inspect_step_chain(&contract_sql, &parsed_steps) {
+        drift.push(message);
+    }
     check_file(
         &contracts.join("signal-theme.json"),
         &theme_json,
