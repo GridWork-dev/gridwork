@@ -51,6 +51,9 @@ pub const STEPS_DIR: &str = "schema/steps";
 /// Where the kernel's backend migrations live, relative to the repo root.
 pub const MIGRATIONS_DIR: &str = "crates/gwk-kernel/migrations";
 
+/// The suite that applies steps to a real PostgreSQL, relative to the repo root.
+pub const MIGRATE_SUITE: &str = "crates/gwk-kernel/tests/admin_migrate.rs";
+
 /// The backend migrations a database at the chain's base already carries.
 ///
 /// `schema/steps/` chains the CONTRACT digest. `gwk_internal` has no digest,
@@ -503,6 +506,46 @@ pub fn read_backend_migrations(dir: &Path) -> Vec<String> {
     stems
 }
 
+/// Refuse a registered step no integration test names.
+///
+/// Deliberately crude: a substring search for each step's file name in the
+/// migrate suite's source. It cannot tell a real proof from the word appearing
+/// in a comment, and it is not meant to. Task 3's reconstruction is stronger
+/// than any rehearsal for the step it covers, and it exists because somebody
+/// wrote it — this is the reminder that somebody has to.
+///
+/// One step does not justify generalising that reconstruction, so this does not
+/// try. It is a tripwire across the gap between "a step is registered" and "a
+/// step has ever been applied to a database".
+pub fn inspect_step_coverage(steps: &[ParsedStep], suite: &str) -> Result<(), String> {
+    // Counted before anything is searched for. Over zero registered steps
+    // "every step is covered" is true of nothing, and the guard would report a
+    // proven registry it never looked at.
+    if steps.is_empty() {
+        return Err(format!(
+            "no steps are registered, so every step being covered is true of nothing: this \
+             check is about {STEPS_DIR} holding entries the suite exercises"
+        ));
+    }
+    let uncovered: Vec<&str> = steps
+        .iter()
+        .map(|step| step.id.as_str())
+        .filter(|id| !suite.contains(*id))
+        .collect();
+    if !uncovered.is_empty() {
+        return Err(format!(
+            "step(s) {} are registered and named nowhere in {MIGRATE_SUITE}. A step no test has \
+             ever applied to a database is DDL that has been reviewed and never run",
+            uncovered
+                .iter()
+                .map(|id| format!("{id:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    Ok(())
+}
+
 /// The step ids, for a message that would otherwise name a count and nothing to
 /// look at.
 fn step_ids(steps: &[ParsedStep]) -> String {
@@ -771,6 +814,25 @@ mod tests {
 
     fn step_file_carrying(base: &str, result: &str, tail: &str) -> String {
         format!("-- base:   {base}\n-- result: {result}\n{tail}")
+    }
+
+    #[test]
+    fn a_registered_step_no_test_names_is_refused() {
+        let steps = [carrying(A, B, "")];
+        let err = inspect_step_coverage(&steps, "// a suite about something else\n")
+            .expect_err("named nowhere");
+        assert!(err.contains("aaaaaaaa-bbbbbbbb.sql"), "{err}");
+        assert!(err.contains("reviewed and never run"), "{err}");
+
+        assert_eq!(
+            inspect_step_coverage(&steps, "migrate(pool, \"aaaaaaaa-bbbbbbbb.sql\")"),
+            Ok(())
+        );
+
+        // The empty registry, which is the shape that makes the question
+        // vacuous rather than answered.
+        let err = inspect_step_coverage(&[], "anything").expect_err("nothing registered");
+        assert!(err.contains("true of nothing"), "{err}");
     }
 
     #[test]

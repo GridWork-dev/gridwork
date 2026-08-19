@@ -967,24 +967,32 @@ async fn dispatch_node_is_truncate_protected_only_by_a_neighbour() {
                             delete this test and add it to the battery"
     );
 
+    // The PROPERTY first, and independently of which mechanism delivers it:
+    // both spellings are refused. The assertion above reds when someone ADDS a
+    // guard, which is the benign direction; these two red when someone drops
+    // the foreign key or cost_entry's guard, which is the failure that matters
+    // and the one the pin alone would sit silently through.
     let bare = sqlx::raw_sql("TRUNCATE gwk.dispatch_node;")
         .execute(&pool)
         .await
-        .expect_err("a bare truncate");
-    assert!(
-        bare.to_string().contains("foreign key"),
-        "refused, but not by the foreign key this rests on: {bare}"
-    );
-
+        .expect_err("TRUNCATE gwk.dispatch_node must be refused, by whatever refuses it");
     let cascade = sqlx::raw_sql("TRUNCATE gwk.dispatch_node CASCADE;")
         .execute(&pool)
         .await
-        .expect_err("a cascading truncate");
+        .expect_err("TRUNCATE ... CASCADE must be refused, by whatever refuses it");
+
+    // Then WHICH mechanism, so the report says what is actually holding it up.
+    // If either stops matching while the refusals above still hold, something
+    // changed and the ADR's account of this table is stale.
+    assert!(
+        bare.to_string().contains("foreign key"),
+        "still refused, but no longer by the foreign key the ADR says it rests on: {bare}"
+    );
     assert!(
         cascade
             .to_string()
             .contains("gwk.cost_entry is append-only"),
-        "refused, but not by cost_entry's guard: {cascade}"
+        "still refused, but no longer by cost_entry's own guard: {cascade}"
     );
 
     drop(pool);
