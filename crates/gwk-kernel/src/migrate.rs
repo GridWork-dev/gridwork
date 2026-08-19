@@ -20,6 +20,8 @@
 //! files, `xtask/src/steps.rs` reads them, and it is that generator — not this
 //! resolver — that holds a step's file name to the digests in its header.
 
+use sqlx::Row as _;
+
 use gwk_domain::contract_steps::Step;
 use gwk_domain::is_sha256_hex;
 
@@ -417,6 +419,389 @@ pub async fn apply(
         events_after,
         elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
     })
+}
+
+/// R1 — the database records the digest the chain starts from.
+///
+/// Before any statement executes. A chain resolved from a base the database is
+/// not at would apply DDL to a shape it does not describe, and the first
+/// statement that happened to succeed would leave a half-migrated database
+/// matching no digest at all.
+///
+/// A database already at the target is refused here rather than deeper: the
+/// resolver answers an equal pair with an empty chain, and "refusing to apply
+/// an empty chain" is a true sentence about the wrong subject.
+pub async fn assert_base(pool: &sqlx::PgPool, expected: &str) -> crate::Result<()> {
+    let recorded: Option<String> = sqlx::query_scalar(
+        "SELECT contract_sha256 FROM gwk_internal.schema_fingerprint WHERE id = 1",
+    )
+    .fetch_optional(pool)
+    .await?;
+    let Some(recorded) = recorded else {
+        return Err(crate::KernelError::Schema(
+            "gwk_internal.schema_fingerprint has no row: this database has never been \
+             initialized by the kernel, and a migration carries a database that already records \
+             a contract"
+                .to_owned(),
+        ));
+    };
+    if recorded == crate::CONTRACT_SQL_SHA256 {
+        return Err(crate::KernelError::Schema(format!(
+            "this database already carries {recorded}, the contract this binary carries: there \
+             is nothing to migrate"
+        )));
+    }
+    if recorded != expected {
+        return Err(crate::KernelError::Schema(format!(
+            "this database records {recorded} and the chain starts from {expected}"
+        )));
+    }
+    Ok(())
+}
+
+/// R4 — the protections refuse a superuser, not merely an ungranted role.
+///
+/// As superuser deliberately: a grant binds the runtime role and nothing else,
+/// and the credential applying a migration is the admin one. A battery that
+/// stays green with `ALTER TABLE gwk.event DISABLE TRIGGER event_append_only`
+/// is testing the grants, and it has no subject.
+///
+/// Each attempt runs inside its own SAVEPOINT, so a refusal does not poison the
+/// transaction the caller is in the middle of and a statement that WRONGLY
+/// succeeds is rolled back rather than left behind.
+pub async fn assert_protections(pool: &sqlx::PgPool) -> crate::Result<()> {
+    let mut tx = pool.begin().await?;
+
+    // Every relation carrying a statement-level TRUNCATE guard, asked for by
+    // name rather than assumed: TRUNCATE needs no rows to be refused, so this
+    // arm covers every table it names without seeding one.
+    let guarded: Vec<(String, String)> = sqlx::query(
+        "SELECT n.nspname AS schema, c.relname AS relation \
+           FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid \
+           JOIN pg_namespace n ON n.oid = c.relnamespace \
+          WHERE NOT t.tgisinternal AND t.tgtype & 32 > 0 \
+            AND n.nspname IN ('gwk', 'gwk_internal') \
+          GROUP BY 1, 2 ORDER BY 1, 2",
+    )
+    .fetch_all(&mut *tx)
+    .await?
+    .into_iter()
+    .map(|row| (row.get("schema"), row.get("relation")))
+    .collect();
+
+    // Counted before it is walked. A query that returned nothing would make
+    // every refusal below vacuous, and the battery would report a protected
+    // database it never touched.
+    if guarded.len() < EXPECTED_TRUNCATE_GUARDS {
+        return Err(crate::KernelError::Schema(format!(
+            "expected at least {EXPECTED_TRUNCATE_GUARDS} relations with a TRUNCATE guard and \
+             found {}: {guarded:?}",
+            guarded.len()
+        )));
+    }
+
+    for (schema, relation) in &guarded {
+        sqlx::raw_sql(sqlx::AssertSqlSafe("SAVEPOINT probe;".to_owned()))
+            .execute(&mut *tx)
+            .await?;
+        // The identifiers come from `pg_class`, not from input.
+        let outcome = sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "TRUNCATE {schema}.{relation};"
+        )))
+        .execute(&mut *tx)
+        .await;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(
+            "ROLLBACK TO SAVEPOINT probe;".to_owned(),
+        ))
+        .execute(&mut *tx)
+        .await?;
+        if outcome.is_ok() {
+            return Err(crate::KernelError::Schema(format!(
+                "TRUNCATE {schema}.{relation} succeeded: its statement-level guard is gone, and \
+                 a row-level DELETE guard never fires on TRUNCATE"
+            )));
+        }
+    }
+
+    // The DELETE arm needs rows, and only rows already present can supply them
+    // without a fixture that is itself untested. `gwk.transition` is seeded by
+    // the contract and never empty; the ledger has a row by the time a
+    // migration reaches here.
+    //
+    // Counted for the same reason as above, and this one is the sharper trap:
+    // `DELETE FROM t` over an empty table affects no rows, fires no row-level
+    // trigger, and succeeds. A DELETE battery over an empty database is green
+    // and means nothing.
+    let mut deleted_from = 0usize;
+    for (schema, relation) in &guarded {
+        // Identifiers out of `pg_class`, never out of input — the same audit
+        // note the TRUNCATE above carries.
+        let count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT count(*) FROM {schema}.{relation}"
+        )))
+        .fetch_one(&mut *tx)
+        .await?;
+        if count == 0 {
+            continue;
+        }
+        sqlx::raw_sql(sqlx::AssertSqlSafe("SAVEPOINT probe;".to_owned()))
+            .execute(&mut *tx)
+            .await?;
+        let outcome = sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "DELETE FROM {schema}.{relation};"
+        )))
+        .execute(&mut *tx)
+        .await;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(
+            "ROLLBACK TO SAVEPOINT probe;".to_owned(),
+        ))
+        .execute(&mut *tx)
+        .await?;
+        if outcome.is_ok() {
+            return Err(crate::KernelError::Schema(format!(
+                "DELETE FROM {schema}.{relation} removed {count} row(s): its row-level guard is \
+                 gone"
+            )));
+        }
+        deleted_from += 1;
+    }
+    if deleted_from == 0 {
+        return Err(crate::KernelError::Schema(
+            "no guarded relation held a row, so the DELETE arm proved nothing: an empty table \
+             fires no row-level trigger and reports success"
+                .to_owned(),
+        ));
+    }
+
+    tx.rollback().await?;
+    Ok(())
+}
+
+/// The floor for [`assert_protections`]'s TRUNCATE sweep.
+///
+/// A floor rather than an equality, because a relation gaining a guard is
+/// always an improvement and should not red a migration. Losing one is what
+/// this catches, and the per-relation refusals catch the rest.
+const EXPECTED_TRUNCATE_GUARDS: usize = 17;
+
+/// R5 — the database ends where the chain said it would, measured rather than
+/// inferred.
+///
+/// The event count is read again and compared to what was read before the
+/// transaction. Inferring "the log is untouched" from the absence of an error
+/// is the same mistake as inferring a passing test from a suite that ran no
+/// cases.
+pub async fn assert_result(pool: &sqlx::PgPool, applied: &Applied) -> crate::Result<()> {
+    let recorded: String = sqlx::query_scalar(
+        "SELECT contract_sha256 FROM gwk_internal.schema_fingerprint WHERE id = 1",
+    )
+    .fetch_one(pool)
+    .await?;
+    if recorded != crate::CONTRACT_SQL_SHA256 {
+        return Err(crate::KernelError::Schema(format!(
+            "the migration committed and this database records {recorded}, not \
+             {} — it is at a contract no binary claims",
+            crate::CONTRACT_SQL_SHA256
+        )));
+    }
+    let events_now: i64 = sqlx::query_scalar("SELECT count(*) FROM gwk.event")
+        .fetch_one(pool)
+        .await?;
+    if events_now != applied.events_after {
+        return Err(crate::KernelError::Schema(format!(
+            "the log held {} events inside the migration and holds {events_now} after it: \
+             something else is writing, and the writer lock did not hold",
+            applied.events_after
+        )));
+    }
+    if applied.events_before != applied.events_after {
+        return Err(crate::KernelError::Schema(format!(
+            "the migration transaction saw the log move from {} to {}: a migration writes no \
+             events, so a daemon was not fenced",
+            applied.events_before, applied.events_after
+        )));
+    }
+    Ok(())
+}
+
+/// The privilege class a relation belongs to.
+///
+/// One table, both schemas. Task 4 added a `gwk_internal` fold and
+/// `admin_init.rs` already had a `gwk` one, and two folds is two places for a
+/// relation to be classified — or, worse, one place for it to be classified and
+/// another where nobody noticed it was missing. A relation absent from this
+/// match is a compile-clean, test-red failure with its own name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GrantClass {
+    /// Appendable, never rewritable, never removable. The log and everything
+    /// whose value is that it cannot be edited afterwards.
+    History,
+    /// The FSM seed the contract ships. Read, and nothing else.
+    Seed,
+    /// A projection the kernel rebuilds: inserted and updated, never deleted.
+    Projection,
+    /// The live-tree cache, the one CONTRACT table where DELETE is real — a
+    /// close removes the row because the entity has no closed state, and the
+    /// event log is the history a replay reproduces it from.
+    TreeCache,
+    /// The kernel's record of itself: which contract it carries and how it got
+    /// here. Readable, and a process that could rewrite its own provenance has
+    /// none.
+    Provenance,
+    /// The writer lease: one seeded row, moved by CAS.
+    Lease,
+    /// Durable delivery state: appended, updated as it settles, never removed.
+    Delivery,
+    /// The blob spine, the one place DELETE is granted — sweep reclaims,
+    /// pins release, uploads expire, and the events referencing a blob outlive
+    /// its bytes.
+    Blob,
+    /// Snapshots: appended and read, superseded rather than edited.
+    Snapshot,
+    /// Nothing at all. A sequence behind a table the runtime role cannot
+    /// insert into has no counter it could need.
+    Nothing,
+}
+
+impl GrantClass {
+    /// (select, insert, update, delete). TRUNCATE is granted nowhere and is
+    /// asserted separately, for every relation, so no class can opt into it.
+    const fn privileges(self) -> (bool, bool, bool, bool) {
+        match self {
+            Self::History => (true, true, false, false),
+            Self::Seed => (true, false, false, false),
+            Self::Projection => (true, true, true, false),
+            Self::TreeCache => (true, true, true, true),
+            Self::Provenance => (true, false, false, false),
+            Self::Lease => (true, false, true, false),
+            Self::Delivery => (true, true, true, false),
+            Self::Blob => (true, true, true, true),
+            Self::Snapshot => (true, true, false, false),
+            Self::Nothing => (false, false, false, false),
+        }
+    }
+}
+
+/// The class of one relation, or `None` if nothing has declared it.
+fn grant_class(schema: &str, relation: &str) -> Option<GrantClass> {
+    use GrantClass::{
+        Blob, Delivery, History, Lease, Nothing, Projection, Provenance, Seed, Snapshot, TreeCache,
+    };
+    Some(match (schema, relation) {
+        ("gwk", "event" | "receipt" | "ingested_record" | "cost_entry") => History,
+        (
+            "gwk",
+            "context_manifest" | "context_release" | "context_observation" | "context_finalization",
+        ) => History,
+        ("gwk", "transition") => Seed,
+        ("gwk", "workspace_node") => TreeCache,
+        (
+            "gwk",
+            "attempt"
+            | "attention_item"
+            | "authority_grant"
+            | "command"
+            | "dispatch_node"
+            | "engine_session"
+            | "evidence"
+            | "gate"
+            | "lease"
+            | "message"
+            | "orchestrator_checkpoint"
+            | "pty_session"
+            | "pty_session_template"
+            | "task"
+            | "workflow_run"
+            | "worktree",
+        ) => Projection,
+        ("gwk_internal", "schema_fingerprint" | "schema_migration") => Provenance,
+        ("gwk_internal", "writer") => Lease,
+        ("gwk_internal", "pty_delivery") => Delivery,
+        ("gwk_internal", "blob" | "blob_pin" | "blob_upload") => Blob,
+        ("gwk_internal", "checkpoint") => Snapshot,
+        ("gwk_internal", "schema_migration_seq_seq") => Nothing,
+        _ => return None,
+    })
+}
+
+/// How many relations the two schemas carry when everything has been applied.
+///
+/// Asserted before the fold, and that ordering is the point rather than a
+/// style: a per-relation sweep over a set that lost a relation agrees with
+/// itself perfectly, and `all()` over an empty one is true. `admin_init.rs`
+/// went red on `26 != 22` once, and the count is what fired.
+const EXPECTED_RELATIONS: usize = 35;
+
+/// R3 — every relation in both schemas holds exactly its declared privileges.
+///
+/// Takes the role by name rather than assuming the caller has assumed it:
+/// `has_table_privilege(role, ..)` answers for a role the connection is not,
+/// which is what lets the migrate verb run this over its own admin connection.
+pub async fn assert_grant_matrix(pool: &sqlx::PgPool, role: &str) -> crate::Result<()> {
+    let rows = sqlx::query(
+        "SELECT n.nspname AS schema, c.relname AS relation, \
+                has_table_privilege($1, c.oid, 'SELECT')   AS sel, \
+                has_table_privilege($1, c.oid, 'INSERT')   AS ins, \
+                has_table_privilege($1, c.oid, 'UPDATE')   AS upd, \
+                has_table_privilege($1, c.oid, 'DELETE')   AS del, \
+                has_table_privilege($1, c.oid, 'TRUNCATE') AS trunc \
+           FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+          WHERE n.nspname IN ('gwk', 'gwk_internal') \
+            AND c.relkind IN ('r', 'p', 'S', 'v', 'm') \
+          ORDER BY 1, 2",
+    )
+    .bind(role)
+    .fetch_all(pool)
+    .await?;
+
+    if rows.len() != EXPECTED_RELATIONS {
+        let found: Vec<String> = rows
+            .iter()
+            .map(|row| {
+                format!(
+                    "{}.{}",
+                    row.get::<String, _>("schema"),
+                    row.get::<String, _>("relation")
+                )
+            })
+            .collect();
+        return Err(crate::KernelError::Schema(format!(
+            "expected {EXPECTED_RELATIONS} relations across gwk and gwk_internal and found {}: \
+             {found:?}",
+            rows.len()
+        )));
+    }
+
+    for row in &rows {
+        let schema: String = row.get("schema");
+        let relation: String = row.get("relation");
+        let observed = (
+            row.get::<bool, _>("sel"),
+            row.get::<bool, _>("ins"),
+            row.get::<bool, _>("upd"),
+            row.get::<bool, _>("del"),
+        );
+        if row.get::<bool, _>("trunc") {
+            return Err(crate::KernelError::Privilege(format!(
+                "{schema}.{relation}: TRUNCATE is granted nowhere"
+            )));
+        }
+        let class = grant_class(&schema, &relation).ok_or_else(|| {
+            crate::KernelError::Privilege(format!(
+                "{schema}.{relation}: no declared grant class. Declare it in `grant_class` in \
+                 the same commit that adds the relation — that match is the only thing between \
+                 a new table and whatever privileges it happens to inherit"
+            ))
+        })?;
+        if observed != class.privileges() {
+            return Err(crate::KernelError::Privilege(format!(
+                "{schema}.{relation} is {class:?} and should hold \
+                 (select, insert, update, delete) = {:?}, and holds {observed:?}",
+                class.privileges()
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -801,3 +801,274 @@ async fn an_asserted_base_is_recorded_as_asserted() {
     drop_database(&maintenance, &database).await;
     drop_role(&maintenance, &role).await;
 }
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see the module docs"]
+async fn r1_refuses_a_database_already_at_this_binarys_contract() {
+    // Criterion 3's mutation, shipped as the test. A fresh `admin init` is
+    // already at the target; the resolver answers an equal pair with an empty
+    // chain, so without R1 the refusal is "refusing to apply an empty chain" —
+    // a true sentence about the wrong subject, arriving after the writer lock.
+    let maintenance = maintenance_pool().await;
+    let role = role_for("r1already");
+    create_role(&maintenance, &role).await;
+    let database = fresh_database(&maintenance, "r1already").await;
+    let pool = PgPool::connect(&url_for(&database)).await.expect("connect");
+    build_base(&pool, &role).await;
+    migrate(&pool, &role).await;
+
+    let refusal = gwk_kernel::migrate::assert_base(&pool, BASE_CONTRACT_SHA256)
+        .await
+        .expect_err("already at the target");
+    let message = refusal.to_string();
+    assert!(message.contains("nothing to migrate"), "{message}");
+    assert!(message.contains(CONTRACT_SQL_SHA256), "{message}");
+
+    // And it applied nothing: still exactly the one ledger row the migration
+    // above wrote.
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM gwk_internal.schema_migration")
+        .fetch_one(&pool)
+        .await
+        .expect("count ledger rows");
+    assert_eq!(rows, 1, "the refused rung left a second row behind");
+
+    drop(pool);
+    drop_database(&maintenance, &database).await;
+    drop_role(&maintenance, &role).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see the module docs"]
+async fn r1_refuses_a_base_the_database_is_not_at_and_an_uninitialized_one() {
+    let maintenance = maintenance_pool().await;
+    let role = role_for("r1wrong");
+    create_role(&maintenance, &role).await;
+    let database = fresh_database(&maintenance, "r1wrong").await;
+    let pool = PgPool::connect(&url_for(&database)).await.expect("connect");
+
+    build_base(&pool, &role).await;
+    let refusal = gwk_kernel::migrate::assert_base(&pool, &"d".repeat(64))
+        .await
+        .expect_err("a base this database is not at");
+    let message = refusal.to_string();
+    assert!(message.contains(BASE_CONTRACT_SHA256), "{message}");
+    assert!(message.contains(&"d".repeat(64)), "{message}");
+
+    // No fingerprint row at all: a database the kernel never initialized.
+    sqlx::raw_sql("DELETE FROM gwk_internal.schema_fingerprint;")
+        .execute(&pool)
+        .await
+        .expect("clear the fingerprint");
+    let refusal = gwk_kernel::migrate::assert_base(&pool, BASE_CONTRACT_SHA256)
+        .await
+        .expect_err("no fingerprint row");
+    assert!(
+        refusal.to_string().contains("never been initialized"),
+        "{refusal}"
+    );
+
+    drop(pool);
+    drop_database(&maintenance, &database).await;
+    drop_role(&maintenance, &role).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see the module docs"]
+async fn r4_goes_red_when_a_protection_is_disabled() {
+    // RED case 3, and the arm that proves the battery has a subject. A
+    // protections battery that stays green after the trigger is disabled is
+    // testing the grants — which bind the runtime role, not the superuser that
+    // just applied a migration.
+    let maintenance = maintenance_pool().await;
+    let role = role_for("r4");
+    create_role(&maintenance, &role).await;
+    let database = fresh_database(&maintenance, "r4").await;
+    let pool = PgPool::connect(&url_for(&database)).await.expect("connect");
+
+    build_base(&pool, &role).await;
+    migrate(&pool, &role).await;
+
+    // Green on the migrated database.
+    gwk_kernel::migrate::assert_protections(&pool)
+        .await
+        .expect("the protections hold after a migration");
+
+    sqlx::raw_sql("ALTER TABLE gwk.event DISABLE TRIGGER event_no_truncate;")
+        .execute(&pool)
+        .await
+        .expect("disable the truncate guard");
+    let refusal = gwk_kernel::migrate::assert_protections(&pool)
+        .await
+        .expect_err("a disabled guard must red the battery");
+    let message = refusal.to_string();
+    assert!(
+        message.contains("TRUNCATE gwk.event succeeded"),
+        "{message}"
+    );
+
+    sqlx::raw_sql("ALTER TABLE gwk.event ENABLE ALWAYS TRIGGER event_no_truncate;")
+        .execute(&pool)
+        .await
+        .expect("restore the truncate guard");
+
+    // The row-level arm, separately: the two guards are different objects and a
+    // battery that only proved one would report the other.
+    sqlx::raw_sql("ALTER TABLE gwk.transition DISABLE TRIGGER transition_immutable;")
+        .execute(&pool)
+        .await
+        .expect("disable the delete guard");
+    let refusal = gwk_kernel::migrate::assert_protections(&pool)
+        .await
+        .expect_err("a disabled row guard must red the battery");
+    assert!(
+        refusal.to_string().contains("DELETE FROM gwk.transition"),
+        "{refusal}"
+    );
+
+    drop(pool);
+    drop_database(&maintenance, &database).await;
+    drop_role(&maintenance, &role).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see the module docs"]
+async fn dispatch_node_is_truncate_protected_only_by_a_neighbour() {
+    // Found by R4 while it was being written, and pinned here because it is
+    // true and surprising rather than because it is wrong.
+    //
+    // `gwk.dispatch_node` carries a row-level DELETE guard and NO
+    // statement-level TRUNCATE cover — the exact pairing this repository's
+    // schema comments warn about. It is protected anyway, but by accident: a
+    // bare TRUNCATE is refused by the foreign key `gwk.cost_entry` holds on it,
+    // and TRUNCATE ... CASCADE is refused by `cost_entry`'s OWN guard. Neither
+    // refusal comes from dispatch_node.
+    //
+    // So the protection is real and it is one edit away from gone. This test is
+    // what makes that edit loud.
+    let maintenance = maintenance_pool().await;
+    let role = role_for("dispatch");
+    create_role(&maintenance, &role).await;
+    let database = fresh_database(&maintenance, "dispatch").await;
+    let pool = PgPool::connect(&url_for(&database)).await.expect("connect");
+    build_base(&pool, &role).await;
+    migrate(&pool, &role).await;
+
+    let guards: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid \
+          WHERE NOT t.tgisinternal AND t.tgtype & 32 > 0 \
+            AND c.oid = 'gwk.dispatch_node'::regclass",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("count dispatch_node truncate guards");
+    assert_eq!(
+        guards, 0,
+        "dispatch_node grew its own TRUNCATE guard — good; \
+                            delete this test and add it to the battery"
+    );
+
+    let bare = sqlx::raw_sql("TRUNCATE gwk.dispatch_node;")
+        .execute(&pool)
+        .await
+        .expect_err("a bare truncate");
+    assert!(
+        bare.to_string().contains("foreign key"),
+        "refused, but not by the foreign key this rests on: {bare}"
+    );
+
+    let cascade = sqlx::raw_sql("TRUNCATE gwk.dispatch_node CASCADE;")
+        .execute(&pool)
+        .await
+        .expect_err("a cascading truncate");
+    assert!(
+        cascade
+            .to_string()
+            .contains("gwk.cost_entry is append-only"),
+        "refused, but not by cost_entry's guard: {cascade}"
+    );
+
+    drop(pool);
+    drop_database(&maintenance, &database).await;
+    drop_role(&maintenance, &role).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see the module docs"]
+async fn a_failing_step_moves_neither_the_fingerprint_nor_the_ledger() {
+    // Criterion 4. Both, because a fingerprint that held while a ledger row
+    // leaked would be a receipt claiming a migration that did not happen — and
+    // the ledger is append-only, so the claim would be permanent.
+    let maintenance = maintenance_pool().await;
+    let role = role_for("failing");
+    create_role(&maintenance, &role).await;
+    let database = fresh_database(&maintenance, "failing").await;
+    let pool = PgPool::connect(&url_for(&database)).await.expect("connect");
+    build_base(&pool, &role).await;
+
+    let chain = resolved_chain();
+    let poisoned = Step {
+        sql: Box::leak(
+            format!("{}\nSELECT this_function_does_not_exist();\n", chain[0].sql).into_boxed_str(),
+        ),
+        ..*chain[0]
+    };
+    let refusal = gwk_kernel::migrate::apply(
+        &pool,
+        &[&poisoned],
+        &role,
+        BASE_CONTRACT_SHA256,
+        false,
+        "0000000000000000000000000000000000000000",
+        None,
+    )
+    .await
+    .expect_err("a step that cannot run");
+    assert!(
+        refusal.to_string().contains("this_function_does_not_exist"),
+        "{refusal}"
+    );
+
+    assert_eq!(
+        recorded_contract(&pool).await,
+        BASE_CONTRACT_SHA256,
+        "the fingerprint moved under a step that failed"
+    );
+    // The ledger table does not exist yet on a base-shaped database, and that
+    // is the correct answer to "did a row land": it could not have.
+    let ledger_exists: bool =
+        sqlx::query_scalar("SELECT to_regclass('gwk_internal.schema_migration') IS NOT NULL")
+            .fetch_one(&pool)
+            .await
+            .expect("probe the ledger");
+    assert!(
+        !ledger_exists,
+        "the failed transaction left the ledger table behind"
+    );
+
+    drop(pool);
+    drop_database(&maintenance, &database).await;
+    drop_role(&maintenance, &role).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see the module docs"]
+async fn r3_and_r5_hold_over_a_migrated_database() {
+    let maintenance = maintenance_pool().await;
+    let role = role_for("r3r5");
+    create_role(&maintenance, &role).await;
+    let database = fresh_database(&maintenance, "r3r5").await;
+    let pool = PgPool::connect(&url_for(&database)).await.expect("connect");
+    build_base(&pool, &role).await;
+    let applied = migrate(&pool, &role).await;
+
+    gwk_kernel::migrate::assert_grant_matrix(&pool, &role)
+        .await
+        .expect("the grant matrix holds over both schemas after a migration");
+    gwk_kernel::migrate::assert_result(&pool, &applied)
+        .await
+        .expect("the database ends where the chain said");
+
+    drop(pool);
+    drop_database(&maintenance, &database).await;
+    drop_role(&maintenance, &role).await;
+}

@@ -182,6 +182,32 @@ pub fn parse_step(id: &str, sql: &str) -> Result<ParsedStep, String> {
         ));
     }
 
+    // Transaction control belongs to the applier, which wraps the step, the
+    // backend migrations, the privilege matrix and the ledger row in one. A
+    // COMMIT in a step ends THAT transaction: everything after it runs outside
+    // one, and a later failure leaves the step committed while reporting that
+    // nothing was applied. Refused here because the symptom appears three
+    // components away from the cause.
+    for (number, line) in sql.lines().enumerate() {
+        let statement = line.trim_start().to_ascii_uppercase();
+        // `END` is a synonym for COMMIT in PostgreSQL and is deliberately NOT
+        // here: plpgsql closes every block with `END;` or `END $$;`, and a step
+        // made of DO blocks — which this one is — would be unwritable. A bare
+        // plpgsql `BEGIN` is safe to list because it carries no semicolon,
+        // which is what distinguishes it from the statement.
+        for keyword in ["BEGIN", "COMMIT", "ROLLBACK", "START TRANSACTION"] {
+            if statement == format!("{keyword};") || statement.starts_with(&format!("{keyword} ")) {
+                return Err(format!(
+                    "{id}:{}: carries `{}`, and a step does not own its transaction — the \
+                     applier wraps it together with the backend migrations, the privilege \
+                     matrix and the ledger row, and a COMMIT here ends that",
+                    number + 1,
+                    line.trim()
+                ));
+            }
+        }
+    }
+
     let mut lines = sql.lines();
     let base = header_digest(lines.next(), "base", id)?;
     let result = header_digest(lines.next(), "result", id)?;
@@ -745,6 +771,27 @@ mod tests {
 
     fn step_file_carrying(base: &str, result: &str, tail: &str) -> String {
         format!("-- base:   {base}\n-- result: {result}\n{tail}")
+    }
+
+    #[test]
+    fn a_step_that_opens_its_own_transaction_is_refused() {
+        // The applier owns one transaction covering the step, the backend
+        // migrations, the privileges and the ledger row. A COMMIT inside the
+        // step ends it early, and everything after runs unprotected — so a
+        // later failure rolls back nothing and still reports a refusal.
+        for control in ["BEGIN;", "COMMIT;", "ROLLBACK;", "START TRANSACTION;"] {
+            let sql = step_file(A, B, &format!("{control}\nSELECT 1;\n"));
+            let err = parse_step("aaaaaaaa-bbbbbbbb.sql", &sql).expect_err("transaction control");
+            assert!(
+                err.contains("does not own its transaction"),
+                "{control}: {err}"
+            );
+        }
+        // `BEGIN` as a word inside plpgsql is not transaction control, and a
+        // step full of DO blocks would be unwritable if this refused it.
+        let body = "DO $$\nBEGIN\n  PERFORM 1;\nEND $$;\n";
+        parse_step("aaaaaaaa-bbbbbbbb.sql", &step_file(A, B, body))
+            .expect("a DO block is not a transaction");
     }
 
     #[test]

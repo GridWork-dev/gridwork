@@ -18,8 +18,13 @@
 -- adding a nullable column or re-checking a constraint: the gate decision
 -- backfill.
 --
--- The whole file is one transaction. A half-applied contract is a database that
--- matches no digest at all, and there is nothing to compare it against.
+-- This file opens NO transaction, and that is load-bearing. It used to wrap
+-- itself in BEGIN/COMMIT, from when a step was something you applied by hand.
+-- `gw admin migrate` now applies the step, the backend migrations, the
+-- privilege matrix and the ledger row as ONE transaction — and a COMMIT in here
+-- ends that one, leaving everything after it running outside any transaction at
+-- all. A step that failed after this file would then have committed this file.
+-- The generator refuses a step carrying transaction control for the same reason.
 --
 -- ONE THING TO KNOW ABOUT THE ESTATE AFTERWARDS. A database that took this step
 -- and one initialized fresh from schema/0001_contract.sql report the SAME
@@ -33,7 +38,6 @@
 -- crates/gwk-kernel/tests/admin_migrate.rs, so that a THIRD difference could
 -- never hide behind it.
 
-BEGIN;
 
 -- ---------------------------------------------------------------------------
 -- #103 — the receipted PTY input path (44d20e0)
@@ -428,4 +432,3 @@ BEGIN
   END IF;
 END $$;
 
-COMMIT;

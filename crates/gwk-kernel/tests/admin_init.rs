@@ -333,6 +333,26 @@ async fn init_applies_the_contract_is_idempotent_and_refuses_a_stranger() {
 
 #[tokio::test]
 #[ignore = "needs a PostgreSQL; see the module docs"]
+async fn the_grant_matrix_over_both_schemas_is_declared_per_relation() {
+    // The SAME assertion the migrate verb runs as R3, not a second copy of it.
+    // Two folds is two places for a relation to be classified — or one place
+    // for it to be classified and another where nobody noticed it was missing.
+    // A fresh initialization and a migrated database now answer to one table.
+    let maintenance = maintenance_pool().await;
+    let (database, role) = initialized_database(&maintenance, "matrix2").await;
+    let pool = PgPool::connect(&url_for(&database)).await.expect("connect");
+
+    gwk_kernel::migrate::assert_grant_matrix(&pool, &role)
+        .await
+        .expect("the grant matrix holds over a freshly initialized database");
+
+    drop(pool);
+    drop_database(&maintenance, &database).await;
+    drop_role(&maintenance, &role).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see the module docs"]
 async fn the_internal_schema_grant_matrix_is_declared_per_relation() {
     // The sibling sweep over schema `gwk` has caught a wrongly-granted table
     // before — it is how #147's Context records were found UPDATE-able. It

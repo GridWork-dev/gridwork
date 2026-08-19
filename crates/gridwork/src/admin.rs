@@ -331,7 +331,22 @@ pub async fn migrate(
         .flat_map(|step| step.backend_migrations.iter().copied())
         .collect();
 
+    // R1, before any statement executes and before the dry run reports a plan
+    // it could not carry out. A chain resolved from a base the database is not
+    // at describes a shape that is not there.
+    gwk_kernel::migrate::assert_base(&pool, base)
+        .await
+        .map_err(configuration)?;
+
     if dry_run {
+        // R3 against the live database, which is the rung a dry run CAN
+        // answer: the grant matrix is a property of the schema as it stands,
+        // and reading it changes nothing. R2's rehearsal is the rung a dry run
+        // is really for and it is not here yet — see the report.
+        gwk_kernel::migrate::assert_grant_matrix(&pool, config.runtime_role())
+            .await
+            .map_err(configuration)?;
+
         emit(
             &json!({
                 "type": "admin_migrate_planned",
@@ -344,6 +359,7 @@ pub async fn migrate(
                 "backend_migrations": carried,
                 "backup_sha256": backup_sha256,
                 "public_revision": revision,
+                "grant_matrix": "checked",
             }),
             pretty,
         );
@@ -361,6 +377,22 @@ pub async fn migrate(
     )
     .await
     .map_err(configuration)?;
+
+    // The rungs that can only be asked after the transaction commits. R5 reads
+    // the fingerprint and the log again rather than inferring either from the
+    // absence of an error; R3 is re-asked because the step changed the table
+    // set, and `GRANT ... ON ALL TABLES` reaches the relations that existed
+    // when it ran. R4 proves the guards still refuse a superuser — the credential
+    // no grant binds, which is the one that just applied a migration.
+    gwk_kernel::migrate::assert_result(&pool, &applied)
+        .await
+        .map_err(configuration)?;
+    gwk_kernel::migrate::assert_grant_matrix(&pool, config.runtime_role())
+        .await
+        .map_err(configuration)?;
+    gwk_kernel::migrate::assert_protections(&pool)
+        .await
+        .map_err(configuration)?;
 
     emit(
         &migrated_receipt(
