@@ -489,12 +489,15 @@ pub async fn assert_protections(pool: &sqlx::PgPool) -> crate::Result<()> {
     .map(|row| (row.get("schema"), row.get("relation")))
     .collect();
 
-    // Counted before it is walked. A query that returned nothing would make
-    // every refusal below vacuous, and the battery would report a protected
+    // Counted before it is walked, and the count is the ONLY arm that can see
+    // a guard that was dropped rather than disabled: the probe below iterates
+    // this same set, so a relation missing from it is a relation nothing asks
+    // about. A query that returned nothing would make every refusal below
+    // vacuous in the same way, and the battery would report a protected
     // database it never touched.
-    if guarded.len() < EXPECTED_TRUNCATE_GUARDS {
+    if guarded.len() != EXPECTED_TRUNCATE_GUARDS {
         return Err(crate::KernelError::Schema(format!(
-            "expected at least {EXPECTED_TRUNCATE_GUARDS} relations with a TRUNCATE guard and \
+            "expected exactly {EXPECTED_TRUNCATE_GUARDS} relations with a TRUNCATE guard and \
              found {}: {guarded:?}",
             guarded.len()
         )));
@@ -577,12 +580,26 @@ pub async fn assert_protections(pool: &sqlx::PgPool) -> crate::Result<()> {
     Ok(())
 }
 
-/// The floor for [`assert_protections`]'s TRUNCATE sweep.
+/// How many relations [`assert_protections`]'s TRUNCATE sweep must find.
 ///
-/// A floor rather than an equality, because a relation gaining a guard is
-/// always an improvement and should not red a migration. Losing one is what
-/// this catches, and the per-relation refusals catch the rest.
-const EXPECTED_TRUNCATE_GUARDS: usize = 17;
+/// Seventeen are the contract's, in `schema/0001_contract.sql`; the eighteenth
+/// is the ledger's own, in `migrations/0006_schema_migration.sql`.
+///
+/// EQUALITY, and asserted the same way [`EXPECTED_RELATIONS`] is. An earlier
+/// draft made it a floor, reasoning that a relation GAINING a guard is always
+/// an improvement and should not red a migration. That reasoning is wrong, and
+/// the floor it produced was the whole of the hole: it left exactly one guard
+/// of slack, so dropping any single guard still cleared it — and a DROPPED
+/// guard is then absent from `pg_trigger`, so it is absent from `guarded`, so
+/// the per-relation probe below never asks about it. The battery returned
+/// `Ok(())` for a database a superuser could TRUNCATE to zero rows.
+///
+/// A guard also cannot arrive unannounced. Adding one edits
+/// `schema/0001_contract.sql`, which moves [`crate::CONTRACT_SQL_SHA256`],
+/// which the digest gate then correctly refuses until a step results in it —
+/// and that step is the change where this number moves with it. There is no
+/// benign direction for this count to drift in.
+const EXPECTED_TRUNCATE_GUARDS: usize = 18;
 
 /// R5 — the database ends where the chain said it would, measured rather than
 /// inferred.

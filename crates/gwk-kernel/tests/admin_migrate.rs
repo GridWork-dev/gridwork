@@ -930,6 +930,93 @@ async fn r4_goes_red_when_a_protection_is_disabled() {
     drop_role(&maintenance, &role).await;
 }
 
+/// How many relations carry a statement-level TRUNCATE guard, counted with the
+/// battery's own query.
+///
+/// The battery's query verbatim, not a re-derivation of it. A count assembled
+/// some other way could agree with the constant while the set the battery
+/// actually walks had changed underneath it, which is the failure this whole
+/// test exists to make visible rather than a second copy of it.
+async fn truncate_guarded_relations(pool: &PgPool) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM (\
+           SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+            WHERE NOT t.tgisinternal AND t.tgtype & 32 > 0 \
+              AND n.nspname IN ('gwk', 'gwk_internal') \
+            GROUP BY n.nspname, c.relname) s",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("count truncate-guarded relations")
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see the module docs"]
+async fn r4_goes_red_when_a_truncate_guard_is_dropped() {
+    // The direction the DISABLE test above cannot reach, and the reason it
+    // cannot: `ALTER TABLE ... DISABLE TRIGGER` leaves the `pg_trigger` row in
+    // place with `tgenabled = 'D'`, and the battery's query filters on neither
+    // column — so the relation stays in the set, the per-relation probe still
+    // asks about it, and the refusal comes from the probe. A DROP removes the
+    // row, which removes the relation from the set, which means the probe
+    // never asks. The COUNT is the only arm that can see it.
+    let maintenance = maintenance_pool().await;
+    let role = role_for("r4dropped");
+    create_role(&maintenance, &role).await;
+    let database = fresh_database(&maintenance, "r4dropped").await;
+    let pool = PgPool::connect(&url_for(&database)).await.expect("connect");
+
+    build_base(&pool, &role).await;
+    migrate(&pool, &role).await;
+
+    // The subject, established before it is mutated: green, over a set with a
+    // known size. A test that only asserted the red would pass just as well
+    // against a battery that was red for some other reason all along.
+    let before = truncate_guarded_relations(&pool).await;
+    gwk_kernel::migrate::assert_protections(&pool)
+        .await
+        .expect("the protections hold after a migration");
+
+    sqlx::raw_sql("DROP TRIGGER event_no_truncate ON gwk.event;")
+        .execute(&pool)
+        .await
+        .expect("drop the truncate guard");
+
+    // The mutation landed, measured rather than assumed. A DROP that silently
+    // did nothing would leave the battery green for the right reason, and this
+    // test would then be asserting nothing at all.
+    let after = truncate_guarded_relations(&pool).await;
+    assert_eq!(
+        after,
+        before - 1,
+        "the DROP removed {} guards, not exactly one",
+        before - after
+    );
+
+    let refusal = gwk_kernel::migrate::assert_protections(&pool)
+        .await
+        .expect_err("a dropped guard must red the battery");
+    let message = refusal.to_string();
+    // The COUNT arm specifically. `TRUNCATE gwk.event succeeded` would mean the
+    // per-relation probe caught it, which it cannot: gwk.event is no longer in
+    // the set being walked. Naming the arm is what keeps this test honest if
+    // the battery is ever restructured.
+    assert!(
+        message.contains(&format!("found {after}")),
+        "the count arm is the refusal, and it reports what it found: {message}"
+    );
+    assert!(
+        !message.contains("TRUNCATE gwk.event succeeded"),
+        "a dropped guard is invisible to the per-relation probe, so it cannot be the refusal: \
+         {message}"
+    );
+
+    drop(pool);
+    drop_database(&maintenance, &database).await;
+    drop_role(&maintenance, &role).await;
+}
+
 #[tokio::test]
 #[ignore = "needs a PostgreSQL; see the module docs"]
 async fn dispatch_node_is_truncate_protected_only_by_a_neighbour() {
