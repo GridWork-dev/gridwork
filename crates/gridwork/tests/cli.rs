@@ -1504,33 +1504,51 @@ fn the_command_union_has_no_migrate_variant() {
     let command = std::fs::read_to_string(repo_root().join("crates/gwk-domain/src/command.rs"))
         .expect("read command.rs");
 
-    let union = command
+    // Bounded at the enum's own closing brace. The tail of the file would
+    // otherwise be scanned too, which quietly made this pin a statement about
+    // `CommandDecodeError` as well — two of the names it counted came from
+    // there, and a `Migrate` declared anywhere below would have reded it.
+    let after = command
         .split_once("pub enum KernelCommand {")
         .expect("KernelCommand is declared")
         .1;
+    let union = after
+        .split_once("\n}")
+        .expect("KernelCommand's declaration is closed")
+        .0;
 
     // Counted before it is searched, for the same reason as the sweep above: a
     // split that found an empty tail would contain no forbidden variant either.
-    let variants = union
+    // Parsed once, and the count and the refusal below read the SAME parse — so
+    // the count is genuinely the guard on the refusal rather than a second
+    // opinion about what a variant is. A name is taken up to whichever
+    // delimiter declares it, because a unit or tuple variant is still a
+    // variant: matching only `Name {` would let `Migrate,` through the refusal
+    // while every existing variant happens to be struct-shaped.
+    let variants: Vec<&str> = union
         .lines()
-        .filter(|line| {
+        .filter_map(|line| {
             let trimmed = line.trim_start();
-            line.len() - trimmed.len() == 4
-                && trimmed
-                    .split(['{', ',', ' '])
-                    .next()
-                    .is_some_and(|word| word.chars().next().is_some_and(char::is_uppercase))
+            if line.len() - trimmed.len() != 4 {
+                return None;
+            }
+            let name = trimmed.split(['{', '(', ',', ' ']).next()?;
+            name.chars()
+                .next()
+                .is_some_and(char::is_uppercase)
+                .then_some(name)
         })
-        .count();
+        .collect();
     assert!(
-        variants > 40,
-        "found {variants} variants in KernelCommand, which is too few to be the real union — \
-         this pin would then be searching an empty string"
+        variants.len() > 40,
+        "found {} variants in KernelCommand, which is too few to be the real union — \
+         this pin would then be searching an empty string",
+        variants.len()
     );
 
     for forbidden in ["Migrate", "ApplyStep", "Backfill", "AlterSchema"] {
         assert!(
-            !union.contains(&format!("    {forbidden} {{")),
+            !variants.contains(&forbidden),
             "KernelCommand has a `{forbidden}` variant: a DDL act performed with the daemon down \
              and the writer lock held is not something a client asks for over the wire"
         );
