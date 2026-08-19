@@ -1531,6 +1531,10 @@ pub fn run(check: bool) {
     inspect_context_truth_schema(&contract_sql).unwrap_or_else(|message| panic!("{message}"));
     let contract_sql_rs = crate::schema::contract_sql_rs(&contract_sql);
 
+    let contract_steps_path = root.join(crate::steps::GENERATED_PATH);
+    let parsed_steps = crate::steps::read_steps(&root.join(crate::steps::STEPS_DIR));
+    let contract_steps_rs = crate::steps::contract_steps_rs(&parsed_steps);
+
     if !check {
         std::fs::create_dir_all(&goldens_dir).expect("create contracts/goldens");
         std::fs::write(contracts.join("bindings.ts"), &bindings_ts).expect("write bindings.ts");
@@ -1540,10 +1544,17 @@ pub fn run(check: bool) {
             std::fs::write(goldens_dir.join(name), content).expect("write golden");
         }
         std::fs::write(&contract_sql_path, &contract_sql_rs).expect("write contract_sql.rs");
+        std::fs::write(&contract_steps_path, &contract_steps_rs).expect("write contract_steps.rs");
+        // The step count is printed rather than left implied: an empty
+        // `schema/steps/` is a legitimate state, and the only way to tell it
+        // apart from a generator that read the wrong directory is to say how
+        // many files it found.
         eprintln!(
-            "contract: wrote bindings.ts, signal-theme.json, {} goldens, {}",
+            "contract: wrote bindings.ts, signal-theme.json, {} goldens, {}, {} (steps: {})",
             golden_files.len(),
-            crate::schema::GENERATED_PATH
+            crate::schema::GENERATED_PATH,
+            crate::steps::GENERATED_PATH,
+            parsed_steps.len()
         );
         return;
     }
@@ -1551,6 +1562,7 @@ pub fn run(check: bool) {
     let mut drift: Vec<String> = Vec::new();
     check_file(&contracts.join("bindings.ts"), &bindings_ts, &mut drift);
     check_file(&contract_sql_path, &contract_sql_rs, &mut drift);
+    check_file(&contract_steps_path, &contract_steps_rs, &mut drift);
     check_file(
         &contracts.join("signal-theme.json"),
         &theme_json,
