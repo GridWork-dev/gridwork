@@ -71,6 +71,119 @@ fn catalog() -> Catalog {
         "refused/no-frontmatter.md",
         Some(|e| matches!(e, SkillError::MissingFrontmatter)),
     );
+    // The flow-style axis. `refused/{anchor,alias,merge-key}.md` are all block
+    // style, and every one of those properties was reachable in flow style, so
+    // the corpus reported three refusals it could not tell from three escapes.
+    c.insert("accepted/flow-allowed-tools.md", None);
+    c.insert(
+        "refused/flow-mapping.md",
+        Some(|e| matches!(e, SkillError::UnsupportedYaml("flow mapping"))),
+    );
+    c.insert(
+        "refused/flow-sequence-alias.md",
+        Some(|e| matches!(e, SkillError::UnsupportedYaml("alias"))),
+    );
+    c.insert(
+        "refused/deep-nesting.md",
+        Some(|e| matches!(e, SkillError::TooDeeplyNested)),
+    );
+    // The offset axis. Every flow case above sits in the top-level
+    // `key: <flow>` position, where a head-of-node test lands on the collection
+    // by positional luck; each of these moves the indicator off that offset,
+    // and all three were accepted until the scan stopped deriving one candidate
+    // slice from the first `": "`.
+    c.insert(
+        "refused/flow-in-sequence-item.md",
+        Some(|e| matches!(e, SkillError::UnsupportedYaml("flow mapping"))),
+    );
+    c.insert(
+        "refused/quoted-key.md",
+        Some(|e| matches!(e, SkillError::MalformedTopLevelKey)),
+    );
+    c.insert(
+        "refused/tab-separator.md",
+        Some(|e| matches!(e, SkillError::UnsupportedYaml("anchor"))),
+    );
+    // The line axis. Every fixture above is one line per construct, so the whole
+    // corpus could only ever exercise a first line — and the scan is handed each
+    // line with its state reset. All three of these were accepted, and in all
+    // three the parser resolved an alias across two top-level keys.
+    c.insert(
+        "refused/multi-line-flow.md",
+        Some(|e| matches!(e, SkillError::UnsupportedYaml("multi-line flow collection"))),
+    );
+    c.insert(
+        "refused/apostrophe-anchor.md",
+        Some(|e| matches!(e, SkillError::UnsupportedYaml("anchor"))),
+    );
+    c.insert(
+        "refused/explicit-key.md",
+        Some(|e| matches!(e, SkillError::UnsupportedYaml("explicit key"))),
+    );
+    // The accepted side of the same axis: content that spans lines and must NOT
+    // be read as YAML, so the refusals above are not paid for by refusing prose.
+    c.insert("accepted/block-scalar-prose.md", None);
+    // The column axis. Every block scalar above sits at column zero — the one
+    // position where the header line's indentation and the owning node's column
+    // coincide — so the corpus could not see a skip armed at the wrong floor.
+    // The item axis. Every accepted sequence above holds plain scalars, so the
+    // corpus could not tell a depth bound from an item counter: a sequence of
+    // mappings was accepted at one entry and refused at two.
+    c.insert("accepted/sequence-of-mappings.md", None);
+    // The closing axis. Every column-zero sequence above is the LAST construct
+    // in its document, so a level that could never be closed was
+    // indistinguishable from a level nothing needed to close; the construct
+    // after this one refused a fully portable manifest at a true depth of one.
+    c.insert("accepted/column-zero-tools.md", None);
+    // The quote-adjacency axis. Every flow-style refusal above puts its
+    // indicator behind a PLAIN key, where the scan's whitespace rule finds the
+    // node start; a JSON-style quoted key needs no space after its `:`, so the
+    // same alias sat one character past everything the corpus exercised.
+    // The dispatch-table axis. The parser's token dispatch holds exactly two
+    // flow-context relaxations — bare `?` is a KEY token and bare `:` a VALUE
+    // token whenever a flow is open — and every flow-style refusal in the
+    // corpus put its indicator behind a plain key, where the block rules the
+    // scan modeled happen to agree with it.
+    c.insert(
+        "refused/explicit-key-flow.md",
+        Some(|e| matches!(e, SkillError::UnsupportedYaml("explicit key"))),
+    );
+    c.insert(
+        "refused/explicit-key-flow-comma.md",
+        Some(|e| matches!(e, SkillError::UnsupportedYaml("explicit key"))),
+    );
+    // The comment-boundary axis. The corpus tested `#` only as prose and as a
+    // whole-line comment; the parser opens one at any token boundary, so a
+    // `#` before a fake closer left the flow open to it and closed to the
+    // scan — the one shape that turns the line-local refusal off.
+    c.insert(
+        "refused/flow-comment-continuation.md",
+        Some(|e| matches!(e, SkillError::UnsupportedYaml("multi-line flow collection"))),
+    );
+    c.insert(
+        "refused/flow-comment-after-quote.md",
+        Some(|e| matches!(e, SkillError::UnsupportedYaml("multi-line flow collection"))),
+    );
+    // The Unicode-blank axis. Indentation is ASCII, `str::trim` is not, and
+    // the parser sides with ASCII — so a U+00A0-prefixed key was scanned
+    // under a name the document does not contain.
+    c.insert(
+        "refused/unicode-space-key.md",
+        Some(|e| matches!(e, SkillError::MalformedTopLevelKey)),
+    );
+    c.insert(
+        "refused/quoted-flow-key-alias.md",
+        Some(|e| matches!(e, SkillError::UnsupportedYaml("alias"))),
+    );
+    c.insert(
+        "refused/block-scalar-in-sequence-item.md",
+        Some(|e| {
+            matches!(
+                e,
+                SkillError::UnsupportedYaml("block scalar behind a sequence marker")
+            )
+        }),
+    );
     c
 }
 
@@ -100,8 +213,8 @@ fn every_fixture_on_disk_is_exercised_and_every_expectation_has_a_fixture() {
     // The count first. Everything below is a fold, and a fold over nothing
     // agrees with itself.
     assert!(
-        found.len() >= 13,
-        "expected at least 13 skill fixtures, walked {}",
+        found.len() >= 33,
+        "expected at least 33 skill fixtures, walked {}",
         found.len()
     );
     assert_eq!(
@@ -165,6 +278,34 @@ fn the_accepted_fixtures_carry_the_evidence_the_asymmetry_promises() {
     assert_eq!(manifest.opaque.len(), 1);
     assert_eq!(manifest.opaque[0].key, "invocation-hint");
     assert_eq!(manifest.opaque[0].value, "proactive");
+
+    // The other half of the asymmetry, and the half nothing asserted: a
+    // manifest whose every key is in `PORTABLE_CORE_FIELDS` puts NOTHING in the
+    // evidence bucket. `full-portable.md` has claimed exactly that in its own
+    // prose since it was written, and only `manifest.name` was ever checked —
+    // so dropping a member from `PORTABLE_CORE_FIELDS` left the suite green
+    // while that field quietly became opaque evidence instead of a typed read.
+    let full = std::fs::read_to_string(Path::new(SKILLS_DIR).join("accepted/full-portable.md"))
+        .expect("readable");
+    let manifest = SkillManifest::parse(&full).expect("parses");
+    assert!(
+        manifest.opaque.is_empty(),
+        "every key is portable-core, so nothing is evidence: {:?}",
+        manifest.opaque
+    );
+    assert_eq!(manifest.license.as_deref(), Some("Apache-2.0"));
+    assert_eq!(manifest.compatibility.as_deref(), Some(">=1.0"));
+    let claimed: Vec<&str> = manifest
+        .allowed_tools
+        .claimed()
+        .iter()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(claimed, ["Read", "Grep"]);
+    assert_eq!(
+        manifest.metadata.get("team").map(String::as_str),
+        Some("infra")
+    );
 
     let ext = std::fs::read_to_string(Path::new(SKILLS_DIR).join("accepted/gridwork-extension.md"))
         .expect("readable");
