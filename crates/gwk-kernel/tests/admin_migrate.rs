@@ -135,6 +135,18 @@ fn repo_root() -> std::path::PathBuf {
         .to_path_buf()
 }
 
+/// True when the checkout has no full history.
+fn is_shallow_clone() -> bool {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root())
+        .arg("rev-parse")
+        .arg("--is-shallow-repository")
+        .output()
+        .expect("run git rev-parse");
+    output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true"
+}
+
 /// One file as it stood at [`BASE_REVISION`].
 fn git_show(path: &str) -> String {
     let output = std::process::Command::new("git")
@@ -144,11 +156,29 @@ fn git_show(path: &str) -> String {
         .arg(format!("{BASE_REVISION}:{path}"))
         .output()
         .expect("run git show");
-    assert!(
-        output.status.success(),
-        "git show {BASE_REVISION}:{path} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+
+    if !output.status.success() {
+        // `fatal: invalid object name` is what a shallow clone says, and read
+        // alone it points at the revision rather than at the checkout. Name the
+        // real cause instead — every developer machine has full history, so the
+        // one place this fires is CI, where nobody is watching it happen.
+        //
+        // A FAILURE, never a skip. This suite's whole claim is that the base is
+        // reconstructible from the repository; a run that quietly stands down
+        // when it cannot find the base reports success for the proof it did not
+        // perform, which is worse than red.
+        let cause = if is_shallow_clone() {
+            "this checkout is SHALLOW and the suite reconstructs the base contract from \
+             history — give the job `fetch-depth: 0`"
+        } else {
+            "the checkout has full history, so the revision itself is the problem"
+        };
+        panic!(
+            "git show {BASE_REVISION}:{path} failed: {cause}. git said: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
     String::from_utf8(output.stdout).expect("the tree is UTF-8")
 }
 
