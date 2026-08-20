@@ -1563,3 +1563,260 @@ fn the_command_union_has_no_migrate_variant() {
         "the IngestionKind refusal this pin makes enforceable is no longer in the contract"
     );
 }
+
+/// The revision the live database was initialized from, and the contract digest
+/// it records — the base of the retroactive step.
+///
+/// The same two constants `crates/gwk-kernel/tests/admin_migrate.rs` carries,
+/// because the two proofs have to be about the same database. The digest is
+/// asserted against the bytes git hands back rather than trusted, so a drift in
+/// either copy reds here instead of quietly testing a different base.
+const BASE_REVISION: &str = "4d54bba";
+const BASE_CONTRACT_SHA256: &str =
+    "aba2f647bc7bb447e7b53307196f63df0bc718d479ec4693f6dd34ec9bf7b545";
+
+/// Backend migrations as of [`BASE_REVISION`]. `0005_pty_delivery` and
+/// `0006_schema_migration` are absent on purpose — the step carries them, which
+/// is half of what a migration does.
+const BASE_MIGRATIONS: [&str; 4] = [
+    "0001_kernel_internal",
+    "0002_writer",
+    "0003_blob",
+    "0004_checkpoint",
+];
+
+/// True when the checkout has no full history.
+fn is_shallow_clone() -> bool {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_root())
+        .arg("rev-parse")
+        .arg("--is-shallow-repository")
+        .output()
+        .expect("run git rev-parse");
+    output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true"
+}
+
+/// One file as it stood at [`BASE_REVISION`].
+///
+/// A FAILURE when it cannot be read, never a skip: this case's base is a claim
+/// about what the repository contains, and a run that stands down when it
+/// cannot find that base reports success for a proof it did not perform.
+fn git_show(path: &str) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_root())
+        .arg("show")
+        .arg(format!("{BASE_REVISION}:{path}"))
+        .output()
+        .expect("run git show");
+    if !output.status.success() {
+        // Every developer machine has full history, so the one place this fires
+        // is CI — where `fatal: invalid object name` read alone points at the
+        // revision rather than at the checkout.
+        let cause = if is_shallow_clone() {
+            "this checkout is SHALLOW and this case reconstructs the base contract from history \
+             — give the job `fetch-depth: 0`"
+        } else {
+            "the checkout has full history, so the revision itself is the problem"
+        };
+        panic!(
+            "git show {BASE_REVISION}:{path} failed: {cause}. git said: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    String::from_utf8(output.stdout).expect("the tree is UTF-8")
+}
+
+/// Lowercase hex of the SHA-256 of `bytes`.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest as _, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .fold(String::with_capacity(64), |mut acc, byte| {
+            use std::fmt::Write as _;
+            let _ = write!(acc, "{byte:02x}");
+            acc
+        })
+}
+
+/// Every JSON object `gw` printed, in order.
+///
+/// `admin migrate --no-backup` emits two: the warning it owes an operator who
+/// asked for no restore path, then the receipt. [`json`] would choke on the
+/// pair, and reading only the last line would stop noticing if the warning ever
+/// silently went away.
+fn json_lines(output: &Output) -> Vec<serde_json::Value> {
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str(line)
+                .unwrap_or_else(|e| panic!("a line of stdout is not JSON ({e}): {line}"))
+        })
+        .collect()
+}
+
+/// Acceptance criterion 1, second clause: `gw admin verify` exits clean over a
+/// database a migration produced.
+///
+/// The first clause is proven in `crates/gwk-kernel/tests/admin_migrate.rs`,
+/// against the applier and by dumping both schemas. This is the different
+/// question, and it is the one an operator asks next: `verify` compares the
+/// digest the database RECORDS against the one this build carries and exits
+/// `Schema` on a mismatch, and a schema dump cannot see that — the fingerprint
+/// is a row, and `pg_dump --schema-only` carries no rows. A chain that landed
+/// on a schema identical to a fresh one while stamping some other digest would
+/// pass every existing test in this repository and refuse the first operator
+/// who ran the next verb.
+///
+/// Its own role and its own databases, both named for this process. A ROLE is
+/// cluster-scoped, and the daemon case above creates one too — two tests in one
+/// binary run on two threads, and one shared role is one shared object for them
+/// to race over.
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn a_migrated_database_verifies_clean() {
+    use sqlx::PgPool;
+
+    let admin_url = std::env::var("GWK_TEST_ADMIN_DATABASE_URL")
+        .expect("GWK_TEST_ADMIN_DATABASE_URL must point at a PostgreSQL superuser DSN");
+    let maintenance = PgPool::connect(&admin_url).await.expect("maintenance");
+
+    let role = format!("gwk_cli_migrated_{}", std::process::id());
+    let live = format!("gwk_cli_migrated_{}", std::process::id());
+    let scratch = format!("gwk_cli_migrated_scratch_{}", std::process::id());
+
+    // Drop-then-create, so residue from a run that panicked is not inherited as
+    // an unknown starting state.
+    for statement in [
+        format!("DROP DATABASE IF EXISTS {live} WITH (FORCE);"),
+        format!("DROP ROLE IF EXISTS {role};"),
+    ] {
+        let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(statement))
+            .execute(&maintenance)
+            .await;
+    }
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE ROLE {role} NOLOGIN;")))
+        .execute(&maintenance)
+        .await
+        .expect("create the runtime role");
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE DATABASE {live};")))
+        .execute(&maintenance)
+        .await
+        .expect("create the live database");
+
+    let (prefix, _) = admin_url.rsplit_once('/').expect("a /database suffix");
+    let admin_dsn = format!("{prefix}/{live}");
+
+    // A database in the state the live one is in: the contract at the base
+    // revision, the backend migrations that existed then, and the fingerprint
+    // row saying so.
+    {
+        let pool = PgPool::connect(&admin_dsn).await.expect("connect");
+        let contract = git_show("schema/0001_contract.sql");
+        assert_eq!(
+            sha256_hex(contract.as_bytes()),
+            BASE_CONTRACT_SHA256,
+            "the contract at {BASE_REVISION} is not the digest this case bases on"
+        );
+        sqlx::raw_sql(sqlx::AssertSqlSafe(contract))
+            .execute(&pool)
+            .await
+            .expect("apply the base contract");
+        for migration in BASE_MIGRATIONS {
+            let sql = git_show(&format!("crates/gwk-kernel/migrations/{migration}.sql"));
+            sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+                .execute(&pool)
+                .await
+                .unwrap_or_else(|err| panic!("apply backend migration {migration}: {err}"));
+        }
+        // The fingerprint, and not the base's own grant matrix. That matrix
+        // cannot reach anything asserted here: the applier replays
+        // `privilege_statements` wholesale after the step, so whatever the base
+        // was granted is overwritten before `verify` looks — and `verify` reads
+        // role ATTRIBUTES, which no GRANT sets. The sibling suite in
+        // `gwk-kernel` reconstructs it because it compares two schema dumps.
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "INSERT INTO gwk_internal.schema_fingerprint (id, contract_sha256) \
+             VALUES (1, '{BASE_CONTRACT_SHA256}');"
+        )))
+        .execute(&pool)
+        .await
+        .expect("record the base contract");
+    }
+
+    let revision = "a1b2c3d4e5".repeat(4);
+    let admin_env: Vec<(&str, &str)> = vec![
+        ("GWK_ADMIN_DATABASE_URL", &admin_dsn),
+        ("GWK_RUNTIME_ROLE", &role),
+        ("GWK_PUBLIC_REVISION", &revision),
+    ];
+
+    let migrated = gw_env(
+        &format!("admin migrate --scratch-database {scratch} --no-backup"),
+        &admin_env,
+    );
+    assert_eq!(
+        code(&migrated),
+        0,
+        "{}{}",
+        String::from_utf8_lossy(&migrated.stdout),
+        String::from_utf8_lossy(&migrated.stderr)
+    );
+    let printed = json_lines(&migrated);
+    // COUNT first: the receipt is the SECOND object, and an index into a list
+    // of one would panic with a message about the wrong thing.
+    assert_eq!(
+        printed.len(),
+        2,
+        "an unbacked migration prints its warning and then its receipt: {printed:?}"
+    );
+    assert_eq!(printed[0]["type"], "admin_migrate_unbacked");
+    let receipt = &printed[1];
+    assert_eq!(receipt["type"], "admin_migrated");
+    assert_eq!(receipt["scratch_database"], scratch);
+    assert_eq!(receipt["base_sha256"], BASE_CONTRACT_SHA256);
+
+    // The verb an operator reaches for next, over the database the one above
+    // just produced.
+    let verified = gw_env("admin verify", &admin_env);
+    assert_eq!(
+        code(&verified),
+        0,
+        "`admin verify` refused a database `admin migrate` just produced: {}{}",
+        String::from_utf8_lossy(&verified.stdout),
+        String::from_utf8_lossy(&verified.stderr)
+    );
+    let answer = json(&verified);
+    assert_eq!(answer["type"], "admin_verified");
+    assert_eq!(answer["target"], "initialized");
+    assert_eq!(answer["runtime_role"], role);
+    // Absent is not clean: a role that does not exist has no violations either,
+    // and this case's whole subject is the role the migration granted to.
+    assert_eq!(answer["runtime_role_exists"], true);
+    assert_eq!(answer["violations"], serde_json::json!([]));
+    // The load-bearing one. `verify` exits `Schema` when these two differ, so a
+    // chain that committed onto any other fingerprint is a refusal here. The
+    // receipt is checked against the same value, which is what ties the digest
+    // the migration CLAIMED to the digest the database now carries — asserting
+    // only that the two halves of `verify`'s own output agree would be a
+    // statement it makes about itself.
+    assert_eq!(
+        answer["detail"]["contract_sha256"],
+        answer["expected_contract_sha256"]
+    );
+    assert_eq!(
+        receipt["contract_sha256"],
+        answer["expected_contract_sha256"]
+    );
+
+    for statement in [
+        format!("DROP DATABASE IF EXISTS {live} WITH (FORCE);"),
+        format!("DROP ROLE IF EXISTS {role};"),
+    ] {
+        let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(statement))
+            .execute(&maintenance)
+            .await;
+    }
+}
