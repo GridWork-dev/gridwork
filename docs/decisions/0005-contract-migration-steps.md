@@ -160,6 +160,26 @@ answers whether this repository owes a step, the runtime answers whether this
 binary can carry a database, and the second question has no good answer from an
 empty registry no matter what the contract digest is.
 
+A fifth surfaced while closing one of those four, which is its own small argument for
+writing the test the criterion actually names.
+
+**`admin verify` over a migrated database guards the privilege arm, and only that.**
+Criterion 1 asks that `verify` exit clean after a migration, and it now does, driven end to
+end against the built binary. What that establishes is narrower than it reads. `verify`
+refuses on two grounds — a runtime role holding a privilege, and a recorded contract digest
+that is not this build's — and only the first is reachable from the migrate path. `migrate`
+resolves the chain with `CONTRACT_SQL_SHA256` as its terminal target; `apply` re-reads
+`schema_fingerprint` inside its own transaction and refuses on a mismatch; `assert_result`
+re-reads it once more after commit. By the time `verify` looks, three guards have already
+settled the comparison it is about to make, and an attempt to land a migration on a foreign
+digest reds at `apply` without ever reaching the verb. The digest half of that clause is
+guarded upstream, not here.
+
+The privilege half is worth having on its own account. Role attributes do not appear in a
+schema dump, so the scratch comparison the rest of this phase's proofs rest on cannot see a
+migration that leaves the runtime role holding `CREATEDB` — and that is the mutation this
+test reds on.
+
 ## What this cost to learn
 
 Three claims in this phase were weaker than the prose around them. None was caught by
