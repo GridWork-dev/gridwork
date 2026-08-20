@@ -1539,11 +1539,57 @@ fn the_command_union_has_no_migrate_variant() {
                 .then_some(name)
         })
         .collect();
+    let bindings = std::fs::read_to_string(repo_root().join("contracts/bindings.ts"))
+        .expect("read bindings.ts");
+
+    // One fixed name, and it is the only literal in this check that is not
+    // derived from something. Everything below compares two parses against each
+    // other, and two parses that both broke into empty sets would agree
+    // perfectly — so one variant that has to be there anchors the rest to the
+    // real union.
     assert!(
-        variants.len() > 40,
-        "found {} variants in KernelCommand, which is too few to be the real union — \
-         this pin would then be searching an empty string",
+        variants.contains(&"CreateTask"),
+        "the parse of KernelCommand found {} variants and `CreateTask` is not among them, so it \
+         is not reading the union: {variants:?}",
         variants.len()
+    );
+
+    // The set, against the GENERATED bindings. This was a `> 40` floor, and a
+    // floor over a set that grows is slack that widens with it: the union holds
+    // 56, so sixteen variants could vanish — or a parse that quietly stopped
+    // matching sixteen of them could go unnoticed — and the floor would still
+    // pass. A number written here is also a number this file can be edited to
+    // agree with, which is the failure mode a pin exists to prevent. The
+    // bindings are regenerated from the enum by `xtask contract`, so they cannot
+    // be brought into agreement with a broken parse without moving the enum too.
+    //
+    // Compared as NAMES rather than counts. Two sets of the same size that
+    // disagree about which variants they hold is exactly the state a rename
+    // produces, and a count cannot see it.
+    let mut declared: Vec<String> = variants.iter().map(|name| snake_case(name)).collect();
+    declared.sort();
+    let deserialize = bindings
+        .split_once("export type KernelCommand_Deserialize =")
+        .expect("KernelCommand_Deserialize is declared in the bindings")
+        .1
+        .split_once("\nexport type ")
+        .expect("KernelCommand_Deserialize is followed by another declaration")
+        .0;
+    let mut generated: Vec<String> = deserialize
+        .match_indices("{ type: \"")
+        .filter_map(|(at, needle)| {
+            deserialize[at + needle.len()..]
+                .split('"')
+                .next()
+                .map(str::to_owned)
+        })
+        .collect();
+    generated.sort();
+    generated.dedup();
+    assert_eq!(
+        declared, generated,
+        "crates/gwk-domain/src/command.rs and contracts/bindings.ts disagree about which \
+         variants KernelCommand has"
     );
 
     for forbidden in ["Migrate", "ApplyStep", "Backfill", "AlterSchema"] {
@@ -1555,13 +1601,32 @@ fn the_command_union_has_no_migrate_variant() {
     }
 
     // And the prose the generated contract already carries stays true.
-    let bindings = std::fs::read_to_string(repo_root().join("contracts/bindings.ts"))
-        .expect("read bindings.ts");
     assert!(
         bindings
             .contains("There is deliberately NO `import`, `migrate`, `backfill`, or `legacy` kind"),
         "the IngestionKind refusal this pin makes enforceable is no longer in the contract"
     );
+}
+
+/// A `PascalCase` variant name in the spelling `rename_all` gives it.
+///
+/// `SendPtyInput` becomes `send_pty_input`, which is what the generated bindings
+/// carry as the `type` discriminant. Written out rather than imported so the
+/// comparison above stays between two artifacts and not between one artifact and
+/// a list this file also maintains.
+fn snake_case(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 8);
+    for (index, character) in name.char_indices() {
+        if character.is_uppercase() {
+            if index > 0 {
+                out.push('_');
+            }
+            out.extend(character.to_lowercase());
+        } else {
+            out.push(character);
+        }
+    }
+    out
 }
 
 /// The revision the live database was initialized from, and the contract digest
@@ -1709,42 +1774,7 @@ async fn a_migrated_database_verifies_clean() {
     let (prefix, _) = admin_url.rsplit_once('/').expect("a /database suffix");
     let admin_dsn = format!("{prefix}/{live}");
 
-    // A database in the state the live one is in: the contract at the base
-    // revision, the backend migrations that existed then, and the fingerprint
-    // row saying so.
-    {
-        let pool = PgPool::connect(&admin_dsn).await.expect("connect");
-        let contract = git_show("schema/0001_contract.sql");
-        assert_eq!(
-            sha256_hex(contract.as_bytes()),
-            BASE_CONTRACT_SHA256,
-            "the contract at {BASE_REVISION} is not the digest this case bases on"
-        );
-        sqlx::raw_sql(sqlx::AssertSqlSafe(contract))
-            .execute(&pool)
-            .await
-            .expect("apply the base contract");
-        for migration in BASE_MIGRATIONS {
-            let sql = git_show(&format!("crates/gwk-kernel/migrations/{migration}.sql"));
-            sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
-                .execute(&pool)
-                .await
-                .unwrap_or_else(|err| panic!("apply backend migration {migration}: {err}"));
-        }
-        // The fingerprint, and not the base's own grant matrix. That matrix
-        // cannot reach anything asserted here: the applier replays
-        // `privilege_statements` wholesale after the step, so whatever the base
-        // was granted is overwritten before `verify` looks — and `verify` reads
-        // role ATTRIBUTES, which no GRANT sets. The sibling suite in
-        // `gwk-kernel` reconstructs it because it compares two schema dumps.
-        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
-            "INSERT INTO gwk_internal.schema_fingerprint (id, contract_sha256) \
-             VALUES (1, '{BASE_CONTRACT_SHA256}');"
-        )))
-        .execute(&pool)
-        .await
-        .expect("record the base contract");
-    }
+    seed_base_database(&admin_dsn).await;
 
     let revision = "a1b2c3d4e5".repeat(4);
     let admin_env: Vec<(&str, &str)> = vec![
@@ -1817,6 +1847,213 @@ async fn a_migrated_database_verifies_clean() {
         receipt["contract_sha256"],
         answer["expected_contract_sha256"]
     );
+
+    for statement in [
+        format!("DROP DATABASE IF EXISTS {live} WITH (FORCE);"),
+        format!("DROP ROLE IF EXISTS {role};"),
+    ] {
+        let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(statement))
+            .execute(&maintenance)
+            .await;
+    }
+}
+
+/// Put `admin_dsn` in the state the live database is in: the contract at the
+/// base revision, the backend migrations that existed then, and the fingerprint
+/// row saying so.
+///
+/// Shared by the two cases below because they have to start from the SAME
+/// database. One of them migrates it and one of them declines to, and "a dry run
+/// changes nothing" is a claim about the thing the real run would have changed.
+async fn seed_base_database(admin_dsn: &str) {
+    let pool = sqlx::PgPool::connect(admin_dsn).await.expect("connect");
+    let contract = git_show("schema/0001_contract.sql");
+    assert_eq!(
+        sha256_hex(contract.as_bytes()),
+        BASE_CONTRACT_SHA256,
+        "the contract at {BASE_REVISION} is not the digest this case bases on"
+    );
+    sqlx::raw_sql(sqlx::AssertSqlSafe(contract))
+        .execute(&pool)
+        .await
+        .expect("apply the base contract");
+    for migration in BASE_MIGRATIONS {
+        let sql = git_show(&format!("crates/gwk-kernel/migrations/{migration}.sql"));
+        sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+            .execute(&pool)
+            .await
+            .unwrap_or_else(|err| panic!("apply backend migration {migration}: {err}"));
+    }
+    // The fingerprint, and not the base's own grant matrix. That matrix cannot
+    // reach anything asserted by either caller: the applier replays
+    // `privilege_statements` wholesale after the step, so whatever the base was
+    // granted is overwritten before `verify` looks — and `verify` reads role
+    // ATTRIBUTES, which no GRANT sets. The sibling suite in `gwk-kernel`
+    // reconstructs it because it compares two schema dumps.
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "INSERT INTO gwk_internal.schema_fingerprint (id, contract_sha256) \
+         VALUES (1, '{BASE_CONTRACT_SHA256}');"
+    )))
+    .execute(&pool)
+    .await
+    .expect("record the base contract");
+}
+
+/// `--dry-run` plans the migration and leaves the database exactly as it was.
+///
+/// The rehearsal arm had no test that ran it against a database at all, and that
+/// gap hid a refusal rather than a cosmetic one. The dry run used to ask R3 —
+/// the grant matrix rung — which counts the relations of the MIGRATED schema,
+/// 35 of them, against a database a dry run by definition holds at its base,
+/// where there are 27. Every rehearsal against a real database therefore failed,
+/// with a message that reads like schema corruption, at the point where the
+/// operator had already stopped the kernel to free the writer lock. Unit
+/// coverage of the receipt's shape could not see it, because the receipt is
+/// printed on the path that never ran.
+///
+/// So this asserts both halves and neither alone would do: the verb exits clean
+/// and prints a plan, and the database it planned against is untouched
+/// afterwards. A dry run that quietly applied the step would satisfy the first.
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn a_dry_run_plans_and_changes_nothing() {
+    use sqlx::PgPool;
+
+    let admin_url = std::env::var("GWK_TEST_ADMIN_DATABASE_URL")
+        .expect("GWK_TEST_ADMIN_DATABASE_URL must point at a PostgreSQL superuser DSN");
+    let maintenance = PgPool::connect(&admin_url).await.expect("maintenance");
+
+    let role = format!("gwk_cli_dryrun_{}", std::process::id());
+    let live = format!("gwk_cli_dryrun_{}", std::process::id());
+    let scratch = format!("gwk_cli_dryrun_scratch_{}", std::process::id());
+
+    for statement in [
+        format!("DROP DATABASE IF EXISTS {live} WITH (FORCE);"),
+        format!("DROP ROLE IF EXISTS {role};"),
+    ] {
+        let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(statement))
+            .execute(&maintenance)
+            .await;
+    }
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE ROLE {role} NOLOGIN;")))
+        .execute(&maintenance)
+        .await
+        .expect("create the runtime role");
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE DATABASE {live};")))
+        .execute(&maintenance)
+        .await
+        .expect("create the live database");
+
+    let (prefix, _) = admin_url.rsplit_once('/').expect("a /database suffix");
+    let admin_dsn = format!("{prefix}/{live}");
+    seed_base_database(&admin_dsn).await;
+
+    // Measured before, and measured again after against these exact numbers. A
+    // relation count and the fingerprint together are what the step moves: it
+    // adds relations and it stamps a new digest, so a dry run that ran any part
+    // of it moves one or both.
+    let before = PgPool::connect(&admin_dsn).await.expect("connect before");
+    let relations_before: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+          WHERE n.nspname IN ('gwk', 'gwk_internal') AND c.relkind IN ('r', 'v', 'm', 'S', 'p')",
+    )
+    .fetch_one(&before)
+    .await
+    .expect("count relations before");
+    // The ledger table itself, not rows in it: `0006_schema_migration` is one of
+    // the backend migrations the step carries, so at the base it does not exist.
+    // Asserting that here is what gives the check after the dry run a subject —
+    // a table that was already absent proves nothing about what the run did.
+    let ledger_before: Option<String> =
+        sqlx::query_scalar("SELECT to_regclass('gwk_internal.schema_migration')::text")
+            .fetch_one(&before)
+            .await
+            .expect("look for the ledger table before");
+    assert_eq!(
+        ledger_before, None,
+        "the ledger table is part of what the step creates, and this database is at the base"
+    );
+    before.close().await;
+
+    let revision = "a1b2c3d4e5".repeat(4);
+    let admin_env: Vec<(&str, &str)> = vec![
+        ("GWK_ADMIN_DATABASE_URL", &admin_dsn),
+        ("GWK_RUNTIME_ROLE", &role),
+        ("GWK_PUBLIC_REVISION", &revision),
+    ];
+
+    let planned = gw_env(
+        &format!("admin migrate --scratch-database {scratch} --no-backup --dry-run"),
+        &admin_env,
+    );
+    assert_eq!(
+        code(&planned),
+        0,
+        "`admin migrate --dry-run` refused a database at the chain's base: {}{}",
+        String::from_utf8_lossy(&planned.stdout),
+        String::from_utf8_lossy(&planned.stderr)
+    );
+
+    // COUNT first. A dry run declines the backup silently — the warning is for
+    // the run that would have needed one — so this is one object, and indexing
+    // into a list of the wrong length panics about the wrong thing.
+    let printed = json_lines(&planned);
+    assert_eq!(
+        printed.len(),
+        1,
+        "a dry run prints its plan and nothing else: {printed:?}"
+    );
+    let plan = &printed[0];
+    assert_eq!(plan["type"], "admin_migrate_planned");
+    assert_eq!(plan["scratch_database_requested"], scratch);
+    assert_eq!(plan["recorded_sha256"], BASE_CONTRACT_SHA256);
+    assert_eq!(plan["base_sha256"], BASE_CONTRACT_SHA256);
+    // The two disclaimers, on a real run against a real database rather than
+    // only in the unit fixture. `rungs_checked` naming `base` alone is the whole
+    // correction: the envelope used to imply the grant matrix had been checked.
+    assert_eq!(plan["rehearsal"], "not implemented");
+    assert_eq!(plan["rungs_checked"], serde_json::json!(["base"]));
+    assert!(
+        plan["steps"]
+            .as_array()
+            .is_some_and(|steps| !steps.is_empty()),
+        "a plan against a database one step behind names the step it would take: {plan}"
+    );
+
+    // And the database is where it was left. This is the half a receipt cannot
+    // assert about itself.
+    let after = PgPool::connect(&admin_dsn).await.expect("connect after");
+    let recorded: String = sqlx::query_scalar(
+        "SELECT contract_sha256 FROM gwk_internal.schema_fingerprint WHERE id = 1",
+    )
+    .fetch_one(&after)
+    .await
+    .expect("read the fingerprint after");
+    assert_eq!(
+        recorded, BASE_CONTRACT_SHA256,
+        "the dry run stamped a new contract digest"
+    );
+    let relations_after: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+          WHERE n.nspname IN ('gwk', 'gwk_internal') AND c.relkind IN ('r', 'v', 'm', 'S', 'p')",
+    )
+    .fetch_one(&after)
+    .await
+    .expect("count relations after");
+    assert_eq!(
+        relations_after, relations_before,
+        "the dry run changed the relation count"
+    );
+    let ledger_after: Option<String> =
+        sqlx::query_scalar("SELECT to_regclass('gwk_internal.schema_migration')::text")
+            .fetch_one(&after)
+            .await
+            .expect("look for the ledger table after");
+    assert_eq!(
+        ledger_after, ledger_before,
+        "the dry run applied a backend migration the step carries"
+    );
+    after.close().await;
 
     for statement in [
         format!("DROP DATABASE IF EXISTS {live} WITH (FORCE);"),
