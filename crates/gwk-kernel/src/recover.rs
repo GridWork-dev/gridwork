@@ -473,7 +473,7 @@ async fn read_blob(
 }
 
 /// The log's highest assigned sequence, read through the caller's connection.
-async fn watermark_of(conn: &mut PgConnection) -> Result<Option<Seq>, Refusal> {
+pub(crate) async fn watermark_of(conn: &mut PgConnection) -> Result<Option<Seq>, Refusal> {
     let text: Option<String> = sqlx::query_scalar("SELECT max(seq)::text FROM gwk.event")
         .fetch_one(conn)
         .await

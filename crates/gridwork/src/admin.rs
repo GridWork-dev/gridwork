@@ -417,10 +417,11 @@ pub async fn migrate(
 /// live migration did, and a field that quietly stops being emitted takes its
 /// evidence with it.
 ///
-/// Thirteen keys. The SPEC's criterion 8 names eight of them; the other five
-/// are here because the operator reading this afterwards needs them just as
-/// much — which database was rehearsed against, what the fingerprint said
-/// BEFORE the run, and whether the base was asserted rather than read.
+/// Fifteen keys. The SPEC's criterion 8 names eight of them and criterion 2
+/// names the watermark pair; the other five are here because the operator
+/// reading this afterwards needs them just as much — which database was
+/// rehearsed against, what the fingerprint said BEFORE the run, and whether the
+/// base was asserted rather than read.
 fn migrated_receipt(
     scratch: &str,
     recorded: &str,
@@ -450,6 +451,12 @@ fn migrated_receipt(
         // daemon that was not fenced, and the receipt is where that shows.
         "events_before": applied.events_before,
         "events_after": applied.events_after,
+        // And the log's highest sequence across the same window, because the
+        // count alone is not a claim that every event survived: an event
+        // removed and replaced holds the count and moves this. Decimal
+        // strings, as `Seq` is everywhere else; `null` on an empty log.
+        "watermark_before": applied.watermark_before,
+        "watermark_after": applied.watermark_after,
         "elapsed_ms": applied.elapsed_ms,
     })
 }
@@ -828,7 +835,7 @@ mod tests {
     /// a field that can stop being emitted between one release and the next,
     /// and this receipt is the only artifact that will ever say what a live
     /// migration did to a database nobody can re-run the migration against.
-    const RECEIPT_KEYS: [&str; 13] = [
+    const RECEIPT_KEYS: [&str; 15] = [
         "type",
         "scratch_database",
         "recorded_sha256",
@@ -841,6 +848,8 @@ mod tests {
         "public_revision",
         "events_before",
         "events_after",
+        "watermark_before",
+        "watermark_after",
         "elapsed_ms",
     ];
 
@@ -853,6 +862,8 @@ mod tests {
             backend_migrations: vec!["0005_pty_delivery".to_owned()],
             events_before: 41,
             events_after: 41,
+            watermark_before: Some(gwk_domain::ids::Seq::new(41)),
+            watermark_after: Some(gwk_domain::ids::Seq::new(41)),
             elapsed_ms: 12,
         };
         let receipt = migrated_receipt(
@@ -893,6 +904,13 @@ mod tests {
         assert_eq!(object["asserted_base"], false);
         assert_eq!(object["events_before"], object["events_after"]);
         assert_eq!(object["contract_sha256"], "b".repeat(64));
+
+        // The watermark pair rides as a decimal STRING, the way `Seq` is
+        // written everywhere else on this wire. A `Seq` that started emitting
+        // as a JSON number would keep the key, keep the count, and change what
+        // every reader of this receipt parses.
+        assert_eq!(object["watermark_before"], object["watermark_after"]);
+        assert_eq!(object["watermark_after"], "41");
     }
 
     /// RED 2: a backup path that does not exist refuses BEFORE anything is

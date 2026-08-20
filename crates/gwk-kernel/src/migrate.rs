@@ -23,7 +23,22 @@
 use sqlx::Row as _;
 
 use gwk_domain::contract_steps::Step;
+use gwk_domain::ids::Seq;
 use gwk_domain::is_sha256_hex;
+
+/// [`crate::recover::watermark_of`], in this module's error type.
+///
+/// The same read recovery does, deliberately, rather than a second
+/// `SELECT max(seq)`: a watermark the migrate path invented could agree with
+/// itself while meaning something other than the position recovery anchors on,
+/// and there would be nothing to notice it. Only the error type has to be
+/// translated — recovery answers in wire `Refusal`s and this module in
+/// [`crate::KernelError`].
+async fn watermark(conn: &mut sqlx::PgConnection) -> crate::Result<Option<Seq>> {
+    crate::recover::watermark_of(conn)
+        .await
+        .map_err(|refusal| crate::KernelError::Schema(refusal.to_string()))
+}
 
 /// Why a chain could not be produced.
 ///
@@ -285,6 +300,17 @@ pub struct Applied {
     /// Events in the log after. The chain writes none, so a difference here is
     /// a daemon that was not fenced.
     pub events_after: i64,
+    /// The log's highest assigned sequence before the chain ran, or `None` on
+    /// an empty log.
+    pub watermark_before: Option<Seq>,
+    /// And after.
+    ///
+    /// Carried BESIDE the count rather than instead of it, because neither one
+    /// covers the other. A step that deleted the newest event and inserted a
+    /// replacement holds the count exactly and moves this; a step that
+    /// renumbered the log holds this exactly and moves the count. Both are what
+    /// "every event survives" is a claim against.
+    pub watermark_after: Option<Seq>,
     /// How long the one transaction took, in milliseconds.
     pub elapsed_ms: u64,
 }
@@ -330,6 +356,7 @@ pub async fn apply(
     let events_before: i64 = sqlx::query_scalar("SELECT count(*) FROM gwk.event")
         .fetch_one(&mut *tx)
         .await?;
+    let watermark_before = watermark(&mut tx).await?;
 
     let mut applied_steps: Vec<String> = Vec::with_capacity(chain.len());
     let mut applied_migrations: Vec<String> = Vec::new();
@@ -407,6 +434,7 @@ pub async fn apply(
     let events_after: i64 = sqlx::query_scalar("SELECT count(*) FROM gwk.event")
         .fetch_one(&mut *tx)
         .await?;
+    let watermark_after = watermark(&mut tx).await?;
 
     tx.commit().await?;
 
@@ -417,6 +445,8 @@ pub async fn apply(
         backend_migrations: applied_migrations,
         events_before,
         events_after,
+        watermark_before,
+        watermark_after,
         elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
     })
 }
@@ -698,10 +728,16 @@ const EXPECTED_TRUNCATE_GUARDS: usize = 18;
 /// R5 — the database ends where the chain said it would, measured rather than
 /// inferred.
 ///
-/// The event count is read again and compared to what was read before the
-/// transaction. Inferring "the log is untouched" from the absence of an error
-/// is the same mistake as inferring a passing test from a suite that ran no
-/// cases.
+/// The event count AND the watermark are read again and compared to what was
+/// read before the transaction. Inferring "the log is untouched" from the
+/// absence of an error is the same mistake as inferring a passing test from a
+/// suite that ran no cases.
+///
+/// Two measurements because one of them is not a claim about survival. A step
+/// that deleted the newest event and inserted a replacement leaves the count
+/// exactly where it was and moves the watermark; a step that renumbered leaves
+/// the watermark and moves the count. Each is invisible to the other, and both
+/// are what criterion 2 refuses.
 pub async fn assert_result(pool: &sqlx::PgPool, applied: &Applied) -> crate::Result<()> {
     let recorded: String = sqlx::query_scalar(
         "SELECT contract_sha256 FROM gwk_internal.schema_fingerprint WHERE id = 1",
@@ -732,7 +768,47 @@ pub async fn assert_result(pool: &sqlx::PgPool, applied: &Applied) -> crate::Res
             applied.events_before, applied.events_after
         )));
     }
+
+    // The watermark half of the same criterion, and the count above is what
+    // says it was measured over something. `max(seq)` over an empty table is
+    // NULL and two NULLs compare equal — honest for a log with no events, and
+    // silent for every other reason the read could come back empty. A
+    // non-empty log whose watermark is absent is a read that did not land
+    // where it was pointed, not a log that survived.
+    if applied.events_after > 0 && applied.watermark_after.is_none() {
+        return Err(crate::KernelError::Schema(format!(
+            "the log holds {} events and reports no watermark: the two are read from the same \
+             table, so comparing the watermarks below would prove nothing",
+            applied.events_after
+        )));
+    }
+    let mut conn = pool.acquire().await?;
+    let watermark_now = watermark(&mut conn).await?;
+    if watermark_now != applied.watermark_after {
+        return Err(crate::KernelError::Schema(format!(
+            "the log's highest sequence was {} inside the migration and is {} after it: \
+             something else is writing, and the writer lock did not hold",
+            render_watermark(applied.watermark_after),
+            render_watermark(watermark_now)
+        )));
+    }
+    if applied.watermark_before != applied.watermark_after {
+        return Err(crate::KernelError::Schema(format!(
+            "the migration transaction saw the log's highest sequence move from {} to {}: the \
+             count held, so this is not an append — an event was removed and replaced, or the \
+             log was renumbered, and either way the events the log carried are not the events \
+             it carries",
+            render_watermark(applied.watermark_before),
+            render_watermark(applied.watermark_after)
+        )));
+    }
     Ok(())
+}
+
+/// A watermark for an operator to read, with a word for the empty log rather
+/// than a bare `None` in the middle of a sentence.
+fn render_watermark(watermark: Option<Seq>) -> String {
+    watermark.map_or_else(|| "absent (an empty log)".to_owned(), |seq| seq.to_string())
 }
 
 /// The privilege class a relation belongs to.

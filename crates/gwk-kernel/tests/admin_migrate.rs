@@ -1270,6 +1270,95 @@ async fn a_failing_step_moves_neither_the_fingerprint_nor_the_ledger() {
 
 #[tokio::test]
 #[ignore = "needs a PostgreSQL; see the module docs"]
+async fn r5_catches_a_step_that_holds_the_event_count_and_moves_the_watermark() {
+    // Criterion 2's other half. "Every event survives" is a claim the count
+    // cannot make on its own: a step that deletes the newest event and inserts
+    // a replacement leaves `count(*)` exactly where it was, and every arm that
+    // reads only the count reports a migration that touched nothing.
+    //
+    // The step below is that step, written the only way a real one could be —
+    // gwk.event's append-only guard is ENABLE ALWAYS, so even the superuser
+    // applying a migration has to turn it off first.
+    let maintenance = maintenance_pool().await;
+    let role = role_for("r5watermark");
+    create_role(&maintenance, &role).await;
+    let database = fresh_database(&maintenance, "r5watermark").await;
+    let pool = PgPool::connect(&url_for(&database)).await.expect("connect");
+    build_base(&pool, &role).await;
+
+    // Two events, so the log has a watermark to move. A migration over an
+    // empty log compares None to None, which is honest and proves nothing —
+    // this test is not that case, and the assertions below say so.
+    seed_gate_decided_event(&pool, 1, "gate-watermark", r#"{"kind": "operator"}"#).await;
+    seed_gate_decided_event(&pool, 2, "gate-watermark", r#"{"kind": "engine"}"#).await;
+
+    let chain = resolved_chain();
+    let poisoned = Step {
+        sql: Box::leak(
+            format!(
+                "{}\n\
+                 ALTER TABLE gwk.event DISABLE TRIGGER event_append_only;\n\
+                 DELETE FROM gwk.event WHERE seq = 2;\n\
+                 INSERT INTO gwk.event (seq, event_id, project_id, aggregate_type, \
+                   aggregate_id, aggregate_version, event_type, schema_version, occurred_at, \
+                   appended_at, actor, origin, payload) \
+                 VALUES (3, 'evt-replacement', 'proj-test', 'gate', 'gate-watermark', 2, \
+                   'gate_decided', 1, now(), now(), '{{\"kind\": \"engine\"}}'::jsonb, \
+                   '{{}}'::jsonb, '{{}}'::jsonb);\n\
+                 ALTER TABLE gwk.event ENABLE ALWAYS TRIGGER event_append_only;\n",
+                chain[0].sql
+            )
+            .into_boxed_str(),
+        ),
+        ..*chain[0]
+    };
+    let applied = gwk_kernel::migrate::apply(
+        &pool,
+        &[&poisoned],
+        &role,
+        BASE_CONTRACT_SHA256,
+        false,
+        "0000000000000000000000000000000000000000",
+        None,
+    )
+    .await
+    .expect("the poisoned step commits — that is the point");
+
+    // The count arm, shown to be insufficient rather than asserted to be. This
+    // is the whole argument for carrying a second measurement: if this ever
+    // stops holding, the watermark comparison below is no longer the thing
+    // catching this step and the test has quietly changed subject.
+    assert_eq!(
+        applied.events_before, applied.events_after,
+        "the step held the count exactly, which is what makes the count blind to it"
+    );
+    assert_eq!(
+        applied.watermark_before,
+        Some(gwk_domain::ids::Seq::new(2)),
+        "the log's highest sequence before the step"
+    );
+    assert_eq!(
+        applied.watermark_after,
+        Some(gwk_domain::ids::Seq::new(3)),
+        "and after — the replacement landed above the event it replaced"
+    );
+
+    let refusal = gwk_kernel::migrate::assert_result(&pool, &applied)
+        .await
+        .expect_err("an event removed and replaced must red R5");
+    let message = refusal.to_string();
+    assert!(
+        message.contains("highest sequence move from 2 to 3"),
+        "the refusal names the watermark, not the count: {message}"
+    );
+
+    drop(pool);
+    drop_database(&maintenance, &database).await;
+    drop_role(&maintenance, &role).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see the module docs"]
 async fn r3_and_r5_hold_over_a_migrated_database() {
     let maintenance = maintenance_pool().await;
     let role = role_for("r3r5");
