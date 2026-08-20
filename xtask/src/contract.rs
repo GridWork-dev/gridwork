@@ -1580,6 +1580,15 @@ pub fn run(check: bool) {
     {
         drift.push(message);
     }
+    // And the bytes of each are the ones they were pinned at. The claim check
+    // above is about which files a database gets; this is about whether they are
+    // still the files it got, which nothing else in this repository can see.
+    if let Err(message) = crate::steps::inspect_frozen_backend_migrations(
+        &root.join(crate::steps::MIGRATIONS_DIR),
+        &migration_stems,
+    ) {
+        drift.push(message);
+    }
     // And every registered step is named by the suite that applies steps to a
     // real database. Crude on purpose — see `inspect_step_coverage`.
     let migrate_suite = std::fs::read_to_string(root.join(crate::steps::MIGRATE_SUITE))

@@ -73,6 +73,52 @@ pub const INITIAL_BACKEND_MIGRATIONS: [&str; 4] = [
     "0004_checkpoint",
 ];
 
+/// Every backend migration, and the bytes it is frozen at.
+///
+/// The accounting above answers which migrations a database HAS. It cannot
+/// answer whether they are still the ones it ran, and nothing else did either:
+/// `crates/gwk-kernel/migrations/` is applied wholesale at initialization and
+/// never again, so editing a file in it changes what every database created
+/// afterwards carries and changes nothing about the ones created before. The
+/// two then disagree, no digest moves, no step is owed, and every gate in this
+/// repository stays green. It is the quietest way the schema can fork.
+///
+/// So the bytes are pinned. Every file gets a row, not only the four that
+/// predate the chain — a migration a step carries is applied by that step to old
+/// databases and by `init` to new ones, and editing it after either has happened
+/// forks them the same way.
+///
+/// The cost is real and it is the point: an edit to one of these files fails the
+/// contract gate until the digest here is updated by hand, which is the moment
+/// to ask whether the edit is reachable by any database that already ran the
+/// file. Usually it is not, and the answer is a new migration.
+pub const FROZEN_BACKEND_MIGRATIONS: [(&str, &str); 6] = [
+    (
+        "0001_kernel_internal",
+        "447b18dc57776efcba0206c9d295f0e9a8ffca1541c7310e9d6cc9ada0309036",
+    ),
+    (
+        "0002_writer",
+        "50b07b19c91bf58f8fbf07342e8b81d56bb81c07f66a57d458d3a93040122836",
+    ),
+    (
+        "0003_blob",
+        "c7d76d8aef2cb66624ec391b5d2e2da8427fe077748650c48776e5abf36250c0",
+    ),
+    (
+        "0004_checkpoint",
+        "cf22bc6f46465083c9b92547b5dd7a9a2ac86182e1d9cc59df62fdcf217d455f",
+    ),
+    (
+        "0005_pty_delivery",
+        "5d7e2205703c10a6a78b1d63931df9fe92856ee8b5c66814138fbe9ec3a6a2ad",
+    ),
+    (
+        "0006_schema_migration",
+        "358b405a42bfb8796408f429a53b511a47a6651a52f659bb20725ac657e15209",
+    ),
+];
+
 /// How many characters of each digest a step's file name carries.
 const NAME_PREFIX_LEN: usize = 8;
 
@@ -191,24 +237,12 @@ pub fn parse_step(id: &str, sql: &str) -> Result<ParsedStep, String> {
     // one, and a later failure leaves the step committed while reporting that
     // nothing was applied. Refused here because the symptom appears three
     // components away from the cause.
-    for (number, line) in sql.lines().enumerate() {
-        let statement = line.trim_start().to_ascii_uppercase();
-        // `END` is a synonym for COMMIT in PostgreSQL and is deliberately NOT
-        // here: plpgsql closes every block with `END;` or `END $$;`, and a step
-        // made of DO blocks — which this one is — would be unwritable. A bare
-        // plpgsql `BEGIN` is safe to list because it carries no semicolon,
-        // which is what distinguishes it from the statement.
-        for keyword in ["BEGIN", "COMMIT", "ROLLBACK", "START TRANSACTION"] {
-            if statement == format!("{keyword};") || statement.starts_with(&format!("{keyword} ")) {
-                return Err(format!(
-                    "{id}:{}: carries `{}`, and a step does not own its transaction — the \
-                     applier wraps it together with the backend migrations, the privilege \
-                     matrix and the ledger row, and a COMMIT here ends that",
-                    number + 1,
-                    line.trim()
-                ));
-            }
-        }
+    if let Some((line, keyword)) = transaction_control(sql) {
+        return Err(format!(
+            "{id}:{line}: carries `{keyword}`, and a step does not own its transaction — the \
+             applier wraps it together with the backend migrations, the privilege matrix and the \
+             ledger row, and a COMMIT here ends that"
+        ));
     }
 
     let mut lines = sql.lines();
@@ -405,6 +439,67 @@ pub fn inspect_step_chain(contract_sql: &str, steps: &[ParsedStep]) -> Result<()
         ));
     }
 
+    // Everything above is about the ends of the chain, and a set can satisfy all
+    // of it while not being one chain. Two disjoint lines are refused, because
+    // they have two terminals — but a line PLUS a closed cycle has exactly one,
+    // since no member of a cycle is anything's terminal, and every check so far
+    // passes over a registry holding a chain and an island that nothing reaches.
+    // The island's steps are files an operator will read as applicable and a
+    // resolver will never walk.
+    //
+    // So walk it. Backward from the terminal, one hop per step, and require the
+    // walk to account for every file registered. A step reached by the walk is a
+    // step some database can actually take; a step the walk never reaches is
+    // not, whatever its header says.
+    //
+    // Bounded by `registered` rather than trusted to terminate. Unique bases and
+    // a single terminal do rule out a cycle reachable from it — but a build gate
+    // that hangs is a worse failure than one that reports the wrong reason, and
+    // the bound costs a comparison.
+    let mut walked = vec![terminal];
+    while walked.len() <= registered {
+        let cursor = walked[walked.len() - 1];
+        let predecessors: Vec<&ParsedStep> = steps
+            .iter()
+            .filter(|other| other.result == cursor.base)
+            .collect();
+        match predecessors.as_slice() {
+            // The chain's start: nothing results in the digest this step bases
+            // on, which is what being first means.
+            [] => break,
+            [one] => walked.push(one),
+            // Two steps arriving at one digest. The fork check above cannot see
+            // this one — it refuses two steps LEAVING a digest — and a merge
+            // breaks the walk the same way, by making "the step before this one"
+            // a choice.
+            many => {
+                return Err(format!(
+                    "{} steps result in {}, which {} bases on: {} — a merge makes the step before \
+                     it a choice, and the chain is a line",
+                    many.len(),
+                    cursor.base,
+                    cursor.id,
+                    step_ids_of(many)
+                ));
+            }
+        }
+    }
+    if walked.len() != registered {
+        let reached: Vec<&str> = walked.iter().map(|step| step.id.as_str()).collect();
+        let stranded: Vec<&ParsedStep> = steps
+            .iter()
+            .filter(|step| !reached.contains(&step.id.as_str()))
+            .collect();
+        return Err(format!(
+            "the chain from {} back reaches {} of the {registered} registered steps: {} is \
+             registered and unreachable — a step no walk from the contract arrives at is a file \
+             that reads as applicable and never applies",
+            terminal.id,
+            walked.len(),
+            step_ids_of(&stranded)
+        ));
+    }
+
     Ok(())
 }
 
@@ -485,6 +580,50 @@ pub fn inspect_backend_migration_claims(
     Ok(())
 }
 
+/// Refuse a backend migration whose bytes have moved since they were pinned.
+///
+/// See [`FROZEN_BACKEND_MIGRATIONS`] for why the bytes are the thing being
+/// checked. `present` is the stems found on disk, and it is compared as a SET
+/// against the pin table in both directions: a file with no pin is as much a
+/// hole as a pin whose file has changed, because the first thing an unpinned
+/// file can do is change.
+pub fn inspect_frozen_backend_migrations(dir: &Path, present: &[String]) -> Result<(), String> {
+    // Counted first. Over an empty directory every "matches its pin" question
+    // below is vacuously true, and a read that returned nothing would report a
+    // clean set of frozen migrations for a repository that has none.
+    if present.len() != FROZEN_BACKEND_MIGRATIONS.len() {
+        let pinned: Vec<&str> = FROZEN_BACKEND_MIGRATIONS
+            .iter()
+            .map(|(id, _)| *id)
+            .collect();
+        return Err(format!(
+            "{} backend migrations are pinned and {} are on disk under {MIGRATIONS_DIR}: pinned \
+             {pinned:?}, present {present:?}. A file with no pin is one whose bytes nothing \
+             watches",
+            FROZEN_BACKEND_MIGRATIONS.len(),
+            present.len()
+        ));
+    }
+
+    for (stem, expected) in FROZEN_BACKEND_MIGRATIONS {
+        let path = dir.join(format!("{stem}.sql"));
+        let sql = std::fs::read_to_string(&path)
+            .map_err(|err| format!("read {}: {err}", path.display()))?;
+        let actual = crate::schema::sha256_hex(sql.as_bytes());
+        if actual != expected {
+            return Err(format!(
+                "{MIGRATIONS_DIR}/{stem}.sql now digests to {actual} and is pinned at {expected}. \
+                 This file is applied at initialization and never again, so the edit reaches every \
+                 database created after it and none created before — if that difference is \
+                 intended, it belongs in a NEW migration a step carries, and if the file was \
+                 never applied anywhere the pin is what moves"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 /// The migration stems on disk, in file-name order.
 pub fn read_backend_migrations(dir: &Path) -> Vec<String> {
     let entries =
@@ -546,9 +685,183 @@ pub fn inspect_step_coverage(steps: &[ParsedStep], suite: &str) -> Result<(), St
     Ok(())
 }
 
+/// Transaction control in `sql` that the applier's transaction would execute,
+/// as the line it sits on and the keyword it is.
+///
+/// The line-oriented predecessor to this asked whether a line STARTED with one
+/// of four keywords, and three shapes walked past it. A file whose last line is
+/// `COMMIT` — no semicolon, nothing after it — matched neither `COMMIT;` nor a
+/// `COMMIT ` prefix. `SELECT 1; COMMIT;` put the keyword where no line-start
+/// test looks. And `END;`, which PostgreSQL treats as a synonym for COMMIT, was
+/// left off the list entirely, because plpgsql closes every block with it and a
+/// step made of DO blocks — which every step here is — would be unwritable.
+///
+/// That third one is why this is a scanner and not a longer keyword list.
+/// Whether `END;` closes a transaction or a plpgsql block is decided by whether
+/// it sits inside a dollar-quoted body: a line test cannot see that and this
+/// can, so the synonym is refused at the top level and still allowed in the one
+/// place every DO block needs it.
+fn transaction_control(sql: &str) -> Option<(usize, String)> {
+    // Comments, string literals and dollar-quoted bodies become blanks, one byte
+    // for one byte, so every offset and line break in the result is the one it
+    // had in the input. Nothing here parses SQL — it establishes what is at the
+    // TOP level, which is the whole of what the question turns on.
+    let scrubbed = scrub_to_top_level(sql);
+
+    let mut offset = 0usize;
+    for statement in scrubbed.split(';') {
+        let start = offset;
+        offset += statement.len() + 1;
+        let leading = statement.len() - statement.trim_start().len();
+        let Some(word) = statement.split_whitespace().next() else {
+            continue;
+        };
+        let keyword = word.to_ascii_uppercase();
+        // `START` opens one and `ABORT` ends one, as surely as the three that
+        // were already listed; `END` can only be the statement by the time a
+        // word reaches here, because a plpgsql block's is inside a body that was
+        // blanked before the split.
+        if !["BEGIN", "START", "COMMIT", "END", "ROLLBACK", "ABORT"].contains(&keyword.as_str()) {
+            continue;
+        }
+        let line = 1 + scrubbed[..start + leading]
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count();
+        return Some((line, keyword));
+    }
+    None
+}
+
+/// `sql` with every comment, string literal and dollar-quoted body blanked out.
+///
+/// Byte for byte, and newlines survive as newlines: the caller reports a line
+/// number out of the result and it has to be the line number in the file.
+fn scrub_to_top_level(sql: &str) -> String {
+    fn blank(out: &mut Vec<u8>, byte: u8) {
+        out.push(if byte == b'\n' { b'\n' } else { b' ' });
+    }
+
+    let bytes = sql.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        // `--` to the end of the line.
+        if bytes[i] == b'-' && bytes.get(i + 1) == Some(&b'-') {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                blank(&mut out, bytes[i]);
+                i += 1;
+            }
+            continue;
+        }
+        // `/* .. */`, which nests in PostgreSQL and is counted rather than
+        // closed at the first `*/`.
+        if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            let mut depth = 1usize;
+            blank(&mut out, bytes[i]);
+            blank(&mut out, bytes[i + 1]);
+            i += 2;
+            while i < bytes.len() && depth > 0 {
+                if bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/') {
+                    depth -= 1;
+                } else if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'*') {
+                    depth += 1;
+                } else {
+                    blank(&mut out, bytes[i]);
+                    i += 1;
+                    continue;
+                }
+                blank(&mut out, bytes[i]);
+                blank(&mut out, bytes[i + 1]);
+                i += 2;
+            }
+            continue;
+        }
+        // A single-quoted literal, in which `''` is an escaped quote rather than
+        // the end — reading it as the end would leave the rest of the literal
+        // scanned as though it were statements.
+        if bytes[i] == b'\'' {
+            blank(&mut out, bytes[i]);
+            i += 1;
+            while i < bytes.len() {
+                let quote = bytes[i] == b'\'';
+                let escaped = quote && bytes.get(i + 1) == Some(&b'\'');
+                blank(&mut out, bytes[i]);
+                i += 1;
+                if escaped {
+                    blank(&mut out, bytes[i]);
+                    i += 1;
+                } else if quote {
+                    break;
+                }
+            }
+            continue;
+        }
+        // `$tag$ .. $tag$`, the form every DO block in a step is written in.
+        if bytes[i] == b'$'
+            && let Some(tag_len) = dollar_tag(&bytes[i..])
+        {
+            let tag = bytes[i..i + tag_len].to_vec();
+            for _ in 0..tag_len {
+                blank(&mut out, bytes[i]);
+                i += 1;
+            }
+            while i < bytes.len() {
+                if bytes[i..].starts_with(&tag) {
+                    for _ in 0..tag_len {
+                        blank(&mut out, bytes[i]);
+                        i += 1;
+                    }
+                    break;
+                }
+                blank(&mut out, bytes[i]);
+                i += 1;
+            }
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    // Never lossy, and never defaulted to empty: blanks are ASCII and every
+    // other byte is copied in place, so no multi-byte character is split. An
+    // empty string here would make the caller's scan vacuous, which is the one
+    // failure this must not degrade into quietly.
+    String::from_utf8(out).expect("blanking replaces bytes one for one")
+}
+
+/// The length of the dollar-quote tag that opens `bytes`, if one does.
+///
+/// `$$` is a tag of two bytes and `$body$` one of six. A `$` followed by
+/// anything that cannot be a tag — `$1`, a parameter placeholder — is not one,
+/// and answering `None` there is what stops a placeholder from swallowing the
+/// rest of the file as a quoted body.
+fn dollar_tag(bytes: &[u8]) -> Option<usize> {
+    let mut end = 1usize;
+    while end < bytes.len() {
+        match bytes[end] {
+            b'$' => return Some(end + 1),
+            b'A'..=b'Z' | b'a'..=b'z' | b'_' => end += 1,
+            // A digit cannot open a tag, which is what distinguishes `$1` from
+            // `$q1$`.
+            b'0'..=b'9' if end > 1 => end += 1,
+            _ => return None,
+        }
+    }
+    None
+}
+
 /// The step ids, for a message that would otherwise name a count and nothing to
 /// look at.
 fn step_ids(steps: &[ParsedStep]) -> String {
+    steps
+        .iter()
+        .map(|step| step.id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The same, for the borrowed subsets the chain walk assembles.
+fn step_ids_of(steps: &[&ParsedStep]) -> String {
     steps
         .iter()
         .map(|step| step.id.as_str())
@@ -653,6 +966,8 @@ mod tests {
     const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const C: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    const D: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    const E: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
     /// A step file carrying no backend migrations — the shape most of these
     /// cases are about, since the digests and the file name are what they test.
@@ -1027,6 +1342,126 @@ mod tests {
         let target = crate::schema::sha256_hex(moved.as_bytes());
         let steps = [parsed(A, B), parsed(B, &target)];
         assert_eq!(inspect_step_chain(&moved, &steps), Ok(()));
+    }
+
+    #[test]
+    fn a_step_no_walk_from_the_contract_reaches_is_refused() {
+        // A line plus a closed cycle, and every check before the walk passes
+        // over it. No digest is based on twice, so there is no fork. And no
+        // member of a cycle is anything's terminal, because each of them is
+        // some other member's predecessor — so the line's terminal is the only
+        // one and the count agrees. The island's two files read as applicable
+        // steps and no database can ever take them.
+        let moved = format!("{}-- moved\n", anchored_sql());
+        let target = crate::schema::sha256_hex(moved.as_bytes());
+        let steps = [parsed(A, &target), parsed(D, E), parsed(E, D)];
+        let err = inspect_step_chain(&moved, &steps).expect_err("an island nothing reaches");
+        assert!(err.contains("registered and unreachable"), "{err}");
+        assert!(err.contains("dddddddd-eeeeeeee.sql"), "{err}");
+        assert!(err.contains("eeeeeeee-dddddddd.sql"), "{err}");
+
+        // The same registry with the island removed. This is what makes the
+        // refusal above a statement about reachability rather than about the
+        // count of steps.
+        assert_eq!(inspect_step_chain(&moved, &[parsed(A, &target)]), Ok(()));
+    }
+
+    #[test]
+    fn two_steps_arriving_at_one_digest_are_refused() {
+        // A merge. The fork check cannot see this one: it refuses two steps
+        // LEAVING a digest, and these two ARRIVE at one. Bases stay unique, the
+        // terminal stays single, the chain still ends where the contract is —
+        // and "the step before this one" is a choice.
+        let moved = format!("{}-- moved\n", anchored_sql());
+        let target = crate::schema::sha256_hex(moved.as_bytes());
+        let steps = [parsed(A, C), parsed(B, C), parsed(C, &target)];
+        let err = inspect_step_chain(&moved, &steps).expect_err("two steps result in C");
+        assert!(err.contains("2 steps result in"), "{err}");
+        assert!(err.contains("the chain is a line"), "{err}");
+    }
+
+    #[test]
+    fn the_transaction_guard_sees_past_the_start_of_a_line() {
+        // Three shapes the line-oriented predecessor to this check walked past.
+        // Each of them ends the applier's transaction partway through a
+        // migration, which is the failure the guard exists for.
+        for (label, body) in [
+            // PostgreSQL treats `END` as a synonym for COMMIT, and it was left
+            // off the keyword list because plpgsql closes every block with it.
+            ("a bare END", "END;\nSELECT 1;\n"),
+            // Nowhere near the start of a line.
+            ("a second statement on one line", "SELECT 1; COMMIT;\n"),
+            // Neither `COMMIT;` nor a `COMMIT ` prefix.
+            ("an unterminated COMMIT", "SELECT 1;\nCOMMIT\n"),
+        ] {
+            let sql = step_file(A, B, body);
+            let err = parse_step("aaaaaaaa-bbbbbbbb.sql", &sql).expect_err(label);
+            assert!(
+                err.contains("does not own its transaction"),
+                "{label}: {err}"
+            );
+        }
+
+        // And the shape that has to stay writable, which is why this is a
+        // scanner and not a longer keyword list: `END` closing plpgsql blocks,
+        // the one place the word is not the statement.
+        let body = "DO $$\nBEGIN\n  IF true THEN\n    PERFORM 1;\n  END IF;\nEND $$;\n";
+        parse_step("aaaaaaaa-bbbbbbbb.sql", &step_file(A, B, body))
+            .expect("plpgsql closes its blocks with END");
+
+        // A comment and a string literal are not statements either. Refusing
+        // them would make the guard unusable over the SQL this repository
+        // actually writes, which discusses its own transaction rules in prose.
+        let body = "-- COMMIT; is discussed here\nSELECT 'COMMIT;' AS note;\n";
+        parse_step("aaaaaaaa-bbbbbbbb.sql", &step_file(A, B, body))
+            .expect("a comment and a literal are not transaction control");
+    }
+
+    #[test]
+    fn a_backend_migration_whose_bytes_moved_is_refused() {
+        let dir = std::env::temp_dir().join(format!("gwk-frozen-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create the fixture dir");
+
+        // Seeded from the REAL files, so the clean arm below passes for the
+        // same reason the repository does rather than for a reason this test
+        // invented.
+        let real = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("xtask has a parent dir")
+            .join(MIGRATIONS_DIR);
+        let present: Vec<String> = FROZEN_BACKEND_MIGRATIONS
+            .iter()
+            .map(|(stem, _)| (*stem).to_owned())
+            .collect();
+        for stem in &present {
+            let sql = std::fs::read_to_string(real.join(format!("{stem}.sql")))
+                .unwrap_or_else(|err| panic!("read {stem}: {err}"));
+            std::fs::write(dir.join(format!("{stem}.sql")), sql).expect("write the fixture");
+        }
+        assert_eq!(inspect_frozen_backend_migrations(&dir, &present), Ok(()));
+
+        // One line, appended to a file every existing database has already run
+        // and nothing will run again.
+        let (stem, pin) = FROZEN_BACKEND_MIGRATIONS[0];
+        let victim = dir.join(format!("{stem}.sql"));
+        let mut sql = std::fs::read_to_string(&victim).expect("read the victim");
+        sql.push_str("-- and one more line\n");
+        std::fs::write(&victim, sql).expect("write the victim");
+        let err = inspect_frozen_backend_migrations(&dir, &present).expect_err("the bytes moved");
+        assert!(err.contains("is pinned at"), "{err}");
+        assert!(err.contains(pin), "{err}");
+
+        // And a file with no pin, which is one edit away from being a file
+        // nothing watches.
+        std::fs::write(dir.join("0099_unpinned.sql"), "SELECT 1;\n").expect("write the unpinned");
+        let mut with_extra = present.clone();
+        with_extra.push("0099_unpinned".to_owned());
+        let err =
+            inspect_frozen_backend_migrations(&dir, &with_extra).expect_err("one file too many");
+        assert!(err.contains("are pinned and"), "{err}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
