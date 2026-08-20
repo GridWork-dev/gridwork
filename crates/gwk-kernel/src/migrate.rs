@@ -370,12 +370,19 @@ pub async fn apply(
 
     let mut applied_steps: Vec<String> = Vec::with_capacity(chain.len());
     let mut applied_migrations: Vec<String> = Vec::new();
+    // The same migrations again, kept per step rather than flattened. The
+    // receipt answers "what did this run carry" and the ledger rows below
+    // answer "what did each step carry"; one list cannot be read as both, and
+    // crediting a step with a migration a later step declared would make the
+    // record claim DDL it never names.
+    let mut carried_per_step: Vec<Vec<String>> = Vec::with_capacity(chain.len());
 
     for step in chain {
         sqlx::raw_sql(sqlx::AssertSqlSafe(step.sql))
             .execute(&mut *tx)
             .await?;
         applied_steps.push(step.id.to_owned());
+        let mut carried: Vec<String> = Vec::new();
 
         for stem in step.backend_migrations {
             // Resolved from the kernel's own `BACKEND_MIGRATIONS`, so the file
@@ -392,7 +399,9 @@ pub async fn apply(
                 .execute(&mut *tx)
                 .await?;
             applied_migrations.push((*stem).to_owned());
+            carried.push((*stem).to_owned());
         }
+        carried_per_step.push(carried);
     }
 
     // Wholesale, never a delta. The grant surface is a function of the table
@@ -425,20 +434,49 @@ pub async fn apply(
         )));
     }
 
-    sqlx::query(
-        "INSERT INTO gwk_internal.schema_migration \
-           (base_sha256, result_sha256, step_id, public_revision, backup_sha256, \
-            backend_migrations) \
-         VALUES ($1, $2, $3, $4, $5, $6)",
-    )
-    .bind(recorded_base)
-    .bind(result)
-    .bind(applied_steps.join(", "))
-    .bind(public_revision)
-    .bind(backup_sha256)
-    .bind(&applied_migrations)
-    .execute(&mut *tx)
-    .await?;
+    // ONE ROW PER STEP, which is what `0006_schema_migration` says of itself:
+    // one row per applied step, never rewritten, so the sequence a database
+    // actually took is reconstructible rather than inferred from where it ended
+    // up. An earlier draft wrote one row per RUN, with `step_id` set to the
+    // whole chain joined by ", ". That is not a coarser version of this record,
+    // it is a different one, and it fails twice. `step_id` is bounded at 128
+    // characters and a step id is 18 of them plus the separator, so the sixth
+    // step of a chain overflows the CHECK — and it does so at the last statement
+    // before the commit, after every ALTER in the migration has already run.
+    // And it spends the column on a value that is not a step id, when matching
+    // it against a file under `schema/steps/` is the one thing a later reader is
+    // promised they can do with it.
+    //
+    // The base of the first row is asserted against what the database recorded,
+    // not taken from the step alone. R1 compared those before any statement ran;
+    // asking again here is what keeps the ledger from recording a start this
+    // database was never at if that rung is ever moved or weakened.
+    if chain[0].base != recorded_base {
+        return Err(crate::KernelError::Schema(format!(
+            "the chain starts at {} and this database recorded {recorded_base}: the ledger would \
+             record a base the database was never at",
+            chain[0].base
+        )));
+    }
+    // `backup_sha256` repeats down the rows of a chain, and that is accurate
+    // rather than duplicated: one backup was taken before the one transaction
+    // every step here runs in, so it is equally the restore point for each.
+    for (step, carried) in chain.iter().zip(&carried_per_step) {
+        sqlx::query(
+            "INSERT INTO gwk_internal.schema_migration \
+               (base_sha256, result_sha256, step_id, public_revision, backup_sha256, \
+                backend_migrations) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(step.base)
+        .bind(step.result)
+        .bind(step.id)
+        .bind(public_revision)
+        .bind(backup_sha256)
+        .bind(carried)
+        .execute(&mut *tx)
+        .await?;
+    }
 
     let events_after: i64 = sqlx::query_scalar("SELECT count(*) FROM gwk.event")
         .fetch_one(&mut *tx)
@@ -677,17 +715,59 @@ async fn assert_protections_probes(tx: &mut sqlx::PgTransaction<'_>) -> crate::R
         }
     }
 
-    // The DELETE arm needs rows, and only rows already present can supply them
-    // without a fixture that is itself untested. `gwk.transition` is seeded by
-    // the contract and never empty; the ledger has a row by the time a
-    // migration reaches here.
+    // The DELETE arm's OWN set, and the fact that it needs one is the finding.
+    // This loop used to walk `guarded` — the TRUNCATE set — on the assumption
+    // that the two are the same relations. They are not: `gwk.dispatch_node`
+    // carries `dispatch_node_no_delete` and no TRUNCATE guard at all, so it was
+    // absent from the only list either arm consulted and nothing in this battery
+    // ever asked about it. A row-level DELETE guard is a different trigger with
+    // a different `tgtype`, and the honest way to find every relation carrying
+    // one is to ask for that, not to reuse a list assembled for another
+    // question.
     //
-    // Counted for the same reason as above, and this one is the sharper trap:
-    // `DELETE FROM t` over an empty table affects no rows, fires no row-level
-    // trigger, and succeeds. A DELETE battery over an empty database is green
-    // and means nothing.
+    // `tgtype & 1` is ROW and `tgtype & 8` is DELETE; `tgenabled = 'A'` carries
+    // the same weight it does above, refusing a dropped, a disabled, and an
+    // ALWAYS-to-ORIGIN-downgraded guard with one predicate.
+    let delete_guarded: Vec<(String, String)> = sqlx::query(
+        "SELECT n.nspname AS schema, c.relname AS relation \
+           FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid \
+           JOIN pg_namespace n ON n.oid = c.relnamespace \
+          WHERE NOT t.tgisinternal AND t.tgtype & 1 > 0 AND t.tgtype & 8 > 0 \
+            AND t.tgenabled = 'A' \
+            AND n.nspname IN ('gwk', 'gwk_internal') \
+          GROUP BY 1, 2 ORDER BY 1, 2",
+    )
+    .fetch_all(&mut **tx)
+    .await?
+    .into_iter()
+    .map(|row| (row.get("schema"), row.get("relation")))
+    .collect();
+
+    // Counted, and this count is the only thing that reaches a guard on an empty
+    // table. The probe below cannot touch one — `DELETE FROM t` over no rows
+    // fires no row-level trigger and reports success — so for every relation
+    // that happens to be empty when a migration runs, "the catalogue holds an
+    // ALWAYS-enabled row-level DELETE guard" is the whole of what this battery
+    // can honestly claim. Equality rather than a floor, so a guard that is
+    // dropped, disabled, or downgraded refuses the migration whether or not its
+    // table had a row to prove it with.
+    if delete_guarded.len() != EXPECTED_DELETE_GUARDS {
+        return Err(crate::KernelError::Schema(format!(
+            "expected exactly {EXPECTED_DELETE_GUARDS} relations with a row-level DELETE guard \
+             and found {}: {delete_guarded:?}",
+            delete_guarded.len()
+        )));
+    }
+
+    // And then behaviourally, wherever a row exists to prove it with. Only rows
+    // already present can supply them without a fixture that is itself untested:
+    // `gwk.transition` is seeded by the contract and never empty, and the ledger
+    // has rows by the time a migration reaches here.
+    //
+    // The trap this floor exists for is the sharper one: a DELETE battery over
+    // an empty database is green and means nothing.
     let mut deleted_from = 0usize;
-    for (schema, relation) in &guarded {
+    for (schema, relation) in &delete_guarded {
         // Identifiers out of `pg_class`, never out of input — the same audit
         // note the TRUNCATE above carries.
         let count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
@@ -860,6 +940,21 @@ async fn assert_no_half_closed_update(tx: &mut sqlx::PgTransaction<'_>) -> crate
 /// and that step is the change where this number moves with it. There is no
 /// benign direction for this count to drift in.
 const EXPECTED_TRUNCATE_GUARDS: usize = 18;
+
+/// How many relations [`assert_protections`]'s row-level DELETE sweep must find.
+///
+/// Nineteen, one more than the TRUNCATE count above, and the extra one is the
+/// point. `gwk.dispatch_node` carries `dispatch_node_no_delete` and no TRUNCATE
+/// guard, so it appears in this set and not in that one — which is why the
+/// DELETE arm cannot reuse that list, and why for as long as it did there was a
+/// guarded relation neither arm ever named.
+///
+/// EQUALITY for the same reason as above, and it carries more weight here. The
+/// TRUNCATE probe reaches every relation it lists, because TRUNCATE needs no
+/// rows; the DELETE probe reaches only the ones that happen to hold a row when
+/// a migration runs. For all the others this count IS the check, so a floor
+/// would leave them proven by nothing at all.
+const EXPECTED_DELETE_GUARDS: usize = 19;
 
 /// R5 — the database ends where the chain said it would, measured rather than
 /// inferred.

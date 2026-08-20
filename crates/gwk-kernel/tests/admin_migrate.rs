@@ -952,9 +952,22 @@ async fn r4_goes_red_when_a_protection_is_disabled() {
     let refusal = gwk_kernel::migrate::assert_protections(&pool)
         .await
         .expect_err("a disabled row guard must red the battery");
+    let message = refusal.to_string();
+    // The count arm again, and which arm answers is the assertion. The probe
+    // used to be the only thing that could see this, and it saw it here only
+    // because the contract seeds `gwk.transition`: `DELETE FROM t` over an empty
+    // table fires no row-level trigger and succeeds, so on any guarded relation
+    // that is empty when a migration runs — which is most of them — a disabled
+    // guard was invisible. Counting the row-level guards as their own set
+    // refuses one whether or not its table held a row to prove it with.
     assert!(
-        refusal.to_string().contains("DELETE FROM gwk.transition"),
-        "{refusal}"
+        message
+            .contains("expected exactly 19 relations with a row-level DELETE guard and found 18"),
+        "a disabled row guard must be caught by the count arm, not left to the probe: {message}"
+    );
+    assert!(
+        !message.contains("gwk\", \"transition"),
+        "the relation whose guard was disabled is still in the counted set: {message}"
     );
 
     drop(pool);
@@ -1318,6 +1331,25 @@ async fn dispatch_node_is_truncate_protected_only_by_a_neighbour() {
         "still refused, but no longer by cost_entry's own guard: {cascade}"
     );
 
+    // And it is in the set the battery's DELETE arm walks — which for a long
+    // time it was not. That arm iterated the TRUNCATE set on the assumption that
+    // the two are the same relations, so the one table this whole test exists to
+    // describe was the one table neither arm ever named. The query is the
+    // battery's own predicate over this relation alone.
+    let counted: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid \
+          WHERE NOT t.tgisinternal AND t.tgtype & 1 > 0 AND t.tgtype & 8 > 0 \
+            AND t.tgenabled = 'A' AND c.oid = 'gwk.dispatch_node'::regclass",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("count dispatch_node row-level delete guards");
+    assert_eq!(
+        counted, 1,
+        "the row-level DELETE guard is how the battery counts dispatch_node at all, and it is \
+         gone or no longer ALWAYS-enabled"
+    );
+
     drop(pool);
     drop_database(&maintenance, &database).await;
     drop_role(&maintenance, &role).await;
@@ -1485,6 +1517,128 @@ async fn r3_and_r5_hold_over_a_migrated_database() {
     gwk_kernel::migrate::assert_result(&pool, &applied)
         .await
         .expect("the database ends where the chain said");
+
+    drop(pool);
+    drop_database(&maintenance, &database).await;
+    drop_role(&maintenance, &role).await;
+}
+
+/// A chain of `count` steps from `base`, each one stamping the fingerprint and
+/// touching nothing else.
+///
+/// Synthetic because the registry holds one step and the property under test
+/// only appears at several: the ledger's `step_id` is bounded at 128 characters
+/// and a step id is 21 of them, so a run that wrote one row naming the whole
+/// chain fitted five steps and violated the CHECK at the sixth — at the last
+/// statement before the commit, after every ALTER had already run.
+///
+/// The SQL moves the fingerprint and adds no relation, which is what lets this
+/// run on top of a real migration: R3 counts the relations of the migrated
+/// schema, and a chain that changed the count would fail that rung for a reason
+/// this test is not about.
+fn synthetic_chain(base: &str, count: usize) -> Vec<Step> {
+    let mut steps: Vec<Step> = Vec::with_capacity(count);
+    let mut from: &'static str = Box::leak(base.to_owned().into_boxed_str());
+    for index in 0..count {
+        let digit = char::from(b'a' + u8::try_from(index).expect("fewer than 26 steps"));
+        let to: &'static str = Box::leak(digit.to_string().repeat(64).into_boxed_str());
+        let id: &'static str =
+            Box::leak(format!("{}-{}.sql", &from[..8], &to[..8]).into_boxed_str());
+        let sql: &'static str = Box::leak(
+            format!(
+                "UPDATE gwk_internal.schema_fingerprint SET contract_sha256 = '{to}' \
+                 WHERE id = 1;\n"
+            )
+            .into_boxed_str(),
+        );
+        steps.push(Step {
+            id,
+            base: from,
+            result: to,
+            backend_migrations: &[],
+            sql,
+        });
+        from = to;
+    }
+    steps
+}
+
+/// The ledger records one row per applied step, and a six-step chain fits.
+///
+/// `0006_schema_migration` describes itself as holding one row per applied step
+/// so the sequence a database took is reconstructible. The applier wrote one row
+/// per RUN, with `step_id` set to the chain joined by ", ", and that is a
+/// different record with two faults. It overflows the column's CHECK at six
+/// steps — 21 characters each plus separators is 136 against a bound of 128 —
+/// and it spends the column on a value that is not a step id, when matching it
+/// against a file under `schema/steps/` is what a later reader is promised.
+///
+/// Six is the count deliberately: five fitted, so a chain of five would pass
+/// against both spellings and prove nothing.
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn the_ledger_writes_one_row_per_step_and_a_six_step_chain_fits() {
+    const BACKUP: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+
+    let maintenance = maintenance_pool().await;
+    let role = role_for("ledger");
+    create_role(&maintenance, &role).await;
+    let database = fresh_database(&maintenance, "ledger").await;
+    let pool = PgPool::connect(&url_for(&database)).await.expect("connect");
+
+    build_base(&pool, &role).await;
+    migrate(&pool, &role).await;
+
+    // On top of the migrated schema, so the rungs inside the applier are asked
+    // of the shape they were written for.
+    let chain = synthetic_chain(CONTRACT_SQL_SHA256, 6);
+    let borrowed: Vec<&Step> = chain.iter().collect();
+    let applied = gwk_kernel::migrate::apply(
+        &pool,
+        &borrowed,
+        &role,
+        CONTRACT_SQL_SHA256,
+        "0000000000000000000000000000000000000000",
+        Some(BACKUP),
+    )
+    .await
+    .expect("a six-step chain applies");
+    assert_eq!(applied.steps.len(), 6, "{:?}", applied.steps);
+
+    // COUNT first. Indexing into a ledger of the wrong length panics about the
+    // wrong thing, and a query that returned nothing would make every per-row
+    // comparison below vacuously true.
+    let rows = sqlx::query(
+        "SELECT step_id, base_sha256, result_sha256, backup_sha256 \
+           FROM gwk_internal.schema_migration ORDER BY seq",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("read the ledger");
+    assert_eq!(
+        rows.len(),
+        1 + chain.len(),
+        "the real migration's row plus one per synthetic step"
+    );
+
+    for (step, row) in chain.iter().zip(rows.iter().skip(1)) {
+        let step_id: String = row.get("step_id");
+        let base: String = row.get("base_sha256");
+        let result: String = row.get("result_sha256");
+        let backup: Option<String> = row.get("backup_sha256");
+        assert_eq!(step_id, step.id);
+        assert_eq!(base, step.base);
+        assert_eq!(result, step.result);
+        // One backup was taken before the one transaction all six ran in, so it
+        // is equally the restore point for each of them.
+        assert_eq!(backup.as_deref(), Some(BACKUP));
+        // The shape that overflowed, pinned directly rather than inferred from
+        // the fact that this run happened to fit.
+        assert!(
+            !step_id.contains(", "),
+            "a ledger row names more than one step: {step_id:?}"
+        );
+    }
 
     drop(pool);
     drop_database(&maintenance, &database).await;
