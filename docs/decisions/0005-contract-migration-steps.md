@@ -269,15 +269,29 @@ later reader behind it. The applier's transaction now sets `lock_timeout = '5s'`
 
 ### Still open, and disclosed rather than fixed
 
-**The serve path never reads `schema_fingerprint`, so one deployment ordering is not loud.**
+**The serve path never reads `schema_fingerprint`, so neither deployment ordering is loud.**
 `daemon()` checks the revision stamp, the writer lock and the runtime privileges, and never
-compares the recorded contract digest against the one it carries. Deploying new binaries
-against an old schema fails fast and legibly, but for the wrong reason — a projection query
-selects a column that does not exist. Migrating *before* advancing the pins does not fail
-fast at all: the old binary's queries still resolve, it starts, claims an epoch, and serves,
-and the first row it projects into the new shape violates a constraint at an arbitrary later
-moment. **Advance the pins first, or keep the units stopped across both acts.** Do not rely
-on the ordering being symmetric; it is not.
+compares the recorded contract digest against the one it carries. Both orderings therefore
+fail quietly, and they differ only in which feature dies and how long it takes anyone to
+notice.
+
+*New binaries against an old schema* is measured here rather than reasoned about, because a
+deployment was found sitting in exactly this state for five days. It did not fail fast. The
+daemon emitted `daemon_started`, notified the service manager, took the socket, and read
+healthy to every probe pointed at it, while one path — opening a PTY session, whose insert
+names a column the old schema does not have — refused every attempt. The whole of the
+evidence was one log line at boot and a table that stopped gaining rows.
+
+*An old binary against a new schema* is quiet for a different reason: its queries still
+resolve against the widened schema, and its projection hash agrees with itself because the
+same binary computes both sides. It starts, claims an epoch, and serves, and the first row
+it projects into the new shape violates a constraint at an arbitrary later moment.
+
+**Therefore: keep the units stopped across both acts.** An earlier revision of this entry
+also offered "advance the pins first", on the belief that the new-binary direction announced
+itself. It does not. There is no mechanical guard on the ordering anywhere in the serve
+path, which makes the stopped window the entire mitigation rather than the tidier of two
+options.
 
 ### And what a follow-up round closed
 
