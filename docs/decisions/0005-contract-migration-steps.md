@@ -144,6 +144,11 @@ went missing on a table that happens to be empty is invisible to this battery,
 and what covers it instead is that the same table's statement-level guard is
 checked unconditionally.
 
+That last sentence was wrong about one relation and is corrected below: `gwk.dispatch_node`
+had no statement-level guard to fall back on, and the arm that should have covered it was
+walking the wrong set. The set is now its own, and its count is an equality — which is what
+now covers a row-level guard that goes missing on an empty table.
+
 **The unit sweep covers one unit file, and the estate's units are not in this
 repository.** Acceptance criterion 9 asks that the verb be absent from every
 `.service` and `.timer`, and the test walks the repository asserting so. This
@@ -274,18 +279,61 @@ and the first row it projects into the new shape violates a constraint at an arb
 moment. **Advance the pins first, or keep the units stopped across both acts.** Do not rely
 on the ordering being symmetric; it is not.
 
-**The DELETE arm walks the TRUNCATE arm's relation set.** Nineteen relations carry a
-row-level delete guard and eighteen carry a statement-level truncate cover; the odd one is
-`gwk.dispatch_node`, which is therefore absent from the set the DELETE arm iterates and is
-never probed at any row count. The narrowing recorded above says that arm skips relations
-whose count is zero, which is true and not the whole story — this one is skipped always.
+### And what a follow-up round closed
 
-**The ledger writes one row per chain, not one per step.** `migrations/0006` describes the
-table as one row per applied step so the sequence a database took is reconstructible; `apply`
-performs a single INSERT with the step ids comma-joined into `step_id`. With a one-step chain
-the two are indistinguishable. They stop being so at two steps, and at six the joined string
-exceeds `step_id`'s `CHECK (length … BETWEEN 1 AND 128)` and aborts the transaction on its
-last statement — after all the DDL and the whole privilege matrix have run.
+The two entries that stood above this line are gone from it, along with four gaps recorded
+further up and one nobody had written down. Each was a guard reaching a smaller subject than
+its prose, which is the same shape as everything else on this page and is why they are
+listed rather than quietly fixed.
+
+**The DELETE arm has its own relation set.** It walked the TRUNCATE arm's, on the assumption
+that the two are the same relations. They are not — `gwk.dispatch_node` carries a row-level
+delete guard and no statement-level cover, so the one table this record already singles out
+was the one table neither arm ever named. The arm now sweeps for row-level DELETE triggers
+directly (`tgtype & 1` and `tgtype & 8`, `tgenabled = 'A'`) and asserts an equality against
+nineteen. The count matters more here than on the TRUNCATE side: that probe reaches every
+relation it lists, and this one reaches only those holding a row when a migration runs, so
+for all the others the count *is* the check.
+
+**The ledger writes one row per step.** `migrations/0006` describes the table as holding one
+row per applied step; `apply` performed a single INSERT with the ids comma-joined into
+`step_id`. At six steps that string exceeds the column's `CHECK (length … BETWEEN 1 AND 128)`
+and aborts the transaction on its last statement, after all the DDL has run. Six is now a
+test, and five would not have been one: five fitted.
+
+**`--dry-run` is exercised against a database.** The rehearsal arm had no behavioural test at
+all, which is how the R3 count mismatch recorded above survived every gate — the receipt it
+printed was on the path that never ran. A case now builds a base database, runs the built
+binary, and asserts both halves: the plan comes back, and the fingerprint, the relation count
+and the ledger table are where they were left. Only the second half catches a dry run that
+prints a plan and applies anyway.
+
+**The step-chain gate walks the chain.** It checked that no digest is based on twice, that
+exactly one terminal exists, and that the terminal is the contract — all of which a line
+*plus a closed cycle* satisfies, because no member of a cycle is anything's terminal. The
+island's files read as applicable steps that no resolver will ever reach. The gate now walks
+backward from the terminal and requires every registered step to be accounted for, which also
+refuses a merge: two steps arriving at one digest make "the step before this one" a choice,
+and the fork check cannot see it because it refuses two steps *leaving* a digest.
+
+**The transaction-control guard is a scanner.** It tested whether a line *started* with one of
+four keywords, and three shapes walked past it: a file ending `COMMIT` with no semicolon,
+`SELECT 1; COMMIT;` on one line, and `END;` — PostgreSQL's synonym for COMMIT, left off the
+list entirely because plpgsql closes every block with it. That last exclusion is why the fix
+is a scanner and not a longer list: whether `END;` ends a transaction or a block is decided by
+whether it sits inside a dollar-quoted body, which a line test cannot see.
+
+**Backend migrations are pinned by digest.** `crates/gwk-kernel/migrations/` is applied at
+initialization and never again, so editing a file there changes what every database created
+afterwards carries and nothing about the ones created before. No digest moves, no step is
+owed, and every gate stays green — the quietest way this schema can fork. All six files now
+carry a byte pin the contract gate checks.
+
+**The `KernelCommand` pin compares two artifacts.** Its guard against searching an empty
+string was `variants.len() > 40` against a union of 56, which is sixteen variants of slack and
+a number the file could be edited to agree with. It now compares the parsed variant names
+against the discriminants in the generated bindings, with one fixed name anchoring the parse
+so that two parses failing into empty sets cannot agree with each other.
 
 ## What this cost to learn
 
