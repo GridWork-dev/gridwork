@@ -250,12 +250,21 @@ pub async fn init(pretty: bool) -> Result<(), Failure> {
 ///    and every base the registry knows, because "no chain" without the
 ///    candidates is a sentence an operator cannot act on.
 ///
-/// `--from` asserts a base rather than reading one. It is the one path where
-/// the precondition goes unchecked, so both the receipt and the ledger row
-/// carry `asserted_base: true` alongside the digest that was actually recorded
-/// at the time — the row is the only thing that will ever say so. It relaxes
-/// the assertion, not the chain: a `--from` naming a digest no step bases on is
-/// still refused.
+/// `--from` states the base the operator believes the database is at, and the
+/// verb checks it like any other. **It does not relax R1 and never did.** The
+/// resolver takes it as the chain's start, and `assert_base` then compares the
+/// recorded fingerprint against that same value and refuses on a mismatch — so
+/// `--from` naming anything other than what the database records is refused,
+/// and `--from` naming what it records changes nothing. It is a confirmation,
+/// not an override: an operator who states the base out loud gets told when
+/// they are wrong, before the writer lock buys anything.
+///
+/// An earlier design ruled this the escape hatch for a database whose
+/// fingerprint does not describe its actual schema, and documented it as the one
+/// path where the precondition goes unchecked. The code has never done that, and
+/// the ledger column that existed to record it has been removed rather than left
+/// writing `true` for runs where the check was in fact performed. **That state
+/// therefore has no exit through this verb** — see the ADR.
 pub async fn migrate(
     scratch: &str,
     backup: Option<&str>,
@@ -263,10 +272,20 @@ pub async fn migrate(
     dry_run: bool,
     pretty: bool,
 ) -> Result<(), Failure> {
-    // FIRST, before the revision stamp and before anything reads the
-    // environment. It is the cheapest check in the verb and it catches the
-    // most common mistake, and every statement after it costs the operator
-    // something to undo.
+    // Cheapest of all, and it runs even though nothing on this path connects to
+    // the scratch: the name is written into the receipt, and a permanent record
+    // should not be able to carry a string that could not have been a database.
+    // When the rehearsal lands this check is already where it needs to be.
+    if !is_database_name(scratch) {
+        return Err(Failure::usage(format!(
+            "{scratch:?} is not a database name"
+        )));
+    }
+
+    // FIRST of the checks that cost anything, before the revision stamp and
+    // before anything reads the environment. It catches the most common
+    // mistake, and every statement after it costs the operator something to
+    // undo.
     // See the doc above.
     let backup_sha256 = match backup {
         Some(path) => Some(digest_backup(path)?),
@@ -317,7 +336,6 @@ pub async fn migrate(
     };
 
     let base = from.unwrap_or(recorded.as_str());
-    let asserted_base = from.is_some();
     let chain = gwk_kernel::migrate::resolve(
         gwk_kernel::CONTRACT_STEPS,
         base,
@@ -336,30 +354,75 @@ pub async fn migrate(
     // at describes a shape that is not there.
     gwk_kernel::migrate::assert_base(&pool, base)
         .await
-        .map_err(configuration)?;
+        .map_err(kernel_failure)?;
+
+    // The same refusal `admin::init` makes, and for the same reason: the
+    // privilege matrix is re-applied wholesale inside the migration, so a role
+    // that must not hold it must be refused BEFORE the grant, not audited after.
+    // `GWK_RUNTIME_ROLE` is read from whatever environment the operator happens
+    // to be in and nothing in the database records which role was granted last,
+    // so a stale export silently widens the trust boundary to a second role —
+    // and every guard in this phase is blind to it, because R3 and `admin
+    // verify` both re-read the same variable and would find their own answer
+    // perfectly satisfied.
+    let attributes = admin::role_attributes(&pool, config.runtime_role())
+        .await
+        .map_err(kernel_failure)?
+        .ok_or_else(|| {
+            Failure::new(
+                KernelErrorCode::Privilege,
+                format!(
+                    "role {:?} does not exist: a migration grants an already-created role and \
+                     never creates one",
+                    config.runtime_role()
+                ),
+            )
+        })?;
+    let violations = attributes.violations();
+    if !violations.is_empty() {
+        return Err(Failure::new(
+            KernelErrorCode::Privilege,
+            format!(
+                "role {:?} holds {}: the kernel refuses to run as a role that can re-grant or \
+                 re-DDL its own store",
+                config.runtime_role(),
+                violations.join(", ")
+            ),
+        ));
+    }
 
     if dry_run {
-        // R3 against the live database, which is the rung a dry run CAN
-        // answer: the grant matrix is a property of the schema as it stands,
-        // and reading it changes nothing. R2's rehearsal is the rung a dry run
-        // is really for and it is not here yet — see the report.
-        gwk_kernel::migrate::assert_grant_matrix(&pool, config.runtime_role())
-            .await
-            .map_err(configuration)?;
-
+        // No R3 here, and its absence is the fix rather than an omission. The
+        // grant matrix rung asserts a relation count that belongs to the
+        // MIGRATED schema — `EXPECTED_RELATIONS`, 35 — and a dry run by
+        // definition holds the database at its base, where the count is 27.
+        // Running it here refused every rehearsal against a real database with
+        // a message that read like schema corruption, after the operator had
+        // already stopped the kernel to get the writer lock. The rung is right;
+        // it was being asked of the wrong schema, and it now runs inside the
+        // applier's transaction where the step has produced the shape it counts.
+        //
+        // What is left is honest and worth having: R1 has already run above,
+        // the chain resolved, and the plan below says exactly which steps and
+        // which backend migrations a real run would carry. That is a preflight,
+        // not a proof, and the envelope no longer claims otherwise.
         emit(
             &json!({
                 "type": "admin_migrate_planned",
-                "scratch_database": scratch,
+                "scratch_database_requested": scratch,
                 "recorded_sha256": recorded,
                 "base_sha256": base,
-                "asserted_base": asserted_base,
                 "contract_sha256": gwk_kernel::CONTRACT_SQL_SHA256,
                 "steps": steps,
                 "backend_migrations": carried,
                 "backup_sha256": backup_sha256,
                 "public_revision": revision,
-                "grant_matrix": "checked",
+                // Named so nobody has to infer it from a missing field. A dry
+                // run resolves the chain and asserts the base; it does not
+                // rehearse, and it does not check the grant matrix — that rung
+                // can only be asked of a schema the step has already produced.
+                "rungs_checked": ["base"],
+                "rehearsal": "not implemented",
             }),
             pretty,
         );
@@ -371,42 +434,45 @@ pub async fn migrate(
         &chain,
         config.runtime_role(),
         &recorded,
-        asserted_base,
         &revision,
         backup_sha256.as_deref(),
     )
     .await
-    .map_err(configuration)?;
+    .map_err(kernel_failure)?;
 
-    // The rungs that can only be asked after the transaction commits. R5 reads
-    // the fingerprint and the log again rather than inferring either from the
-    // absence of an error; R3 is re-asked because the step changed the table
-    // set, and `GRANT ... ON ALL TABLES` reaches the relations that existed
-    // when it ran. R4 proves the guards still refuse a superuser — the credential
-    // no grant binds, which is the one that just applied a migration.
-    gwk_kernel::migrate::assert_result(&pool, &applied)
-        .await
-        .map_err(configuration)?;
-    gwk_kernel::migrate::assert_grant_matrix(&pool, config.runtime_role())
-        .await
-        .map_err(configuration)?;
-    gwk_kernel::migrate::assert_protections(&pool)
-        .await
-        .map_err(configuration)?;
+    // R3 and R4 have already run, inside `apply`'s transaction, where a failure
+    // is a rollback rather than a report. What is left is the one rung that can
+    // only be asked afterwards: R5 re-reads the fingerprint and the log to catch
+    // a writer that was never fenced, and a measurement that has to notice
+    // something outside the transaction cannot be taken inside it.
+    let verified = gwk_kernel::migrate::assert_result(&pool, &applied).await;
 
-    emit(
-        &migrated_receipt(
-            scratch,
-            &recorded,
-            base,
-            asserted_base,
-            &applied,
-            backup_sha256.as_deref(),
-            &revision,
-        ),
-        pretty,
+    // The receipt goes out either way, and that ordering is the point. The
+    // transaction is committed by now: the schema has moved, the ledger row is
+    // there, and this document is the only artifact that will ever say what
+    // happened. Returning the error first — which is what an earlier draft did —
+    // withheld it in precisely the case an operator needs it most, leaving one
+    // error line to explain a database that had already changed.
+    let mut receipt = migrated_receipt(
+        scratch,
+        &recorded,
+        base,
+        &applied,
+        backup_sha256.as_deref(),
+        &revision,
     );
-    Ok(())
+    if let Some(object) = receipt.as_object_mut() {
+        object.insert("verified".to_owned(), Value::Bool(verified.is_ok()));
+        if let Err(error) = &verified {
+            object.insert(
+                "verification_error".to_owned(),
+                Value::String(error.to_string()),
+            );
+        }
+    }
+    emit(&receipt, pretty);
+
+    verified.map_err(kernel_failure)
 }
 
 /// The receipt one completed migration leaves behind.
@@ -417,29 +483,39 @@ pub async fn migrate(
 /// live migration did, and a field that quietly stops being emitted takes its
 /// evidence with it.
 ///
-/// Fifteen keys. The SPEC's criterion 8 names eight of them and criterion 2
-/// names the watermark pair; the other five are here because the operator
-/// reading this afterwards needs them just as much — which database was
-/// rehearsed against, what the fingerprint said BEFORE the run, and whether the
-/// base was asserted rather than read.
+/// Fifteen keys, and two of them are disclaimers. The SPEC's criterion 8 names
+/// eight and criterion 2 names the watermark pair; the rest are here because the
+/// operator reading this afterwards needs them just as much — what the
+/// fingerprint said BEFORE the run, and what the run did NOT do.
+///
+/// `verified` and `verification_error` are added by the caller rather than
+/// here, because whether R5 passed is not known until after this document's
+/// other fields are.
 fn migrated_receipt(
     scratch: &str,
     recorded: &str,
     base: &str,
-    asserted_base: bool,
     applied: &gwk_kernel::migrate::Applied,
     backup_sha256: Option<&str>,
     revision: &str,
 ) -> Value {
     json!({
         "type": "admin_migrated",
-        "scratch_database": scratch,
+        // REQUESTED, not rehearsed against. The scratch proof is not
+        // implemented, so nothing here ever connected to this database — and a
+        // field named `scratch_database` in the one permanent record of a
+        // migration reads, six months later, as evidence of a rehearsal that
+        // did not happen. The name says what is true and the sibling below says
+        // what is not.
+        "scratch_database_requested": scratch,
+        "rehearsal": "not implemented",
         // What the database said before the run, and what the chain was
-        // resolved from. They differ exactly when `--from` overrode the base,
-        // which is why both are here rather than one.
+        // resolved from. `--from` cannot make these differ — it asserts the
+        // base rather than overriding it — so a difference would itself be a
+        // finding. Both are kept because a receipt that carried one could not
+        // show that.
         "recorded_sha256": recorded,
         "base_sha256": base,
-        "asserted_base": asserted_base,
         "contract_sha256": applied.result,
         "steps": applied.steps,
         // The step's work and the backend migrations' work, kept apart: the
@@ -761,12 +837,19 @@ const REVISION_ENV: &str = "GWK_PUBLIC_REVISION";
 
 /// The same server, a different database. Derived rather than asked for
 /// separately so a scratch cannot be pointed at another host by accident.
-fn beside(url: &SecretString, database: &str) -> Result<SecretString, Failure> {
-    if database.is_empty()
-        || !database
+/// Whether a string could name a PostgreSQL database this binary would connect
+/// to. Extracted from [`beside`] so a verb that only ever RECORDS the name can
+/// hold it to the same bar as one that connects to it — a name that could not be
+/// a database has no business being written into a permanent receipt either.
+fn is_database_name(database: &str) -> bool {
+    !database.is_empty()
+        && database
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_')
-    {
+}
+
+fn beside(url: &SecretString, database: &str) -> Result<SecretString, Failure> {
+    if !is_database_name(database) {
         return Err(Failure::usage(format!(
             "{database:?} is not a database name"
         )));
@@ -785,6 +868,32 @@ fn beside(url: &SecretString, database: &str) -> Result<SecretString, Failure> {
 /// A configuration or storage error, which is what almost everything here is.
 fn configuration(error: gwk_kernel::KernelError) -> Failure {
     Failure::new(KernelErrorCode::Storage, error.to_string())
+}
+
+/// A [`gwk_kernel::KernelError`] reported as the kind of failure it actually is.
+///
+/// [`configuration`] flattens every variant to [`KernelErrorCode::Storage`],
+/// which [`crate::exit`] renders as exit 5 — *"the kernel is not usable right
+/// now. Retrying later is the fix."* For the migrate ladder that is not merely
+/// imprecise, it is the opposite instruction: a rung refuses with
+/// [`gwk_kernel::KernelError::Schema`], meaning something does not verify, and
+/// the honest code for that is exit 6 — *"retrying is NOT the fix."* A wrapper
+/// that believed the 5 would re-run a migration whose guards had just been
+/// found broken, and the second run would refuse with "there is nothing to
+/// migrate" — also a 5, so it would try again.
+///
+/// The variant already carries the answer; this stops throwing it away.
+fn kernel_failure(error: gwk_kernel::KernelError) -> Failure {
+    let code = match error {
+        gwk_kernel::KernelError::Schema(_) => KernelErrorCode::Schema,
+        gwk_kernel::KernelError::Privilege(_) => KernelErrorCode::Privilege,
+        gwk_kernel::KernelError::Writer(_) => KernelErrorCode::Fenced,
+        // Nothing was attempted, and no amount of waiting fixes a missing or
+        // malformed variable.
+        gwk_kernel::KernelError::Config(_) => KernelErrorCode::Validation,
+        gwk_kernel::KernelError::Database(_) => KernelErrorCode::Storage,
+    };
+    Failure::new(code, error.to_string())
 }
 
 fn refusal(refusal: Refusal) -> Failure {
@@ -837,10 +946,10 @@ mod tests {
     /// migration did to a database nobody can re-run the migration against.
     const RECEIPT_KEYS: [&str; 15] = [
         "type",
-        "scratch_database",
+        "scratch_database_requested",
+        "rehearsal",
         "recorded_sha256",
         "base_sha256",
-        "asserted_base",
         "contract_sha256",
         "steps",
         "backend_migrations",
@@ -855,22 +964,34 @@ mod tests {
 
     #[test]
     fn the_migrate_receipt_carries_exactly_the_keys_it_promises() {
+        // EVERY value distinct, and that is the whole design of this fixture.
+        // An earlier version passed the same digest as `recorded` and `base`,
+        // `41` as both event counts, and one `Seq` as both watermarks — so
+        // `migrated_receipt` could have emitted any one of those values twice
+        // under two names and all three assertions would still have passed.
+        // The expectation and the observation moved together, which is the one
+        // shape a mutation cannot catch. Distinct inputs are what make the
+        // field-to-key mapping testable at all.
+        //
+        // `recorded` and `base` cannot actually differ in a real run — `--from`
+        // asserts the base rather than overriding it — but this is a test of the
+        // mapping, and a mapping that collapsed two parameters into one key
+        // would be invisible to a fixture that fed them the same string.
         let applied = gwk_kernel::migrate::Applied {
             base: "a".repeat(64),
-            result: "b".repeat(64),
+            result: "d".repeat(64),
             steps: vec!["aaaaaaaa-bbbbbbbb.sql".to_owned()],
             backend_migrations: vec!["0005_pty_delivery".to_owned()],
             events_before: 41,
-            events_after: 41,
+            events_after: 42,
             watermark_before: Some(gwk_domain::ids::Seq::new(41)),
-            watermark_after: Some(gwk_domain::ids::Seq::new(41)),
+            watermark_after: Some(gwk_domain::ids::Seq::new(42)),
             elapsed_ms: 12,
         };
         let receipt = migrated_receipt(
-            "probe",
+            "probe-scratch",
             &"a".repeat(64),
-            &"a".repeat(64),
-            false,
+            &"b".repeat(64),
             &applied,
             Some(&"c".repeat(64)),
             "0000000000000000000000000000000000000000",
@@ -898,19 +1019,30 @@ mod tests {
             );
         }
 
-        // And the two digests that differ only under `--from` are both really
-        // there, rather than one value emitted twice under two names.
+        // Each field against its OWN input, never against its twin. Every one
+        // of these fails if `migrated_receipt` emits the wrong side of a pair.
         assert_eq!(object["type"], "admin_migrated");
-        assert_eq!(object["asserted_base"], false);
-        assert_eq!(object["events_before"], object["events_after"]);
-        assert_eq!(object["contract_sha256"], "b".repeat(64));
+        assert_eq!(object["recorded_sha256"], "a".repeat(64));
+        assert_eq!(object["base_sha256"], "b".repeat(64));
+        assert_eq!(object["contract_sha256"], "d".repeat(64));
+        assert_eq!(object["backup_sha256"], "c".repeat(64));
+        assert_eq!(object["events_before"], 41);
+        assert_eq!(object["events_after"], 42);
+        assert_eq!(object["elapsed_ms"], 12);
+        assert_eq!(object["steps"][0], "aaaaaaaa-bbbbbbbb.sql");
+        assert_eq!(object["backend_migrations"][0], "0005_pty_delivery");
+
+        // The two disclaimers, asserted like any other evidence. `rehearsal`
+        // stops being true the day C3 lands, and this is what will say so.
+        assert_eq!(object["scratch_database_requested"], "probe-scratch");
+        assert_eq!(object["rehearsal"], "not implemented");
 
         // The watermark pair rides as a decimal STRING, the way `Seq` is
         // written everywhere else on this wire. A `Seq` that started emitting
         // as a JSON number would keep the key, keep the count, and change what
         // every reader of this receipt parses.
-        assert_eq!(object["watermark_before"], object["watermark_after"]);
-        assert_eq!(object["watermark_after"], "41");
+        assert_eq!(object["watermark_before"], "41");
+        assert_eq!(object["watermark_after"], "42");
     }
 
     /// RED 2: a backup path that does not exist refuses BEFORE anything is

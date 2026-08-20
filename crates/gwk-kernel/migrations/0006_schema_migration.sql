@@ -69,11 +69,14 @@ CREATE TABLE gwk_internal.schema_migration (
   -- this is NOT NULL over an empty array rather than nullable.
   backend_migrations text[] NOT NULL
                       CHECK (gwk_internal.migration_names_are_valid(backend_migrations)),
-  -- Whether the operator asserted the base digest by hand rather than the
-  -- applier reading it out of `schema_fingerprint`. An asserted base is a
-  -- claim about the database; a read one is an observation of it, and a later
-  -- reader must be able to tell which this row rests on.
-  asserted_base   boolean NOT NULL,
+  -- There is deliberately no `asserted_base` column. An earlier draft carried
+  -- one to record that the operator had asserted the base by hand rather than
+  -- the applier reading it out of `schema_fingerprint` — but the verb checks
+  -- the fingerprint on every path, including `--from`, so the column could only
+  -- ever be written `true` for runs where the precondition HAD been checked.
+  -- A permanent, append-only record is the last place to keep a field that
+  -- states the opposite of what happened.
+  --
   -- A step that arrives where it started is not a step; the resolver refuses
   -- one and the ledger must not be able to record what it refuses.
   CONSTRAINT schema_migration_step_moves CHECK (base_sha256 <> result_sha256)

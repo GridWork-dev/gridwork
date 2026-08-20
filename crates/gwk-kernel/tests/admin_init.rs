@@ -573,8 +573,8 @@ async fn the_ledger_refuses_mutation_from_a_superuser() {
 
     sqlx::query(
         "INSERT INTO gwk_internal.schema_migration \
-           (base_sha256, result_sha256, step_id, backend_migrations, asserted_base) \
-         VALUES ($1, $2, 'aaaaaaaa-bbbbbbbb.sql', $3, false)",
+           (base_sha256, result_sha256, step_id, backend_migrations) \
+         VALUES ($1, $2, 'aaaaaaaa-bbbbbbbb.sql', $3)",
     )
     .bind("a".repeat(64))
     .bind("b".repeat(64))

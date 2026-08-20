@@ -329,16 +329,11 @@ pub struct Applied {
 /// half-applied contract matches no digest at all and there is nothing to
 /// compare it against.
 ///
-/// `asserted_base` records whether the operator supplied the base rather than
-/// the applier reading it out of `schema_fingerprint`. It is the one thing that
-/// will ever say the precondition went unchecked, so it is written even though
-/// nothing here reads it back.
 pub async fn apply(
     pool: &sqlx::PgPool,
     chain: &[&Step],
     role: &str,
     recorded_base: &str,
-    asserted_base: bool,
     public_revision: &str,
     backup_sha256: Option<&str>,
 ) -> crate::Result<Applied> {
@@ -352,6 +347,21 @@ pub async fn apply(
 
     let started = std::time::Instant::now();
     let mut tx = pool.begin().await?;
+
+    // Every `ALTER TABLE` below needs ACCESS EXCLUSIVE, and the writer lock this
+    // verb holds is a `pg_try_advisory_lock` that excludes another kernel writer
+    // and nothing else. A psql session, a dashboard read, a `pg_dump` — none of
+    // them take it, and any one of them holding ACCESS SHARE makes the first
+    // ALTER wait forever. PostgreSQL's lock queue is FIFO, so while it waits it
+    // also queues every later reader behind it: an operator watching a hung
+    // migrate would be watching it wedge the table it is migrating. A refusal is
+    // recoverable and legible; an unbounded wait is neither. `SET LOCAL` scopes
+    // this to the transaction, so nothing outside it inherits the deadline.
+    sqlx::raw_sql(sqlx::AssertSqlSafe(
+        "SET LOCAL lock_timeout = '5s';".to_owned(),
+    ))
+    .execute(&mut *tx)
+    .await?;
 
     let events_before: i64 = sqlx::query_scalar("SELECT count(*) FROM gwk.event")
         .fetch_one(&mut *tx)
@@ -418,8 +428,8 @@ pub async fn apply(
     sqlx::query(
         "INSERT INTO gwk_internal.schema_migration \
            (base_sha256, result_sha256, step_id, public_revision, backup_sha256, \
-            backend_migrations, asserted_base) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            backend_migrations) \
+         VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(recorded_base)
     .bind(result)
@@ -427,7 +437,6 @@ pub async fn apply(
     .bind(public_revision)
     .bind(backup_sha256)
     .bind(&applied_migrations)
-    .bind(asserted_base)
     .execute(&mut *tx)
     .await?;
 
@@ -435,6 +444,20 @@ pub async fn apply(
         .fetch_one(&mut *tx)
         .await?;
     let watermark_after = watermark(&mut tx).await?;
+
+    // R3 and R4, INSIDE the transaction, which is the only place they can
+    // refuse rather than merely report. Both are questions about the schema the
+    // step just produced, and the catalogue changes are visible here — so asking
+    // them after the commit, as an earlier draft did, bought nothing and cost
+    // the ability to roll back. A step that widens the grant matrix or leaves an
+    // append-only guard broken now aborts this transaction; before, it committed
+    // and was told about afterwards, with no exit but the operator's own dump.
+    //
+    // R5 stays after the commit deliberately. It re-reads the log to catch a
+    // writer that was never fenced, and a measurement taken inside the
+    // transaction that would have to detect it cannot see anything outside.
+    assert_grant_matrix(&mut *tx, role).await?;
+    assert_protections_within(&mut tx).await?;
 
     tx.commit().await?;
 
@@ -489,6 +512,30 @@ pub async fn assert_base(pool: &sqlx::PgPool, expected: &str) -> crate::Result<(
     Ok(())
 }
 
+/// Whether an error is THIS relation's own append-only guard refusing.
+///
+/// Two conditions, and the arms below are wrong without either. SQLSTATE
+/// `P0001` is `raise_exception`, which only a PL/pgSQL `RAISE` produces: every
+/// guard in both schemas is one, and no foreign key, privilege check or lock
+/// timeout can forge it. And the message has to name this relation, because
+/// under CASCADE another relation's guard answers with a `P0001` of its own —
+/// probing a table whose guard has been dropped is met by a referencing table's
+/// guard, which is a true refusal about the wrong subject.
+///
+/// The trailing space is not incidental. Guard messages carry the relation
+/// either bare (`task rows cannot be deleted`) or schema-qualified
+/// (`gwk.event is append-only (TRUNCATE refused)`), so testing for the bare name
+/// matches both shapes — but `pty_session` is a prefix of
+/// `pty_session_template`, and without a boundary the template's refusal would
+/// be credited to the session's guard.
+fn is_guard_refusal(error: &sqlx::Error, relation: &str) -> bool {
+    let sqlx::Error::Database(ref database) = *error else {
+        return false;
+    };
+    database.code().as_deref() == Some("P0001")
+        && database.message().contains(&format!("{relation} "))
+}
+
 /// R4 — the protections refuse a superuser, not merely an ungranted role.
 ///
 /// As superuser deliberately: a grant binds the runtime role and nothing else,
@@ -501,30 +548,80 @@ pub async fn assert_base(pool: &sqlx::PgPool, expected: &str) -> crate::Result<(
 /// succeeds is rolled back rather than left behind.
 pub async fn assert_protections(pool: &sqlx::PgPool) -> crate::Result<()> {
     let mut tx = pool.begin().await?;
+    let outcome = assert_protections_within(&mut tx).await;
+    // Explicitly, not by drop: the probes below TRUNCATE and DELETE real
+    // relations, and "the transaction was never committed" is a thing worth
+    // seeing in the code rather than inferring from a destructor.
+    tx.rollback().await?;
+    outcome
+}
 
+/// [`assert_protections`], inside a transaction the caller already holds.
+///
+/// The applier runs the rung here rather than after its commit, which is the
+/// difference between refusing a migration that breaks an append-only guard and
+/// committing one and then reporting it. Everything the probes do is undone
+/// through a savepoint before this returns, so the caller's transaction is left
+/// exactly as it was found — a migration is not rolled back by proving itself.
+pub(crate) async fn assert_protections_within(
+    tx: &mut sqlx::PgTransaction<'_>,
+) -> crate::Result<()> {
+    sqlx::raw_sql(sqlx::AssertSqlSafe("SAVEPOINT protections;".to_owned()))
+        .execute(&mut **tx)
+        .await?;
+
+    let outcome = assert_protections_probes(tx).await;
+
+    // Only on the way out clean. A refusal aborts the caller's whole
+    // transaction anyway, and reaching for the savepoint on an already-poisoned
+    // connection would replace the real refusal with a driver error.
+    if outcome.is_ok() {
+        sqlx::raw_sql(sqlx::AssertSqlSafe(
+            "ROLLBACK TO SAVEPOINT protections;".to_owned(),
+        ))
+        .execute(&mut **tx)
+        .await?;
+    }
+    outcome
+}
+
+async fn assert_protections_probes(tx: &mut sqlx::PgTransaction<'_>) -> crate::Result<()> {
     // Every relation carrying a statement-level TRUNCATE guard, asked for by
     // name rather than assumed: TRUNCATE needs no rows to be refused, so this
     // arm covers every table it names without seeding one.
+    //
+    // `tgenabled = 'A'` is load-bearing and was missing. `pg_trigger` keeps the
+    // row when a trigger is disabled — `ALTER TABLE .. DISABLE TRIGGER` sets
+    // `tgenabled` to 'D' and changes nothing else — so a count over an
+    // unfiltered sweep cannot see a disabled guard at all. Worse, a guard
+    // created without `ENABLE ALWAYS` sits at the default 'O', and an ORIGIN
+    // trigger does not fire when the session is a replica, which is precisely
+    // the session a restore runs in. Both states are a guard that is present
+    // in the catalogue and absent in the moment it is needed. Filtering to 'A'
+    // is what makes the count below refuse a DROP, a DISABLE, and an
+    // ALWAYS-to-ORIGIN downgrade with one predicate and no second query.
     let guarded: Vec<(String, String)> = sqlx::query(
         "SELECT n.nspname AS schema, c.relname AS relation \
            FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid \
            JOIN pg_namespace n ON n.oid = c.relnamespace \
           WHERE NOT t.tgisinternal AND t.tgtype & 32 > 0 \
+            AND t.tgenabled = 'A' \
             AND n.nspname IN ('gwk', 'gwk_internal') \
           GROUP BY 1, 2 ORDER BY 1, 2",
     )
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await?
     .into_iter()
     .map(|row| (row.get("schema"), row.get("relation")))
     .collect();
 
-    // Counted before it is walked, and the count is the ONLY arm that can see
-    // a guard that was dropped rather than disabled: the probe below iterates
-    // this same set, so a relation missing from it is a relation nothing asks
-    // about. A query that returned nothing would make every refusal below
-    // vacuous in the same way, and the battery would report a protected
-    // database it never touched.
+    // Counted before it is walked, and with the `tgenabled` filter above this
+    // is now the arm that catches every way a guard stops guarding: dropped,
+    // disabled, or downgraded out of ALWAYS. The probe below iterates this same
+    // set, so a relation missing from it is a relation nothing asks about, and
+    // a query that returned nothing would make every refusal below vacuous in
+    // the same way — the battery would report a protected database it never
+    // touched.
     if guarded.len() != EXPECTED_TRUNCATE_GUARDS {
         return Err(crate::KernelError::Schema(format!(
             "expected exactly {EXPECTED_TRUNCATE_GUARDS} relations with a TRUNCATE guard and \
@@ -535,24 +632,48 @@ pub async fn assert_protections(pool: &sqlx::PgPool) -> crate::Result<()> {
 
     for (schema, relation) in &guarded {
         sqlx::raw_sql(sqlx::AssertSqlSafe("SAVEPOINT probe;".to_owned()))
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         // The identifiers come from `pg_class`, not from input.
+        //
+        // CASCADE, and it is not a convenience. PostgreSQL checks a table's
+        // inbound foreign keys BEFORE it fires any BEFORE TRUNCATE trigger, so
+        // a bare TRUNCATE of a referenced table is refused with 0A000 and the
+        // guard never runs. Three of the relations here are referenced —
+        // `gwk.attempt`, `gwk.task`, `gwk.context_manifest` — which means a
+        // bare probe never once exercised their guards, and could not tell a
+        // present guard from a dropped one, in every run. CASCADE pulls the
+        // referencing tables into the same statement, the FK objection goes
+        // away, and the guard is reached. Nothing is truncated either way: the
+        // savepoint below is rolled back.
         let outcome = sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
-            "TRUNCATE {schema}.{relation};"
+            "TRUNCATE {schema}.{relation} CASCADE;"
         )))
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await;
         sqlx::raw_sql(sqlx::AssertSqlSafe(
             "ROLLBACK TO SAVEPOINT probe;".to_owned(),
         ))
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-        if outcome.is_ok() {
-            return Err(crate::KernelError::Schema(format!(
-                "TRUNCATE {schema}.{relation} succeeded: its statement-level guard is gone, and \
-                 a row-level DELETE guard never fires on TRUNCATE"
-            )));
+        match outcome {
+            Ok(_) => {
+                return Err(crate::KernelError::Schema(format!(
+                    "TRUNCATE {schema}.{relation} succeeded: its statement-level guard is gone, \
+                     and a row-level DELETE guard never fires on TRUNCATE"
+                )));
+            }
+            // The guard, and this relation's guard specifically.
+            Err(error) if is_guard_refusal(&error, relation) => {}
+            Err(error) => {
+                return Err(crate::KernelError::Schema(format!(
+                    "TRUNCATE {schema}.{relation} was refused, but not by its own guard \
+                     ({error}). A foreign key, a missing privilege and a lock timeout each \
+                     refuse this probe exactly as flatly as the guard does, and under CASCADE so \
+                     does another relation's guard — accepting any of them as proof is how a \
+                     relation whose guard is gone reads as protected"
+                )));
+            }
         }
     }
 
@@ -572,29 +693,45 @@ pub async fn assert_protections(pool: &sqlx::PgPool) -> crate::Result<()> {
         let count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
             "SELECT count(*) FROM {schema}.{relation}"
         )))
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
         if count == 0 {
             continue;
         }
         sqlx::raw_sql(sqlx::AssertSqlSafe("SAVEPOINT probe;".to_owned()))
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         let outcome = sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
             "DELETE FROM {schema}.{relation};"
         )))
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await;
         sqlx::raw_sql(sqlx::AssertSqlSafe(
             "ROLLBACK TO SAVEPOINT probe;".to_owned(),
         ))
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-        if outcome.is_ok() {
-            return Err(crate::KernelError::Schema(format!(
-                "DELETE FROM {schema}.{relation} removed {count} row(s): its row-level guard is \
-                 gone"
-            )));
+        match outcome {
+            Ok(_) => {
+                return Err(crate::KernelError::Schema(format!(
+                    "DELETE FROM {schema}.{relation} removed {count} row(s): its row-level guard \
+                     is gone"
+                )));
+            }
+            Err(error) if is_guard_refusal(&error, relation) => {}
+            Err(error) => {
+                // The row-level guard is a BEFORE trigger and a foreign key's
+                // is an AFTER one, so a present guard always answers first and
+                // this arm is not confounded the way the TRUNCATE arm was. It
+                // becomes confounded the moment the guard is gone: the FK then
+                // refuses in its place, and a bare `is_err()` would read that
+                // as the guard holding.
+                return Err(crate::KernelError::Schema(format!(
+                    "DELETE FROM {schema}.{relation} was refused, but not by its own guard \
+                     ({error}): a foreign key refuses a delete just as flatly, and it is what \
+                     answers once the guard is gone"
+                )));
+            }
         }
         deleted_from += 1;
     }
@@ -606,9 +743,8 @@ pub async fn assert_protections(pool: &sqlx::PgPool) -> crate::Result<()> {
         ));
     }
 
-    assert_no_half_closed_update(&mut tx).await?;
+    assert_no_half_closed_update(tx).await?;
 
-    tx.rollback().await?;
     Ok(())
 }
 
@@ -924,7 +1060,14 @@ const EXPECTED_RELATIONS: usize = 35;
 /// Takes the role by name rather than assuming the caller has assumed it:
 /// `has_table_privilege(role, ..)` answers for a role the connection is not,
 /// which is what lets the migrate verb run this over its own admin connection.
-pub async fn assert_grant_matrix(pool: &sqlx::PgPool, role: &str) -> crate::Result<()> {
+/// Generic over the executor so the applier can ask it INSIDE its own
+/// transaction, where the relation set is the one the step just produced, while
+/// a caller holding only a pool still asks it standalone. `&PgPool` and
+/// `&mut *tx` both satisfy the bound.
+pub async fn assert_grant_matrix<'e, E>(executor: E, role: &str) -> crate::Result<()>
+where
+    E: sqlx::PgExecutor<'e>,
+{
     let rows = sqlx::query(
         "SELECT n.nspname AS schema, c.relname AS relation, \
                 has_table_privilege($1, c.oid, 'SELECT')   AS sel, \
@@ -938,7 +1081,7 @@ pub async fn assert_grant_matrix(pool: &sqlx::PgPool, role: &str) -> crate::Resu
           ORDER BY 1, 2",
     )
     .bind(role)
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await?;
 
     if rows.len() != EXPECTED_RELATIONS {

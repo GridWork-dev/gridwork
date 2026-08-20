@@ -1775,8 +1775,15 @@ async fn a_migrated_database_verifies_clean() {
     assert_eq!(printed[0]["type"], "admin_migrate_unbacked");
     let receipt = &printed[1];
     assert_eq!(receipt["type"], "admin_migrated");
-    assert_eq!(receipt["scratch_database"], scratch);
+    assert_eq!(receipt["scratch_database_requested"], scratch);
     assert_eq!(receipt["base_sha256"], BASE_CONTRACT_SHA256);
+    // The two disclaimers ride on a real run, not only in the unit fixture:
+    // nothing rehearsed, and R5 was asked and answered.
+    assert_eq!(receipt["rehearsal"], "not implemented");
+    assert_eq!(
+        receipt["verified"], true,
+        "the migration committed and its post-commit rung did not pass"
+    );
 
     // The verb an operator reaches for next, over the database the one above
     // just produced.

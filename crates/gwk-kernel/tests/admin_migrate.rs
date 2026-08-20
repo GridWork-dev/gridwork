@@ -276,7 +276,6 @@ async fn migrate(pool: &PgPool, role: &str) -> Applied {
         &chain,
         role,
         BASE_CONTRACT_SHA256,
-        false,
         "0000000000000000000000000000000000000000",
         None,
     )
@@ -653,10 +652,10 @@ async fn a_regraded_gate_takes_its_latest_decision() {
 }
 
 /// The ledger row this migration wrote, as (base, result, step_id,
-/// backend_migrations, asserted_base, backup_sha256).
-async fn ledger_row(pool: &PgPool) -> (String, String, String, Vec<String>, bool, Option<String>) {
+/// backend_migrations, backup_sha256).
+async fn ledger_row(pool: &PgPool) -> (String, String, String, Vec<String>, Option<String>) {
     let rows: Vec<_> = sqlx::query(
-        "SELECT base_sha256, result_sha256, step_id, backend_migrations, asserted_base, \
+        "SELECT base_sha256, result_sha256, step_id, backend_migrations, \
                 backup_sha256 \
            FROM gwk_internal.schema_migration ORDER BY seq",
     )
@@ -674,7 +673,6 @@ async fn ledger_row(pool: &PgPool) -> (String, String, String, Vec<String>, bool
         row.try_get("step_id").expect("step_id"),
         row.try_get("backend_migrations")
             .expect("backend_migrations"),
-        row.try_get("asserted_base").expect("asserted_base"),
         row.try_get("backup_sha256").expect("backup_sha256"),
     )
 }
@@ -714,7 +712,7 @@ async fn a_carried_backend_migration_lands_is_recorded_and_is_reachable() {
         ["0005_pty_delivery", "0006_schema_migration"]
     );
 
-    let (base, result, step_id, carried, asserted, backup) = ledger_row(&pool).await;
+    let (base, result, step_id, carried, backup) = ledger_row(&pool).await;
     assert_eq!(base, BASE_CONTRACT_SHA256);
     assert_eq!(result, CONTRACT_SQL_SHA256);
     assert_eq!(step_id, "aba2f647-7ebb2ada.sql");
@@ -723,7 +721,6 @@ async fn a_carried_backend_migration_lands_is_recorded_and_is_reachable() {
         ["0005_pty_delivery", "0006_schema_migration"],
         "the row does not name what the run carried"
     );
-    assert!(!asserted, "a plain run did not assert its base");
     assert_eq!(backup, None);
 
     // Reachable, and counted. "One query succeeded" is what a grant on one
@@ -763,34 +760,57 @@ async fn a_carried_backend_migration_lands_is_recorded_and_is_reachable() {
 
 #[tokio::test]
 #[ignore = "needs a PostgreSQL; see the module docs"]
-async fn an_asserted_base_is_recorded_as_asserted() {
-    // `--from` is the one path where the applier does not check the
-    // precondition it acts on. The row is the only thing that will ever say so,
-    // and it carries the digest the database ACTUALLY recorded beside the flag
-    // — otherwise a later reader cannot tell which claim was overridden.
+async fn a_stated_base_is_checked_like_any_other_and_never_overrides() {
+    // What `--from` really does, pinned, because three documents said it did
+    // something else. It states the base the operator BELIEVES the database is
+    // at; `assert_base` then compares that against the recorded fingerprint and
+    // refuses on a mismatch. There is no path on which a stated base is applied
+    // unchecked, so the ledger no longer carries a column claiming there is.
+    //
+    // The two arms below are the whole claim: a stated base that is wrong is
+    // refused, and a stated base that is right is indistinguishable from having
+    // stated nothing. A test asserting only the second would pass against a
+    // build where `--from` bypassed the check entirely.
     let maintenance = maintenance_pool().await;
-    let role = role_for("asserted");
+    let role = role_for("stated");
     create_role(&maintenance, &role).await;
-    let database = fresh_database(&maintenance, "asserted").await;
+    let database = fresh_database(&maintenance, "stated").await;
     let pool = PgPool::connect(&url_for(&database)).await.expect("connect");
 
     build_base(&pool, &role).await;
+
+    // A base the database is not at. Well formed, and a digest no step bases
+    // on would be refused by the resolver instead — this one has to reach
+    // `assert_base` to prove `assert_base` is what refuses it.
+    let refusal = gwk_kernel::migrate::assert_base(&pool, &"f".repeat(64))
+        .await
+        .expect_err("a stated base that is not the recorded one must be refused");
+    let message = refusal.to_string();
+    assert!(
+        message.contains(BASE_CONTRACT_SHA256) && message.contains(&"f".repeat(64)),
+        "the refusal names neither what the database records nor what was stated: {message}"
+    );
+
+    // And the true one passes, so the arm above is refusing the mismatch rather
+    // than refusing everything.
+    gwk_kernel::migrate::assert_base(&pool, BASE_CONTRACT_SHA256)
+        .await
+        .expect("the recorded base is the one the database is at");
+
     let chain = resolved_chain();
     let applied = gwk_kernel::migrate::apply(
         &pool,
         &chain,
         &role,
         BASE_CONTRACT_SHA256,
-        true,
         "0000000000000000000000000000000000000000",
         Some(&"c".repeat(64)),
     )
     .await
-    .expect("apply with an asserted base");
+    .expect("apply");
     assert_eq!(applied.result, CONTRACT_SQL_SHA256);
 
-    let (_, _, _, _, asserted, backup) = ledger_row(&pool).await;
-    assert!(asserted, "the override left no trace in the ledger");
+    let (_, _, _, _, backup) = ledger_row(&pool).await;
     assert_eq!(
         backup,
         Some("c".repeat(64)),
@@ -901,9 +921,21 @@ async fn r4_goes_red_when_a_protection_is_disabled() {
         .await
         .expect_err("a disabled guard must red the battery");
     let message = refusal.to_string();
+    // The COUNT arm, and naming which arm is the point of the assertion.
+    // `DISABLE TRIGGER` leaves the `pg_trigger` row in place with `tgenabled`
+    // set to 'D', so a sweep that filtered on nothing but `tgisinternal` and
+    // `tgtype` counted it and moved on — the probe was the only thing that
+    // could see a disabled guard, and for the three relations another table's
+    // foreign key answers for, not even the probe could. Filtering the sweep to
+    // `tgenabled = 'A'` drops a disabled guard out of the set, so the count
+    // falls to 17 and refuses before any relation is probed.
     assert!(
-        message.contains("TRUNCATE gwk.event succeeded"),
-        "{message}"
+        message.contains("expected exactly 18 relations with a TRUNCATE guard and found 17"),
+        "a disabled guard must be caught by the count arm, not left to the probe: {message}"
+    );
+    assert!(
+        !message.contains("gwk\", \"event"),
+        "the relation whose guard was disabled is still in the counted set: {message}"
     );
 
     sqlx::raw_sql("ALTER TABLE gwk.event ENABLE ALWAYS TRIGGER event_no_truncate;")
@@ -943,12 +975,93 @@ async fn truncate_guarded_relations(pool: &PgPool) -> i64 {
            SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid \
              JOIN pg_namespace n ON n.oid = c.relnamespace \
             WHERE NOT t.tgisinternal AND t.tgtype & 32 > 0 \
+              AND t.tgenabled = 'A' \
               AND n.nspname IN ('gwk', 'gwk_internal') \
             GROUP BY n.nspname, c.relname) s",
     )
     .fetch_one(pool)
     .await
     .expect("count truncate-guarded relations")
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see the module docs"]
+async fn r4_goes_red_when_a_guard_is_present_enabled_and_no_longer_refuses() {
+    // The hole the count arm cannot reach, on the relation that hid it.
+    //
+    // PostgreSQL checks a table's inbound foreign keys BEFORE it fires any
+    // BEFORE TRUNCATE trigger. `gwk.attempt` is referenced by five other tables,
+    // so a bare `TRUNCATE gwk.attempt` is refused with 0A000 whether its guard
+    // is there or not — measured, not reasoned: with the guard present the error
+    // is the foreign key's, and the guard never runs. The probe arm therefore
+    // never exercised this relation's guard in any run, and a battery reading
+    // `is_err()` as proof reported it protected on the strength of somebody
+    // else's constraint.
+    //
+    // The count arm does not cover this case. A trigger that is present,
+    // enabled, and ALWAYS is counted — the mutation here leaves the catalogue
+    // untouched and guts the FUNCTION, which is the one way a guard stops
+    // guarding without the count moving.
+    let maintenance = maintenance_pool().await;
+    let role = role_for("gutted");
+    create_role(&maintenance, &role).await;
+    let database = fresh_database(&maintenance, "gutted").await;
+    let pool = PgPool::connect(&url_for(&database)).await.expect("connect");
+
+    build_base(&pool, &role).await;
+    migrate(&pool, &role).await;
+
+    gwk_kernel::migrate::assert_protections(&pool)
+        .await
+        .expect("the protections hold after a migration");
+    let before = truncate_guarded_relations(&pool).await;
+    assert_eq!(before, 18, "the mutation below must not move this count");
+
+    // Present, enabled, ALWAYS — and it no longer refuses anything. A BEFORE
+    // STATEMENT trigger cannot cancel by returning NULL, so the TRUNCATE
+    // proceeds.
+    sqlx::raw_sql(
+        "CREATE OR REPLACE FUNCTION gwk.forbid_state_row_delete() RETURNS trigger \
+           LANGUAGE plpgsql AS $gutted$ BEGIN RETURN NULL; END $gutted$;",
+    )
+    .execute(&pool)
+    .await
+    .expect("gut the guard function");
+
+    assert_eq!(
+        truncate_guarded_relations(&pool).await,
+        before,
+        "the mutation moved the count, so this test would pass for the wrong reason"
+    );
+
+    let refusal = gwk_kernel::migrate::assert_protections(&pool)
+        .await
+        .expect_err("a guard that no longer refuses must red the battery");
+    let message = refusal.to_string();
+    // What discrimination looks like here, and it is worth being precise about
+    // because the mechanism is not the obvious one. The probe does not come back
+    // "succeeded": CASCADE pulls `gwk.cost_entry` into the same statement and
+    // ITS guard — a different function, untouched by this mutation — refuses.
+    // The battery still reds, because a refusal naming another relation is not
+    // evidence about this one. Present guard: `gwk.attempt`'s own trigger fires
+    // first, because the target leads the truncate list, and the battery passes.
+    // Gutted guard: the neighbour answers instead and the battery says so. Those
+    // two outcomes differ, which is the whole requirement; a bare `is_err()`
+    // collapses them into one and reports protection either way.
+    assert!(
+        message.contains("TRUNCATE gwk.attempt was refused, but not by its own guard"),
+        "the battery must name gwk.attempt as the subject and report that something other than \
+         its guard answered: {message}"
+    );
+    assert!(
+        message.contains("gwk.cost_entry is append-only"),
+        "the refusal must carry what actually answered, or the operator cannot tell a confounded \
+         probe from a broken one: {message}"
+    );
+
+    drop(pool);
+    drop_database(&maintenance, &database).await;
+    drop_role(&maintenance, &role).await;
 }
 
 #[tokio::test]
@@ -1235,7 +1348,6 @@ async fn a_failing_step_moves_neither_the_fingerprint_nor_the_ledger() {
         &[&poisoned],
         &role,
         BASE_CONTRACT_SHA256,
-        false,
         "0000000000000000000000000000000000000000",
         None,
     )
@@ -1317,7 +1429,6 @@ async fn r5_catches_a_step_that_holds_the_event_count_and_moves_the_watermark() 
         &[&poisoned],
         &role,
         BASE_CONTRACT_SHA256,
-        false,
         "0000000000000000000000000000000000000000",
         None,
     )
