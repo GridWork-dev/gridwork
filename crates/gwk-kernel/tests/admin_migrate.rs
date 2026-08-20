@@ -1017,6 +1017,129 @@ async fn r4_goes_red_when_a_truncate_guard_is_dropped() {
     drop_role(&maintenance, &role).await;
 }
 
+/// Re-add `pty_session_closed_iff_terminal` with `body`, or drop it entirely
+/// when `body` is `None`.
+///
+/// One helper for both mutations, because they are the same edit at two depths
+/// and the arm has to red on each: a constraint that came back WRONG and a
+/// constraint that did not come back at all.
+///
+/// `IF EXISTS` because the restore below runs after the drop-outright mutation,
+/// and it is the reason every call site asserts the resulting state with
+/// [`closed_iff_terminal_present`] rather than trusting that the statement did
+/// something — a DROP that silently matched nothing is exactly the mutation
+/// that never happened.
+async fn rewrite_closed_iff_terminal(pool: &PgPool, body: Option<&str>) {
+    sqlx::raw_sql(
+        "ALTER TABLE gwk.pty_session DROP CONSTRAINT IF EXISTS pty_session_closed_iff_terminal;",
+    )
+    .execute(pool)
+    .await
+    .expect("drop the closed-iff-terminal constraint");
+    if let Some(body) = body {
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "ALTER TABLE gwk.pty_session ADD CONSTRAINT pty_session_closed_iff_terminal \
+             CHECK ({body});"
+        )))
+        .execute(pool)
+        .await
+        .expect("re-add the closed-iff-terminal constraint");
+    }
+}
+
+/// Whether the constraint the arm probes is on the table at all, read out of
+/// `pg_constraint` rather than inferred from the mutation having been issued.
+async fn closed_iff_terminal_present(pool: &PgPool) -> bool {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT count(*) = 1 FROM pg_constraint \
+          WHERE conname = 'pty_session_closed_iff_terminal' \
+            AND conrelid = 'gwk.pty_session'::regclass",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("probe the constraint")
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see the module docs"]
+async fn r4_goes_red_when_the_closed_iff_constraint_comes_back_one_directional() {
+    // Criterion 6's half-closed UPDATE arm, and the reason it is worth having
+    // separately from the TRUNCATE and DELETE arms: the migration step DROPS
+    // `pty_session_closed_iff_terminal` and re-ADDs it, and a re-add that turns
+    // the iff into a one-way implication is accepted by PostgreSQL, validates
+    // against every existing row, and refuses exactly half of what its name
+    // says. Nothing above this can see that — TRUNCATE and DELETE do not
+    // evaluate a CHECK.
+    let maintenance = maintenance_pool().await;
+    let role = role_for("r4iff");
+    create_role(&maintenance, &role).await;
+    let database = fresh_database(&maintenance, "r4iff").await;
+    let pool = PgPool::connect(&url_for(&database)).await.expect("connect");
+
+    build_base(&pool, &role).await;
+    migrate(&pool, &role).await;
+
+    // The subject, established before it is mutated. A test that only asserted
+    // the red would pass against a battery that was red all along.
+    assert!(
+        closed_iff_terminal_present(&pool).await,
+        "the step is supposed to leave the constraint on the table"
+    );
+    gwk_kernel::migrate::assert_protections(&pool)
+        .await
+        .expect("the protections hold after a migration");
+
+    // Mutation 1: the implication. `state <> 'closed' OR closed_at IS NOT NULL`
+    // still refuses a closed row with a NULL `closed_at`, so a one-directional
+    // arm would call this a pass. The half it admits is the other one.
+    rewrite_closed_iff_terminal(&pool, Some("state <> 'closed' OR closed_at IS NOT NULL")).await;
+    assert!(
+        closed_iff_terminal_present(&pool).await,
+        "the mutation is a WRONG constraint, not a missing one"
+    );
+    let refusal = gwk_kernel::migrate::assert_protections(&pool)
+        .await
+        .expect_err("an implication is not an iff and must red the battery");
+    let message = refusal.to_string();
+    assert!(
+        message.contains("a running session still carrying a closed_at"),
+        "the refusal names the half the implication admits: {message}"
+    );
+
+    // Mutation 2: gone entirely. Both halves are accepted now, so the FIRST
+    // probe is the refusal — which is how this arm distinguishes a constraint
+    // that came back wrong from one that did not come back.
+    rewrite_closed_iff_terminal(&pool, None).await;
+    assert!(
+        !closed_iff_terminal_present(&pool).await,
+        "the DROP left the constraint behind, so the assertion below proves nothing"
+    );
+    let refusal = gwk_kernel::migrate::assert_protections(&pool)
+        .await
+        .expect_err("a dropped constraint must red the battery");
+    let message = refusal.to_string();
+    assert!(
+        message.contains("a closed session with no closed_at"),
+        "with the constraint gone the first probe is the refusal: {message}"
+    );
+
+    // And back: green again over the constraint the contract actually declares,
+    // which is what says the two reds came from the mutation rather than from
+    // anything this test did to get there.
+    rewrite_closed_iff_terminal(&pool, Some("(state = 'closed') = (closed_at IS NOT NULL)")).await;
+    assert!(
+        closed_iff_terminal_present(&pool).await,
+        "the restore did not put a constraint back"
+    );
+    gwk_kernel::migrate::assert_protections(&pool)
+        .await
+        .expect("the restored iff is green");
+
+    drop(pool);
+    drop_database(&maintenance, &database).await;
+    drop_role(&maintenance, &role).await;
+}
+
 #[tokio::test]
 #[ignore = "needs a PostgreSQL; see the module docs"]
 async fn dispatch_node_is_truncate_protected_only_by_a_neighbour() {

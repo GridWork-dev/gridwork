@@ -576,7 +576,101 @@ pub async fn assert_protections(pool: &sqlx::PgPool) -> crate::Result<()> {
         ));
     }
 
+    assert_no_half_closed_update(&mut tx).await?;
+
     tx.rollback().await?;
+    Ok(())
+}
+
+/// The half-closed UPDATE arm of [`assert_protections`].
+///
+/// `gwk.pty_session_closed_iff_terminal` is an IFF — closed exactly when
+/// `closed_at` is set — and the step in `schema/steps/` drops it and re-adds it
+/// in place. That is the one shape a battery run after the step exists to
+/// notice: a constraint re-added as the one-way implication
+/// `state <> 'closed' OR closed_at IS NOT NULL` compiles, validates against
+/// every row a live table holds, and silently stops refusing half of what its
+/// name claims.
+///
+/// A CHECK fires only against a row being written, so unlike the TRUNCATE arm
+/// this one cannot be built by probing an empty table — it SEEDS one, inside the
+/// transaction the caller rolls back. Runs after the DELETE arm so the seeded
+/// row is not in the set that arm counts.
+async fn assert_no_half_closed_update(tx: &mut sqlx::PgTransaction<'_>) -> crate::Result<()> {
+    const PROBE_ID: &str = "gwk-migrate-protections-probe";
+
+    sqlx::query("INSERT INTO gwk.pty_session (id, generation) VALUES ($1, 'protections-probe')")
+        .bind(PROBE_ID)
+        .execute(&mut **tx)
+        .await?;
+
+    // The control, and it is the whole reason the two refusals below mean
+    // anything. `pty_session_cas` is a BEFORE UPDATE ROW trigger, so it fires
+    // AHEAD of any CHECK: an UPDATE that forgot to advance `version` is refused
+    // by the CAS guard and is indistinguishable, from here, from an UPDATE the
+    // constraint refused. And an UPDATE whose WHERE matches nothing touches no
+    // row, evaluates no CHECK, and succeeds — the same "summed over nothing"
+    // the count arms above exist to refuse. A legal transition has to be
+    // watched to land, on exactly one row, before a refusal is evidence of
+    // anything.
+    //
+    // It also leaves the probe row closed, which is what makes each violation
+    // below a single-column edit away from a legal state.
+    let advanced = sqlx::query(
+        "UPDATE gwk.pty_session SET version = version + 1, state = 'closed', closed_at = now() \
+         WHERE id = $1",
+    )
+    .bind(PROBE_ID)
+    .execute(&mut **tx)
+    .await
+    .map_err(|err| {
+        crate::KernelError::Schema(format!(
+            "the LEGAL half of gwk.pty_session's closed-iff-terminal constraint was refused \
+             ({err}): whatever refused it would refuse the two violations below too, so this \
+             arm would have reported a protected database it never probed"
+        ))
+    })?;
+    if advanced.rows_affected() != 1 {
+        return Err(crate::KernelError::Schema(format!(
+            "the probe row was not there to update: {} rows affected, not 1. An UPDATE that \
+             matches nothing fires no trigger and evaluates no CHECK, and reports success",
+            advanced.rows_affected()
+        )));
+    }
+
+    // Both directions, because they are not the same test. The one-way
+    // implication above still refuses a closed row with no `closed_at` — it is
+    // the OTHER half, a `running` row carrying one, that it quietly admits. An
+    // arm that probed one direction would pass against exactly the drift this
+    // exists to catch.
+    for (violation, sql) in [
+        (
+            "a closed session with no closed_at",
+            "UPDATE gwk.pty_session SET version = version + 1, closed_at = NULL WHERE id = $1",
+        ),
+        (
+            "a running session still carrying a closed_at",
+            "UPDATE gwk.pty_session SET version = version + 1, state = 'running' WHERE id = $1",
+        ),
+    ] {
+        sqlx::raw_sql(sqlx::AssertSqlSafe("SAVEPOINT probe;".to_owned()))
+            .execute(&mut **tx)
+            .await?;
+        let outcome = sqlx::query(sql).bind(PROBE_ID).execute(&mut **tx).await;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(
+            "ROLLBACK TO SAVEPOINT probe;".to_owned(),
+        ))
+        .execute(&mut **tx)
+        .await?;
+        if outcome.is_ok() {
+            return Err(crate::KernelError::Schema(format!(
+                "gwk.pty_session accepted {violation}: pty_session_closed_iff_terminal is not \
+                 the iff it is named for, and the step that drops and re-adds it is where that \
+                 happens"
+            )));
+        }
+    }
+
     Ok(())
 }
 
