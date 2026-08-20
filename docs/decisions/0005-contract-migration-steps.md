@@ -27,14 +27,28 @@ apply against a production log. **Cost:** one more authored file per contract ch
 CI gate that refuses a moved digest with no step resulting in it. That gate is the price
 and the point: it makes forgetting the step impossible rather than unlikely.
 
-**B2 — refuse by default, `--from <sha256>` asserts a different base.** The SPEC
-recommended B1 (always refuse) and B2 was taken because a database whose fingerprint does
-not describe its actual schema is a real state with no other exit. **Cost, and what the
-override owes:** this is the one path where the verb applies a chain whose precondition it
-has not checked. So both the receipt and the ledger row carry `asserted_base: true`
-alongside the digest actually recorded at the time — that row is the only thing that will
-ever say the check was skipped. The override relaxes the assertion, not the chain: a
-`--from` naming a digest no step bases on is still refused.
+**B1 — always refuse a base the database is not at. `--from <sha256>` states a base and
+gets it checked like any other.** This entry recorded B2 for most of the phase, and B2 was
+never what the code did. B2 said the verb would apply a chain whose precondition it had not
+checked, because a database whose fingerprint does not describe its actual schema is a real
+state with no other exit. The implementation resolves the chain from `--from` and then
+hands the same value to `assert_base`, which reads the recorded fingerprint and refuses on
+a mismatch — so `--from` naming anything other than what the database records is refused,
+and `--from` naming what it records changes nothing. There was never a third outcome.
+
+Two reviewers found this independently, and it is recorded as B1 rather than repaired into
+B2 on purpose: the code is stricter than the ruling, the stricter behaviour is the one worth
+keeping, and a `data-migration` verb should not grow a documented bypass to make a document
+true. **Cost, stated plainly:** the state B2 was ruled in to serve — a fingerprint that does
+not describe its schema — **has no exit through this verb.** It needs a hand-authored step
+or a restore.
+
+The `asserted_base` column is gone from the ledger and the field from the receipt. It could
+only ever have been written `true` for runs where the precondition *had* been checked, and
+a permanent append-only record is the last place to keep a field that states the opposite
+of what happened. What `--from` is good for now is stated in its own doc comment: an
+operator who says out loud which base they believe they are on gets told when they are
+wrong, before the writer lock costs anything.
 
 **C3 — the scratch proof runs beside the live database**, on the same server and therefore
 the same major by construction, via the `beside()` helper `rebuild-projections` already
@@ -180,11 +194,104 @@ schema dump, so the scratch comparison the rest of this phase's proofs rest on c
 migration that leaves the runtime role holding `CREATEDB` — and that is the mutation this
 test reds on.
 
+### What a REVIEW and SECURITY round found afterwards
+
+Everything above was written while every gate was green. A code review, a security audit and
+a migration-safety assessment then ran against the finished branch, and between them found
+that the rehearsal could not run at all, that the protections battery had never exercised
+three of its eighteen relations, and that a failed proof exited with the code meaning
+*retry*. Those are fixed, and are recorded here because the pattern is the point: each one
+was a guard whose prose was true and whose subject was smaller than the sentence implied.
+
+**The TRUNCATE probe never reached three relations, in any run.** PostgreSQL checks a
+table's inbound foreign keys *before* it fires any `BEFORE TRUNCATE` trigger — measured, not
+reasoned. `gwk.attempt`, `gwk.task` and `gwk.context_manifest` are referenced by other
+tables, so a bare `TRUNCATE` of them returned `0A000` from the foreign key while the guard
+sat unexecuted, and the arm read that refusal as proof. Disabling one of those guards left
+the battery green on both arms. Fixed twice over: the probe now truncates `CASCADE`, which
+makes the guard actually run, and it requires the refusal to be `P0001` *naming that
+relation* — because under CASCADE a neighbour's guard answers with a `P0001` of its own,
+which is a true refusal about the wrong subject.
+
+**The guard sweep could not see a disabled or downgraded trigger.** `pg_trigger` keeps the
+row when a trigger is disabled, so a count over an unfiltered sweep never moved; and a guard
+created without `ENABLE ALWAYS` sits at the default `ORIGIN`, which does not fire in a
+replica session — the session a restore runs in. The sweep now filters `tgenabled = 'A'`, so
+one predicate refuses a drop, a disable, and an `ALWAYS`-to-`ORIGIN` downgrade.
+
+**`--dry-run` could not complete against a real database, and the rehearsal claims less than
+it did.** The dry-run arm ran R3, whose relation count belongs to the *migrated* schema (35);
+a dry run holds the database at its base, where the count is 27. Every rehearsal against a
+real database therefore refused, with a message that read like schema corruption, after the
+operator had already stopped the kernel to take the writer lock. R3 has moved inside the
+applier's transaction where the count is correct, and the dry-run envelope now says
+`"rungs_checked": ["base"]` and `"rehearsal": "not implemented"` rather than
+`"grant_matrix": "checked"`. **A dry run is a preflight, not a proof** — it resolves the
+chain and asserts the base.
+
+**R3 and R4 ran after the commit.** Both are questions about the schema the step produced,
+and the catalogue changes are visible inside the transaction, so running them afterwards
+bought nothing and cost the ability to roll back: a step that widened the grant matrix or
+broke an append-only guard committed first and was reported second. Both now run before
+`tx.commit()`. R5 stays after it, because it exists to catch a writer that was never fenced
+and a measurement taken inside the transaction cannot see outside it.
+
+**Every rung failure exited 5, which this repository's own table defines as "retrying later
+is the fix".** `KernelError::Schema` means something does not verify, whose code is 6 —
+*retrying is NOT the fix*. A wrapper obeying the exit code would have re-run a migration
+whose guards had just been found broken. The variant is now mapped rather than flattened.
+
+**A post-commit failure printed no receipt.** The three rungs returned before the emit, so
+the one case where an operator most needs the record — the schema has moved, the ledger row
+exists, and something does not verify — was the one case that produced a single error line.
+The receipt is now emitted either way, carrying `verified` and `verification_error`.
+
+**`migrate` did not check the runtime role, and `public` was a legal role name.**
+`admin::init` refuses a role holding `SUPERUSER`/`CREATEROLE`/`CREATEDB`/`BYPASSRLS`;
+`migrate` replayed the same grant matrix and checked neither. `GWK_RUNTIME_ROLE` is read from
+whatever environment the operator is in and nothing in the database records which role was
+granted, so a stale export silently widens the matrix to a second role — invisibly, because
+R3 and `verify` both re-read the same variable and find their own answer satisfied. Sharpest
+corner: `public` matched the identifier pattern, and `GRANT … TO public` grants to every role
+in the cluster. `migrate` now performs `init`'s check, and `validate_role` refuses `public`,
+`current_user`, `session_user` and `current_role` as the `RoleSpec` keywords they are.
+
+**No statement or lock timeout existed anywhere.** Every `ALTER TABLE` in the step takes
+`ACCESS EXCLUSIVE`, and the writer lock is a `pg_try_advisory_lock` that excludes another
+kernel writer and nothing else — not a psql session, not a dashboard read, not a `pg_dump`.
+Any of them holding `ACCESS SHARE` made the first `ALTER` wait indefinitely, queueing every
+later reader behind it. The applier's transaction now sets `lock_timeout = '5s'`.
+
+### Still open, and disclosed rather than fixed
+
+**The serve path never reads `schema_fingerprint`, so one deployment ordering is not loud.**
+`daemon()` checks the revision stamp, the writer lock and the runtime privileges, and never
+compares the recorded contract digest against the one it carries. Deploying new binaries
+against an old schema fails fast and legibly, but for the wrong reason — a projection query
+selects a column that does not exist. Migrating *before* advancing the pins does not fail
+fast at all: the old binary's queries still resolve, it starts, claims an epoch, and serves,
+and the first row it projects into the new shape violates a constraint at an arbitrary later
+moment. **Advance the pins first, or keep the units stopped across both acts.** Do not rely
+on the ordering being symmetric; it is not.
+
+**The DELETE arm walks the TRUNCATE arm's relation set.** Nineteen relations carry a
+row-level delete guard and eighteen carry a statement-level truncate cover; the odd one is
+`gwk.dispatch_node`, which is therefore absent from the set the DELETE arm iterates and is
+never probed at any row count. The narrowing recorded above says that arm skips relations
+whose count is zero, which is true and not the whole story — this one is skipped always.
+
+**The ledger writes one row per chain, not one per step.** `migrations/0006` describes the
+table as one row per applied step so the sequence a database took is reconstructible; `apply`
+performs a single INSERT with the step ids comma-joined into `step_id`. With a one-step chain
+the two are indistinguishable. They stop being so at two steps, and at six the joined string
+exceeds `step_id`'s `CHECK (length … BETWEEN 1 AND 128)` and aborts the transaction on its
+last statement — after all the DDL and the whole privilege matrix have run.
+
 ## What this cost to learn
 
-Three claims in this phase were weaker than the prose around them. None was caught by
-review; two fell to a mutation, and the third to goal-backward verification after every
-gate was already green.
+Five claims in this phase were weaker than the prose around them. None was caught by the
+gates; two fell to a mutation, one to goal-backward verification after every gate was
+already green, and two to a review round run after that verification had returned PASS.
 
 **The one-transaction guarantee was false when it was first claimed.** The applier wraps the
 step, the backend migrations, the privilege matrix and the ledger row in one transaction —
@@ -214,9 +321,32 @@ nothing downstream asked about it either. The battery returned `Ok(())` for a da
 superuser could TRUNCATE to zero rows.
 
 The mutation that was supposed to catch this could not. `ALTER TABLE … DISABLE TRIGGER`
-leaves the catalog row in place with `tgenabled = 'D'`, and the sweep's query filters on
-neither column, so the relation stays in the set and the refusal comes from the probe. The
+leaves the catalog row in place with `tgenabled = 'D'`, and the sweep's query filtered on
+neither column, so the relation stayed in the set and the refusal came from the probe. The
 guard had only ever been watched failing in the one direction that never exercises the count
 arm. A mutation has to remove the thing from the set the count is taken over, not merely
-stop its effect; the constant is an equality now, and its mutation drops rather than
-disables.
+stop its effect; the constant is an equality now, and the sweep filters `tgenabled = 'A'`,
+so a disable drops the relation out of the count as surely as a drop does.
+
+**A probe can be structurally unable to reach the thing it probes, and reasoning will not
+tell you.** The TRUNCATE arm looked sound for eighteen relations and was inert for three,
+because PostgreSQL evaluates a table's inbound foreign keys before firing its `BEFORE
+TRUNCATE` triggers. Nothing in the code, the schema or the comments said so, and the arm's
+own failure mode — a refusal — was indistinguishable from success at doing its job. What
+settled it was four statements against a throwaway container: guard present with an inbound
+FK gave `0A000`, guard present without one gave `P0001`, and guard *disabled* with an
+inbound FK gave a byte-identical `0A000`. Two of those three outcomes were the same, which
+is the entire finding. The same experiment then refuted the obvious fix: `CASCADE` alone
+lets a neighbour's guard answer with a `P0001` of its own, so the refusal has to be checked
+for the relation it names. Both halves came from running it, not from reading it.
+
+**A decision record can describe behaviour the code has never had, and stay that way through
+every gate.** `--from` was ruled in as an escape hatch, documented as the one path where the
+precondition goes unchecked, and given a receipt field and a permanent ledger column to
+record that it had been used. It never did any of that: the value it supplies is handed
+straight to the check it was supposed to bypass. Nothing was wrong with the code, and nothing
+in this repository could have noticed — no test exercised the flag past the argument parser,
+and the only test named for it called the applier directly, below the layer where the check
+lives. Two reviewers reading independently both found it in the same pass. The lesson is
+narrower than "write more tests": a flag whose entire purpose is to *relax* a guard has to be
+tested through the layer that holds the guard, or the test cannot fail for the right reason.
