@@ -111,10 +111,60 @@ schema against a fresh initialization line for line — plus a CI check that eve
 step is named by that suite. `--dry-run` runs the rungs a read-only pass can answer and
 applies nothing.
 
+Four more were found by this phase's own goal-backward verification, after the
+implementation was complete and every gate was green. They are narrowings rather
+than defects — each guard does what it says, over a smaller subject than a reader
+would assume — and they are recorded here because an unstated narrowing reads as
+coverage.
+
+**The DELETE arm proves itself against whatever rows the database happens to
+hold.** The TRUNCATE arm covers all eighteen guarded relations without seeding
+anything, because TRUNCATE needs no rows to be refused. The DELETE arm cannot:
+`DELETE FROM t` over an empty table affects no rows, fires no row-level trigger,
+and succeeds. So it skips every relation whose count is zero, and on a freshly
+migrated database that leaves two — `gwk.transition`, seeded by the contract at
+initialization, and the ledger's own row. The floor is `deleted_from == 0`, which
+refuses a run that proved nothing whatsoever; it is not a claim that the other
+sixteen row-level guards were exercised. They were not. A row-level guard that
+went missing on a table that happens to be empty is invisible to this battery,
+and what covers it instead is that the same table's statement-level guard is
+checked unconditionally.
+
+**The unit sweep covers one unit file, and the estate's units are not in this
+repository.** Acceptance criterion 9 asks that the verb be absent from every
+`.service` and `.timer`, and the test walks the repository asserting so. This
+repository contains exactly one such file — `crates/gwk-pty-host/gwk-pty-host.service`
+— and no timer at all. The units that actually run the estate live outside it.
+The grep-proof is a statement about what this repository could ship, not about
+what the operator's machine runs, and keeping the verb out of a unit on the host
+stays an operator obligation the test does not discharge.
+
+**A backend migration reaches an existing database only if a step names it, and
+only a doc comment says so.** `BACKEND_MIGRATIONS` is applied wholesale by
+`init`, so a seventh file added to that array reaches every fresh database
+automatically. It reaches an existing one only through a step's `-- carries:`
+header. Nothing enforces the pairing: adding `0007_*.sql` does not move
+`CONTRACT_SQL_SHA256`, so the missing-step gate — which watches
+`schema/0001_contract.sql` and nothing else — stays green while fresh and
+migrated databases diverge. The positional guard between `BACKEND_MIGRATIONS` and
+`BACKEND_MIGRATION_STEMS` asserts the two lists stay the same length; it says
+nothing about whether a step carries the new entry.
+
+**The two step gates disagree about an empty registry, and they fail closed.**
+`inspect_step_chain` accepts a registry holding no steps when the contract still
+carries the digest it carried when that gate was introduced — nothing has moved
+that a step would have to describe. `resolve` refuses an empty registry
+unconditionally, as `NoSteps`. A build can therefore pass CI and still refuse to
+migrate anything. That is the safe direction and it is left alone: the CI gate
+answers whether this repository owes a step, the runtime answers whether this
+binary can carry a database, and the second question has no good answer from an
+empty registry no matter what the contract digest is.
+
 ## What this cost to learn
 
-Two claims in this phase were asserted in prose before they were true, and both were caught
-by a mutation rather than by review.
+Three claims in this phase were weaker than the prose around them. None was caught by
+review; two fell to a mutation, and the third to goal-backward verification after every
+gate was already green.
 
 **The one-transaction guarantee was false when it was first claimed.** The applier wraps the
 step, the backend migrations, the privilege matrix and the ledger row in one transaction —
@@ -133,3 +183,20 @@ fold as the only gate: a per-relation sweep over zero relations returns `Ok(())`
 ordering is a diagnostics win, not a soundness one, and the distinction is worth stating
 because the phase's own instructions had it the other way round until a mutation refused to
 behave as specified.
+
+**A count can be present, ordered first, and still slack.** The paragraph above was written
+while `EXPECTED_TRUNCATE_GUARDS` was a floor — `guarded.len() < 17`, against a real count of
+eighteen: seventeen in the contract and the eighteenth added by this phase, on the ledger's
+own table. It is a count, it runs before the fold, and it was worth nothing. One guard of
+slack is exactly enough to admit a database that lost one, and losing one removes the
+relation from `pg_trigger`, which removes it from the set the per-relation probe walks — so
+nothing downstream asked about it either. The battery returned `Ok(())` for a database a
+superuser could TRUNCATE to zero rows.
+
+The mutation that was supposed to catch this could not. `ALTER TABLE … DISABLE TRIGGER`
+leaves the catalog row in place with `tgenabled = 'D'`, and the sweep's query filters on
+neither column, so the relation stays in the set and the refusal comes from the probe. The
+guard had only ever been watched failing in the one direction that never exercises the count
+arm. A mutation has to remove the thing from the set the count is taken over, not merely
+stop its effect; the constant is an equality now, and its mutation drops rather than
+disables.
