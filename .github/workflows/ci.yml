@@ -1070,7 +1070,18 @@ jobs:
           GIT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          container_id="$(docker run -d -p 127.0.0.1:8080:3000 -e PORT=3000 gridwork-site:ci)"
+          # T27: the image runs NODE_ENV=production, where the origin gate is unconditional —
+          # site/lib/origin-verification.ts honors mode=disabled ONLY under development/test. So
+          # the smoke arms the gate with a throwaway secret and presents it, rather than trying to
+          # switch it off. 32 random bytes as base64url: 43 chars whose final character always
+          # falls in the [AEIMQUYcgkosw048] class the decoder requires.
+          synthetic_secret="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
+          if [[ ! "$synthetic_secret" =~ ^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$ ]]; then
+            echo "site smoke: generated secret is not a canonical 32-byte base64url value" >&2
+            exit 1
+          fi
+          container_id="$(docker run -d -p 127.0.0.1:8080:3000 -e PORT=3000 \
+            -e "GRIDWORK_ORIGIN_SECRET_CURRENT=${synthetic_secret}" gridwork-site:ci)"
           if [[ ! "$container_id" =~ ^[a-f0-9]{64}$ ]]; then
             echo "site smoke: invalid container id" >&2
             exit 1
@@ -1080,7 +1091,8 @@ jobs:
 
           ready=0
           for _ in $(seq 1 30); do
-            if curl -fsS -o /dev/null http://127.0.0.1:8080/; then
+            if curl -fsS -o /dev/null -H "X-Gridwork-Origin-Secret: ${synthetic_secret}" \
+              http://127.0.0.1:8080/; then
               ready=1
               break
             fi
@@ -1092,11 +1104,33 @@ jobs:
             exit 1
           fi
 
+          # The gate must actually REJECT, not merely tolerate a valid header. Without this arm
+          # the whole smoke below passes identically whether the gate enforces or was deleted,
+          # because every other request here carries a good secret. Cover an asset and a metadata
+          # path too: proxy.ts deliberately declares no matcher, and that is the claim being made.
+          for path in / /health /docs /robots.txt /_next/static/chunks/main.js; do
+            status="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:8080${path}")"
+            if [ "$status" != "403" ]; then
+              echo "site smoke: ${path} answered ${status} without the origin secret, expected 403" >&2
+              echo "site smoke: the origin gate is not covering every route" >&2
+              exit 1
+            fi
+          done
+          wrong_secret="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
+          status="$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H "X-Gridwork-Origin-Secret: ${wrong_secret}" http://127.0.0.1:8080/health)"
+          if [ "$status" != "403" ]; then
+            echo "site smoke: /health answered ${status} for a WRONG secret, expected 403" >&2
+            exit 1
+          fi
+          echo "site smoke: the origin gate rejects missing and wrong secrets on every route"
+
           check_response() {
             local path="$1"
             local expected_status="$2"
             local response
-            response="$(curl -sS -D - -o /dev/null "http://127.0.0.1:8080${path}")"
+            response="$(curl -sS -D - -o /dev/null \
+              -H "X-Gridwork-Origin-Secret: ${synthetic_secret}" "http://127.0.0.1:8080${path}")"
             echo "$response" | grep -qE "^HTTP/[0-9.]+ ${expected_status} "
             for header in Strict-Transport-Security X-Content-Type-Options X-Frame-Options Referrer-Policy Content-Security-Policy; do
               echo "$response" | grep -qi "^${header}:"
@@ -1120,7 +1154,8 @@ jobs:
           # while the route still answers 200 with a cheerful "unknown" — which is
           # exactly how the sibling repo carrying this same stamp let a
           # six-commit-stale build sit in production unnoticed. So compare it.
-          reported="$(curl -sS "http://127.0.0.1:8080/health" | jq -r '.sha')"
+          reported="$(curl -sS -H "X-Gridwork-Origin-Secret: ${synthetic_secret}" \
+            "http://127.0.0.1:8080/health" | jq -r '.sha')"
           if [ "$reported" != "${GIT_SHA}" ]; then
             echo "site smoke: /health reports '${reported}', expected '${GIT_SHA}'" >&2
             echo "site smoke: the ARG -> ENV -> route chain is broken" >&2
@@ -1130,7 +1165,8 @@ jobs:
 
           # And it must not be cached. A cached health check answers for whichever
           # container served it last, which is the one question it may never answer.
-          curl -sS -D - -o /dev/null "http://127.0.0.1:8080/health" |
+          curl -sS -D - -o /dev/null -H "X-Gridwork-Origin-Secret: ${synthetic_secret}" \
+            "http://127.0.0.1:8080/health" |
             grep -qi '^cache-control:.*no-store' || {
             echo "site smoke: /health is missing cache-control: no-store" >&2
             exit 1
