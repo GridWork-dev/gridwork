@@ -2,6 +2,7 @@
   "compilerOptions": {
     "target": "ES2022",
     "lib": ["dom", "dom.iterable", "esnext"],
+    "types": ["bun"],
     "allowJs": false,
     "skipLibCheck": true,
     "strict": true,
@@ -33,10 +34,10 @@
   // `tools/` is not app code. It holds the vendored house design-token contract and its
   // validator — a Bun CLI, byte-pinned against its canonical copy by
   // tools/vendored-config-drift.test.ts. This config is the Next app's: DOM libs, bundler
-  // resolution, no Bun types, no `allowImportingTsExtensions`. Under it the validator
-  // reports four errors that are all category mismatch rather than defects, and every one
-  // of them is unfixable here by construction, since editing the file is the fork the
-  // byte-pin exists to prevent. It is type-checked where it belongs — by `bun test tools/`
-  // at the repo root, which runs it for real against this site's stylesheet.
+  // resolution, and no `allowImportingTsExtensions`. Under it the validator reports errors
+  // that are category mismatch rather than defects, and every one of them is unfixable here
+  // by construction, since editing the file is the fork the byte-pin exists to prevent. It
+  // is type-checked where it belongs — by `bun test tools/` at the repo root, which runs it
+  // for real against this site's stylesheet.
   "exclude": ["node_modules", "tools"]
 }
