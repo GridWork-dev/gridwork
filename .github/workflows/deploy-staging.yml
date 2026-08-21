@@ -11,6 +11,10 @@
 # way to select an image ad hoc, so an execute against a stale Job definition silently
 # runs last release's migration and reports success (doc 07 §5, and the linked gcloud
 # reference). That is the failure this ordering exists to prevent.
+#
+# GRIDWORK TEMPLATE DIVERGENCES (post-copy review): bind the digest map to its immutable
+# source SHA and verified GitHub provenance, restore traffic to LATEST after a rollback,
+# and emit a machine-validated deployment receipt for promotion and rollback.
 
 name: deploy staging
 
@@ -21,9 +25,16 @@ on:
         description: 'JSON: {"<service>": "sha256:..."} — from a publish run'
         required: true
         type: string
+      source_sha:
+        description: Full source commit SHA carried by the published image attestation
+        required: true
+        type: string
   workflow_call:
     inputs:
       digests:
+        required: true
+        type: string
+      source_sha:
         required: true
         type: string
 
@@ -38,14 +49,18 @@ permissions:
 
 jobs:
   deploy:
+    if: github.repository == 'GridWork-dev/gridwork' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     environment: staging
     permissions:
       contents: read
       id-token: write
+      attestations: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -58,7 +73,15 @@ jobs:
       - name: validate inputs against the manifest
         id: plan
         env:
+          BUN_VERSION_FILE: ${{ vars.BUN_VERSION_FILE }}
           DIGESTS: ${{ inputs.digests }}
+          GCP_NONPROD_PROJECT: ${{ vars.GCP_NONPROD_PROJECT }}
+          GCP_PROD_PROJECT: ${{ vars.GCP_PROD_PROJECT }}
+          GCP_REGION: ${{ vars.GCP_REGION }}
+          GCP_REGISTRY_HOST: ${{ vars.GCP_REGISTRY_HOST }}
+          GCP_STAGING_DEPLOYER_SA: ${{ vars.GCP_STAGING_DEPLOYER_SA }}
+          GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
           ENVIRONMENT: staging
           # plan.ts emits fully-qualified image references and cannot build one without
           # the registry prefix. Omitted in the first cut of this template; caught by the
@@ -73,6 +96,24 @@ jobs:
           create_credentials_file: true
 
       - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      - name: verify image provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SERVICES: ${{ steps.plan.outputs.services }}
+          SOURCE_SHA: ${{ steps.plan.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          gcloud auth configure-docker "${{ vars.GCP_REGISTRY_HOST }}" --quiet
+          printf '%s' "$SERVICES" | jq -r '.[].image' |
+          while read -r image; do
+            gh attestation verify "oci://${image}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "github.com/${GITHUB_REPOSITORY}/.github/workflows/publish-image.yml" \
+              --source-digest "$SOURCE_SHA" \
+              --source-ref refs/heads/main \
+              --deny-self-hosted-runners
+          done
 
       # Step 1 of §5. The direct Neon URL, never the pooled one: a migration takes
       # session-scoped locks and advisory state that a transaction pooler discards
@@ -106,6 +147,10 @@ jobs:
               --project "${{ vars.GCP_NONPROD_PROJECT }}" \
               --region "${{ vars.GCP_REGION }}" \
               --image "$image"
+            gcloud run services update-traffic "$svc" \
+              --project "${{ vars.GCP_NONPROD_PROJECT }}" \
+              --region "${{ vars.GCP_REGION }}" \
+              --to-latest
             echo "::endgroup::"
           done
 
@@ -115,6 +160,7 @@ jobs:
       - name: origin + Access bypass suite
         env:
           ENVIRONMENT: staging
+          EXPECTED_SHA: ${{ steps.plan.outputs.source_sha }}
           # Empty on repos with no Cloudflare Access app. smoke.ts calls the public
           # hostname through Cloudflare, and an Access-protected hostname answers 302 to
           # the login page without a service token — indistinguishable from a broken
@@ -124,21 +170,43 @@ jobs:
         run: bun run deploy/smoke.ts
 
       - name: promotion evidence
+        env:
+          DEPLOYMENT_RUN_ID: ${{ github.run_id }}
+          PROJECT: ${{ vars.GCP_NONPROD_PROJECT }}
+          REGION: ${{ vars.GCP_REGION }}
+          REPOSITORY: ${{ github.repository }}
+          SERVICES: ${{ steps.plan.outputs.services }}
+          SOURCE_SHA: ${{ steps.plan.outputs.source_sha }}
         run: |
           set -euo pipefail
-          cat > staging-evidence.json <<JSON
-          {
-            "environment": "staging",
-            "commit": "${{ github.sha }}",
-            "run_id": "${{ github.run_id }}",
-            "digests": ${{ toJSON(inputs.digests) }},
-            "migration_job": "${{ steps.plan.outputs.migration_job }}",
-            "services": ${{ steps.plan.outputs.services }}
-          }
-          JSON
+          receipt='[]'
+          printf '%s' "$SERVICES" | jq -r '.[] | "\(.service) \(.image)"' |
+          while read -r svc image; do
+            state="$(gcloud run services describe "$svc" \
+              --project "$PROJECT" --region "$REGION" --format=json)"
+            revision="$(printf '%s' "$state" | jq -er '
+              [.status.traffic[] | select(.percent == 100) | .revisionName] | unique |
+              if length == 1 then .[0]
+              else error("expected exactly one 100% traffic revision") end')"
+            actual="$(gcloud run revisions describe "$revision" \
+              --project "$PROJECT" --region "$REGION" \
+              --format='value(spec.containers[0].image)')"
+            test "$actual" = "$image"
+            receipt="$(printf '%s' "$receipt" | jq \
+              --arg service "$svc" --arg image "$image" --arg revision "$revision" \
+              '. + [{service:$service,image:$image,revision:$revision}]')"
+          done
+          jq -n \
+            --arg repository "$REPOSITORY" \
+            --arg source_sha "$SOURCE_SHA" \
+            --arg deployment_run_id "$DEPLOYMENT_RUN_ID" \
+            --argjson services "$receipt" \
+            '{schema:1,repository:$repository,environment:"staging",source_sha:$source_sha,
+              deployment_run_id:$deployment_run_id,services:$services}' \
+            > deployment-receipt.json
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: staging-evidence
-          path: staging-evidence.json
+          path: deployment-receipt.json
           if-no-files-found: error

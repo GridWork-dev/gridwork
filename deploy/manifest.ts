@@ -43,7 +43,13 @@ function assertExactKeys(
 function boundedString(value: unknown, label: string, maximum = 512): string {
   if (typeof value !== "string") throw new Error(`${label} must be a string`);
   const trimmed = value.trim();
-  if (trimmed.length === 0 || trimmed.length > maximum || trimmed.includes("\0")) {
+  if (
+    trimmed.length === 0 ||
+    trimmed.length > maximum ||
+    trimmed.includes("\0") ||
+    value.includes("\r") ||
+    value.includes("\n")
+  ) {
     throw new Error(`${label} is invalid`);
   }
   return trimmed;

@@ -3,6 +3,8 @@ import { describe, expect, test } from "bun:test";
 import { readSmokeConfig, runSmoke, type SmokeConfig } from "./smoke";
 
 const sha = "a".repeat(40);
+const originSecret = "A".repeat(43);
+const canaryUrl = "https://r123---gridwork-site-example-ue.a.run.app";
 const securityHeaders = {
   "strict-transport-security": "max-age=31536000",
   "x-content-type-options": "nosniff",
@@ -43,6 +45,8 @@ describe("public deployment smoke", () => {
       environment: "staging",
       mode: "post-deploy",
       canaryTag: undefined,
+      canaryUrls: undefined,
+      originSecrets: undefined,
       expectedSha: undefined,
       accessClientId: "client-id-name",
       accessClientSecret: "secret-value",
@@ -86,6 +90,60 @@ describe("public deployment smoke", () => {
     await expect(
       runSmoke(config({ environment: "staging", accessClientId: undefined })),
     ).rejects.toThrow("staging smoke requires Cloudflare Access service credentials");
+  });
+
+  test("smokes the zero-traffic tag URL directly with the gridwork origin header", async () => {
+    const calls: Array<{ url: string; headers: Headers }> = [];
+    await runSmoke(
+      config({
+        mode: "pre-migration",
+        canaryTag: "r123",
+        canaryUrls: JSON.stringify({ "gridwork-site": canaryUrl }),
+        originSecrets: JSON.stringify({ "gridwork-site": originSecret }),
+        expectedSha: undefined,
+      }),
+      async (url, init) => {
+        calls.push({ url: String(url), headers: new Headers(init?.headers) });
+        return responseFor(url);
+      },
+    );
+
+    expect(calls.map((call) => call.url)).toEqual([`${canaryUrl}/health`, `${canaryUrl}/`]);
+    for (const call of calls) {
+      expect(call.headers.get("x-gridwork-origin-secret")).toBe(originSecret);
+      expect(call.headers.has("cf-access-client-id")).toBe(false);
+      expect(call.headers.has("cf-access-client-secret")).toBe(false);
+    }
+  });
+
+  test("fails closed when canary URL or secret maps are absent, malformed, or unsafe", async () => {
+    const base = {
+      mode: "post-migration",
+      canaryTag: "r123",
+      expectedSha: undefined,
+    } as const;
+    await expect(runSmoke(config(base))).rejects.toThrow("CANARY_URLS is required");
+    await expect(
+      runSmoke(config({ ...base, canaryUrls: "{}", originSecrets: "{}" })),
+    ).rejects.toThrow("CANARY_URLS is missing gridwork-site");
+    await expect(
+      runSmoke(
+        config({
+          ...base,
+          canaryUrls: JSON.stringify({ "gridwork-site": "https://example.com" }),
+          originSecrets: JSON.stringify({ "gridwork-site": originSecret }),
+        }),
+      ),
+    ).rejects.toThrow("CANARY_URLS.gridwork-site must be a Cloud Run tag URL");
+    await expect(
+      runSmoke(
+        config({
+          ...base,
+          canaryUrls: JSON.stringify({ "gridwork-site": canaryUrl }),
+          originSecrets: JSON.stringify({ "gridwork-site": "not-a-secret" }),
+        }),
+      ),
+    ).rejects.toThrow("ORIGIN_SECRETS.gridwork-site is invalid");
   });
 
   test("fails on status, provenance, cache, or browser-header regressions", async () => {

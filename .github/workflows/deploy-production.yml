@@ -9,14 +9,19 @@
 # EXPAND migrations only. A contract migration runs in a later release, after the
 # rollback window closes and no compatible old revision remains (doc 07 §6) — this
 # workflow has no path for one and must not grow one.
+#
+# GRIDWORK TEMPLATE DIVERGENCES (post-copy review): production consumes a successful
+# staging receipt instead of free-text digests, validates the hold before authentication,
+# records the unique 100%-serving revision, and restores prior traffic after any failed
+# post-mutation gate. Upstream owns the direct tagged-canary smoke contract.
 
 name: deploy production
 
 on:
   workflow_dispatch:
     inputs:
-      digests:
-        description: 'JSON: {"<service>": "sha256:..."} — the digests staging proved'
+      staging_run_id:
+        description: Successful deploy-staging run containing staging-evidence
         required: true
         type: string
       hold_seconds:
@@ -39,27 +44,61 @@ permissions:
 
 jobs:
   rollout:
+    if: github.repository == 'GridWork-dev/gridwork' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    # The GitHub environment is the operator gate (doc 07 §11: "operator gate receipt
-    # where the change affects secrets, production data or migration"). Its reviewers and
-    # its deployment-branch policy are the receipt.
+    # doc 07 §11 wants an "operator gate receipt where the change affects secrets,
+    # production data or migration", and names the GitHub environment as that receipt.
+    # Naming the environment here is necessary but NOT sufficient: environment protection
+    # rules are plan-gated, and on this account only a PUBLIC repo gets them. Measured
+    # 2026-08-21 — gridwork (public) carries 2 protection rules on `production`; caisson,
+    # gridwork-studio and dev-profile (private) carry ZERO, so on those three there is no
+    # reviewer and no deployment-branch policy and this line buys only secret scoping.
+    # Do not read it as a gate on a repo that has none; check before relying on it.
     environment: production
     permissions:
       contents: read
       id-token: write
+      actions: read
+      attestations: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: ${{ vars.BUN_VERSION_FILE }}
 
+      - name: retrieve successful staging receipt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STAGING_RUN_ID: ${{ inputs.staging_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$STAGING_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]]
+          run="$(gh run view "$STAGING_RUN_ID" \
+            --json conclusion,workflowName,headBranch,event)"
+          printf '%s' "$run" | jq -e '
+            .conclusion == "success" and .workflowName == "deploy staging" and
+            .headBranch == "main" and (.event == "workflow_dispatch" or .event == "workflow_call")'
+          mkdir -p staging-evidence
+          gh run download "$STAGING_RUN_ID" --name staging-evidence --dir staging-evidence
+
       - name: validate inputs against the manifest
         id: plan
         env:
-          DIGESTS: ${{ inputs.digests }}
+          BUN_VERSION_FILE: ${{ vars.BUN_VERSION_FILE }}
           ENVIRONMENT: production
+          GCP_NONPROD_PROJECT: ${{ vars.GCP_NONPROD_PROJECT }}
+          GCP_PROD_DEPLOYER_SA: ${{ vars.GCP_PROD_DEPLOYER_SA }}
+          GCP_PROD_PROJECT: ${{ vars.GCP_PROD_PROJECT }}
+          GCP_REGION: ${{ vars.GCP_REGION }}
+          GCP_REGISTRY_HOST: ${{ vars.GCP_REGISTRY_HOST }}
+          GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
+          HOLD_SECONDS: ${{ inputs.hold_seconds }}
+          PROMOTION_RECEIPT: staging-evidence/deployment-receipt.json
+          STAGING_RUN_ID: ${{ inputs.staging_run_id }}
           # See deploy-staging.yml — plan.ts cannot build an image reference without it.
           GCP_REGISTRY: ${{ vars.GCP_REGISTRY }}
         run: bun run deploy/plan.ts >> "$GITHUB_OUTPUT"
@@ -72,29 +111,60 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
 
+      - name: verify promoted image provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SERVICES: ${{ steps.plan.outputs.services }}
+          SOURCE_SHA: ${{ steps.plan.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          gcloud auth configure-docker "${{ vars.GCP_REGISTRY_HOST }}" --quiet
+          printf '%s' "$SERVICES" | jq -r '.[].image' |
+          while read -r image; do
+            gh attestation verify "oci://${image}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "github.com/${GITHUB_REPOSITORY}/.github/workflows/publish-image.yml" \
+              --source-digest "$SOURCE_SHA" \
+              --source-ref refs/heads/main \
+              --deny-self-hosted-runners
+          done
+
       # Recorded BEFORE anything changes. doc 07 §11 wants the rollback revision in the
       # evidence, and the only moment it is knowable is before the new revision exists.
       - name: record the rollback revision
         id: previous
+        env:
+          PROJECT: ${{ vars.GCP_PROD_PROJECT }}
+          REGION: ${{ vars.GCP_REGION }}
+          SERVICES: ${{ steps.plan.outputs.services }}
         run: |
           set -euo pipefail
-          echo '${{ steps.plan.outputs.services }}' | jq -r '.[].service' |
+          rollback='{}'
+          printf '%s' "$SERVICES" | jq -r '.[].service' |
           while read -r svc; do
-            rev="$(gcloud run services describe "$svc" \
-              --project "${{ vars.GCP_PROD_PROJECT }}" \
-              --region "${{ vars.GCP_REGION }}" \
-              --format 'value(status.traffic[0].revisionName)')"
-            printf '%s %s\n' "$svc" "$rev"
-          done | tee rollback-revisions.txt
+            state="$(gcloud run services describe "$svc" \
+              --project "$PROJECT" --region "$REGION" --format=json)"
+            rev="$(printf '%s' "$state" | jq -er '
+              [.status.traffic[] | select(.percent == 100) | .revisionName] | unique |
+              if length == 1 then .[0]
+              else error("expected exactly one 100% traffic revision") end')"
+            rollback="$(printf '%s' "$rollback" | jq \
+              --arg service "$svc" --arg revision "$rev" '. + {($service):$revision}')"
+          done
+          printf '%s\n' "$rollback" > rollback-revisions.json
+          printf '%s' "$rollback" | jq -r 'to_entries[] | "\(.key) \(.value)"' \
+            > rollback-revisions.txt
 
       # §6 step 1: zero traffic, tagged. The revision exists and is addressable by tag,
       # and no user has reached it.
       - name: deploy zero-traffic tagged revisions
+        env:
+          SERVICES: ${{ steps.plan.outputs.services }}
         run: |
           set -euo pipefail
           tag="r${GITHUB_RUN_ID}"
           echo "CANARY_TAG=$tag" >> "$GITHUB_ENV"
-          echo '${{ steps.plan.outputs.services }}' | jq -r '.[] | "\(.service) \(.image)"' |
+          printf '%s' "$SERVICES" | jq -r '.[] | "\(.service) \(.image)"' |
           while read -r svc image; do
             gcloud run services update "$svc" \
               --project "${{ vars.GCP_PROD_PROJECT }}" \
@@ -104,14 +174,65 @@ jobs:
               --no-traffic
           done
 
+      # doc 07 §6 step 5 asks for the tagged revision to be smoke-tested BEFORE any
+      # traffic reaches it, and the first cut of this template had no way to do it. A
+      # Cloud Run traffic tag is addressable only at its own run.app URL; the T27 origin
+      # gate rejects a direct run.app request by design; and Cloudflare routes to the
+      # service's default URL, never to a tag. The caisson and gridwork adoptions hit
+      # this independently and both degraded the pre-traffic smokes to public-edge
+      # baselines against the CURRENT revision — which is not a canary check at all, and
+      # would have left the 5% step as the canary's first real exercise.
+      #
+      # Operator ruling 2026-08-21: the deploy workflow carries the origin secret and
+      # calls the tag URL directly, satisfying the gate as the caller rather than routing
+      # around it. Resolve the URLs from the service description — do not synthesize them
+      # from the tag name, because a URL that is merely well-formed proves nothing.
+      - name: resolve the tagged revision URLs
+        env:
+          PROJECT: ${{ vars.GCP_PROD_PROJECT }}
+          REGION: ${{ vars.GCP_REGION }}
+          SERVICES: ${{ steps.plan.outputs.services }}
+        run: |
+          set -euo pipefail
+          urls='{}'
+          while read -r svc; do
+            url="$(gcloud run services describe "$svc" \
+              --project "$PROJECT" \
+              --region "$REGION" \
+              --format json |
+              jq -r --arg t "$CANARY_TAG" '.status.traffic[] | select(.tag == $t) | .url')"
+            # Fail loudly. An empty URL here would otherwise reach smoke.ts, which has a
+            # public-hostname path and would happily pass against the CURRENT revision —
+            # a green pre-traffic check that tested nothing.
+            if [ -z "$url" ]; then
+              echo "::error::no URL for tag ${CANARY_TAG} on ${svc}"
+              exit 1
+            fi
+            urls="$(printf '%s' "$urls" | jq --arg k "$svc" --arg v "$url" '. + {($k): $v}')"
+          done < <(printf '%s' "$SERVICES" | jq -r '.[].service')
+          {
+            echo 'CANARY_URLS<<CANARY_URLS_EOF'
+            printf '%s\n' "$urls"
+            echo 'CANARY_URLS_EOF'
+          } >> "$GITHUB_ENV"
+
       # §6 step 2: checks that do NOT require the new schema. Running schema-dependent
       # checks here would fail every expand release for the wrong reason and train
       # everyone to ignore this gate.
+      #
+      # CANARY_TAG and CANARY_URLS are inherited from $GITHUB_ENV and deliberately NOT
+      # re-declared here: a step-level `env:` mapping overrides the inherited value, so a
+      # passthrough that expanded to empty would blank them and take smoke.ts down its
+      # public-hostname path without saying so.
       - name: pre-migration boot + origin checks
         env:
           ENVIRONMENT: production
           MODE: pre-migration
-          CANARY_TAG: ${{ env.CANARY_TAG }}
+          # The per-service origin secrets, as a JSON object keyed by service key, so one
+          # environment secret covers a multi-service repo and this file stays identical
+          # across all four. smoke.ts sends its repo's own origin header — the header NAME
+          # is per-repo and belongs in that repo's smoke.ts, only the value comes from here.
+          ORIGIN_SECRETS: ${{ secrets.ORIGIN_SECRETS }}
           # Empty on repos with no Cloudflare Access app. smoke.ts calls the public
           # hostname through Cloudflare, and an Access-protected hostname answers 302 to
           # the login page without a service token — indistinguishable from a broken
@@ -147,7 +268,8 @@ jobs:
         env:
           ENVIRONMENT: production
           MODE: post-migration
-          CANARY_TAG: ${{ env.CANARY_TAG }}
+          # As above: CANARY_TAG / CANARY_URLS are inherited, never re-declared.
+          ORIGIN_SECRETS: ${{ secrets.ORIGIN_SECRETS }}
           # Empty on repos with no Cloudflare Access app. smoke.ts calls the public
           # hostname through Cloudflare, and an Access-protected hostname answers 302 to
           # the login page without a service token — indistinguishable from a broken
@@ -160,13 +282,15 @@ jobs:
       # gate and it must exit non-zero on a breach, not warn. An observation step that
       # cannot fail is decoration.
       - name: progressive traffic shift
+        id: rollout
         env:
-          HOLD: ${{ inputs.hold_seconds }}
+          HOLD: ${{ steps.plan.outputs.hold_seconds }}
+          SERVICES: ${{ steps.plan.outputs.services }}
         run: |
           set -euo pipefail
           for pct in 5 25 100; do
             echo "::group::shift to ${pct}%"
-            echo '${{ steps.plan.outputs.services }}' | jq -r '.[].service' |
+            printf '%s' "$SERVICES" | jq -r '.[].service' |
             while read -r svc; do
               gcloud run services update-traffic "$svc" \
                 --project "${{ vars.GCP_PROD_PROJECT }}" \
@@ -187,6 +311,14 @@ jobs:
         env:
           ENVIRONMENT: production
           MODE: post-deploy
+          EXPECTED_SHA: ${{ steps.plan.outputs.source_sha }}
+          # Traffic is at 100% and the promoted revision is what the public hostname
+          # serves, so this one goes through Cloudflare — the only step that proves the
+          # real end-to-end path. Blanked here rather than left to smoke.ts's discipline:
+          # the tag URL is still valid at this point, so a mode bug would otherwise smoke
+          # the canary a third time and never test the edge at all.
+          CANARY_URLS: ""
+          ORIGIN_SECRETS: ""
           # Empty on repos with no Cloudflare Access app. smoke.ts calls the public
           # hostname through Cloudflare, and an Access-protected hostname answers 302 to
           # the login page without a service token — indistinguishable from a broken
@@ -195,19 +327,78 @@ jobs:
           CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
         run: bun run deploy/smoke.ts
 
-      - name: deployment evidence
+      - name: record production deployment receipt
+        env:
+          DEPLOYMENT_RUN_ID: ${{ github.run_id }}
+          PROJECT: ${{ vars.GCP_PROD_PROJECT }}
+          REGION: ${{ vars.GCP_REGION }}
+          REPOSITORY: ${{ github.repository }}
+          SERVICES: ${{ steps.plan.outputs.services }}
+          SOURCE_SHA: ${{ steps.plan.outputs.source_sha }}
         run: |
           set -euo pipefail
+          receipt='[]'
+          printf '%s' "$SERVICES" | jq -r '.[] | "\(.service) \(.image)"' |
+          while read -r svc image; do
+            state="$(gcloud run services describe "$svc" \
+              --project "$PROJECT" --region "$REGION" --format=json)"
+            revision="$(printf '%s' "$state" | jq -er '
+              [.status.traffic[] | select(.percent == 100) | .revisionName] | unique |
+              if length == 1 then .[0]
+              else error("expected exactly one 100% traffic revision") end')"
+            actual="$(gcloud run revisions describe "$revision" \
+              --project "$PROJECT" --region "$REGION" \
+              --format='value(spec.containers[0].image)')"
+            test "$actual" = "$image"
+            receipt="$(printf '%s' "$receipt" | jq \
+              --arg service "$svc" --arg image "$image" --arg revision "$revision" \
+              '. + [{service:$service,image:$image,revision:$revision}]')"
+          done
           jq -n \
-            --arg commit "${{ github.sha }}" \
-            --arg run_id "${{ github.run_id }}" \
-            --arg tag "${CANARY_TAG}" \
-            --argjson services '${{ steps.plan.outputs.services }}' \
-            --arg migration "${{ inputs.skip_migration && 'skipped' || steps.plan.outputs.migration_job }}" \
-            --rawfile rollback rollback-revisions.txt \
-            '{environment:"production", commit:$commit, run_id:$run_id, canary_tag:$tag,
-              services:$services, migration:$migration, rollback_revisions:$rollback,
-              traffic_progression:[0,5,25,100]}' > production-evidence.json
+            --arg repository "$REPOSITORY" \
+            --arg source_sha "$SOURCE_SHA" \
+            --arg deployment_run_id "$DEPLOYMENT_RUN_ID" \
+            --argjson services "$receipt" \
+            '{schema:1,repository:$repository,environment:"production",source_sha:$source_sha,
+              deployment_run_id:$deployment_run_id,services:$services}' \
+            > deployment-receipt.json
+
+      - name: restore prior traffic after a failed gate
+        if: failure() && steps.previous.outcome == 'success'
+        env:
+          PROJECT: ${{ vars.GCP_PROD_PROJECT }}
+          REGION: ${{ vars.GCP_REGION }}
+        run: |
+          set -euo pipefail
+          test -s rollback-revisions.json
+          jq -r 'to_entries[] | "\(.key) \(.value)"' rollback-revisions.json |
+          while read -r svc revision; do
+            gcloud run services update-traffic "$svc" \
+              --project "$PROJECT" --region "$REGION" \
+              --to-revisions "${revision}=100"
+          done
+          ENVIRONMENT=production MODE=rollback bun run deploy/smoke.ts
+
+      - name: deployment evidence
+        if: always()
+        env:
+          PLAN_OUTCOME: ${{ steps.plan.outcome }}
+          ROLLOUT_OUTCOME: ${{ steps.rollout.outcome }}
+          RUN_ID: ${{ github.run_id }}
+          SOURCE_SHA: ${{ steps.plan.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          canary_tag="${CANARY_TAG:-}"
+          jq -n \
+            --arg run_id "$RUN_ID" \
+            --arg source_sha "$SOURCE_SHA" \
+            --arg canary_tag "$canary_tag" \
+            --arg plan_outcome "$PLAN_OUTCOME" \
+            --arg rollout_outcome "$ROLLOUT_OUTCOME" \
+            '{environment:"production",run_id:$run_id,source_sha:$source_sha,
+              canary_tag:$canary_tag,plan_outcome:$plan_outcome,
+              rollout_outcome:$rollout_outcome,traffic_progression:[0,5,25,100]}' \
+            > production-evidence.json
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
@@ -215,5 +406,7 @@ jobs:
           name: production-evidence
           path: |
             production-evidence.json
+            deployment-receipt.json
+            rollback-revisions.json
             rollback-revisions.txt
           if-no-files-found: error

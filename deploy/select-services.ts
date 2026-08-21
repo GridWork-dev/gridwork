@@ -1,7 +1,24 @@
 import { output, readManifest, requireService, type ServiceManifest } from "./manifest";
 import { reportCliError } from "./manifest";
+import { validateDeploymentConfig } from "./policy";
 
 const COMMIT = /^[0-9a-f]{40}$/;
+const ROOT_BUILD_INPUTS = [
+  ".dockerignore",
+  "deploy/services.json",
+  "README.md",
+  "ROADMAP.md",
+  "CLEANROOM.md",
+  "SECURITY.md",
+  "docs/architecture.md",
+  "docs/protocol.md",
+  "docs/PARITY.md",
+  "docs/contract/NAMING.md",
+  "docs/security/THREAT_MODEL.md",
+  "docs/derivation/SPECS.md",
+  "docs/derivation/CAPTURES.md",
+  "docs/derivation/reviews/**",
+] as const;
 
 function globExpression(pattern: string): RegExp {
   let source = "^";
@@ -44,7 +61,14 @@ export function selectServiceKeys(
 }
 
 function keyPathList(manifest: ServiceManifest, key: string): string[] {
-  return requireService(manifest, key).watched_paths;
+  const service = requireService(manifest, key);
+  return [
+    ...service.watched_paths,
+    service.dockerfile,
+    ...(service.build_context === "." && service.dockerfile === "site/Dockerfile"
+      ? ROOT_BUILD_INPUTS
+      : []),
+  ];
 }
 
 function matchesWatchedPath(patterns: string[], paths: string[]): boolean {
@@ -81,6 +105,9 @@ export function changedPathsSince(before: string): string[] {
 }
 
 async function main(): Promise<void> {
+  if (process.env["DEPLOY_TARGET"] === "publish") {
+    validateDeploymentConfig("publish", process.env);
+  }
   const manifest = await readManifest();
   const only = process.env["ONLY"]?.trim() || undefined;
   const before = parseBefore(process.env["BEFORE"]);

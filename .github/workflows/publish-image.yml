@@ -8,6 +8,10 @@
 # What it is NOT: a deployer. Publishing and deploying are separate identities (doc 07
 # §2) and separate workflows on purpose. This job may write to Artifact Registry and
 # nothing else; it holds no Cloud Run permission at all.
+#
+# GRIDWORK TEMPLATE DIVERGENCES (post-copy review): privileged publication is restricted
+# to this repository's main ref, checkout credentials are not persisted, and evidence is
+# serialized with jq instead of interpolating GitHub contexts into a shell heredoc.
 
 name: publish image
 
@@ -52,6 +56,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -59,13 +64,25 @@ jobs:
 
       - id: pick
         env:
+          DEPLOY_TARGET: publish
+          BUN_VERSION_FILE: ${{ vars.BUN_VERSION_FILE }}
+          GCP_IMAGE_PUBLISHER_SA: ${{ vars.GCP_IMAGE_PUBLISHER_SA }}
+          GCP_NONPROD_PROJECT: ${{ vars.GCP_NONPROD_PROJECT }}
+          GCP_PROD_PROJECT: ${{ vars.GCP_PROD_PROJECT }}
+          GCP_REGION: ${{ vars.GCP_REGION }}
+          GCP_REGISTRY: ${{ vars.GCP_REGISTRY }}
+          GCP_REGISTRY_HOST: ${{ vars.GCP_REGISTRY_HOST }}
+          GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
           ONLY: ${{ inputs.service }}
           BEFORE: ${{ github.event.before }}
         run: bun run deploy/select-services.ts >> "$GITHUB_OUTPUT"
 
   publish:
     needs: select
-    if: needs.select.outputs.any == 'true'
+    if: >-
+      needs.select.outputs.any == 'true' &&
+      github.repository == 'GridWork-dev/gridwork' &&
+      github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
@@ -88,6 +105,8 @@ jobs:
           exit 1
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -181,21 +200,31 @@ jobs:
       # doc 07 §11: the evidence IS the deliverable. A deploy that cannot show its
       # digest, its tests and its scan is not a deploy you can reason about at 3am.
       - name: source-to-image manifest
+        env:
+          BUILD_CONTEXT: ${{ steps.svc.outputs.build_context }}
+          COMMIT_SHA: ${{ github.sha }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          DOCKERFILE: ${{ steps.svc.outputs.dockerfile }}
+          IMAGE: ${{ vars.GCP_REGISTRY }}/${{ matrix.service }}
+          REF: ${{ github.ref }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          SERVICE: ${{ matrix.service }}
         run: |
           set -euo pipefail
-          cat > image-manifest-${{ matrix.service }}.json <<JSON
-          {
-            "service": "${{ matrix.service }}",
-            "repository": "${{ github.repository }}",
-            "commit": "${{ github.sha }}",
-            "ref": "${{ github.ref }}",
-            "run_id": "${{ github.run_id }}",
-            "image": "${{ vars.GCP_REGISTRY }}/${{ matrix.service }}",
-            "digest": "${{ steps.build.outputs.digest }}",
-            "dockerfile": "${{ steps.svc.outputs.dockerfile }}",
-            "build_context": "${{ steps.svc.outputs.build_context }}"
-          }
-          JSON
+          jq -n \
+            --arg service "$SERVICE" \
+            --arg repository "$REPOSITORY" \
+            --arg commit "$COMMIT_SHA" \
+            --arg ref "$REF" \
+            --arg run_id "$RUN_ID" \
+            --arg image "$IMAGE" \
+            --arg digest "$DIGEST" \
+            --arg dockerfile "$DOCKERFILE" \
+            --arg build_context "$BUILD_CONTEXT" \
+            '{service:$service, repository:$repository, commit:$commit, ref:$ref,
+              run_id:$run_id, image:$image, digest:$digest, dockerfile:$dockerfile,
+              build_context:$build_context}' > "image-manifest-${SERVICE}.json"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

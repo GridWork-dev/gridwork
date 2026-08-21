@@ -10,6 +10,10 @@
 #
 # It is also useless once the database has moved past compatibility. Rollback is safe
 # only while the old revision can still read what the new one wrote.
+#
+# GRIDWORK TEMPLATE DIVERGENCES (post-copy review): raw revision existence is not a
+# known-good proof. This copy requires a successful deployment run's immutable receipt,
+# verifies the recorded image still backs the revision, and only then mutates traffic.
 
 name: rollback
 
@@ -29,6 +33,10 @@ on:
         default: production
         type: choice
         options: [staging, production]
+      deployment_run_id:
+        description: Successful deploy run whose receipt contains the target revision
+        required: true
+        type: string
 
 # §8 rule 2: the SAME concurrency namespace the deploy workflows use, so a rollback and
 # a deploy can never interleave their traffic mutations. Two groups would defeat this.
@@ -41,30 +49,64 @@ permissions:
 
 jobs:
   rollback:
+    if: github.repository == 'GridWork-dev/gridwork' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: ${{ inputs.environment }}
     permissions:
       contents: read
       id-token: write
+      actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: ${{ vars.BUN_VERSION_FILE }}
+
+      - name: retrieve approved deployment receipt
+        env:
+          DEPLOYMENT_RUN_ID: ${{ inputs.deployment_run_id }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$DEPLOYMENT_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]]
+          if [[ "$ENVIRONMENT" == production ]]; then
+            workflow='deploy production'
+          else
+            workflow='deploy staging'
+          fi
+          run="$(gh run view "$DEPLOYMENT_RUN_ID" \
+            --json conclusion,workflowName,headBranch,event)"
+          printf '%s' "$run" | jq -e --arg workflow "$workflow" '
+            .conclusion == "success" and .workflowName == $workflow and
+            .headBranch == "main" and (.event == "workflow_dispatch" or .event == "workflow_call")'
+          mkdir -p deployment-evidence
+          gh run download "$DEPLOYMENT_RUN_ID" \
+            --name "${ENVIRONMENT}-evidence" --dir deployment-evidence
 
       # §8 rule 1. Both inputs are free text on a `workflow_dispatch` form, and the
       # service name reaches a gcloud call that mutates production traffic.
       - name: validate service + revision against strict allowlists
         id: check
         env:
+          BUN_VERSION_FILE: ${{ vars.BUN_VERSION_FILE }}
           SERVICE: ${{ inputs.service }}
           REVISION: ${{ inputs.revision }}
           ENVIRONMENT: ${{ inputs.environment }}
+          DEPLOYMENT_RECEIPT: deployment-evidence/deployment-receipt.json
+          DEPLOYMENT_RUN_ID: ${{ inputs.deployment_run_id }}
           GCP_NONPROD_PROJECT: ${{ vars.GCP_NONPROD_PROJECT }}
+          GCP_PROD_DEPLOYER_SA: ${{ vars.GCP_PROD_DEPLOYER_SA }}
           GCP_PROD_PROJECT: ${{ vars.GCP_PROD_PROJECT }}
           GCP_REGION: ${{ vars.GCP_REGION }}
+          GCP_REGISTRY: ${{ vars.GCP_REGISTRY }}
+          GCP_REGISTRY_HOST: ${{ vars.GCP_REGISTRY_HOST }}
+          GCP_STAGING_DEPLOYER_SA: ${{ vars.GCP_STAGING_DEPLOYER_SA }}
+          GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
         run: bun run deploy/validate-rollback.ts >> "$GITHUB_OUTPUT"
 
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
@@ -74,6 +116,19 @@ jobs:
           create_credentials_file: true
 
       - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      - name: verify receipt image still backs the revision
+        env:
+          EXPECTED_IMAGE: ${{ steps.check.outputs.image }}
+          PROJECT: ${{ steps.check.outputs.project }}
+          REGION: ${{ vars.GCP_REGION }}
+          REVISION: ${{ inputs.revision }}
+        run: |
+          set -euo pipefail
+          actual="$(gcloud run revisions describe "$REVISION" \
+            --project "$PROJECT" --region "$REGION" \
+            --format='value(spec.containers[0].image)')"
+          test "$actual" = "$EXPECTED_IMAGE"
 
       - name: shift traffic to the known-good revision
         run: |

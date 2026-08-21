@@ -1193,10 +1193,7 @@ jobs:
         working-directory: site
         run: bun install --frozen-lockfile
       - name: deployment entry points
-        run: |
-          set -euo pipefail
-          site/node_modules/.bin/tsc -p deploy/tsconfig.json
-          bun test deploy/
+        run: bash deploy/gates.sh
       - name: lint
         run: ./tools/lint.sh .
       - name: format

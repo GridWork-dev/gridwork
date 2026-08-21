@@ -32,7 +32,7 @@ describe("selectServiceKeys", () => {
       "gridwork-site",
     ]);
     expect(selectServiceKeys(manifest, ["site.config.ts"])).toEqual(["gridwork-site"]);
-    expect(selectServiceKeys(manifest, ["README.md"])).toEqual([]);
+    expect(selectServiceKeys(manifest, ["README.md"])).toEqual(["gridwork-site"]);
   });
 
   test("an explicit service bypasses path selection but remains allowlisted", () => {
@@ -40,6 +40,21 @@ describe("selectServiceKeys", () => {
     expect(() => selectServiceKeys(manifest, [], "not-owned")).toThrow(
       "unknown service not-owned",
     );
+    expect(() => selectServiceKeys(manifest, [], "constructor")).toThrow(
+      "unknown service constructor",
+    );
+  });
+
+  test("rebuilds for manifest, Docker context, and root documentation inputs", () => {
+    for (const path of [
+      "deploy/services.json",
+      ".dockerignore",
+      "README.md",
+      "docs/architecture.md",
+      "docs/derivation/reviews/example.md",
+    ]) {
+      expect(selectServiceKeys(manifest, [path])).toContain("gridwork-site");
+    }
   });
 
   test("an absent before revision selects every service for a manual publish", () => {
