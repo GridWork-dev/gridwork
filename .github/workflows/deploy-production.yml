@@ -9,16 +9,6 @@
 # EXPAND migrations only. A contract migration runs in a later release, after the
 # rollback window closes and no compatible old revision remains (doc 07 §6) — this
 # workflow has no path for one and must not grow one.
-#
-# GRIDWORK TEMPLATE DIVERGENCES: the pinned Bun version lives at site/package.json and
-# plan.ts needs GCP_REGISTRY to turn the publish workflow's bare sha256 digest into an
-# immutable Artifact Registry reference. CANARY_TAG is inherited from GITHUB_ENV; using
-# the template's env-context expression would evaluate before that runtime file update
-# and blank it. The Worker has no zero-traffic tag-routing control, and a direct tag URL
-# would bypass the T27 edge path. Because gridwork-site has no migration, the two
-# zero-traffic smoke steps below are public-edge baselines; Cloud Run readiness plus the
-# CI image smoke covers boot, and the final public health check binds the 100% revision
-# to github.sha.
 
 name: deploy production
 
@@ -63,13 +53,14 @@ jobs:
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version-file: site/package.json
+          bun-version-file: ${{ vars.BUN_VERSION_FILE }}
 
       - name: validate inputs against the manifest
         id: plan
         env:
           DIGESTS: ${{ inputs.digests }}
           ENVIRONMENT: production
+          # See deploy-staging.yml — plan.ts cannot build an image reference without it.
           GCP_REGISTRY: ${{ vars.GCP_REGISTRY }}
         run: bun run deploy/plan.ts >> "$GITHUB_OUTPUT"
 
@@ -116,10 +107,17 @@ jobs:
       # §6 step 2: checks that do NOT require the new schema. Running schema-dependent
       # checks here would fail every expand release for the wrong reason and train
       # everyone to ignore this gate.
-      - name: pre-migration public-edge baseline
+      - name: pre-migration boot + origin checks
         env:
           ENVIRONMENT: production
           MODE: pre-migration
+          CANARY_TAG: ${{ env.CANARY_TAG }}
+          # Empty on repos with no Cloudflare Access app. smoke.ts calls the public
+          # hostname through Cloudflare, and an Access-protected hostname answers 302 to
+          # the login page without a service token — indistinguishable from a broken
+          # deploy. Never echo either value.
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
         run: bun run deploy/smoke.ts
 
       # §6 steps 3-4. Update-then-execute, same as staging, same reason. Fail closed:
@@ -145,10 +143,17 @@ jobs:
 
       # §6 step 5: authenticated origin headers, representative read AND write flows.
       # Read-only smoke on a release that changed writes proves nothing.
-      - name: post-migration public-edge baseline
+      - name: smoke the tagged revision
         env:
           ENVIRONMENT: production
           MODE: post-migration
+          CANARY_TAG: ${{ env.CANARY_TAG }}
+          # Empty on repos with no Cloudflare Access app. smoke.ts calls the public
+          # hostname through Cloudflare, and an Access-protected hostname answers 302 to
+          # the login page without a service token — indistinguishable from a broken
+          # deploy. Never echo either value.
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
         run: bun run deploy/smoke.ts
 
       # §6 steps 6-8. Each step observes before the next shift; deploy/observe.ts is the
@@ -169,7 +174,10 @@ jobs:
                 --to-tags "${CANARY_TAG}=${pct}"
             done
             sleep "$HOLD"
-            ENVIRONMENT=production STEP="$pct" bun run deploy/observe.ts
+            ENVIRONMENT=production STEP="$pct" \
+              GCP_PROD_PROJECT="${{ vars.GCP_PROD_PROJECT }}" \
+              GCP_REGION="${{ vars.GCP_REGION }}" \
+              bun run deploy/observe.ts
             echo "::endgroup::"
           done
 
@@ -179,6 +187,12 @@ jobs:
         env:
           ENVIRONMENT: production
           MODE: post-deploy
+          # Empty on repos with no Cloudflare Access app. smoke.ts calls the public
+          # hostname through Cloudflare, and an Access-protected hostname answers 302 to
+          # the login page without a service token — indistinguishable from a broken
+          # deploy. Never echo either value.
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
         run: bun run deploy/smoke.ts
 
       - name: deployment evidence

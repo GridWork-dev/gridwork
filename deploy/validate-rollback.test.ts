@@ -23,83 +23,71 @@ const region = "us-east4";
 const revision = "gridwork-site-00042-abc";
 
 describe("validateRollback", () => {
-  test("accepts an allowlisted service only after the exact revision is described", () => {
-    const calls: string[][] = [];
+  test("selects the target project only after validating the service and revision", () => {
     const result = validateRollback(
       manifest,
       "gridwork-site",
       revision,
       "production",
+      "example-staging-12345",
       project,
       region,
-      (arguments_) => {
-        calls.push(arguments_);
-        return revision;
-      },
     );
 
     expect(result).toEqual({ project });
-    expect(calls).toEqual([
-      [
-        "run",
-        "revisions",
-        "describe",
-        revision,
-        "--project",
-        project,
-        "--region",
-        region,
-        "--format=value(metadata.name)",
-      ],
-    ]);
   });
 
-  test("rejects unowned services and malformed revisions before calling gcloud", () => {
-    const never = () => {
-      throw new Error("gcloud must not run");
-    };
+  test("rejects unowned services and inherited object keys", () => {
     expect(() =>
-      validateRollback(manifest, "other-site", revision, "production", project, region, never),
+      validateRollback(
+        manifest,
+        "other-site",
+        revision,
+        "production",
+        "example-staging-12345",
+        project,
+        region,
+      ),
     ).toThrow("unknown service other-site");
+    expect(() =>
+      validateRollback(
+        manifest,
+        "constructor",
+        "constructor-00042-abc",
+        "production",
+        "example-staging-12345",
+        project,
+        region,
+      ),
+    ).toThrow("unknown service constructor");
+  });
+
+  test("rejects malformed revisions", () => {
     expect(() =>
       validateRollback(
         manifest,
         "gridwork-site",
         "other-site-00042-abc",
         "production",
+        "example-staging-12345",
         project,
         region,
-        never,
       ),
     ).toThrow("REVISION must belong to gridwork-site");
   });
 
-  test("fails closed when the revision does not exist", () => {
-    expect(() =>
-      validateRollback(
-        manifest,
-        "gridwork-site",
-        revision,
-        "staging",
-        project,
-        region,
-        () => {
-          throw new Error("not found");
-        },
-      ),
-    ).toThrow(`revision ${revision} does not exist`);
-  });
-
   test("rejects invalid environment, project, and region inputs", () => {
-    const exists = () => revision;
     expect(() =>
-      validateRollback(manifest, "gridwork-site", revision, "preview", project, region, exists),
+      validateRollback(manifest, "gridwork-site", revision, "preview", project, project, region),
     ).toThrow("ENVIRONMENT must be staging or production");
     expect(() =>
-      validateRollback(manifest, "gridwork-site", revision, "production", "bad", region, exists),
-    ).toThrow("GCP_PROJECT is invalid");
+      validateRollback(manifest, "gridwork-site", revision, "production", "bad", project, region),
+    ).toThrow("GCP_NONPROD_PROJECT is invalid");
     expect(() =>
-      validateRollback(manifest, "gridwork-site", revision, "production", project, "bad", exists),
+      validateRollback(manifest, "gridwork-site", revision, "production", project, "bad", region),
+    ).toThrow("GCP_PROD_PROJECT is invalid");
+    expect(() =>
+      validateRollback(manifest, "gridwork-site", revision, "production", project, project, "bad"),
     ).toThrow("GCP_REGION is invalid");
   });
 });

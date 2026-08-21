@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { runSmoke, type SmokeConfig } from "./smoke";
+import { readSmokeConfig, runSmoke, type SmokeConfig } from "./smoke";
 
 const sha = "a".repeat(40);
 const securityHeaders = {
@@ -32,6 +32,23 @@ function config(overrides: Partial<SmokeConfig> = {}): SmokeConfig {
 }
 
 describe("public deployment smoke", () => {
+  test("defaults a staging template invocation to post-deploy mode", () => {
+    expect(
+      readSmokeConfig({
+        ENVIRONMENT: "staging",
+        CF_ACCESS_CLIENT_ID: "client-id-name",
+        CF_ACCESS_CLIENT_SECRET: "secret-value",
+      }),
+    ).toEqual({
+      environment: "staging",
+      mode: "post-deploy",
+      canaryTag: undefined,
+      expectedSha: undefined,
+      accessClientId: "client-id-name",
+      accessClientSecret: "secret-value",
+    });
+  });
+
   test("checks health and a page through the production Cloudflare hostname", async () => {
     const calls: Array<{ url: string; headers: Headers }> = [];
     await runSmoke(config(), async (url, init) => {

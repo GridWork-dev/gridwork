@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   evaluateObservation,
   observationUrl,
+  verifyTrafficAllocation,
   runObservation,
   type ObservationSample,
 } from "./observe";
@@ -69,4 +70,42 @@ describe("observation gate", () => {
       "https://gridwork.sh/health?observe=5-3",
     ]);
   });
+});
+
+test("verifies the canary percentage in the requested project and region", () => {
+  const calls: string[][] = [];
+  verifyTrafficAllocation(
+    ["gridwork-site"],
+    "5",
+    "r123",
+    "gridwork-prod-99d2",
+    "us-east4",
+    (arguments_) => {
+      calls.push(arguments_);
+      return JSON.stringify({ status: { traffic: [{ tag: "r123", percent: 5 }] } });
+    },
+  );
+  expect(calls).toEqual([
+    [
+      "run",
+      "services",
+      "describe",
+      "gridwork-site",
+      "--project",
+      "gridwork-prod-99d2",
+      "--region",
+      "us-east4",
+      "--format=json",
+    ],
+  ]);
+  expect(() =>
+    verifyTrafficAllocation(
+      ["gridwork-site"],
+      "25",
+      "r123",
+      "gridwork-prod-99d2",
+      "us-east4",
+      () => JSON.stringify({ status: { traffic: [{ tag: "r123", percent: 5 }] } }),
+    ),
+  ).toThrow("gridwork-site canary traffic is 5%, expected 25%");
 });

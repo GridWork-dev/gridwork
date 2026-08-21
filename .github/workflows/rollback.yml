@@ -10,11 +10,6 @@
 #
 # It is also useless once the database has moved past compatibility. Rollback is safe
 # only while the old revision can still read what the new one wrote.
-#
-# GRIDWORK TEMPLATE DIVERGENCES: the pinned Bun version lives at site/package.json;
-# revision validation needs the selected target project and region; and that existence
-# check must run after OIDC auth/setup-gcloud (the template places it before credentials,
-# so a clean GitHub runner can never prove a real revision).
 
 name: rollback
 
@@ -57,7 +52,20 @@ jobs:
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version-file: site/package.json
+          bun-version-file: ${{ vars.BUN_VERSION_FILE }}
+
+      # §8 rule 1. Both inputs are free text on a `workflow_dispatch` form, and the
+      # service name reaches a gcloud call that mutates production traffic.
+      - name: validate service + revision against strict allowlists
+        id: check
+        env:
+          SERVICE: ${{ inputs.service }}
+          REVISION: ${{ inputs.revision }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          GCP_NONPROD_PROJECT: ${{ vars.GCP_NONPROD_PROJECT }}
+          GCP_PROD_PROJECT: ${{ vars.GCP_PROD_PROJECT }}
+          GCP_REGION: ${{ vars.GCP_REGION }}
+        run: bun run deploy/validate-rollback.ts >> "$GITHUB_OUTPUT"
 
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
@@ -66,19 +74,6 @@ jobs:
           create_credentials_file: true
 
       - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
-
-      # §8 rule 1. Both inputs are free text on a `workflow_dispatch` form, and the
-      # service name reaches a gcloud call that mutates production traffic. The script
-      # also describes the revision, so auth/setup-gcloud must precede this read.
-      - name: validate service + revision against strict allowlists
-        id: check
-        env:
-          SERVICE: ${{ inputs.service }}
-          REVISION: ${{ inputs.revision }}
-          ENVIRONMENT: ${{ inputs.environment }}
-          GCP_PROJECT: ${{ inputs.environment == 'production' && vars.GCP_PROD_PROJECT || vars.GCP_NONPROD_PROJECT }}
-          GCP_REGION: ${{ vars.GCP_REGION }}
-        run: bun run deploy/validate-rollback.ts >> "$GITHUB_OUTPUT"
 
       - name: shift traffic to the known-good revision
         run: |
@@ -96,6 +91,12 @@ jobs:
           ENVIRONMENT: ${{ inputs.environment }}
           MODE: rollback
           SERVICE: ${{ inputs.service }}
+          # Empty on repos with no Cloudflare Access app. smoke.ts calls the public
+          # hostname through Cloudflare, and an Access-protected hostname answers 302 to
+          # the login page without a service token — indistinguishable from a broken
+          # deploy. Never echo either value.
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
         run: bun run deploy/smoke.ts
 
       # §8 rule 5. Nothing here deletes the failed revision: it is the diagnosis.

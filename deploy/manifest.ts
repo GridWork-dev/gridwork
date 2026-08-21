@@ -154,6 +154,7 @@ export async function readManifest(): Promise<ServiceManifest> {
 }
 
 export function requireService(manifest: ServiceManifest, key: string): ServiceConfig {
+  if (!Object.hasOwn(manifest.services, key)) throw new Error(`unknown service ${key}`);
   const service = manifest.services[key];
   if (!service) throw new Error(`unknown service ${key}`);
   return service;

@@ -11,11 +11,6 @@
 # way to select an image ad hoc, so an execute against a stale Job definition silently
 # runs last release's migration and reports success (doc 07 §5, and the linked gcloud
 # reference). That is the failure this ordering exists to prevent.
-#
-# GRIDWORK TEMPLATE DIVERGENCES: the pinned Bun version lives at site/package.json;
-# plan.ts needs the repository variable that owns the image prefix; and the staging
-# hostname is Access-protected, so its public-path smoke consumes the two named GitHub
-# environment secrets below. No secret value belongs in this file or its logs.
 
 name: deploy staging
 
@@ -54,7 +49,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version-file: site/package.json
+          bun-version-file: ${{ vars.BUN_VERSION_FILE }}
 
       # Every service key and every digest is validated against the repo's own manifest
       # before a single gcloud call. doc 07 §8 rule 1 asks for strict allowlists on
@@ -65,6 +60,9 @@ jobs:
         env:
           DIGESTS: ${{ inputs.digests }}
           ENVIRONMENT: staging
+          # plan.ts emits fully-qualified image references and cannot build one without
+          # the registry prefix. Omitted in the first cut of this template; caught by the
+          # gridwork adoption, which had to add it locally to make plan.ts implementable.
           GCP_REGISTRY: ${{ vars.GCP_REGISTRY }}
         run: bun run deploy/plan.ts >> "$GITHUB_OUTPUT"
 
@@ -117,7 +115,10 @@ jobs:
       - name: origin + Access bypass suite
         env:
           ENVIRONMENT: staging
-          MODE: post-deploy
+          # Empty on repos with no Cloudflare Access app. smoke.ts calls the public
+          # hostname through Cloudflare, and an Access-protected hostname answers 302 to
+          # the login page without a service token — indistinguishable from a broken
+          # deploy. Never echo either value.
           CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
           CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
         run: bun run deploy/smoke.ts

@@ -26,6 +26,25 @@ export type SmokeConfig = {
   accessClientSecret?: string | undefined;
 };
 
+type EnvironmentSource = Readonly<Record<string, string | undefined>>;
+
+export function readSmokeConfig(environment: EnvironmentSource): SmokeConfig {
+  const deploymentEnvironment = environment["ENVIRONMENT"]?.trim() ?? "";
+  const configuredMode = environment["MODE"]?.trim();
+  const mode = configuredMode || (deploymentEnvironment === "staging" ? "post-deploy" : "");
+  return {
+    environment: deploymentEnvironment,
+    mode,
+    canaryTag: environment["CANARY_TAG"]?.trim() || undefined,
+    expectedSha:
+      mode === "post-deploy"
+        ? environment["EXPECTED_SHA"]?.trim() || environment["GITHUB_SHA"]?.trim()
+        : undefined,
+    accessClientId: environment["CF_ACCESS_CLIENT_ID"],
+    accessClientSecret: environment["CF_ACCESS_CLIENT_SECRET"],
+  };
+}
+
 function validateCredential(value: string | undefined, label: string): string {
   const credential = value?.trim() ?? "";
   if (
@@ -136,21 +155,11 @@ export async function runSmoke(config: SmokeConfig, fetcher: Fetcher = fetch): P
 }
 
 async function main(): Promise<void> {
-  const environment = process.env["ENVIRONMENT"]?.trim();
-  const mode = process.env["MODE"]?.trim();
-  if (!environment) throw new Error("ENVIRONMENT is required");
-  if (!mode) throw new Error("MODE is required");
-
-  const expectedSha = mode === "post-deploy" ? process.env["GITHUB_SHA"]?.trim() : undefined;
-  await runSmoke({
-    environment,
-    mode,
-    canaryTag: process.env["CANARY_TAG"]?.trim(),
-    expectedSha,
-    accessClientId: process.env["CF_ACCESS_CLIENT_ID"],
-    accessClientSecret: process.env["CF_ACCESS_CLIENT_SECRET"],
-  });
-  process.stdout.write(`smoke environment=${environment} mode=${mode} passed\n`);
+  const config = readSmokeConfig(process.env);
+  if (!config.environment) throw new Error("ENVIRONMENT is required");
+  if (!config.mode) throw new Error("MODE is required");
+  await runSmoke(config);
+  process.stdout.write(`smoke environment=${config.environment} mode=${config.mode} passed\n`);
 }
 
 if (import.meta.main) {
