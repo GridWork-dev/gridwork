@@ -1,0 +1,102 @@
+import { describe, expect, test } from "bun:test";
+
+import { runSmoke, type SmokeConfig } from "./smoke";
+
+const sha = "a".repeat(40);
+const securityHeaders = {
+  "strict-transport-security": "max-age=31536000",
+  "x-content-type-options": "nosniff",
+  "x-frame-options": "DENY",
+  "referrer-policy": "strict-origin-when-cross-origin",
+  "content-security-policy": "default-src 'self'",
+};
+
+function responseFor(url: string | URL | Request, shaValue = sha): Response {
+  const parsed = new URL(String(url));
+  if (parsed.pathname === "/health") {
+    return Response.json(
+      { status: "ok", sha: shaValue },
+      { headers: { ...securityHeaders, "cache-control": "no-store" } },
+    );
+  }
+  return new Response("ok", { status: 200, headers: securityHeaders });
+}
+
+function config(overrides: Partial<SmokeConfig> = {}): SmokeConfig {
+  return {
+    environment: "production",
+    mode: "post-deploy",
+    expectedSha: sha,
+    ...overrides,
+  };
+}
+
+describe("public deployment smoke", () => {
+  test("checks health and a page through the production Cloudflare hostname", async () => {
+    const calls: Array<{ url: string; headers: Headers }> = [];
+    await runSmoke(config(), async (url, init) => {
+      calls.push({ url: String(url), headers: new Headers(init?.headers) });
+      return responseFor(url);
+    });
+
+    expect(calls.map((call) => call.url)).toEqual([
+      "https://gridwork.sh/health",
+      "https://gridwork.sh/",
+    ]);
+    for (const call of calls) {
+      expect(call.url.includes("run.app")).toBe(false);
+      expect(call.headers.has("x-gridwork-origin-secret")).toBe(false);
+    }
+  });
+
+  test("sends Access service credentials only to the staging public hostname", async () => {
+    const calls: Array<{ url: string; headers: Headers }> = [];
+    await runSmoke(
+      config({
+        environment: "staging",
+        accessClientId: "client-id-name",
+        accessClientSecret: "secret-value",
+      }),
+      async (url, init) => {
+        calls.push({ url: String(url), headers: new Headers(init?.headers) });
+        return responseFor(url);
+      },
+    );
+
+    expect(calls[0]?.url).toBe("https://gridwork.gwstg.dev/health");
+    expect(calls[0]?.headers.get("cf-access-client-id")).toBe("client-id-name");
+    expect(calls[0]?.headers.get("cf-access-client-secret")).toBe("secret-value");
+    await expect(
+      runSmoke(config({ environment: "staging", accessClientId: undefined })),
+    ).rejects.toThrow("staging smoke requires Cloudflare Access service credentials");
+  });
+
+  test("fails on status, provenance, cache, or browser-header regressions", async () => {
+    await expect(
+      runSmoke(config(), async () => new Response("bad", { status: 503 })),
+    ).rejects.toThrow("public health returned 503");
+    await expect(
+      runSmoke(config(), async (url) => responseFor(url, "b".repeat(40))),
+    ).rejects.toThrow("public health reported an unexpected revision");
+    await expect(
+      runSmoke(config({ expectedSha: undefined }), async (url) => {
+        const response = responseFor(url);
+        response.headers.delete("strict-transport-security");
+        return response;
+      }),
+    ).rejects.toThrow("missing strict-transport-security");
+  });
+
+  test("requires a rollout tag for the pre/post-migration workflow modes", async () => {
+    await expect(
+      runSmoke(config({ mode: "pre-migration", canaryTag: undefined }), async (url) =>
+        responseFor(url),
+      ),
+    ).rejects.toThrow("CANARY_TAG is required");
+    await expect(
+      runSmoke(config({ mode: "pre-migration", canaryTag: "bad tag" }), async (url) =>
+        responseFor(url),
+      ),
+    ).rejects.toThrow("CANARY_TAG is invalid");
+  });
+});

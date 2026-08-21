@@ -1,0 +1,21 @@
+{
+  "_source": "gridwork-infra/manifests/services.toml (doc 07 §4) — regenerate, never hand-edit",
+  "repository": "GridWork-dev/gridwork",
+  "services": {
+    "gridwork-site": {
+      "dockerfile": "site/Dockerfile",
+      "build_context": ".",
+      "watched_paths": [
+        "site/**"
+      ],
+      "healthcheck": "/health",
+      "hostnames": [
+        "gridwork.sh"
+      ],
+      "runtime": "cloud-run-service",
+      "origin_secret_mode": "GRIDWORK_ORIGIN_SECRET_MODE",
+      "origin_secret_current": "GRIDWORK_ORIGIN_SECRET_CURRENT",
+      "origin_secret_next": "GRIDWORK_ORIGIN_SECRET_NEXT"
+    }
+  }
+}
