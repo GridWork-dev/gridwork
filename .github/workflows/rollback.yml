@@ -1,0 +1,116 @@
+# T28 reference: application rollback (doc 07 §8).
+#
+# COPY VERBATIM into each app repo as `.github/workflows/rollback.yml`.
+#
+# Scope, stated plainly because the limit is the safety property: this shifts TRAFFIC to
+# a known-good revision. It does not reverse a schema change and it never will —
+# destructive schema reversal is not automated (doc 07 §8). If a release wrote
+# semantically bad data, this workflow is the wrong tool and the separately approved
+# database recovery procedure is the right one.
+#
+# It is also useless once the database has moved past compatibility. Rollback is safe
+# only while the old revision can still read what the new one wrote.
+#
+# GRIDWORK TEMPLATE DIVERGENCES: the pinned Bun version lives at site/package.json;
+# revision validation needs the selected target project and region; and that existence
+# check must run after OIDC auth/setup-gcloud (the template places it before credentials,
+# so a clean GitHub runner can never prove a real revision).
+
+name: rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: Service key to roll back (must appear in deploy/services.json)
+        required: true
+        type: string
+      revision:
+        description: Target revision name (from a prior run's rollback-revisions.txt)
+        required: true
+        type: string
+      environment:
+        required: true
+        default: production
+        type: choice
+        options: [staging, production]
+
+# §8 rule 2: the SAME concurrency namespace the deploy workflows use, so a rollback and
+# a deploy can never interleave their traffic mutations. Two groups would defeat this.
+concurrency:
+  group: deploy-${{ inputs.environment }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: site/package.json
+
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ inputs.environment == 'production' && vars.GCP_PROD_DEPLOYER_SA || vars.GCP_STAGING_DEPLOYER_SA }}
+          create_credentials_file: true
+
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      # §8 rule 1. Both inputs are free text on a `workflow_dispatch` form, and the
+      # service name reaches a gcloud call that mutates production traffic. The script
+      # also describes the revision, so auth/setup-gcloud must precede this read.
+      - name: validate service + revision against strict allowlists
+        id: check
+        env:
+          SERVICE: ${{ inputs.service }}
+          REVISION: ${{ inputs.revision }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          GCP_PROJECT: ${{ inputs.environment == 'production' && vars.GCP_PROD_PROJECT || vars.GCP_NONPROD_PROJECT }}
+          GCP_REGION: ${{ vars.GCP_REGION }}
+        run: bun run deploy/validate-rollback.ts >> "$GITHUB_OUTPUT"
+
+      - name: shift traffic to the known-good revision
+        run: |
+          set -euo pipefail
+          gcloud run services update-traffic "${{ inputs.service }}" \
+            --project "${{ steps.check.outputs.project }}" \
+            --region "${{ vars.GCP_REGION }}" \
+            --to-revisions "${{ inputs.revision }}=100"
+
+      # §8 rule 4: verify through Cloudflare, not against the run.app origin. The origin
+      # gate rejects a direct request by design, so a direct check cannot tell a healthy
+      # rollback from a broken one — and the public path is what the user is on.
+      - name: verify the public flow through Cloudflare
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          MODE: rollback
+          SERVICE: ${{ inputs.service }}
+        run: bun run deploy/smoke.ts
+
+      # §8 rule 5. Nothing here deletes the failed revision: it is the diagnosis.
+      - name: rollback evidence
+        if: always()
+        run: |
+          set -euo pipefail
+          gcloud run services describe "${{ inputs.service }}" \
+            --project "${{ steps.check.outputs.project }}" \
+            --region "${{ vars.GCP_REGION }}" \
+            --format json > rollback-state.json
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: rollback-evidence-${{ inputs.service }}
+          path: rollback-state.json
+          if-no-files-found: error

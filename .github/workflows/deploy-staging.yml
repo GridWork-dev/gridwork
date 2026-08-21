@@ -1,0 +1,143 @@
+# T28 reference: stable staging flow (doc 07 §5).
+#
+# COPY VERBATIM into each app repo as `.github/workflows/deploy-staging.yml`.
+#
+# The ordering here is the whole point and it is not stylistic:
+#
+#   publish digest -> update the migration Job TO that digest -> execute the Job
+#   -> deploy the same digest to the services -> smoke -> record evidence
+#
+# The Job definition is updated BEFORE it is executed. `gcloud run jobs execute` has no
+# way to select an image ad hoc, so an execute against a stale Job definition silently
+# runs last release's migration and reports success (doc 07 §5, and the linked gcloud
+# reference). That is the failure this ordering exists to prevent.
+#
+# GRIDWORK TEMPLATE DIVERGENCES: the pinned Bun version lives at site/package.json;
+# plan.ts needs the repository variable that owns the image prefix; and the staging
+# hostname is Access-protected, so its public-path smoke consumes the two named GitHub
+# environment secrets below. No secret value belongs in this file or its logs.
+
+name: deploy staging
+
+on:
+  workflow_dispatch:
+    inputs:
+      digests:
+        description: 'JSON: {"<service>": "sha256:..."} — from a publish run'
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      digests:
+        required: true
+        type: string
+
+# doc 07 §8 rule 2: serialize against any other deploy or rollback touching this
+# environment. Two concurrent traffic mutations produce a state neither run intended.
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: staging
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: site/package.json
+
+      # Every service key and every digest is validated against the repo's own manifest
+      # before a single gcloud call. doc 07 §8 rule 1 asks for strict allowlists on
+      # rollback inputs; the same reasoning applies to a deploy — `gcloud run services
+      # update` will cheerfully point a service at any digest string you hand it.
+      - name: validate inputs against the manifest
+        id: plan
+        env:
+          DIGESTS: ${{ inputs.digests }}
+          ENVIRONMENT: staging
+          GCP_REGISTRY: ${{ vars.GCP_REGISTRY }}
+        run: bun run deploy/plan.ts >> "$GITHUB_OUTPUT"
+
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_STAGING_DEPLOYER_SA }}
+          create_credentials_file: true
+
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      # Step 1 of §5. The direct Neon URL, never the pooled one: a migration takes
+      # session-scoped locks and advisory state that a transaction pooler discards
+      # between statements (doc 02, doc 01 §6).
+      - name: point the migration Job at this digest
+        if: steps.plan.outputs.migration_job != ''
+        run: |
+          set -euo pipefail
+          gcloud run jobs update "${{ steps.plan.outputs.migration_job }}" \
+            --project "${{ vars.GCP_NONPROD_PROJECT }}" \
+            --region "${{ vars.GCP_REGION }}" \
+            --image "${{ steps.plan.outputs.migration_image }}"
+
+      - name: execute the migration Job
+        if: steps.plan.outputs.migration_job != ''
+        run: |
+          set -euo pipefail
+          gcloud run jobs execute "${{ steps.plan.outputs.migration_job }}" \
+            --project "${{ vars.GCP_NONPROD_PROJECT }}" \
+            --region "${{ vars.GCP_REGION }}" \
+            --wait
+
+      - name: deploy each service to its digest
+        id: deploy
+        run: |
+          set -euo pipefail
+          echo '${{ steps.plan.outputs.services }}' | jq -r '.[] | "\(.service) \(.image)"' |
+          while read -r svc image; do
+            echo "::group::$svc"
+            gcloud run services update "$svc" \
+              --project "${{ vars.GCP_NONPROD_PROJECT }}" \
+              --region "${{ vars.GCP_REGION }}" \
+              --image "$image"
+            echo "::endgroup::"
+          done
+
+      # doc 04 §4 + the T30 bypass suite. A staging deploy that does not re-prove the
+      # origin gate is how the gate silently regresses: nothing else in the pipeline
+      # touches it, and the first place you would notice is production.
+      - name: origin + Access bypass suite
+        env:
+          ENVIRONMENT: staging
+          MODE: post-deploy
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: bun run deploy/smoke.ts
+
+      - name: promotion evidence
+        run: |
+          set -euo pipefail
+          cat > staging-evidence.json <<JSON
+          {
+            "environment": "staging",
+            "commit": "${{ github.sha }}",
+            "run_id": "${{ github.run_id }}",
+            "digests": ${{ toJSON(inputs.digests) }},
+            "migration_job": "${{ steps.plan.outputs.migration_job }}",
+            "services": ${{ steps.plan.outputs.services }}
+          }
+          JSON
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: staging-evidence
+          path: staging-evidence.json
+          if-no-files-found: error

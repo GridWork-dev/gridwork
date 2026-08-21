@@ -1,0 +1,205 @@
+# T28 reference: production rollout (doc 07 §6, evidence §11).
+#
+# COPY VERBATIM into each app repo as `.github/workflows/deploy-production.yml`.
+#
+# Doc 07 §6 in one line: "A 'canary' that jumps from 0% to 100% is not a canary." The
+# progression below is 0 -> 5 -> 25 -> 100 with an observation hold at each step, and the
+# hold times are workflow inputs because they are policy, not physics.
+#
+# EXPAND migrations only. A contract migration runs in a later release, after the
+# rollback window closes and no compatible old revision remains (doc 07 §6) — this
+# workflow has no path for one and must not grow one.
+#
+# GRIDWORK TEMPLATE DIVERGENCES: the pinned Bun version lives at site/package.json and
+# plan.ts needs GCP_REGISTRY to turn the publish workflow's bare sha256 digest into an
+# immutable Artifact Registry reference. CANARY_TAG is inherited from GITHUB_ENV; using
+# the template's env-context expression would evaluate before that runtime file update
+# and blank it. The Worker has no zero-traffic tag-routing control, and a direct tag URL
+# would bypass the T27 edge path. Because gridwork-site has no migration, the two
+# zero-traffic smoke steps below are public-edge baselines; Cloud Run readiness plus the
+# CI image smoke covers boot, and the final public health check binds the 100% revision
+# to github.sha.
+
+name: deploy production
+
+on:
+  workflow_dispatch:
+    inputs:
+      digests:
+        description: 'JSON: {"<service>": "sha256:..."} — the digests staging proved'
+        required: true
+        type: string
+      hold_seconds:
+        description: Observation hold at each traffic step
+        required: false
+        default: "300"
+        type: string
+      skip_migration:
+        description: This release ships no schema change
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  rollout:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    # The GitHub environment is the operator gate (doc 07 §11: "operator gate receipt
+    # where the change affects secrets, production data or migration"). Its reviewers and
+    # its deployment-branch policy are the receipt.
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: site/package.json
+
+      - name: validate inputs against the manifest
+        id: plan
+        env:
+          DIGESTS: ${{ inputs.digests }}
+          ENVIRONMENT: production
+          GCP_REGISTRY: ${{ vars.GCP_REGISTRY }}
+        run: bun run deploy/plan.ts >> "$GITHUB_OUTPUT"
+
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_PROD_DEPLOYER_SA }}
+          create_credentials_file: true
+
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      # Recorded BEFORE anything changes. doc 07 §11 wants the rollback revision in the
+      # evidence, and the only moment it is knowable is before the new revision exists.
+      - name: record the rollback revision
+        id: previous
+        run: |
+          set -euo pipefail
+          echo '${{ steps.plan.outputs.services }}' | jq -r '.[].service' |
+          while read -r svc; do
+            rev="$(gcloud run services describe "$svc" \
+              --project "${{ vars.GCP_PROD_PROJECT }}" \
+              --region "${{ vars.GCP_REGION }}" \
+              --format 'value(status.traffic[0].revisionName)')"
+            printf '%s %s\n' "$svc" "$rev"
+          done | tee rollback-revisions.txt
+
+      # §6 step 1: zero traffic, tagged. The revision exists and is addressable by tag,
+      # and no user has reached it.
+      - name: deploy zero-traffic tagged revisions
+        run: |
+          set -euo pipefail
+          tag="r${GITHUB_RUN_ID}"
+          echo "CANARY_TAG=$tag" >> "$GITHUB_ENV"
+          echo '${{ steps.plan.outputs.services }}' | jq -r '.[] | "\(.service) \(.image)"' |
+          while read -r svc image; do
+            gcloud run services update "$svc" \
+              --project "${{ vars.GCP_PROD_PROJECT }}" \
+              --region "${{ vars.GCP_REGION }}" \
+              --image "$image" \
+              --tag "$tag" \
+              --no-traffic
+          done
+
+      # §6 step 2: checks that do NOT require the new schema. Running schema-dependent
+      # checks here would fail every expand release for the wrong reason and train
+      # everyone to ignore this gate.
+      - name: pre-migration public-edge baseline
+        env:
+          ENVIRONMENT: production
+          MODE: pre-migration
+        run: bun run deploy/smoke.ts
+
+      # §6 steps 3-4. Update-then-execute, same as staging, same reason. Fail closed:
+      # a partially applied expand migration with traffic still on the old revision is
+      # recoverable; the same migration with traffic already shifted is not.
+      - name: point the migration Job at this digest
+        if: inputs.skip_migration != true && steps.plan.outputs.migration_job != ''
+        run: |
+          set -euo pipefail
+          gcloud run jobs update "${{ steps.plan.outputs.migration_job }}" \
+            --project "${{ vars.GCP_PROD_PROJECT }}" \
+            --region "${{ vars.GCP_REGION }}" \
+            --image "${{ steps.plan.outputs.migration_image }}"
+
+      - name: execute the expand migration
+        if: inputs.skip_migration != true && steps.plan.outputs.migration_job != ''
+        run: |
+          set -euo pipefail
+          gcloud run jobs execute "${{ steps.plan.outputs.migration_job }}" \
+            --project "${{ vars.GCP_PROD_PROJECT }}" \
+            --region "${{ vars.GCP_REGION }}" \
+            --wait
+
+      # §6 step 5: authenticated origin headers, representative read AND write flows.
+      # Read-only smoke on a release that changed writes proves nothing.
+      - name: post-migration public-edge baseline
+        env:
+          ENVIRONMENT: production
+          MODE: post-migration
+        run: bun run deploy/smoke.ts
+
+      # §6 steps 6-8. Each step observes before the next shift; deploy/observe.ts is the
+      # gate and it must exit non-zero on a breach, not warn. An observation step that
+      # cannot fail is decoration.
+      - name: progressive traffic shift
+        env:
+          HOLD: ${{ inputs.hold_seconds }}
+        run: |
+          set -euo pipefail
+          for pct in 5 25 100; do
+            echo "::group::shift to ${pct}%"
+            echo '${{ steps.plan.outputs.services }}' | jq -r '.[].service' |
+            while read -r svc; do
+              gcloud run services update-traffic "$svc" \
+                --project "${{ vars.GCP_PROD_PROJECT }}" \
+                --region "${{ vars.GCP_REGION }}" \
+                --to-tags "${CANARY_TAG}=${pct}"
+            done
+            sleep "$HOLD"
+            ENVIRONMENT=production STEP="$pct" bun run deploy/observe.ts
+            echo "::endgroup::"
+          done
+
+      # §6 step 9. The previous revision is retained deliberately — `update-traffic` does
+      # not delete it, and nothing here should. It is the rollback target.
+      - name: post-deploy synthetic flows
+        env:
+          ENVIRONMENT: production
+          MODE: post-deploy
+        run: bun run deploy/smoke.ts
+
+      - name: deployment evidence
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg commit "${{ github.sha }}" \
+            --arg run_id "${{ github.run_id }}" \
+            --arg tag "${CANARY_TAG}" \
+            --argjson services '${{ steps.plan.outputs.services }}' \
+            --arg migration "${{ inputs.skip_migration && 'skipped' || steps.plan.outputs.migration_job }}" \
+            --rawfile rollback rollback-revisions.txt \
+            '{environment:"production", commit:$commit, run_id:$run_id, canary_tag:$tag,
+              services:$services, migration:$migration, rollback_revisions:$rollback,
+              traffic_progression:[0,5,25,100]}' > production-evidence.json
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: production-evidence
+          path: |
+            production-evidence.json
+            rollback-revisions.txt
+          if-no-files-found: error

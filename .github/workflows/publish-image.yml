@@ -1,0 +1,247 @@
+# T28 reference: image publication (doc 07 §3 + §4).
+#
+# COPY THIS FILE VERBATIM into each app repo as `.github/workflows/publish-image.yml`.
+# Everything repo-specific is a variable or lives in `deploy/services.json`, so the four
+# copies stay byte-identical and drift is detectable by comparing hashes. If you find
+# yourself editing the body for one repo, that is a bug in this template — fix it here.
+#
+# What it is NOT: a deployer. Publishing and deploying are separate identities (doc 07
+# §2) and separate workflows on purpose. This job may write to Artifact Registry and
+# nothing else; it holds no Cloud Run permission at all.
+#
+# GRIDWORK TEMPLATE DIVERGENCE: this repository deliberately has no root package.json.
+# Its pinned Bun version and JavaScript gates live under site/, while the house lint
+# wrapper runs from the repository root. Keep the paths below aligned with ci.yml.
+
+name: publish image
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      service:
+        description: "Single service key to publish; default is every service this repo owns"
+        required: false
+        type: string
+  workflow_call:
+    inputs:
+      service:
+        required: false
+        type: string
+    outputs:
+      digests:
+        description: JSON object mapping service key to the published image digest
+        value: ${{ jobs.collect.outputs.digests }}
+
+# doc 07 §1: never two publishes of the same ref at once — the second would race the
+# first's provenance attestation onto a digest it did not build.
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # Which services does this push actually change? `watched_paths` in the canonical
+  # manifest answers exactly that question (doc 07 §4), so it is the matrix source —
+  # never a hand-maintained list that drifts from the manifest the review approved.
+  select:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+      any: ${{ steps.pick.outputs.any }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: site/package.json
+
+      - id: pick
+        env:
+          ONLY: ${{ inputs.service }}
+          BEFORE: ${{ github.event.before }}
+        run: bun run deploy/select-services.ts >> "$GITHUB_OUTPUT"
+
+  publish:
+    needs: select
+    if: needs.select.outputs.any == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.select.outputs.matrix) }}
+    permissions:
+      contents: read
+      id-token: write # doc 07 §1 rule 3: OIDC/WIF only, never a JSON key
+      attestations: write # doc 07 §4: provenance attestation on the published digest
+    steps:
+      # doc 07 §3: a fork PR gets nothing. This workflow is push/dispatch-only so a fork
+      # cannot reach it, but say so out loud rather than relying on the trigger list
+      # staying that way — the failure mode of a widened trigger is silent credential
+      # exposure, and this check costs one step.
+      - name: refuse a fork ref
+        if: github.event.pull_request.head.repo.fork == true
+        run: |
+          echo "::error::fork refs never publish images (doc 07 §3)"
+          exit 1
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: site/package.json
+
+      - name: resolve build inputs
+        id: svc
+        env:
+          SERVICE: ${{ matrix.service }}
+        run: bun run deploy/service-inputs.ts >> "$GITHUB_OUTPUT"
+
+      # doc 07 §3: lint, typecheck, tests, and an image that builds — before anything is
+      # pushed anywhere. A digest that was never tested is worse than no digest, because
+      # the rollback ladder will happily promote it.
+      - name: install
+        run: bun install --frozen-lockfile
+        working-directory: site
+
+      - name: gates
+        run: |
+          set -euo pipefail
+          ./tools/lint.sh .
+          bun run --cwd site typecheck
+          site/node_modules/.bin/tsc -p deploy/tsconfig.json
+          bun run --cwd site test
+          bun test deploy/
+
+      - id: auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_IMAGE_PUBLISHER_SA }}
+          token_format: access_token
+          # doc 07 §4: the generated credential file must never reach a Docker context.
+          # `create_credentials_file: false` is the mechanical guarantee; .dockerignore
+          # entries are the belt, this is the braces.
+          create_credentials_file: false
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ vars.GCP_REGISTRY_HOST }}
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.access_token }}
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      # No `latest`. Doc 07 §4: human-readable tags may carry the full SHA, but nothing
+      # in a deploy or a rollback ever resolves a tag — they consume the digest this step
+      # emits. A floating tag in a rollback path is how you roll back to the thing you
+      # were trying to escape.
+      - name: build and push by digest
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: ${{ steps.svc.outputs.build_context }}
+          file: ${{ steps.svc.outputs.dockerfile }}
+          push: true
+          provenance: mode=max
+          sbom: true
+          tags: ${{ vars.GCP_REGISTRY }}/${{ matrix.service }}:${{ github.sha }}
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+      - name: attest provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ vars.GCP_REGISTRY }}/${{ matrix.service }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: sbom
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          image: ${{ vars.GCP_REGISTRY }}/${{ matrix.service }}@${{ steps.build.outputs.digest }}
+          artifact-name: sbom-${{ matrix.service }}.spdx.json
+          output-file: sbom-${{ matrix.service }}.spdx.json
+
+      - name: vulnerability scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ vars.GCP_REGISTRY }}/${{ matrix.service }}@${{ steps.build.outputs.digest }}
+          format: sarif
+          output: trivy-${{ matrix.service }}.sarif
+          # Report, do not gate — a scan that blocks every publish on a base-image CVE
+          # with no fix available gets disabled within a week, and a disabled scan is
+          # worth less than a recorded one. Gating belongs at the deploy picker, against
+          # a policy that names which severities actually stop a release.
+          exit-code: "0"
+          severity: CRITICAL,HIGH
+
+      # doc 07 §11: the evidence IS the deliverable. A deploy that cannot show its
+      # digest, its tests and its scan is not a deploy you can reason about at 3am.
+      - name: source-to-image manifest
+        run: |
+          set -euo pipefail
+          cat > image-manifest-${{ matrix.service }}.json <<JSON
+          {
+            "service": "${{ matrix.service }}",
+            "repository": "${{ github.repository }}",
+            "commit": "${{ github.sha }}",
+            "ref": "${{ github.ref }}",
+            "run_id": "${{ github.run_id }}",
+            "image": "${{ vars.GCP_REGISTRY }}/${{ matrix.service }}",
+            "digest": "${{ steps.build.outputs.digest }}",
+            "dockerfile": "${{ steps.svc.outputs.dockerfile }}",
+            "build_context": "${{ steps.svc.outputs.build_context }}"
+          }
+          JSON
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: publish-evidence-${{ matrix.service }}
+          path: |
+            image-manifest-${{ matrix.service }}.json
+            sbom-${{ matrix.service }}.spdx.json
+            trivy-${{ matrix.service }}.sarif
+          if-no-files-found: error
+
+      - name: record digest
+        run: |
+          mkdir -p digests
+          echo '${{ steps.build.outputs.digest }}' > "digests/${{ matrix.service }}"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: digest-${{ matrix.service }}
+          path: digests/${{ matrix.service }}
+          if-no-files-found: error
+
+  collect:
+    needs: publish
+    if: always() && needs.publish.result == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      digests: ${{ steps.collect.outputs.digests }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: digest-*
+          path: digests
+          merge-multiple: false
+      - id: collect
+        run: |
+          set -euo pipefail
+          json='{}'
+          for d in digests/digest-*/*; do
+            svc="$(basename "$d")"
+            json="$(printf '%s' "$json" | jq --arg k "$svc" --arg v "$(cat "$d")" '. + {($k): $v}')"
+          done
+          printf 'digests=%s\n' "$json" >> "$GITHUB_OUTPUT"
