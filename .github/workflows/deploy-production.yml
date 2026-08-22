@@ -56,7 +56,7 @@ permissions:
 
 jobs:
   rollout:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER_LINUX || 'ubuntu-latest' }}
     timeout-minutes: 90
     # doc 07 §11 wants an "operator gate receipt where the change affects secrets,
     # production data or migration", and names the GitHub environment as that receipt.
@@ -85,7 +85,8 @@ jobs:
       # This runs ahead of the receipt gate below, which is a deliberate exception to "the
       # receipt is first": it reads no dispatch input, touches no secret, and cannot be
       # influenced by whoever pressed the button. The receipt is still the first step that
-      # consumes anything the dispatcher supplied, and nothing before it can be steered.
+      # consumes a dispatch INPUT (the ref check below reads only the ref, which picks this
+      # file and cannot be steered by it), and nothing before it can be steered.
       - name: assert the repository variables are set
         env:
           BUN_VERSION_FILE: ${{ vars.BUN_VERSION_FILE }}
@@ -102,6 +103,24 @@ jobs:
           done
           if [ -n "$missing" ]; then
             echo "::error::unset repository variables:$missing"
+            exit 1
+          fi
+
+      # Production dispatches from `main` only. `workflow_dispatch` accepts any ref, and
+      # the ref chooses which copy of THIS FILE and of deploy/*.ts runs under the production
+      # deployer credential `auth` mints below. This step is the fail-fast, not the
+      # boundary: a branch can carry a copy of this file without it, and the WIF binding
+      # keys on the environment claim alone today. The boundary is the WIF provider's
+      # attribute condition on the ref (gridwork-infra stacks, tracked separately); until
+      # it lands this stops the honest mistake, not the adversary. Reads only the ref,
+      # which picks this file and cannot be steered by it.
+      - name: refuse a dispatch from any ref but main
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [ "$REF" != "refs/heads/main" ]; then
+            echo "::error::production deploys dispatch from refs/heads/main only, not ${REF}"
             exit 1
           fi
 
@@ -281,17 +300,25 @@ jobs:
           GCP_REGION: ${{ vars.GCP_REGION }}
         run: |
           set -euo pipefail
+          # See deploy-staging.yml's record step: `status.traffic[0]` was an array position
+          # held up by gcloud's undocumented serialisation order. Select by percent; refuse
+          # on a split (rollback.yml first, then deploy).
+          serving='[.status.traffic[]? | select((.percent // 0) > 0) | .revisionName]
+            | if length == 1 then .[0] else error("expected exactly one serving revision, got \(length)") end'
           printf '%s' "$SERVICES" | jq -r '.[].service' |
           while read -r svc; do
-            # Fail loudly on any error EXCEPT "the service does not exist yet", which is
-            # the legitimate first-deploy case and the only one that may record nothing.
-            # Bare suppression (`|| true`) would turn an expired credential or a missing
-            # run.viewer binding into a green run with no rollback target; no suppression
-            # at all makes the first production deploy of a new service impossible.
+            # Fail loudly on any error EXCEPT "the service does not exist", which records
+            # nothing. Bare suppression (`|| true`) would turn an expired credential or a
+            # missing run.viewer binding into a green run with no rollback target. NOT_FOUND
+            # is NOT the first-deploy path: every service is pre-created by the production
+            # stack with a serving bootstrap revision (modules/cloud_run_service — image and
+            # traffic under ignore_changes), so a first CI deploy always records one, and
+            # `services update` below cannot create a service — an absent one fails there
+            # at zero traffic, before any tag or shift exists.
             if ! rev="$(gcloud run services describe "$svc" \
               --project "$GCP_PROD_PROJECT" \
               --region "$GCP_REGION" \
-              --format 'value(status.traffic[0].revisionName)' 2>describe-err.txt)"; then
+              --format json 2>describe-err.txt | jq -r "$serving")"; then
               if ! grep -qi 'NOT_FOUND\|not found' describe-err.txt; then
                 cat describe-err.txt >&2
                 echo "::error::could not read the serving revision of ${svc} — refusing to roll out without a rollback target"
@@ -304,8 +331,14 @@ jobs:
             # submits an empty revision, which would let the provenance gate approve a
             # revision that never held traffic.
             [ -n "$rev" ] || continue
-            printf '%s %s\n' "$svc" "$rev"
-          done | tee rollback-revisions.txt
+            # Appended per line, not `done | tee file`: the loop's `::error::` annotation is
+            # stdout too, and through a trailing tee it became a LINE IN THE ROLLBACK FILE —
+            # which the restore step then fed to update-traffic as a service name, so a
+            # record-step failure (zero traffic touched) ended in a red "TRAFFIC RESTORE
+            # FAILED" page. No pre-truncate either: the file exists only once a real line
+            # was written, so the hashFiles guards stay inert on an early failure.
+            printf '%s %s\n' "$svc" "$rev" | tee -a rollback-revisions.txt
+          done
 
       # §6 step 1: zero traffic, tagged. The revision exists and is addressable by tag,
       # and no user has reached it.
@@ -483,6 +516,7 @@ jobs:
       # gate and it must exit non-zero on a breach, not warn. An observation step that
       # cannot fail is decoration.
       - name: progressive traffic shift
+        id: shift
         env:
           HOLD: ${{ inputs.hold_seconds }}
           SERVICES: ${{ steps.plan.outputs.services }}
@@ -567,6 +601,7 @@ jobs:
       # serving the canary and needs a human now, and it must not read as the thing that
       # broke.
       - name: restore traffic if the rollout did not complete
+        id: restore
         if: (failure() || cancelled()) && hashFiles('rollback-revisions.txt') != ''
         env:
           GCP_PROD_PROJECT: ${{ vars.GCP_PROD_PROJECT }}
@@ -589,16 +624,33 @@ jobs:
               --region "$GCP_REGION" \
               --to-revisions "${rev}=100" || failed=1
           done < rollback-revisions.txt
-          [ "$failed" -eq 0 ] || \
+          # `|| echo` alone exits 0 — this step read GREEN while its own annotation said
+          # production may still be serving the canary, and the reader triaging the red job
+          # was sent to the wrong step. `-e` stays off above so the loop finishes every
+          # service before reporting; the exit is here instead.
+          [ "$failed" -eq 0 ] || {
             echo "::error::TRAFFIC RESTORE FAILED — production may still be serving the canary; restore by hand from rollback-revisions.txt"
+            exit 1
+          }
 
+      # No `if:` meant the default `success()`: the evidence was skipped on exactly the runs
+      # it exists for — a failed shift, a failed smoke, a restore — and the run that
+      # stranded traffic left no record of where it stopped. Same shape rollback.yml
+      # already uses: `always()`, narrowed to runs where the plan and the record step
+      # produced the inputs this needs, with the shift's and the restore's own outcomes
+      # inside the file. `skipped` for the restore is the normal value on a clean run.
+      #
+      # `workflow_commit`, not `commit` — see deploy-staging.yml's evidence step.
       - name: deployment evidence
+        if: always() && steps.plan.outcome == 'success' && hashFiles('rollback-revisions.txt') != ''
         env:
           COMMIT: ${{ github.sha }}
           RUN_ID: ${{ github.run_id }}
           STAGING_RUN_ID: ${{ inputs.staging_run_id }}
           SERVICES: ${{ steps.plan.outputs.services }}
           MIGRATION: ${{ inputs.skip_migration && 'skipped' || steps.plan.outputs.migration_job }}
+          ROLLOUT: ${{ steps.shift.outcome }}
+          RESTORE: ${{ steps.restore.outcome }}
         run: |
           set -euo pipefail
           # jq -n was already the right call, but the values were still reaching it as
@@ -607,16 +659,19 @@ jobs:
           # in the value, and the remainder is command source. Through `env:` each value is
           # one argv element, quoted by the shell, and jq is the only thing that parses it.
           jq -n \
-            --arg commit "$COMMIT" \
+            --arg workflow_commit "$COMMIT" \
             --arg run_id "$RUN_ID" \
             --arg staging_run_id "$STAGING_RUN_ID" \
-            --arg tag "$CANARY_TAG" \
+            --arg tag "${CANARY_TAG:-}" \
             --argjson services "$SERVICES" \
             --arg migration "$MIGRATION" \
+            --arg rollout "$ROLLOUT" \
+            --arg restore "$RESTORE" \
             --rawfile rollback rollback-revisions.txt \
-            '{environment:"production", commit:$commit, run_id:$run_id,
+            '{environment:"production", workflow_commit:$workflow_commit, run_id:$run_id,
               staging_run_id:$staging_run_id, canary_tag:$tag,
               services:$services, migration:$migration, rollback_revisions:$rollback,
+              rollout:$rollout, restore:$restore,
               traffic_progression:[0,5,25,100]}' > production-evidence.json
 
       # `if: always()` with `if-no-files-found: error` was a guaranteed second red step on

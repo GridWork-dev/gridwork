@@ -44,7 +44,7 @@ jobs:
   # manifest answers exactly that question (doc 07 §4), so it is the matrix source —
   # never a hand-maintained list that drifts from the manifest the review approved.
   select:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER_LINUX || 'ubuntu-latest' }}
     outputs:
       matrix: ${{ steps.pick.outputs.matrix }}
       any: ${{ steps.pick.outputs.any }}
@@ -122,7 +122,7 @@ jobs:
   publish:
     needs: select
     if: needs.select.outputs.any == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER_LINUX || 'ubuntu-latest' }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -362,6 +362,7 @@ jobs:
             sbom-${{ matrix.service }}.spdx.json
             trivy-${{ matrix.service }}.sarif
           if-no-files-found: error
+          overwrite: true
 
       # Both values through env:. This was `echo '${{ ... }}' > "digests/${{ ... }}"` —
       # single quotes are not a sandbox, they are text the runner writes around text it
@@ -382,11 +383,12 @@ jobs:
           name: digest-${{ matrix.service }}
           path: digests/${{ matrix.service }}
           if-no-files-found: error
+          overwrite: true
 
   collect:
     needs: publish
     if: always() && needs.publish.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER_LINUX || 'ubuntu-latest' }}
     outputs:
       digests: ${{ steps.collect.outputs.digests }}
     steps:

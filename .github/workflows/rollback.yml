@@ -49,6 +49,15 @@ on:
         default: production
         type: choice
         options: [staging, production]
+      # A typed confirmation, because on three of the four repos there is no environment
+      # protection rule (see deploy-production.yml's job header) and nothing else stands
+      # between this form and a live production traffic shift. Must equal
+      # `<service>/<revision>` exactly, checked before `auth` — a mismatch costs a red run
+      # and nothing else. A check of intent, not a four-eyes gate.
+      confirm:
+        description: Type "<service>/<revision>" exactly to confirm the traffic shift
+        required: true
+        type: string
 
 # §8 rule 2: the SAME concurrency namespace the deploy workflows use, so a rollback and
 # a deploy can never interleave their traffic mutations. Two groups would defeat this.
@@ -61,7 +70,7 @@ permissions:
 
 jobs:
   rollback:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER_LINUX || 'ubuntu-latest' }}
     timeout-minutes: 30
     environment: ${{ inputs.environment }}
     permissions:
@@ -93,6 +102,18 @@ jobs:
           done
           if [ -n "$missing" ]; then
             echo "::error::unset repository variables:$missing"
+            exit 1
+          fi
+
+      - name: verify the typed confirmation
+        env:
+          SERVICE: ${{ inputs.service }}
+          REVISION: ${{ inputs.revision }}
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          set -euo pipefail
+          if [ "$CONFIRM" != "${SERVICE}/${REVISION}" ]; then
+            echo "::error::confirm must equal \"<service>/<revision>\" for this dispatch exactly — refusing to shift traffic"
             exit 1
           fi
 
@@ -247,14 +268,21 @@ jobs:
           REGION: ${{ vars.GCP_REGION }}
         run: |
           set -euo pipefail
-          rev="$(gcloud run services describe "$SERVICE" \
+          # By percent, not `status.traffic[0]` — see the deploy workflows' record steps.
+          # Unlike them this records EVERY revision holding traffic, one line each: this is
+          # the recovery path for a stranded split, and each of those revisions did serve,
+          # which is exactly what the provenance gate above exists to prove.
+          revs="$(gcloud run services describe "$SERVICE" \
             --project "$PROJECT" \
             --region "$REGION" \
-            --format 'value(status.traffic[0].revisionName)')"
+            --format json |
+            jq -r '.status.traffic[]? | select((.percent // 0) > 0) | .revisionName')"
           # No line rather than a line naming nothing — an empty second field is an exact
           # whole-line match for an empty revision input at the gate above.
-          [ -n "$rev" ] || { echo "::error::${SERVICE} has no serving revision to record"; exit 1; }
-          printf '%s %s\n' "$SERVICE" "$rev" | tee rollback-revisions.txt
+          [ -n "$revs" ] || { echo "::error::${SERVICE} has no serving revision to record"; exit 1; }
+          while read -r rev; do
+            printf '%s %s\n' "$SERVICE" "$rev"
+          done <<< "$revs" | tee rollback-revisions.txt
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always() && hashFiles('rollback-revisions.txt') != ''
@@ -337,7 +365,14 @@ jobs:
           # single-line `key=value` into $GITHUB_ENV or $GITHUB_OUTPUT. Those writes take
           # one line by definition, and jq pretty-prints by default, so any captured or
           # env/output-bound jq in this pipeline must pass -c or it silently truncates.
-          gcloud run services describe "$SERVICE" \
+          #
+          # Captured, then written. A `… | jq > rollback-state.json` opens the redirect
+          # before either command runs, so a describe that fails AFTER a green `check`
+          # (expired credential, 429, wrong region) left a zero-byte file — and hashFiles of
+          # an empty file is non-empty, so the upload below published it as evidence. Under
+          # `set -euo pipefail` a failed describe or jq aborts this assignment before any
+          # file exists, and the hashFiles guard stays inert.
+          state="$(gcloud run services describe "$SERVICE" \
             --project "$PROJECT" \
             --region "$REGION" \
             --format json |
@@ -346,7 +381,8 @@ jobs:
               latestReadyRevisionName: .status.latestReadyRevisionName,
               traffic: [.status.traffic[]? | {revisionName, percent, tag}],
               traffic_shift: env.SHIFT_OUTCOME
-            }' > rollback-state.json
+            }')"
+          printf '%s\n' "$state" > rollback-state.json
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always() && hashFiles('rollback-state.json') != ''
