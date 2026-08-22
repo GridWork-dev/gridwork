@@ -5,8 +5,6 @@ import {
   requireService,
   type ServiceManifest,
 } from "./manifest";
-import { readDeploymentReceipt, rollbackImage } from "./receipt";
-import { validateDeploymentConfig } from "./policy";
 
 const PROJECT = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
 const REGION = /^[a-z]+-[a-z]+[0-9]$/;
@@ -46,27 +44,14 @@ async function main(): Promise<void> {
   const nonproductionProject = process.env["GCP_NONPROD_PROJECT"]?.trim();
   const productionProject = process.env["GCP_PROD_PROJECT"]?.trim();
   const region = process.env["GCP_REGION"]?.trim();
-  const receiptPath = process.env["DEPLOYMENT_RECEIPT"]?.trim();
-  const repository = process.env["GITHUB_REPOSITORY"]?.trim();
-  const deploymentRunId = process.env["DEPLOYMENT_RUN_ID"]?.trim();
   if (!service) throw new Error("SERVICE is required");
   if (!revision) throw new Error("REVISION is required");
   if (!environment) throw new Error("ENVIRONMENT is required");
   if (!nonproductionProject) throw new Error("GCP_NONPROD_PROJECT is required");
   if (!productionProject) throw new Error("GCP_PROD_PROJECT is required");
   if (!region) throw new Error("GCP_REGION is required");
-  if (!receiptPath) throw new Error("DEPLOYMENT_RECEIPT is required");
-  if (!repository) throw new Error("GITHUB_REPOSITORY is required");
-  if (!deploymentRunId) throw new Error("DEPLOYMENT_RUN_ID is required");
-  if (environment !== "staging" && environment !== "production") {
-    throw new Error("ENVIRONMENT must be staging or production");
-  }
-  validateDeploymentConfig(environment, process.env);
 
   const manifest = await readManifest();
-  if (manifest.repository !== repository) {
-    throw new Error("deploy/services.json.repository does not match GITHUB_REPOSITORY");
-  }
   const result = validateRollback(
     manifest,
     service,
@@ -77,17 +62,6 @@ async function main(): Promise<void> {
     region,
   );
   output("project", result.project);
-  output(
-    "image",
-    rollbackImage(
-      await readDeploymentReceipt(receiptPath),
-      repository,
-      environment,
-      service,
-      revision,
-      deploymentRunId,
-    ),
-  );
 }
 
 if (import.meta.main) {

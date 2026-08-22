@@ -1,6 +1,5 @@
 import { output, readManifest, requireService, type ServiceManifest } from "./manifest";
 import { reportCliError } from "./manifest";
-import { validateDeploymentConfig } from "./policy";
 
 const COMMIT = /^[0-9a-f]{40}$/;
 const ROOT_BUILD_INPUTS = [
@@ -105,9 +104,6 @@ export function changedPathsSince(before: string): string[] {
 }
 
 async function main(): Promise<void> {
-  if (process.env["DEPLOY_TARGET"] === "publish") {
-    validateDeploymentConfig("publish", process.env);
-  }
   const manifest = await readManifest();
   const only = process.env["ONLY"]?.trim() || undefined;
   const before = parseBefore(process.env["BEFORE"]);

@@ -5,12 +5,9 @@ import {
   requireService,
   type ServiceManifest,
 } from "./manifest";
-import { promotionInputs, readDeploymentReceipt } from "./receipt";
-import { validateDeploymentConfig } from "./policy";
 
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const ARTIFACT_REGISTRY = /^[a-z0-9][a-z0-9.-]*\.pkg\.dev\/[a-z][a-z0-9-]{4,28}[a-z0-9]\/[a-z][a-z0-9._-]{0,62}$/;
-const COMMIT = /^[0-9a-f]{40}$/;
 
 type Environment = "staging" | "production";
 
@@ -18,17 +15,7 @@ export type DeploymentPlan = {
   services: Array<{ service: string; image: string }>;
   migrationJob: string;
   migrationImage: string;
-  sourceSha: string;
 };
-
-export function validateHoldSeconds(value: string): number {
-  if (!/^[0-9]+$/.test(value)) throw new Error("HOLD_SECONDS must be a decimal integer");
-  const seconds = Number(value);
-  if (!Number.isSafeInteger(seconds) || seconds < 60 || seconds > 1_200) {
-    throw new Error("HOLD_SECONDS must be between 60 and 1200");
-  }
-  return seconds;
-}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -63,12 +50,8 @@ export function createPlan(
   digests: Record<string, string>,
   environmentValue: string,
   registry: string,
-  sourceSha: string,
 ): DeploymentPlan {
   parseEnvironment(environmentValue);
-  if (!COMMIT.test(sourceSha)) {
-    throw new Error("SOURCE_SHA must be a full lowercase Git commit SHA");
-  }
   if (!ARTIFACT_REGISTRY.test(registry)) {
     throw new Error("GCP_REGISTRY must name an Artifact Registry repository");
   }
@@ -85,7 +68,7 @@ export function createPlan(
 
   // gridwork.sh has no database or migration Job. Keep both outputs because the shared
   // workflows and the three stateful sibling repos consume the same plan shape.
-  return { services, migrationJob: "", migrationImage: "", sourceSha };
+  return { services, migrationJob: "", migrationImage: "" };
 }
 
 async function main(): Promise<void> {
@@ -96,51 +79,13 @@ async function main(): Promise<void> {
   if (environment !== "staging" && environment !== "production") {
     throw new Error("ENVIRONMENT must be staging or production");
   }
-  validateDeploymentConfig(environment, process.env);
   const manifest = await readManifest();
-  const repository = process.env["GITHUB_REPOSITORY"]?.trim();
-  if (!repository) throw new Error("GITHUB_REPOSITORY is required");
-  if (manifest.repository !== repository) {
-    throw new Error("deploy/services.json.repository does not match GITHUB_REPOSITORY");
-  }
-
-  let digests: Record<string, string>;
-  let sourceSha: string;
-  const receiptPath = process.env["PROMOTION_RECEIPT"]?.trim();
-  if (receiptPath) {
-    const stagingRunId = process.env["STAGING_RUN_ID"]?.trim();
-    if (!stagingRunId) throw new Error("STAGING_RUN_ID is required");
-    const promoted = promotionInputs(
-      await readDeploymentReceipt(receiptPath),
-      repository,
-      stagingRunId,
-    );
-    digests = promoted.digests;
-    sourceSha = promoted.sourceSha;
-  } else {
-    const digestInput = process.env["DIGESTS"];
-    const sourceInput = process.env["SOURCE_SHA"]?.trim();
-    if (!digestInput) throw new Error("DIGESTS is required");
-    if (!sourceInput) throw new Error("SOURCE_SHA is required");
-    digests = parseDigests(digestInput);
-    sourceSha = sourceInput;
-  }
-
-  const plan = createPlan(
-    manifest,
-    digests,
-    environment,
-    registry,
-    sourceSha,
-  );
+  const digestInput = process.env["DIGESTS"];
+  if (!digestInput) throw new Error("DIGESTS is required");
+  const plan = createPlan(manifest, parseDigests(digestInput), environment, registry);
   output("services", JSON.stringify(plan.services));
   output("migration_job", plan.migrationJob);
   output("migration_image", plan.migrationImage);
-  output("source_sha", plan.sourceSha);
-  const holdSeconds = process.env["HOLD_SECONDS"]?.trim();
-  if (holdSeconds !== undefined && holdSeconds !== "") {
-    output("hold_seconds", String(validateHoldSeconds(holdSeconds)));
-  }
 }
 
 if (import.meta.main) {

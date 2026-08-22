@@ -22,6 +22,13 @@ const project = "example-prod-12345";
 const region = "us-east4";
 const revision = "gridwork-site-00042-abc";
 
+function runRollbackCli(environment: Record<string, string>) {
+  return Bun.spawnSync([process.execPath, "run", "deploy/validate-rollback.ts"], {
+    cwd: new URL("..", import.meta.url).pathname,
+    env: environment,
+  });
+}
+
 describe("validateRollback", () => {
   test("selects the target project only after validating the service and revision", () => {
     const result = validateRollback(
@@ -89,5 +96,18 @@ describe("validateRollback", () => {
     expect(() =>
       validateRollback(manifest, "gridwork-site", revision, "production", project, project, "bad"),
     ).toThrow("GCP_REGION is invalid");
+  });
+
+  test("accepts exactly the environment surface supplied by the final workflow", () => {
+    const result = runRollbackCli({
+      SERVICE: "gridwork-site",
+      REVISION: revision,
+      ENVIRONMENT: "production",
+      GCP_NONPROD_PROJECT: "example-staging-12345",
+      GCP_PROD_PROJECT: project,
+      GCP_REGION: region,
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toBe(`project=${project}\n`);
   });
 });

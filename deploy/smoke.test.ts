@@ -90,6 +90,21 @@ describe("public deployment smoke", () => {
     await expect(
       runSmoke(config({ environment: "staging", accessClientId: undefined })),
     ).rejects.toThrow("staging smoke requires Cloudflare Access service credentials");
+
+    await expect(
+      runSmoke(
+        config({
+          environment: "staging",
+          accessClientId: "client-id-name",
+          accessClientSecret: "secret-value",
+        }),
+        async () =>
+          new Response(null, {
+            status: 302,
+            headers: { location: "https://example.cloudflareaccess.com/cdn-cgi/access/login" },
+          }),
+      ),
+    ).rejects.toThrow("public health returned 302");
   });
 
   test("smokes the zero-traffic tag URL directly with the gridwork origin header", async () => {
