@@ -122,17 +122,43 @@ describe("public deployment smoke", () => {
         expectedSha: undefined,
       }),
       async (url, init) => {
-        calls.push({ url: String(url), headers: new Headers(init?.headers) });
+        const headers = new Headers(init?.headers);
+        calls.push({ url: String(url), headers });
+        if (new URL(String(url)).searchParams.has("origin-gate")) {
+          return Response.json({ error: "Forbidden" }, { status: 403 });
+        }
         return responseFor(url);
       },
     );
 
-    expect(calls.map((call) => call.url)).toEqual([`${canaryUrl}/health`, `${canaryUrl}/`]);
-    for (const call of calls) {
+    expect(calls.map((call) => call.url)).toEqual([
+      `${canaryUrl}/health?origin-gate=missing`,
+      `${canaryUrl}/health?origin-gate=incorrect`,
+      `${canaryUrl}/health`,
+      `${canaryUrl}/`,
+    ]);
+    expect(calls[0]?.headers.has("x-gridwork-origin-secret")).toBe(false);
+    expect(calls[1]?.headers.get("x-gridwork-origin-secret")).not.toBe(originSecret);
+    for (const call of calls.slice(2)) {
       expect(call.headers.get("x-gridwork-origin-secret")).toBe(originSecret);
       expect(call.headers.has("cf-access-client-id")).toBe(false);
       expect(call.headers.has("cf-access-client-secret")).toBe(false);
     }
+  });
+
+  test("rejects a canary whose direct origin accepts missing or incorrect gate credentials", async () => {
+    await expect(
+      runSmoke(
+        config({
+          mode: "pre-migration",
+          canaryTag: "r123",
+          canaryUrls: JSON.stringify({ "gridwork-site": canaryUrl }),
+          originSecrets: JSON.stringify({ "gridwork-site": originSecret }),
+          expectedSha: undefined,
+        }),
+        async (url) => responseFor(url),
+      ),
+    ).rejects.toThrow("canary origin gate accepted a request without the origin secret");
   });
 
   test("fails closed when canary URL or secret maps are absent, malformed, or unsafe", async () => {

@@ -161,6 +161,44 @@ function canaryTarget(config: SmokeConfig): { origin: string; headers: Headers }
   };
 }
 
+function incorrectOriginSecret(secret: string): string {
+  return `${secret[0] === "A" ? "B" : "A"}${secret.slice(1)}`;
+}
+
+async function assertCanaryOriginGate(
+  origin: string,
+  secret: string,
+  fetcher: Fetcher,
+): Promise<void> {
+  const probes = [
+    {
+      label: "without the origin secret",
+      query: "missing",
+      headers: new Headers({ accept: "application/json" }),
+    },
+    {
+      label: "with an incorrect origin secret",
+      query: "incorrect",
+      headers: new Headers({
+        accept: "application/json",
+        [ORIGIN_SECRET_HEADER]: incorrectOriginSecret(secret),
+      }),
+    },
+  ];
+
+  for (const probe of probes) {
+    const response = await fetchWithTimeout(
+      `${origin}/health?origin-gate=${probe.query}`,
+      { method: "GET", redirect: "manual", headers: probe.headers },
+      REQUEST_TIMEOUT_MS,
+      fetcher,
+    );
+    if (response.status !== 403) {
+      throw new Error(`canary origin gate accepted a request ${probe.label}`);
+    }
+  }
+}
+
 function assertResponseHeaders(response: Response, path: string): void {
   for (const header of REQUIRED_HEADERS) {
     if (!response.headers.has(header)) throw new Error(`${path} is missing ${header}`);
@@ -179,6 +217,12 @@ export async function runSmoke(config: SmokeConfig, fetcher: Fetcher = fetch): P
     ? canaryTarget(config)
     : { origin: PUBLIC_ORIGINS[environment], headers: publicRequestHeaders(config) };
   const label = canaryMode ? "canary" : "public";
+
+  if (canaryMode) {
+    const originSecret = target.headers.get(ORIGIN_SECRET_HEADER);
+    if (!originSecret) throw new Error("canary origin secret is missing");
+    await assertCanaryOriginGate(target.origin, originSecret, fetcher);
+  }
 
   // Pre/post-migration proves the zero-traffic revision at the tag URL resolved by gcloud,
   // authenticating with the same origin-secret header the Worker uses. Post-deploy and
