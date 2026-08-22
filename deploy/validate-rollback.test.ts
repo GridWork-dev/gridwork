@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { parseManifest } from "./manifest";
 import { validateRollback } from "./validate-rollback";
@@ -27,6 +30,42 @@ function runRollbackCli(environment: Record<string, string>) {
     cwd: new URL("..", import.meta.url).pathname,
     env: environment,
   });
+}
+
+function runRollbackWithFakeGcloud(
+  environment: Record<string, string>,
+  exitCode = 0,
+) {
+  const fixtureDirectory = mkdtempSync(join(tmpdir(), "gridwork-gcloud-"));
+  const executable = join(fixtureDirectory, "gcloud");
+  const capture = join(fixtureDirectory, "argv.txt");
+  writeFileSync(
+    executable,
+    [
+      "#!/bin/sh",
+      'printf \'%s\\n\' "$@" > "$GCLOUD_ARGS_CAPTURE"',
+      'printf \'%s\\n\' "$EXPECTED_REVISION"',
+      'exit "$GCLOUD_EXIT_CODE"',
+      "",
+    ].join("\n"),
+    { mode: 0o700 },
+  );
+
+  try {
+    const result = runRollbackCli({
+      ...environment,
+      PATH: fixtureDirectory,
+      GCLOUD_ARGS_CAPTURE: capture,
+      EXPECTED_REVISION: revision,
+      GCLOUD_EXIT_CODE: String(exitCode),
+    });
+    const argv = existsSync(capture)
+      ? readFileSync(capture, "utf8").trimEnd().split("\n")
+      : [];
+    return { result, argv };
+  } finally {
+    rmSync(fixtureDirectory, { recursive: true, force: true });
+  }
 }
 
 describe("validateRollback", () => {
@@ -98,8 +137,8 @@ describe("validateRollback", () => {
     ).toThrow("GCP_REGION is invalid");
   });
 
-  test("accepts exactly the environment surface supplied by the final workflow", () => {
-    const result = runRollbackCli({
+  test("looks up the validated revision with an argv array before approving it", () => {
+    const { result, argv } = runRollbackWithFakeGcloud({
       SERVICE: "gridwork-site",
       REVISION: revision,
       ENVIRONMENT: "production",
@@ -109,5 +148,51 @@ describe("validateRollback", () => {
     });
     expect(result.exitCode).toBe(0);
     expect(result.stdout.toString()).toBe(`project=${project}\n`);
+    expect(argv).toEqual([
+      "run",
+      "revisions",
+      "describe",
+      revision,
+      "--project",
+      project,
+      "--region",
+      region,
+      "--format=value(metadata.name)",
+    ]);
+  });
+
+  test("rejects raw whitespace-bearing inputs before spawning gcloud", () => {
+    for (const overrides of [
+      { SERVICE: "gridwork-site " },
+      { REVISION: `${revision}\n` },
+    ]) {
+      const { result, argv } = runRollbackWithFakeGcloud({
+        SERVICE: "gridwork-site",
+        REVISION: revision,
+        ENVIRONMENT: "production",
+        GCP_NONPROD_PROJECT: "example-staging-12345",
+        GCP_PROD_PROJECT: project,
+        GCP_REGION: region,
+        ...overrides,
+      });
+      expect(result.exitCode).not.toBe(0);
+      expect(argv).toEqual([]);
+    }
+  });
+
+  test("fails when Cloud Run cannot resolve the validated revision", () => {
+    const { result, argv } = runRollbackWithFakeGcloud(
+      {
+        SERVICE: "gridwork-site",
+        REVISION: revision,
+        ENVIRONMENT: "production",
+        GCP_NONPROD_PROJECT: "example-staging-12345",
+        GCP_PROD_PROJECT: project,
+        GCP_REGION: region,
+      },
+      7,
+    );
+    expect(result.exitCode).not.toBe(0);
+    expect(argv[0]).toBe("run");
   });
 });

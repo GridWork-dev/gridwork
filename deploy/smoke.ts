@@ -5,7 +5,7 @@ const PUBLIC_ORIGINS = {
   production: "https://gridwork.sh",
   staging: "https://gridwork.gwstg.dev",
 } as const;
-const MODES = new Set(["pre-migration", "post-migration", "post-deploy", "rollback"]);
+const MODES = new Set(["staging", "pre-migration", "post-migration", "post-deploy", "rollback"]);
 const CANARY_TAG = /^r[0-9]{1,20}$/;
 const COMMIT = /^[0-9a-f]{40}$/;
 const ORIGIN_SECRET = /^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/;
@@ -23,6 +23,7 @@ const REQUIRED_HEADERS = [
 export type SmokeConfig = {
   environment: string;
   mode: string;
+  service?: string | undefined;
   canaryTag?: string | undefined;
   canaryUrls?: string | undefined;
   originSecrets?: string | undefined;
@@ -35,11 +36,11 @@ type EnvironmentSource = Readonly<Record<string, string | undefined>>;
 
 export function readSmokeConfig(environment: EnvironmentSource): SmokeConfig {
   const deploymentEnvironment = environment["ENVIRONMENT"]?.trim() ?? "";
-  const configuredMode = environment["MODE"]?.trim();
-  const mode = configuredMode || (deploymentEnvironment === "staging" ? "post-deploy" : "");
+  const mode = environment["MODE"]?.trim() ?? "";
   return {
     environment: deploymentEnvironment,
     mode,
+    service: environment["SERVICE"] || undefined,
     canaryTag: environment["CANARY_TAG"]?.trim() || undefined,
     canaryUrls: environment["CANARY_URLS"]?.trim() || undefined,
     originSecrets: environment["ORIGIN_SECRETS"]?.trim() || undefined,
@@ -70,6 +71,12 @@ function validateConfig(config: SmokeConfig): keyof typeof PUBLIC_ORIGINS {
     throw new Error("ENVIRONMENT must be staging or production");
   }
   if (!MODES.has(config.mode)) throw new Error("MODE is invalid");
+  if (config.mode === "rollback") {
+    if (!config.service) throw new Error("rollback smoke requires SERVICE");
+    if (config.service !== SERVICE) {
+      throw new Error(`rollback smoke received unknown service ${config.service}`);
+    }
+  }
   if (config.mode === "pre-migration" || config.mode === "post-migration") {
     if (!config.canaryTag) throw new Error("CANARY_TAG is required");
     if (!CANARY_TAG.test(config.canaryTag)) throw new Error("CANARY_TAG is invalid");

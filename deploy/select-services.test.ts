@@ -60,4 +60,18 @@ describe("selectServiceKeys", () => {
   test("an absent before revision selects every service for a manual publish", () => {
     expect(selectServiceKeys(manifest, null)).toEqual(["docs-site", "gridwork-site"]);
   });
+
+  test("rejects service keys that are unsafe as artifact path segments", () => {
+    const invalidManifest: ServiceManifest = {
+      ...manifest,
+      services: {
+        ...manifest.services,
+        "../escape": manifest.services["docs-site"]!,
+      },
+    };
+
+    expect(() => selectServiceKeys(invalidManifest, null)).toThrow(
+      "invalid service key ../escape",
+    );
+  });
 });

@@ -34,16 +34,18 @@ function config(overrides: Partial<SmokeConfig> = {}): SmokeConfig {
 }
 
 describe("public deployment smoke", () => {
-  test("defaults a staging template invocation to post-deploy mode", () => {
+  test("reads the explicit staging mode supplied by the corrected template", () => {
     expect(
       readSmokeConfig({
         ENVIRONMENT: "staging",
+        MODE: "staging",
         CF_ACCESS_CLIENT_ID: "client-id-name",
         CF_ACCESS_CLIENT_SECRET: "secret-value",
       }),
     ).toEqual({
       environment: "staging",
-      mode: "post-deploy",
+      mode: "staging",
+      service: undefined,
       canaryTag: undefined,
       canaryUrls: undefined,
       originSecrets: undefined,
@@ -75,6 +77,7 @@ describe("public deployment smoke", () => {
     await runSmoke(
       config({
         environment: "staging",
+        mode: "staging",
         accessClientId: "client-id-name",
         accessClientSecret: "secret-value",
       }),
@@ -95,6 +98,7 @@ describe("public deployment smoke", () => {
       runSmoke(
         config({
           environment: "staging",
+          mode: "staging",
           accessClientId: "client-id-name",
           accessClientSecret: "secret-value",
         }),
@@ -188,5 +192,22 @@ describe("public deployment smoke", () => {
         responseFor(url),
       ),
     ).rejects.toThrow("CANARY_TAG is invalid");
+  });
+
+  test("reads SERVICE and scopes rollback smoke to the requested owned service", async () => {
+    const rollback = readSmokeConfig({
+      ENVIRONMENT: "production",
+      MODE: "rollback",
+      SERVICE: "gridwork-site",
+    });
+    expect(rollback).toMatchObject({ mode: "rollback", service: "gridwork-site" });
+    await expect(runSmoke(rollback, async (url) => responseFor(url))).resolves.toBeUndefined();
+
+    await expect(
+      runSmoke({ ...config({ mode: "rollback" }), service: undefined } as SmokeConfig),
+    ).rejects.toThrow("rollback smoke requires SERVICE");
+    await expect(
+      runSmoke({ ...config({ mode: "rollback" }), service: "other-site" } as SmokeConfig),
+    ).rejects.toThrow("rollback smoke received unknown service other-site");
   });
 });

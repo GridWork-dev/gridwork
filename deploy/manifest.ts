@@ -167,6 +167,9 @@ export function requireService(manifest: ServiceManifest, key: string): ServiceC
 }
 
 export function output(name: string, value: string): void {
+  if (value.includes("\r") || value.includes("\n")) {
+    throw new Error(`GitHub output ${name} must be a single line`);
+  }
   process.stdout.write(`${name}=${value}\n`);
 }
 

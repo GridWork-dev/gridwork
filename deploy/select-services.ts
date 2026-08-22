@@ -2,6 +2,7 @@ import { output, readManifest, requireService, type ServiceManifest } from "./ma
 import { reportCliError } from "./manifest";
 
 const COMMIT = /^[0-9a-f]{40}$/;
+const SERVICE_KEY = /^[a-z][a-z0-9-]{0,62}$/;
 const ROOT_BUILD_INPUTS = [
   ".dockerignore",
   "deploy/services.json",
@@ -50,13 +51,19 @@ export function selectServiceKeys(
   only?: string,
 ): string[] {
   if (only) {
+    assertServiceKey(only);
     requireService(manifest, only);
     return [only];
   }
 
   const keys = Object.keys(manifest.services).sort();
+  for (const key of keys) assertServiceKey(key);
   if (changedPaths === null) return keys;
   return keys.filter((key) => matchesWatchedPath(keyPathList(manifest, key), changedPaths));
+}
+
+function assertServiceKey(key: string): void {
+  if (!SERVICE_KEY.test(key)) throw new Error(`invalid service key ${key}`);
 }
 
 function keyPathList(manifest: ServiceManifest, key: string): string[] {

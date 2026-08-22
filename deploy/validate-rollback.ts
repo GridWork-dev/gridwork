@@ -38,8 +38,10 @@ export function validateRollback(
 }
 
 async function main(): Promise<void> {
-  const service = process.env["SERVICE"]?.trim();
-  const revision = process.env["REVISION"]?.trim();
+  // The workflow consumes these raw dispatch values after this gate. Validate the same
+  // bytes it will use rather than approving trimmed aliases of whitespace-bearing input.
+  const service = process.env["SERVICE"];
+  const revision = process.env["REVISION"];
   const environment = process.env["ENVIRONMENT"]?.trim();
   const nonproductionProject = process.env["GCP_NONPROD_PROJECT"]?.trim();
   const productionProject = process.env["GCP_PROD_PROJECT"]?.trim();
@@ -61,6 +63,29 @@ async function main(): Promise<void> {
     productionProject,
     region,
   );
+  // This script runs after auth. The strict revision regex above therefore executes
+  // before the first credentialed consumer of dispatch input, and the lookup receives
+  // one argv element per value rather than shell source.
+  const lookup = Bun.spawnSync([
+    "gcloud",
+    "run",
+    "revisions",
+    "describe",
+    revision,
+    "--project",
+    result.project,
+    "--region",
+    region,
+    "--format=value(metadata.name)",
+  ]);
+  if (lookup.exitCode !== 0) {
+    const detail = new TextDecoder().decode(lookup.stderr).trim();
+    throw new Error(`Cloud Run revision lookup failed${detail ? `: ${detail}` : ""}`);
+  }
+  const resolvedRevision = new TextDecoder().decode(lookup.stdout).trim();
+  if (resolvedRevision !== revision) {
+    throw new Error("REVISION does not exist in the selected Cloud Run project");
+  }
   output("project", result.project);
 }
 
