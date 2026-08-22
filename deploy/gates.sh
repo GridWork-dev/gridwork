@@ -35,5 +35,7 @@ trap - EXIT
 
 site/node_modules/.bin/tsc -p deploy/tsconfig.json
 bun run --cwd site test
-test "$(rg --files deploy -g '*.test.ts' | wc -l)" -gt 0
+shopt -s nullglob globstar
+deploy_tests=(deploy/**/*.test.ts)
+test "${#deploy_tests[@]}" -gt 0
 bun test deploy/
