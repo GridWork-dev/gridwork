@@ -1,10 +1,7 @@
 import { fetchWithTimeout, type Fetcher } from "./http";
 import { readManifest, reportCliError } from "./manifest";
 
-const PUBLIC_ORIGINS = {
-  production: "https://gridwork.sh",
-  staging: "https://gridwork.gwstg.dev",
-} as const;
+const PUBLIC_ORIGIN = "https://gridwork.sh";
 
 export const OBSERVATION_SAMPLES = 20;
 export const MAX_ERROR_RATE = 0.01;
@@ -30,9 +27,9 @@ export type ObservationSummary = {
   p95Ms: number;
 };
 
-function assertEnvironment(value: string): asserts value is keyof typeof PUBLIC_ORIGINS {
-  if (value !== "staging" && value !== "production") {
-    throw new Error("ENVIRONMENT must be staging or production");
+function assertEnvironment(value: string): asserts value is "production" {
+  if (value !== "production") {
+    throw new Error("ENVIRONMENT must be production");
   }
 }
 
@@ -95,7 +92,7 @@ export function observationUrl(environment: string, step: string, sample: number
   assertEnvironment(environment);
   assertStep(step);
   if (!Number.isSafeInteger(sample) || sample < 0) throw new Error("sample index is invalid");
-  return `${PUBLIC_ORIGINS[environment]}/health?observe=${step}-${sample}`;
+  return `${PUBLIC_ORIGIN}/health?observe=${step}-${sample}`;
 }
 
 export function evaluateObservation(

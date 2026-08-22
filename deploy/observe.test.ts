@@ -38,15 +38,15 @@ describe("observation gate", () => {
     );
   });
 
-  test("uses only the public Cloudflare hostname", () => {
+  test("accepts only the production Cloudflare hostname", () => {
     expect(observationUrl("production", "25", 3)).toBe(
       "https://gridwork.sh/health?observe=25-3",
     );
-    expect(observationUrl("staging", "5", 0)).toBe(
-      "https://gridwork.gwstg.dev/health?observe=5-0",
+    expect(() => observationUrl("staging", "5", 0)).toThrow(
+      "ENVIRONMENT must be production",
     );
     expect(() => observationUrl("preview", "5", 0)).toThrow(
-      "ENVIRONMENT must be staging or production",
+      "ENVIRONMENT must be production",
     );
     expect(() => observationUrl("production", "10", 0)).toThrow(
       "STEP must be 5, 25, or 100",
