@@ -55,6 +55,25 @@ describe("public deployment smoke", () => {
     });
   });
 
+  test("does not bind a delayed promotion to the workflow checkout", () => {
+    const workflowSha = "b".repeat(40);
+    expect(
+      readSmokeConfig({
+        ENVIRONMENT: "production",
+        MODE: "post-deploy",
+        GITHUB_SHA: workflowSha,
+      }).expectedSha,
+    ).toBeUndefined();
+    expect(
+      readSmokeConfig({
+        ENVIRONMENT: "production",
+        MODE: "post-deploy",
+        EXPECTED_SHA: sha,
+        GITHUB_SHA: workflowSha,
+      }).expectedSha,
+    ).toBe(sha);
+  });
+
   test("checks health and a page through the production Cloudflare hostname", async () => {
     const calls: Array<{ url: string; headers: Headers }> = [];
     await runSmoke(config(), async (url, init) => {

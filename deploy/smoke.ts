@@ -46,7 +46,7 @@ export function readSmokeConfig(environment: EnvironmentSource): SmokeConfig {
     originSecrets: environment["ORIGIN_SECRETS"]?.trim() || undefined,
     expectedSha:
       mode === "post-deploy"
-        ? environment["EXPECTED_SHA"]?.trim() || environment["GITHUB_SHA"]?.trim()
+        ? environment["EXPECTED_SHA"]?.trim() || undefined
         : undefined,
     accessClientId: environment["CF_ACCESS_CLIENT_ID"],
     accessClientSecret: environment["CF_ACCESS_CLIENT_SECRET"],
