@@ -1,5 +1,5 @@
 import { fetchWithTimeout, type Fetcher } from "./http";
-import { readManifest, reportCliError } from "./manifest";
+import { readManifestForRepository, reportCliError } from "./manifest";
 
 const PUBLIC_ORIGIN = "https://gridwork.sh";
 
@@ -163,7 +163,7 @@ async function main(): Promise<void> {
   if (!project) throw new Error("GCP_PROD_PROJECT is required");
   if (!region) throw new Error("GCP_REGION is required");
   if (!canaryTag) throw new Error("CANARY_TAG is required");
-  const manifest = await readManifest();
+  const manifest = await readManifestForRepository(process.env["GITHUB_REPOSITORY"]);
   verifyTrafficAllocation(Object.keys(manifest.services), step, canaryTag, project, region);
   const summary = await runObservation(environment, step);
   process.stdout.write(

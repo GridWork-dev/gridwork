@@ -1,6 +1,6 @@
 import {
   output,
-  readManifest,
+  readManifestForRepository,
   reportCliError,
   requireService,
   type ServiceManifest,
@@ -17,7 +17,10 @@ export function serviceInputs(
 async function main(): Promise<void> {
   const key = process.env["SERVICE"]?.trim();
   if (!key) throw new Error("SERVICE is required");
-  const inputs = serviceInputs(await readManifest(), key);
+  const inputs = serviceInputs(
+    await readManifestForRepository(process.env["GITHUB_REPOSITORY"]),
+    key,
+  );
   output("dockerfile", inputs.dockerfile);
   output("build_context", inputs.buildContext);
 }

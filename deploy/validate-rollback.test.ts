@@ -28,7 +28,7 @@ const revision = "gridwork-site-00042-abc";
 function runRollbackCli(environment: Record<string, string>) {
   return Bun.spawnSync([process.execPath, "run", "deploy/validate-rollback.ts"], {
     cwd: new URL("..", import.meta.url).pathname,
-    env: environment,
+    env: { GITHUB_REPOSITORY: "GridWork-dev/gridwork", ...environment },
   });
 }
 

@@ -1,6 +1,7 @@
 import {
+  assertManifestRepository,
   output,
-  readManifest,
+  readManifestForRepository,
   reportCliError,
   requireService,
   type ServiceManifest,
@@ -50,8 +51,10 @@ export function createPlan(
   digests: Record<string, string>,
   environmentValue: string,
   registry: string,
+  expectedRepository: string,
 ): DeploymentPlan {
   parseEnvironment(environmentValue);
+  assertManifestRepository(manifest, expectedRepository);
   if (!ARTIFACT_REGISTRY.test(registry)) {
     throw new Error("GCP_REGISTRY must name an Artifact Registry repository");
   }
@@ -79,10 +82,11 @@ async function main(): Promise<void> {
   if (environment !== "staging" && environment !== "production") {
     throw new Error("ENVIRONMENT must be staging or production");
   }
-  const manifest = await readManifest();
+  const repository = process.env["GITHUB_REPOSITORY"];
+  const manifest = await readManifestForRepository(repository);
   const digestInput = process.env["DIGESTS"];
   if (!digestInput) throw new Error("DIGESTS is required");
-  const plan = createPlan(manifest, parseDigests(digestInput), environment, registry);
+  const plan = createPlan(manifest, parseDigests(digestInput), environment, registry, repository!);
   output("services", JSON.stringify(plan.services));
   output("migration_job", plan.migrationJob);
   output("migration_image", plan.migrationImage);

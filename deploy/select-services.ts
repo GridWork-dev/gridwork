@@ -1,4 +1,4 @@
-import { output, readManifest, requireService, type ServiceManifest } from "./manifest";
+import { output, readManifestForRepository, requireService, type ServiceManifest } from "./manifest";
 import { reportCliError } from "./manifest";
 
 const COMMIT = /^[0-9a-f]{40}$/;
@@ -111,7 +111,7 @@ export function changedPathsSince(before: string): string[] {
 }
 
 async function main(): Promise<void> {
-  const manifest = await readManifest();
+  const manifest = await readManifestForRepository(process.env["GITHUB_REPOSITORY"]);
   const only = process.env["ONLY"]?.trim() || undefined;
   const before = parseBefore(process.env["BEFORE"]);
   const selected = selectServiceKeys(manifest, before === null ? null : changedPathsSince(before), only);

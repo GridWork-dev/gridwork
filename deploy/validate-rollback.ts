@@ -1,6 +1,6 @@
 import {
   output,
-  readManifest,
+  readManifestForRepository,
   reportCliError,
   requireService,
   type ServiceManifest,
@@ -53,7 +53,7 @@ async function main(): Promise<void> {
   if (!productionProject) throw new Error("GCP_PROD_PROJECT is required");
   if (!region) throw new Error("GCP_REGION is required");
 
-  const manifest = await readManifest();
+  const manifest = await readManifestForRepository(process.env["GITHUB_REPOSITORY"]);
   const result = validateRollback(
     manifest,
     service,

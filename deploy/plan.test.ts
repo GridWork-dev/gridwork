@@ -20,6 +20,7 @@ const manifest = parseManifest({
 
 const digest = `sha256:${"a".repeat(64)}`;
 const registry = "us-east4-docker.pkg.dev/example-project/apps";
+const repository = "GridWork-dev/gridwork";
 
 function runPlanCli(environment: Record<string, string>) {
   return Bun.spawnSync([process.execPath, "run", "deploy/plan.ts"], {
@@ -30,7 +31,9 @@ function runPlanCli(environment: Record<string, string>) {
 
 describe("deployment plan allowlist", () => {
   test("constructs immutable image references for reviewed services", () => {
-    expect(createPlan(manifest, { "gridwork-site": digest }, "production", registry)).toEqual({
+    expect(
+      createPlan(manifest, { "gridwork-site": digest }, "production", registry, repository),
+    ).toEqual({
       services: [
         {
           service: "gridwork-site",
@@ -43,12 +46,24 @@ describe("deployment plan allowlist", () => {
   });
 
   test("rejects unknown service keys before constructing a plan", () => {
-    expect(() => createPlan(manifest, { "other-site": digest }, "staging", registry)).toThrow(
-      "unknown service other-site",
-    );
     expect(() =>
-      createPlan(manifest, { constructor: digest }, "staging", registry),
+      createPlan(manifest, { "other-site": digest }, "staging", registry, repository),
+    ).toThrow("unknown service other-site");
+    expect(() =>
+      createPlan(manifest, { constructor: digest }, "staging", registry, repository),
     ).toThrow("unknown service constructor");
+  });
+
+  test("rejects a manifest owned by a different repository", () => {
+    expect(() =>
+      createPlan(
+        { ...manifest, repository: "GridWork-dev/other" },
+        { "gridwork-site": digest },
+        "production",
+        registry,
+        repository,
+      ),
+    ).toThrow("deploy/services.json.repository does not match GITHUB_REPOSITORY");
   });
 
   test("rejects malformed and empty digest maps", () => {
@@ -58,9 +73,10 @@ describe("deployment plan allowlist", () => {
         { "gridwork-site": "sha256:not-a-digest" },
         "staging",
         registry,
+        repository,
       ),
     ).toThrow("invalid digest for gridwork-site");
-    expect(() => createPlan(manifest, {}, "staging", registry)).toThrow(
+    expect(() => createPlan(manifest, {}, "staging", registry, repository)).toThrow(
       "DIGESTS must contain at least one service",
     );
   });
@@ -72,7 +88,7 @@ describe("deployment plan allowlist", () => {
 
   test("rejects unknown environments and registries", () => {
     expect(() =>
-      createPlan(manifest, { "gridwork-site": digest }, "preview", registry),
+      createPlan(manifest, { "gridwork-site": digest }, "preview", registry, repository),
     ).toThrow(
       "ENVIRONMENT must be staging or production",
     );
@@ -82,6 +98,7 @@ describe("deployment plan allowlist", () => {
         { "gridwork-site": digest },
         "production",
         "docker.io/example",
+        repository,
       ),
     ).toThrow("GCP_REGISTRY must name an Artifact Registry repository");
   });
@@ -91,6 +108,7 @@ describe("deployment plan allowlist", () => {
       DIGESTS: JSON.stringify({ "gridwork-site": digest }),
       ENVIRONMENT: "production",
       GCP_REGISTRY: registry,
+      GITHUB_REPOSITORY: repository,
     });
     expect(result.exitCode).toBe(0);
     expect(result.stdout.toString()).toContain(`${registry}/gridwork-site@${digest}`);

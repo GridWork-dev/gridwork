@@ -159,6 +159,25 @@ export async function readManifest(): Promise<ServiceManifest> {
   return parseManifest(value);
 }
 
+export function assertManifestRepository(
+  manifest: ServiceManifest,
+  expectedRepository: string | undefined,
+): void {
+  if (!expectedRepository) throw new Error("GITHUB_REPOSITORY is required");
+  if (!REPOSITORY.test(expectedRepository)) throw new Error("GITHUB_REPOSITORY is invalid");
+  if (manifest.repository !== expectedRepository) {
+    throw new Error("deploy/services.json.repository does not match GITHUB_REPOSITORY");
+  }
+}
+
+export async function readManifestForRepository(
+  expectedRepository: string | undefined,
+): Promise<ServiceManifest> {
+  const manifest = await readManifest();
+  assertManifestRepository(manifest, expectedRepository);
+  return manifest;
+}
+
 export function requireService(manifest: ServiceManifest, key: string): ServiceConfig {
   if (!Object.hasOwn(manifest.services, key)) throw new Error(`unknown service ${key}`);
   const service = manifest.services[key];
