@@ -4,6 +4,36 @@ async function workflow(name: string): Promise<string> {
   return Bun.file(new URL(`../.github/workflows/${name}.yml`, import.meta.url)).text();
 }
 
+function runBodies(source: string): string[] {
+  const lines = source.split("\n");
+  const bodies: string[] = [];
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index]!;
+    const match = /^(\s*)run:\s*(.*)$/.exec(line);
+    if (!match) continue;
+    const indent = match[1]!.length;
+    if (match[2] !== "|") {
+      bodies.push(match[2]!);
+      continue;
+    }
+    const body: string[] = [];
+    for (index += 1; index < lines.length; index++) {
+      const bodyLine = lines[index]!;
+      if (bodyLine.length > 0 && bodyLine.search(/\S/) <= indent) {
+        index -= 1;
+        break;
+      }
+      body.push(bodyLine);
+    }
+    bodies.push(body.join("\n"));
+  }
+  return bodies;
+}
+
+function count(source: string, value: string): number {
+  return source.split(value).length - 1;
+}
+
 describe("deployment workflow safety state transitions", () => {
   test("publication runs gates and the required host preparation before image build", async () => {
     const source = await workflow("publish-image");
@@ -17,6 +47,9 @@ describe("deployment workflow safety state transitions", () => {
     expect(source).toContain("bun-version-file: ${{ vars.BUN_VERSION_FILE }}");
     expect(source).toContain("${{ vars.GCP_REGISTRY }}/${{ matrix.service }}");
     expect(source).not.toContain("if [ -f deploy/prepare-build.sh ]");
+    expect(source).toContain("jq -c --arg k \"$svc\" --arg v");
+    expect(source).toContain('case "$REGISTRY" in');
+    expect(source).toContain('"$REGISTRY_HOST"/*)');
   });
 
   test("gridwork explicitly declares that no host build preparation is needed", async () => {
@@ -41,6 +74,9 @@ describe("deployment workflow safety state transitions", () => {
     expect(source).toContain("CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}");
     expect(source).toContain("CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}");
     expect(source).toContain("run: bun run deploy/smoke.ts");
+    expect(source).toContain("MODE: staging");
+    expect(source).toContain("name: staging-rollback-revisions");
+    expect(source).toContain("rollback_revisions:$rollback");
   });
 
   test("production smokes the direct tagged revision before public traffic", async () => {
@@ -57,20 +93,57 @@ describe("deployment workflow safety state transitions", () => {
     expect(shift).toBeGreaterThan(postMigration);
     expect(publicSmoke).toBeGreaterThan(shift);
     expect(source).toContain('echo "CANARY_TAG=$tag" >> "$GITHUB_ENV"');
-    expect(source).toContain("CANARY_URLS<<CANARY_URLS_EOF");
+    expect(source).toContain("printf 'CANARY_URLS=%s\\n' \"$urls\" >> \"$GITHUB_ENV\"");
     expect(source).toContain("ORIGIN_SECRETS: ${{ secrets.ORIGIN_SECRETS }}");
     expect(source).not.toContain("CANARY_TAG: ${{ env.CANARY_TAG }}");
     expect(source).toContain('CANARY_URLS: ""');
     expect(source).toContain('ORIGIN_SECRETS: ""');
     expect(source).toContain('--to-tags "${CANARY_TAG}=${pct}"');
+    expect(source).toContain("staging_run_id:");
+    expect(source).toContain("run-id: ${{ inputs.staging_run_id }}");
+    expect(source).toContain('if [ "$HOLD" -lt 30 ] || [ "$HOLD" -gt 900 ]');
+    expect(source).toContain("(failure() || cancelled())");
+    expect(source).toContain("name: production-rollback-revisions");
+    expect(source).toContain("staging_run_id:$staging_run_id");
   });
 
   test("rollback validates the target and sends staging Access credentials", async () => {
     const source = await workflow("rollback");
     expect(source).toContain("run: bun run deploy/validate-rollback.ts");
-    expect(source).toContain('--to-revisions "${{ inputs.revision }}=100"');
+    expect(source).toContain('--to-revisions "${REVISION}=100"');
     expect(source).toContain("MODE: rollback");
     expect(source).toContain("CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}");
     expect(source).toContain("CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}");
+    expect(source).toContain("evidence_run_id:");
+    expect(source).toContain("run-id: ${{ inputs.evidence_run_id }}");
+    expect(source).toContain("name: ${{ inputs.environment }}-rollback-revisions");
+    expect(source).toContain("traffic_shift: env.SHIFT_OUTCOME");
+  });
+
+  test("routes runner expressions through env instead of shell source", async () => {
+    for (const name of [
+      "publish-image",
+      "deploy-staging",
+      "deploy-production",
+      "rollback",
+    ]) {
+      for (const body of runBodies(await workflow(name))) {
+        expect(body).not.toContain("${{");
+      }
+    }
+  });
+
+  test("keeps the no-root-lockfile dependency guard conditional and fail-closed", async () => {
+    const sources = await Promise.all([
+      workflow("publish-image"),
+      workflow("deploy-staging"),
+      workflow("deploy-production"),
+      workflow("rollback"),
+    ]);
+    const combined = sources.join("\n");
+    expect(count(combined, "\n            bun install --frozen-lockfile")).toBe(5);
+    expect(count(combined, "\n          elif grep -hoE")).toBe(5);
+    expect(count(combined, "this repo has no root bun.lock")).toBeGreaterThanOrEqual(5);
+    expect(combined).not.toContain("run: bun install --frozen-lockfile");
   });
 });

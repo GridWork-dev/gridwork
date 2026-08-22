@@ -8,10 +8,6 @@
 # What it is NOT: a deployer. Publishing and deploying are separate identities (doc 07
 # §2) and separate workflows on purpose. This job may write to Artifact Registry and
 # nothing else; it holds no Cloud Run permission at all.
-#
-# GRIDWORK TEMPLATE DIVERGENCES (post-copy review): privileged publication is restricted
-# to this repository's main ref, checkout credentials are not persisted, and evidence is
-# serialized with jq instead of interpolating GitHub contexts into a shell heredoc.
 
 name: publish image
 
@@ -53,36 +49,79 @@ jobs:
       matrix: ${{ steps.pick.outputs.matrix }}
       any: ${{ steps.pick.outputs.any }}
     steps:
+      # An unset REPOSITORY VARIABLE interpolates to the empty string. It does not fail, and
+      # GitHub — not this template — owns what "empty" then means, so an absent variable is a
+      # value chosen by someone who is not in the room.
+      #
+      # `BUN_VERSION_FILE` is the one that proves this is not hygiene. Read at the pinned
+      # setup-bun SHA (`0c5077e5`, `action.yml`: neither `bun-version` nor `bun-version-file`
+      # is required, the latter defaults to null; `src/action.ts:158`: "If no version
+      # specified, default is 'latest'"). So an empty value does not error — it installs the
+      # newest Bun, the repo's pin silently stops binding, and the run is green. Same shape
+      # as the missing dependency install: a success nobody had to produce.
+      #
+      # Asserted for every variable the job reads rather than only the ones argued to be
+      # dangerous, because deciding which ones self-report is exactly the reasoning that
+      # produced the gap. Each job lists its own; a job that stops reading one drops it here
+      # in the same edit.
+      #
+      # First step in the job — before checkout, before `setup-bun`, before any credential.
+      # A misconfigured repo costs one red run and nothing else.
+      - name: assert the repository variables are set
+        env:
+          BUN_VERSION_FILE: ${{ vars.BUN_VERSION_FILE }}
+        run: |
+          set -euo pipefail
+          missing=""
+          for v in BUN_VERSION_FILE; do
+            [ -n "${!v:-}" ] || missing="$missing $v"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::unset repository variables:$missing"
+            exit 1
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-          persist-credentials: false
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: ${{ vars.BUN_VERSION_FILE }}
 
+      # Every `bun run deploy/*.ts` in this pipeline resolves this repo's dependencies, and
+      # until 2026-08-21 nothing installed them. Bun's auto-install covered that silently:
+      # it fetches from the registry against package.json RANGES, not `bun.lock`, which
+      # made the deploy path the only place in these repos where the lockfile did not bind.
+      # Every other workflow in all four repos runs `bun install --frozen-lockfile`; the
+      # T28 template was the exception, and that was an oversight, not a decision.
+      #
+      # gridwork is the one repo with nothing to install: it has no root `package.json`
+      # (its Bun project is `site/`) and its `deploy/*.ts` are deliberately
+      # dependency-free. The `exit 1` arm is what keeps that exemption honest — a repo that
+      # grows a package import without a root lockfile fails here instead of quietly
+      # auto-installing. `node:` and `bun:` specifiers are builtins, installed from nowhere.
+      #
+      # This step is byte-identical in all four workflows. Copy it, do not adapt it.
+      - name: install the deploy scripts' dependencies
+        run: |
+          set -euo pipefail
+          if [ -f bun.lock ]; then
+            bun install --frozen-lockfile
+          elif grep -hoE 'from "[^"]+"' deploy/*.ts | grep -qvE 'from "(\.|node:|bun:)'; then
+            echo "::error::deploy/*.ts imports a package but this repo has no root bun.lock"
+            exit 1
+          fi
+
       - id: pick
         env:
-          DEPLOY_TARGET: publish
-          BUN_VERSION_FILE: ${{ vars.BUN_VERSION_FILE }}
-          GCP_IMAGE_PUBLISHER_SA: ${{ vars.GCP_IMAGE_PUBLISHER_SA }}
-          GCP_NONPROD_PROJECT: ${{ vars.GCP_NONPROD_PROJECT }}
-          GCP_PROD_PROJECT: ${{ vars.GCP_PROD_PROJECT }}
-          GCP_REGION: ${{ vars.GCP_REGION }}
-          GCP_REGISTRY: ${{ vars.GCP_REGISTRY }}
-          GCP_REGISTRY_HOST: ${{ vars.GCP_REGISTRY_HOST }}
-          GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
           ONLY: ${{ inputs.service }}
           BEFORE: ${{ github.event.before }}
         run: bun run deploy/select-services.ts >> "$GITHUB_OUTPUT"
 
   publish:
     needs: select
-    if: >-
-      needs.select.outputs.any == 'true' &&
-      github.repository == 'GridWork-dev/gridwork' &&
-      github.ref == 'refs/heads/main'
+    if: needs.select.outputs.any == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
@@ -104,13 +143,43 @@ jobs:
           echo "::error::fork refs never publish images (doc 07 §3)"
           exit 1
 
+      # See the `select` job for why an unset repository variable is a vendor-chosen value
+      # rather than a failure. This job reads five; it asserts all five.
+      - name: assert the repository variables are set
+        env:
+          BUN_VERSION_FILE: ${{ vars.BUN_VERSION_FILE }}
+          GCP_IMAGE_PUBLISHER_SA: ${{ vars.GCP_IMAGE_PUBLISHER_SA }}
+          GCP_REGISTRY: ${{ vars.GCP_REGISTRY }}
+          GCP_REGISTRY_HOST: ${{ vars.GCP_REGISTRY_HOST }}
+          GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
+        run: |
+          set -euo pipefail
+          missing=""
+          for v in BUN_VERSION_FILE GCP_IMAGE_PUBLISHER_SA GCP_REGISTRY GCP_REGISTRY_HOST GCP_WIF_PROVIDER; do
+            [ -n "${!v:-}" ] || missing="$missing $v"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::unset repository variables:$missing"
+            exit 1
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: ${{ vars.BUN_VERSION_FILE }}
+
+      # Same step as the `select` job above — see there for why it is not an unconditional
+      # `bun install` and what the `exit 1` arm catches. The bodies must not drift.
+      - name: install the deploy scripts' dependencies
+        run: |
+          set -euo pipefail
+          if [ -f bun.lock ]; then
+            bun install --frozen-lockfile
+          elif grep -hoE 'from "[^"]+"' deploy/*.ts | grep -qvE 'from "(\.|node:|bun:)'; then
+            echo "::error::deploy/*.ts imports a package but this repo has no root bun.lock"
+            exit 1
+          fi
 
       - name: resolve build inputs
         id: svc
@@ -131,6 +200,20 @@ jobs:
       - name: gates
         run: bash deploy/gates.sh
 
+      # Anything that must happen on the HOST before Docker is handed the build
+      # context. dev-profile is why this exists: its Dockerfile builds a staged
+      # public-only tree (tools/build-site-target.ts -> .site-build-public/) behind a
+      # .dockerignore allowlist, so the staging step cannot move inside the Dockerfile —
+      # by the time Docker runs, the context has already been filtered.
+      #
+      # REQUIRED in every repo, not skip-if-absent. A repo with nothing to prepare ships
+      # a one-line script saying so. An `if [ -f ... ]` guard here would make "no
+      # preparation needed" and "the script is missing" identical at a glance, and the
+      # failure mode of the second is an image built from the wrong tree that passes
+      # every gate above it.
+      - name: prepare build context
+        run: bash deploy/prepare-build.sh
+
       - id: auth
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
@@ -141,6 +224,35 @@ jobs:
           # `create_credentials_file: false` is the mechanical guarantee; .dockerignore
           # entries are the belt, this is the braces.
           create_credentials_file: false
+
+      # `GCP_REGISTRY_HOST` is the host `docker login` sends the access token to, and
+      # `GCP_REGISTRY` is the host the image is actually pushed to. They are two
+      # independent repository variables that only happen to agree, and nothing checked
+      # that they did — so a principal who can write repository variables but cannot read
+      # secrets (a `repo`-scoped PAT, an org owner setting an org-level var) could point
+      # the login at a host they control and receive a live GCP access token for the
+      # image-publisher SA. The push to GCP_REGISTRY then fails and the run goes red,
+      # after the credential has already left. `create_credentials_file: false` does not
+      # help: it stops the credential reaching a Docker CONTEXT, not a login to the wrong
+      # host.
+      #
+      # Asserted rather than derived because `docker login` takes a host, not a
+      # host-plus-path, so GCP_REGISTRY cannot simply be passed through. The pair check is
+      # the property that matters: the token only ever goes to the host the image goes to.
+      - name: assert the login host is the registry's own host
+        env:
+          REGISTRY: ${{ vars.GCP_REGISTRY }}
+          REGISTRY_HOST: ${{ vars.GCP_REGISTRY_HOST }}
+        run: |
+          set -euo pipefail
+          case "$REGISTRY_HOST" in
+            *.pkg.dev) ;;
+            *) echo "::error::GCP_REGISTRY_HOST is not an Artifact Registry host"; exit 1 ;;
+          esac
+          case "$REGISTRY" in
+            "$REGISTRY_HOST"/*) ;;
+            *) echo "::error::GCP_REGISTRY_HOST is not the host of GCP_REGISTRY — refusing to send a registry credential to it"; exit 1 ;;
+          esac
 
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -199,32 +311,48 @@ jobs:
 
       # doc 07 §11: the evidence IS the deliverable. A deploy that cannot show its
       # digest, its tests and its scan is not a deploy you can reason about at 3am.
+      #
+      # Every value arrives through `env:` and is read as "$VAR" — including the output
+      # FILENAME. This was nine ${{ }} interpolations inside a `cat <<JSON` heredoc, the
+      # same defect class as the confirmed deploy-staging exploit: the runner substitutes
+      # ${{ }} into the script TEXT before a shell parses it, so a value containing $(...)
+      # arrived as executable source, after auth, with a live registry credential in
+      # reach. Quoting the delimiter is not the fix — a value carrying a quote still
+      # breaks out of the surrounding quoting, and one carrying the delimiter line still
+      # ends the heredoc early. env: is the fix: the value goes to the process
+      # environment, never into the script text.
+      #
+      # "Those inputs are hard to reach" is not a security property — `dockerfile` and
+      # `build_context` come from deploy/service-inputs.ts reading deploy/services.json,
+      # generated from a manifest a human edits. `jq -n --arg` builds the body for the
+      # same reason: a quote or backslash yields valid JSON, not a file collect cannot
+      # parse. No -c, deliberately — this file is read by a human, and the -c rule binds
+      # values captured into a variable or written to $GITHUB_OUTPUT.
       - name: source-to-image manifest
         env:
-          BUILD_CONTEXT: ${{ steps.svc.outputs.build_context }}
-          COMMIT_SHA: ${{ github.sha }}
+          SERVICE: ${{ matrix.service }}
+          REPOSITORY: ${{ github.repository }}
+          COMMIT: ${{ github.sha }}
+          REF: ${{ github.ref }}
+          RUN_ID: ${{ github.run_id }}
+          IMAGE: ${{ vars.GCP_REGISTRY }}/${{ matrix.service }}
           DIGEST: ${{ steps.build.outputs.digest }}
           DOCKERFILE: ${{ steps.svc.outputs.dockerfile }}
-          IMAGE: ${{ vars.GCP_REGISTRY }}/${{ matrix.service }}
-          REF: ${{ github.ref }}
-          REPOSITORY: ${{ github.repository }}
-          RUN_ID: ${{ github.run_id }}
-          SERVICE: ${{ matrix.service }}
+          BUILD_CONTEXT: ${{ steps.svc.outputs.build_context }}
         run: |
           set -euo pipefail
           jq -n \
             --arg service "$SERVICE" \
             --arg repository "$REPOSITORY" \
-            --arg commit "$COMMIT_SHA" \
+            --arg commit "$COMMIT" \
             --arg ref "$REF" \
             --arg run_id "$RUN_ID" \
             --arg image "$IMAGE" \
             --arg digest "$DIGEST" \
             --arg dockerfile "$DOCKERFILE" \
             --arg build_context "$BUILD_CONTEXT" \
-            '{service:$service, repository:$repository, commit:$commit, ref:$ref,
-              run_id:$run_id, image:$image, digest:$digest, dockerfile:$dockerfile,
-              build_context:$build_context}' > "image-manifest-${SERVICE}.json"
+            '{service: $service, repository: $repository, commit: $commit, ref: $ref, run_id: $run_id, image: $image, digest: $digest, dockerfile: $dockerfile, build_context: $build_context}' \
+            > "image-manifest-$SERVICE.json"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -235,10 +363,19 @@ jobs:
             trivy-${{ matrix.service }}.sarif
           if-no-files-found: error
 
+      # Both values through env:. This was `echo '${{ ... }}' > "digests/${{ ... }}"` —
+      # single quotes are not a sandbox, they are text the runner writes around text it
+      # already substituted, so one quote character in either value ends the quoting and
+      # the rest of the value is shell. `printf '%s\n'` also beats `echo` here: echo
+      # interprets leading dashes and backslashes on some shells, printf does not.
       - name: record digest
+        env:
+          SERVICE: ${{ matrix.service }}
+          DIGEST: ${{ steps.build.outputs.digest }}
         run: |
+          set -euo pipefail
           mkdir -p digests
-          echo '${{ steps.build.outputs.digest }}' > "digests/${{ matrix.service }}"
+          printf '%s\n' "$DIGEST" > "digests/$SERVICE"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -258,12 +395,26 @@ jobs:
           pattern: digest-*
           path: digests
           merge-multiple: false
+      # `jq -c` is load-bearing, not a nicety. Without it jq pretty-prints, so the
+      # accumulator was MULTILINE from the first service onward and then written with
+      # `printf 'digests=%s\n'` into $GITHUB_OUTPUT — a single-line key=value format.
+      # This was broken, not merely risky: the `digests` workflow_call output was corrupt
+      # for every non-empty publish, and it is the exact input deploy-staging and
+      # deploy-production consume. -c keeps the object on one line so the write is valid.
       - id: collect
         run: |
           set -euo pipefail
+          # nullglob so an empty download expands to nothing rather than to the literal
+          # pattern. Without it the loop runs once on `digests/digest-*/*`, `cat` fails
+          # inside a --arg command substitution whose outer jq still exits 0, and the
+          # output becomes `digests={"*":""}` — a green publish handing the deploy
+          # workflows a service named `*`. Unreachable today (collect is gated on
+          # publish success and both uploads use if-no-files-found: error), which is
+          # exactly why it would not be noticed the day one of those changes.
+          shopt -s nullglob
           json='{}'
           for d in digests/digest-*/*; do
             svc="$(basename "$d")"
-            json="$(printf '%s' "$json" | jq --arg k "$svc" --arg v "$(cat "$d")" '. + {($k): $v}')"
+            json="$(printf '%s' "$json" | jq -c --arg k "$svc" --arg v "$(cat "$d")" '. + {($k): $v}')"
           done
           printf 'digests=%s\n' "$json" >> "$GITHUB_OUTPUT"
