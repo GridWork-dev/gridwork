@@ -610,6 +610,39 @@ pub async fn checkpoints(conn: &mut PgConnection) -> Result<Vec<Checkpoint>, Ref
         .collect()
 }
 
+/// How many checkpoints this database holds, and the newest sequence one
+/// anchors at.
+///
+/// One statement for the pair, because they are only ever wanted together: the
+/// caller is about to discard these rows and is asking how much evidence that
+/// costs and which restart's comparison it was.
+pub async fn census(pool: &sqlx::PgPool) -> Result<(i64, Option<Seq>), Refusal> {
+    let (held, newest): (i64, Option<String>) =
+        sqlx::query_as("SELECT count(*), max(through_seq)::text FROM gwk_internal.checkpoint")
+            .fetch_one(pool)
+            .await
+            .map_err(|e| Refusal::storage(format!("count checkpoints: {e}")))?;
+    let newest = newest
+        .map(|text| from_numeric_text(&text).map(Seq::new))
+        .transpose()
+        .map_err(|e| Refusal::storage(format!("column through_seq: {e}")))?;
+    Ok((held, newest))
+}
+
+/// Delete every checkpoint, returning how many rows went.
+///
+/// An ADMIN act by construction: the runtime role holds SELECT and INSERT on
+/// this table and no DELETE, which the privilege sweep asserts. A kernel that
+/// could erase the evidence its own recovery is graded against would be able to
+/// launder a divergence into an `Unverified` start.
+pub async fn discard_all(pool: &sqlx::PgPool) -> Result<u64, Refusal> {
+    Ok(sqlx::query("DELETE FROM gwk_internal.checkpoint")
+        .execute(pool)
+        .await
+        .map_err(|e| Refusal::storage(format!("discard checkpoints: {e}")))?
+        .rows_affected())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

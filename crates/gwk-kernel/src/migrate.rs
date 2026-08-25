@@ -311,6 +311,13 @@ pub struct Applied {
     /// renumbered the log holds this exactly and moves the count. Both are what
     /// "every event survives" is a claim against.
     pub watermark_after: Option<Seq>,
+    /// Checkpoints this run discarded — every one the database held, because
+    /// every one of them describes the contract the run replaced.
+    ///
+    /// The receipt is the only place this number is ever recorded. The ledger
+    /// has no column for it, and adding one would take a backend migration that
+    /// reaches an existing database only when a LATER step names it.
+    pub checkpoints_discarded: u64,
     /// How long the one transaction took, in milliseconds.
     pub elapsed_ms: u64,
 }
@@ -319,10 +326,13 @@ pub struct Applied {
 ///
 /// Order, and each part is here because the one before it made it possible:
 /// the step DDL, then the backend migrations the steps declare, then the
-/// privilege matrix wholesale, then the ledger row. Privileges come after the
+/// privilege matrix wholesale, then the ledger row, then the checkpoints of the
+/// contract that just stopped being this database's. Privileges come after the
 /// migrations because `GRANT ... ON ALL TABLES IN SCHEMA gwk` reaches the
-/// relations that exist when it runs, and the ledger row comes last because
-/// `0006_schema_migration` may be one of the migrations that just arrived.
+/// relations that exist when it runs, and the ledger row comes before the
+/// discard because `0006_schema_migration` may be one of the migrations that
+/// just arrived — the row saying a migration happened is written before the
+/// only rows it destroys.
 ///
 /// One transaction, so a crash leaves the database at its base fingerprint —
 /// which the binaries that were serving it a moment ago still serve. A
@@ -478,6 +488,31 @@ pub async fn apply(
         .await?;
     }
 
+    // EVERY checkpoint, keyed on the event rather than on the bytes. Each row
+    // in this table was written under the contract the statements above just
+    // replaced — the verb holds the writer lock, so nothing appended while they
+    // ran — and its `projection_hash` was taken over the OLD `ProjectionRecord`
+    // shape. Left in place, the next restart finds one sitting at the watermark,
+    // compares that hash against one taken over the NEW shape, and reports
+    // `Verdict::Diverged` for a database that is not divergent: it refuses to
+    // serve. A step that rewrites projection VALUES without changing any shape
+    // does the same thing, which is why no shape oracle is asked — the one
+    // authored step contains exactly such a rewrite.
+    //
+    // Discarded rather than reinterpreted, on the domain's own terms: nothing in
+    // the contract depends on a checkpoint existing, so losing one costs a
+    // comparison and not a recovery. The next start says `Unverified` and
+    // serves, and the first append re-anchors.
+    //
+    // Inside the transaction, which is load-bearing rather than tidy: a step
+    // that fails must leave the checkpoints where it found them, because a
+    // migration that changed nothing must not destroy the evidence the
+    // still-current contract's next restart is entitled to compare against.
+    let checkpoints_discarded = sqlx::query("DELETE FROM gwk_internal.checkpoint")
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+
     let events_after: i64 = sqlx::query_scalar("SELECT count(*) FROM gwk.event")
         .fetch_one(&mut *tx)
         .await?;
@@ -508,6 +543,7 @@ pub async fn apply(
         events_after,
         watermark_before,
         watermark_after,
+        checkpoints_discarded,
         elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
     })
 }

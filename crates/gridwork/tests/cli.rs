@@ -1899,6 +1899,36 @@ async fn seed_base_database(admin_dsn: &str) {
     .expect("record the base contract");
 }
 
+/// Seed one checkpoint at `through_seq`, in the shape the kernel writes.
+///
+/// `records_ref` carries a real `PayloadRef`, `byte_size` as the decimal string
+/// that type serializes to, and every one of the table's four CHECKs holds — a
+/// row the production writer could have produced, rather than one only this
+/// test would ever insert.
+async fn seed_checkpoint(pool: &sqlx::PgPool, through_seq: i64) {
+    sqlx::query(
+        "INSERT INTO gwk_internal.checkpoint \
+           (through_seq, schema_version, projection_hash, records_ref, created_at) \
+         VALUES ($1::numeric, 1, $2, $3::jsonb, now())",
+    )
+    .bind(through_seq)
+    .bind("a".repeat(64))
+    .bind(format!(
+        r#"{{"digest": "sha256:{}", "media_type": "application/x-ndjson", "byte_size": "4096"}}"#,
+        "a".repeat(64)
+    ))
+    .execute(pool)
+    .await
+    .expect("seed a checkpoint");
+}
+
+async fn checkpoint_count(pool: &sqlx::PgPool) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM gwk_internal.checkpoint")
+        .fetch_one(pool)
+        .await
+        .expect("count the checkpoints")
+}
+
 /// `--dry-run` plans the migration and leaves the database exactly as it was.
 ///
 /// The rehearsal arm had no test that ran it against a database at all, and that
@@ -1953,6 +1983,17 @@ async fn a_dry_run_plans_and_changes_nothing() {
     // adds relations and it stamps a new digest, so a dry run that ran any part
     // of it moves one or both.
     let before = PgPool::connect(&admin_dsn).await.expect("connect before");
+    // One checkpoint, because the real run deletes every one it finds and the
+    // rehearsal has to both NAME that and leave it alone. Seeded before the
+    // count below, which is what stops an empty table from satisfying either
+    // half: `checkpoints_to_discard: 0` over no rows agrees with a dry run that
+    // does not look, and with one that deleted them.
+    seed_checkpoint(&before, 1).await;
+    let checkpoints_before = checkpoint_count(&before).await;
+    assert_eq!(
+        checkpoints_before, 1,
+        "the fixture did not land, so neither assertion about it below has a subject"
+    );
     let relations_before: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
           WHERE n.nspname IN ('gwk', 'gwk_internal') AND c.relkind IN ('r', 'v', 'm', 'S', 'p')",
@@ -2013,6 +2054,14 @@ async fn a_dry_run_plans_and_changes_nothing() {
     // correction: the envelope used to imply the grant matrix had been checked.
     assert_eq!(plan["rehearsal"], "not implemented");
     assert_eq!(plan["rungs_checked"], serde_json::json!(["base"]));
+    // The one destructive act a real run performs that no DDL records: it
+    // deletes every checkpoint, because each describes the contract being
+    // replaced. A rehearsal that omitted it would be silent about the only part
+    // of the run that is not recoverable from the repository.
+    assert_eq!(
+        plan["checkpoints_to_discard"], 1,
+        "the plan does not say how much recovery evidence the real run would drop: {plan}"
+    );
     assert!(
         plan["steps"]
             .as_array()
@@ -2053,8 +2102,168 @@ async fn a_dry_run_plans_and_changes_nothing() {
         ledger_after, ledger_before,
         "the dry run applied a backend migration the step carries"
     );
+    assert_eq!(
+        checkpoint_count(&after).await,
+        checkpoints_before,
+        "the dry run performed the discard it was only supposed to report"
+    );
     after.close().await;
 
+    for statement in [
+        format!("DROP DATABASE IF EXISTS {live} WITH (FORCE);"),
+        format!("DROP ROLE IF EXISTS {role};"),
+    ] {
+        let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(statement))
+            .execute(&maintenance)
+            .await;
+    }
+}
+
+/// `gw admin discard-checkpoints` rehearses, deletes, and refuses a live kernel.
+///
+/// The escape hatch for a database whose checkpoints describe a contract it no
+/// longer carries — one migrated by a binary from before the applier discarded
+/// them, or one carrying a checkpoint a differently-hashing build wrote. Both
+/// present as `Diverged` at the same sequence, and neither is a divergence.
+///
+/// Three arms, and the two refusals are why the verb exists rather than a `psql`
+/// line in a runbook: `--dry-run` says how many and deletes none, a held writer
+/// lock refuses outright, and only the plain run deletes. A hatch that deleted
+/// during a rehearsal, or under a kernel still appending checkpoints beside it,
+/// would be worse than the psql line — it would look careful.
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn discard_checkpoints_rehearses_refuses_a_held_lock_and_then_deletes() {
+    use sqlx::{Connection as _, PgPool};
+
+    let admin_url = std::env::var("GWK_TEST_ADMIN_DATABASE_URL")
+        .expect("GWK_TEST_ADMIN_DATABASE_URL must point at a PostgreSQL superuser DSN");
+    let maintenance = PgPool::connect(&admin_url).await.expect("maintenance");
+
+    let role = format!("gwk_cli_discard_{}", std::process::id());
+    let live = format!("gwk_cli_discard_{}", std::process::id());
+
+    for statement in [
+        format!("DROP DATABASE IF EXISTS {live} WITH (FORCE);"),
+        format!("DROP ROLE IF EXISTS {role};"),
+    ] {
+        let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(statement))
+            .execute(&maintenance)
+            .await;
+    }
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE ROLE {role} NOLOGIN;")))
+        .execute(&maintenance)
+        .await
+        .expect("create the runtime role");
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE DATABASE {live};")))
+        .execute(&maintenance)
+        .await
+        .expect("create the live database");
+
+    let (prefix, _) = admin_url.rsplit_once('/').expect("a /database suffix");
+    let admin_dsn = format!("{prefix}/{live}");
+    seed_base_database(&admin_dsn).await;
+
+    // TWO, at different sequences. One row cannot tell a count from a boolean,
+    // and the highest sequence is a second field the receipt has to get right.
+    let pool = PgPool::connect(&admin_dsn).await.expect("connect");
+    seed_checkpoint(&pool, 1).await;
+    seed_checkpoint(&pool, 2).await;
+    assert_eq!(
+        checkpoint_count(&pool).await,
+        2,
+        "the fixture did not land, so every count below would pass over an empty table"
+    );
+
+    let revision = "b1c2d3e4f5".repeat(4);
+    let admin_env: Vec<(&str, &str)> = vec![
+        ("GWK_ADMIN_DATABASE_URL", &admin_dsn),
+        ("GWK_RUNTIME_ROLE", &role),
+        ("GWK_PUBLIC_REVISION", &revision),
+    ];
+
+    // The rehearsal.
+    let planned = gw_env("admin discard-checkpoints --dry-run", &admin_env);
+    assert_eq!(
+        code(&planned),
+        0,
+        "`admin discard-checkpoints --dry-run` refused: {}{}",
+        String::from_utf8_lossy(&planned.stdout),
+        String::from_utf8_lossy(&planned.stderr)
+    );
+    let plan = json(&planned);
+    assert_eq!(plan["type"], "checkpoints_discard_planned");
+    assert_eq!(plan["checkpoints_to_discard"], 2);
+    // A decimal string, as `Seq` is everywhere else on this wire.
+    assert_eq!(plan["through_seq_max_before"], "2");
+    assert_eq!(plan["public_revision"], revision);
+    assert_eq!(
+        checkpoint_count(&pool).await,
+        2,
+        "the rehearsal deleted the rows it was only supposed to count"
+    );
+
+    // The refusal. `gwk_kernel::WRITER_LOCK_KEY` on a session of its own is
+    // exactly the state a running kernel leaves the database in — taken here
+    // directly rather than through `WriterLock` so it can be RELEASED on
+    // demand: dropping that guard aborts a probe task, and the server holds the
+    // lock until the aborted task's connection actually closes, which is a race
+    // the last arm below loses.
+    let mut holder = sqlx::PgConnection::connect(&admin_dsn)
+        .await
+        .expect("a session to hold the writer lock on");
+    let held: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+        .bind(gwk_kernel::WRITER_LOCK_KEY)
+        .fetch_one(&mut holder)
+        .await
+        .expect("take the writer lock");
+    assert!(held, "nothing else may hold this database's writer lock");
+
+    let fenced = gw_env("admin discard-checkpoints", &admin_env);
+    assert_eq!(
+        code(&fenced),
+        3,
+        "a held writer lock did not refuse the discard: {}{}",
+        String::from_utf8_lossy(&fenced.stdout),
+        String::from_utf8_lossy(&fenced.stderr)
+    );
+    assert_eq!(
+        checkpoint_count(&pool).await,
+        2,
+        "the verb deleted rows out from under a live kernel and then reported a refusal"
+    );
+
+    let released: bool = sqlx::query_scalar("SELECT pg_advisory_unlock($1)")
+        .bind(gwk_kernel::WRITER_LOCK_KEY)
+        .fetch_one(&mut holder)
+        .await
+        .expect("release the writer lock");
+    assert!(released, "the unlock ran on a session that did not hold it");
+    sqlx::Connection::close(holder)
+        .await
+        .expect("close the holding session");
+
+    // And the act itself, once nothing holds the lock.
+    let discarded = gw_env("admin discard-checkpoints", &admin_env);
+    assert_eq!(
+        code(&discarded),
+        0,
+        "`admin discard-checkpoints` refused with no kernel running: {}{}",
+        String::from_utf8_lossy(&discarded.stdout),
+        String::from_utf8_lossy(&discarded.stderr)
+    );
+    let receipt = json(&discarded);
+    assert_eq!(receipt["type"], "checkpoints_discarded");
+    assert_eq!(receipt["checkpoints_discarded"], 2);
+    assert_eq!(receipt["through_seq_max_before"], "2");
+    assert_eq!(receipt["public_revision"], revision);
+    assert_eq!(
+        checkpoint_count(&pool).await,
+        0,
+        "the verb reported a discard it did not perform"
+    );
+
+    pool.close().await;
     for statement in [
         format!("DROP DATABASE IF EXISTS {live} WITH (FORCE);"),
         format!("DROP ROLE IF EXISTS {role};"),

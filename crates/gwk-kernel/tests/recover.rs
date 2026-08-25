@@ -196,6 +196,48 @@ async fn an_unreadable_checkpoint_is_walked_past_and_reported() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// A database with no checkpoint at all is `Unverified`, and it serves.
+///
+/// The arm the migration-side discard leans on. `gw admin migrate` deletes
+/// every checkpoint it finds, because each one describes the contract it just
+/// replaced — and that is a cure only if a checkpoint-less database still
+/// starts. If this arm ever became a refusal, discarding would be a second way
+/// to produce the outage it exists to prevent.
+///
+/// Reached by never taking a checkpoint rather than by deleting one, so the
+/// test does not depend on the very statement it is licensing. A blob store IS
+/// attached, which is what separates this from the neighbouring "no blob store"
+/// arm: the ladder looked and found nothing, rather than having nowhere to look.
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
+async fn a_log_with_no_checkpoint_at_all_is_unverified_and_still_serves() {
+    let maintenance = maintenance_pool().await;
+    let (name, root, store) = checkpointing_store(&maintenance, "rcnone").await;
+    populate(&store).await;
+    assert!(
+        checkpoints(&store).await.is_empty(),
+        "the barrier fired on its own, so this case is not the one it claims to be"
+    );
+
+    let report = store.recover().await.expect("recover");
+    match &report.verdict {
+        Verdict::Unverified { reason } => assert_eq!(
+            reason, "no valid checkpoint",
+            "the reason names the wrong arm: this database has a blob store and an empty table"
+        ),
+        other => panic!("expected Unverified, got {other:?}"),
+    }
+    assert!(
+        report.ready(),
+        "a database with no checkpoint must still serve — otherwise discarding the stranded \
+         ones is a second way to produce the outage"
+    );
+    assert!(report.rejected.is_empty(), "{:?}", report.rejected);
+
+    drop_database(&maintenance, &name).await;
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[tokio::test]
 #[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
 async fn a_log_restored_without_its_projections_is_rebuilt_by_replay() {
