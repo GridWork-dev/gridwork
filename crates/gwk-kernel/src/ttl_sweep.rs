@@ -35,9 +35,27 @@
 //! act on further: a renewed lease means the holder is alive, and marking
 //! its attempt `unknown` under it would be a false liveness report.
 //!
+//! # Two triggers, not one
+//!
+//! A lease that expired is one trigger. It is not the only way an attempt
+//! stops being alive, and it was never the whole job: `worktree_lease_id` is
+//! nullable on the wire and in the schema, so a dispatch that needs no
+//! worktree — a read-only review, say — creates an attempt with no lease at
+//! all. Nothing about that attempt's death produces a lease to expire, so the
+//! arm above is blind to it by construction, and one that crashed while
+//! `running` stayed `running` forever: the kernel went on claiming work was
+//! in flight that nothing was performing.
+//!
+//! So the pass has a second trigger: an attempt in
+//! one of the same uncertain states that NO live lease is backing and that
+//! has not produced a single event for [`STALE_AFTER`] is marked `unknown`
+//! too. "No live lease" rather than "no lease" on purpose — it also catches
+//! the attempt whose lease is already `expired` or `released`, which the
+//! lease loop can never re-find (it only ever reads `state = 'held'`).
+//!
 //! Both writes are per-row CAS, so a lost race on either one is not an
 //! error — the next tick re-reads the current state and decides again. A
-//! query failure is the one thing [`sweep_once`] propagates; everything
+//! query failure is the one thing [`sweep_once_with`] propagates; everything
 //! about an individual row racing is absorbed.
 
 use std::sync::Arc;
@@ -61,6 +79,21 @@ use crate::store::PgEventStore;
 /// a different cadence yet; add a knob when one does.
 pub const SWEEP_INTERVAL: Duration = Duration::from_secs(15);
 
+/// How long an attempt with no live lease may go without a single event
+/// before the kernel stops claiming it runs.
+///
+/// The lease trigger is prompt because an elapsed TTL is proof of death. An
+/// attempt no lease is backing offers no such proof, so silence is the only
+/// signal there is — and `unknown` is terminal
+/// ([`gwk_domain::fsm::AttemptState`] gives it no outgoing edge), so a false
+/// positive is permanent. The value therefore has to exceed the longest
+/// legitimate quiet stretch of a live lease-less dispatch, not merely the
+/// sweep's own cadence. It is affordable because five commands refresh
+/// `gwk.attempt.updated_at` — `TransitionAttempt`, `UpdateBudget`,
+/// `RecordAttemptRuntime`, `RecordAttemptOutcome` and `RecordRound` — so an
+/// attempt that is doing anything at all advances it.
+pub const STALE_AFTER: Duration = Duration::from_secs(3600);
+
 /// What one sweep pass did.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SweepReport {
@@ -82,10 +115,25 @@ pub async fn run(store: Arc<PgEventStore>, interval: Duration) {
     }
 }
 
+/// One pass at the threshold production wires: [`STALE_AFTER`].
+///
+/// Every tick [`run`] takes goes through here, so the shipped value is this
+/// function's, never a caller's.
+pub async fn sweep_once(store: &PgEventStore) -> Result<SweepReport> {
+    sweep_once_with(store, STALE_AFTER).await
+}
+
 /// One pass: expire every lease whose TTL elapsed, and mark `unknown` every
 /// attempt it was backing that had not already reached a terminal or
-/// not-yet-live state.
-pub async fn sweep_once(store: &PgEventStore) -> Result<SweepReport> {
+/// not-yet-live state — then every attempt no live lease is backing that has
+/// been silent for `stale_after`.
+///
+/// The threshold is a parameter only so a test can move it. A row's
+/// `updated_at` is written from its event's `appended_at`, which is
+/// Postgres's own `now()` at append, and `assert_transition` requires every
+/// UPDATE to advance `version` by exactly one — so a fixture cannot be
+/// backdated by SQL or by command, and the threshold is the only lever left.
+pub async fn sweep_once_with(store: &PgEventStore, stale_after: Duration) -> Result<SweepReport> {
     let mut report = SweepReport::default();
     // One instant for every command this pass issues — the same thing one
     // client request's `issued_at` would be, and cheaper than a database
@@ -128,6 +176,8 @@ pub async fn sweep_once(store: &PgEventStore) -> Result<SweepReport> {
         sweep_dead_attempts(store, &lease_id, &issued_at, &mut report).await?;
     }
 
+    sweep_stale_attempts(store, stale_after, &issued_at, &mut report).await?;
+
     Ok(report)
 }
 
@@ -148,9 +198,10 @@ async fn sweep_dead_attempts(
              ORDER BY aggregate_version LIMIT 1 \
          ) e ON true \
          WHERE a.worktree_lease_id = $1 \
-           AND a.state IN ('starting', 'running', 'blocked', 'canceling')",
+           AND a.state = ANY($2)",
     )
     .bind(lease_id)
+    .bind(uncertain_state_names()?)
     .fetch_all(store.pool())
     .await
     .map_err(KernelError::Database)?;
@@ -181,6 +232,87 @@ async fn sweep_dead_attempts(
         // completed) — not a sweep failure, just stale by the time it landed.
     }
     Ok(())
+}
+
+/// Mark `unknown` every attempt that no live lease is backing and that has
+/// gone `stale_after` without a single event.
+///
+/// The lease arm cannot reach these: an attempt created with
+/// `worktree_lease_id` NULL has no lease whose expiry would trigger it, and
+/// one whose lease already left `held` is equally unreachable, because the
+/// lease loop only ever re-reads `state = 'held'`. `NOT EXISTS (... 'held')`
+/// is one predicate for both spellings of the same fact — nothing is proving
+/// this attempt alive.
+async fn sweep_stale_attempts(
+    store: &PgEventStore,
+    stale_after: Duration,
+    issued_at: &Timestamp,
+    report: &mut SweepReport,
+) -> Result<()> {
+    let rows: Vec<(String, i64, String, f64)> = sqlx::query_as(
+        "SELECT a.id, a.version, e.project_id, \
+                extract(epoch FROM now() - a.updated_at)::float8 \
+         FROM gwk.attempt a \
+         JOIN LATERAL ( \
+             SELECT project_id FROM gwk.event \
+             WHERE aggregate_type = 'attempt' AND aggregate_id = a.id \
+             ORDER BY aggregate_version LIMIT 1 \
+         ) e ON true \
+         WHERE a.state = ANY($1) \
+           AND a.updated_at < now() - make_interval(secs => $2::float8) \
+           AND NOT EXISTS ( \
+               SELECT 1 FROM gwk.lease l \
+               WHERE l.id = a.worktree_lease_id AND l.state = 'held' \
+           ) \
+         ORDER BY a.id",
+    )
+    .bind(uncertain_state_names()?)
+    .bind(stale_after.as_secs_f64())
+    .fetch_all(store.pool())
+    .await
+    .map_err(KernelError::Database)?;
+
+    for (attempt_id, version, project_id, age_secs) in rows {
+        let version = version_of(version)?;
+        let command = KernelCommand::TransitionAttempt {
+            attempt_id: AttemptId::new(attempt_id.clone()),
+            to: AttemptState::Unknown,
+            expected_version: version,
+            receipt_id: None,
+        };
+        let envelope = kernel_envelope(
+            &command,
+            // A different prefix from the lease arm's, so the log itself says
+            // which trigger buried the attempt.
+            format!("ttl_sweep:attempt_stale:{attempt_id}:{version}"),
+            &project_id,
+            issued_at,
+        );
+        if let KernelResult::CommandApplied { .. } = store.submit(&envelope).await {
+            // `run` discards the report, so stderr is the operational trace
+            // this leaves behind — burying an attempt is not routine, and an
+            // operator reading the journal should see which ones and why.
+            eprintln!(
+                "gwk-kernel: ttl_sweep buried attempt {attempt_id} (version {version}) \
+                 after {age_secs:.0}s with no live lease backing it"
+            );
+            report
+                .attempts_marked_unknown
+                .push(AttemptId::new(attempt_id));
+        }
+        // A lost CAS is the same benign race as in the lease arm: the attempt
+        // moved on its own between the read above and this write.
+    }
+    Ok(())
+}
+
+/// The FSM's uncertain states, in the error type this module speaks.
+///
+/// One derivation, shared with the recovery report that names the same rows —
+/// a second literal here could drift from the transitions it selects for.
+fn uncertain_state_names() -> Result<Vec<String>> {
+    crate::recover::uncertain_states()
+        .map_err(|e| KernelError::Schema(format!("uncertain states: {e}")))
 }
 
 /// Narrow a `bigint` version column to the `u32` the domain carries.
@@ -238,5 +370,35 @@ fn kernel_envelope(
         // and a null payload would be refused by the kernel anyway (`gw`'s
         // own envelope builder makes the same call).
         payload: serde_json::to_value(command).unwrap_or(serde_json::Value::Null),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The value `sweep_once` — and therefore every production tick — wires
+    /// into [`sweep_once_with`]. The integration arms prove the threshold is
+    /// READ; this proves the number production reads is a usable one.
+    ///
+    /// Both bounds are load-bearing in opposite directions. Too low and the
+    /// sweep buries live work, because `unknown` is terminal and a lease-less
+    /// dispatch can legitimately go a long time between events; the floor is
+    /// stated against [`SWEEP_INTERVAL`] so it stays many ticks of headroom
+    /// rather than a number that happens to be large. Too high and the defect
+    /// this arm exists to close is simply back — an attempt nothing is
+    /// running keeps reading `running` for longer than anyone will wait.
+    #[test]
+    fn the_stale_threshold_is_bounded() {
+        assert!(
+            STALE_AFTER >= SWEEP_INTERVAL * 20,
+            "STALE_AFTER ({STALE_AFTER:?}) must leave many sweep ticks of headroom \
+             over SWEEP_INTERVAL ({SWEEP_INTERVAL:?}) — `unknown` is terminal"
+        );
+        assert!(
+            STALE_AFTER <= Duration::from_secs(24 * 60 * 60),
+            "STALE_AFTER ({STALE_AFTER:?}) must still drain within a day — \
+             a threshold nothing reaches is the defect, not the fix"
+        );
     }
 }

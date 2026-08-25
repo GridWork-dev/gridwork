@@ -484,19 +484,28 @@ pub(crate) async fn watermark_of(conn: &mut PgConnection) -> Result<Option<Seq>,
         .map_err(|e| Refusal::storage(format!("watermark: {e}")))
 }
 
-/// Attempts whose outcome a restart cannot know.
+/// The states whose outcome a restart cannot know, as wire strings.
 ///
 /// The FSM already names them and is not asked twice: a state is uncertain
 /// exactly when it has a legal edge to `unknown`. `queued` and `leased` do not
 /// — an attempt that never started has no outcome to be uncertain about, it
 /// simply has not run — and hard-coding a list here would be a second copy of
 /// the FSM, free to drift from the one the transitions are checked against.
-async fn uncertain_attempts(conn: &mut PgConnection) -> Result<Vec<String>, Refusal> {
-    let states = AttemptState::STATES
+///
+/// Shared with [`crate::ttl_sweep`], which selects on the same set: the report
+/// that NAMES a stuck attempt and the sweep that BURIES it have to be talking
+/// about the same rows, and one derivation is how that stays true.
+pub(crate) fn uncertain_states() -> Result<Vec<String>, Refusal> {
+    AttemptState::STATES
         .iter()
         .filter(|state| AttemptState::can_transition(**state, AttemptState::Unknown))
         .map(wire_str)
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect()
+}
+
+/// Attempts whose outcome a restart cannot know.
+async fn uncertain_attempts(conn: &mut PgConnection) -> Result<Vec<String>, Refusal> {
+    let states = uncertain_states()?;
     let rows = sqlx::query("SELECT id FROM gwk.attempt WHERE state = ANY($1) ORDER BY id")
         .bind(&states)
         .fetch_all(conn)
@@ -516,15 +525,9 @@ mod tests {
 
     #[test]
     fn uncertainty_is_read_off_the_fsm_and_excludes_what_never_started() {
-        let uncertain: Vec<&str> = AttemptState::STATES
-            .iter()
-            .filter(|s| AttemptState::can_transition(**s, AttemptState::Unknown))
-            .map(|s| wire_str(s).expect("wire name"))
-            .collect::<Vec<_>>()
-            .leak()
-            .iter()
-            .map(|s| s.as_str())
-            .collect();
+        // The one derivation both readers use: this report, and the TTL
+        // sweep's stale arm.
+        let uncertain = uncertain_states().expect("wire names");
         assert_eq!(
             uncertain,
             ["starting", "running", "blocked", "canceling"],

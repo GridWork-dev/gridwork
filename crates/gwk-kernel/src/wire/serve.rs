@@ -258,12 +258,16 @@ impl Daemon {
 
     /// Start the periodic TTL sweep: a lease-holder that died rather than
     /// released it gets noticed on [`crate::ttl_sweep::SWEEP_INTERVAL`], not
-    /// only on its next renewal attempt. See [`crate::ttl_sweep`].
+    /// only on its next renewal attempt — and an attempt no live lease is
+    /// backing at all gets noticed once it has been silent for
+    /// [`crate::ttl_sweep::STALE_AFTER`], which is the only trigger that
+    /// reaches a lease-less dispatch. See [`crate::ttl_sweep`].
     ///
     /// Separate from [`Daemon::new`] for the same reason
     /// [`Daemon::notify_on_append`] is: it spawns, and a daemon that never
     /// calls this still serves every other request correctly — dead leases
-    /// simply accumulate until something else expires them.
+    /// simply accumulate until something else expires them, and stuck
+    /// attempts go on reading `running` with nothing behind them.
     pub fn spawn_ttl_sweep(&self) {
         tokio::spawn(crate::ttl_sweep::run(
             Arc::clone(&self.store),
