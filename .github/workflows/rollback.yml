@@ -1,0 +1,393 @@
+# T28 reference: application rollback (doc 07 §8).
+#
+# COPY VERBATIM into each app repo as `.github/workflows/rollback.yml`.
+#
+# Scope, stated plainly because the limit is the safety property: this shifts TRAFFIC to
+# a known-good revision. It does not reverse a schema change and it never will —
+# destructive schema reversal is not automated (doc 07 §8). If a release wrote
+# semantically bad data, this workflow is the wrong tool and the separately approved
+# database recovery procedure is the right one.
+#
+# It is also useless once the database has moved past compatibility. Rollback is safe
+# only while the old revision can still read what the new one wrote.
+#
+# Shell rule for this whole file, no exceptions: no `${{ }}` inside a `run:` body. The
+# runner substitutes those TEXTUALLY into the script source before any shell parses it,
+# so a value containing `$(...)` arrives as executable source. Reproduced upstream: with
+# an unquoted heredoc delimiter the payload ran. Quoting the delimiter is not the fix —
+# a value carrying a quote character still breaks out of surrounding quoting, and a value
+# carrying the delimiter line still ends the heredoc early. Every data value comes in
+# through a step-level `env:` mapping and is read as "$VAR". `${{ }}` stays legal in
+# `uses:`, `with:`, `if:`, `env:` right-hand sides, `name:` and job keys — none of those
+# are shell.
+
+name: rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: Service key to roll back (must appear in deploy/services.json)
+        required: true
+        type: string
+      revision:
+        description: Target revision name (from a prior run's rollback-revisions.txt)
+        required: true
+        type: string
+      # A revision that merely EXISTS is not a rollback target. A zero-traffic canary from
+      # a failed release exists too, and promoting one to 100% is a deploy wearing a
+      # rollback's clothes — it ships code that never served a request, under a name that
+      # tells the operator the opposite. The only evidence that a revision once held
+      # traffic is the rollback-revisions.txt a prior deploy recorded BEFORE it changed
+      # anything, so the run that recorded it is a required input and is checked below.
+      evidence_run_id:
+        description: Run ID of the deploy whose rollback-revisions.txt lists this revision
+        required: true
+        type: string
+      environment:
+        required: true
+        default: production
+        type: choice
+        options: [staging, production]
+      # A typed confirmation, because on three of the four repos there is no environment
+      # protection rule (see deploy-production.yml's job header) and nothing else stands
+      # between this form and a live production traffic shift. Must equal
+      # `<service>/<revision>` exactly, checked before `auth` — a mismatch costs a red run
+      # and nothing else. A check of intent, not a four-eyes gate.
+      confirm:
+        description: Type "<service>/<revision>" exactly to confirm the traffic shift
+        required: true
+        type: string
+
+# §8 rule 2: the SAME concurrency namespace the deploy workflows use, so a rollback and
+# a deploy can never interleave their traffic mutations. Two groups would defeat this.
+concurrency:
+  group: deploy-${{ inputs.environment }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  rollback:
+    runs-on: ${{ vars.CI_RUNNER_LINUX || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
+      # Reading another run's artifact is a cross-run API call, not a workspace read, and
+      # `actions/download-artifact` with `run-id` returns 403 without this scope. It is
+      # read-only: this token cannot cancel, re-run or delete anything.
+      actions: read
+    steps:
+      # See publish.yml's `select` job for why an unset repository variable is a
+      # vendor-chosen value rather than a failure — an empty `BUN_VERSION_FILE` installs the
+      # newest Bun on a green run instead of erroring. This job reads both projects and both
+      # deployer SAs because `environment` picks the pair at runtime.
+      - name: assert the repository variables are set
+        env:
+          BUN_VERSION_FILE: ${{ vars.BUN_VERSION_FILE }}
+          GCP_NONPROD_PROJECT: ${{ vars.GCP_NONPROD_PROJECT }}
+          GCP_PROD_DEPLOYER_SA: ${{ vars.GCP_PROD_DEPLOYER_SA }}
+          GCP_PROD_PROJECT: ${{ vars.GCP_PROD_PROJECT }}
+          GCP_REGION: ${{ vars.GCP_REGION }}
+          GCP_STAGING_DEPLOYER_SA: ${{ vars.GCP_STAGING_DEPLOYER_SA }}
+          GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
+        run: |
+          set -euo pipefail
+          missing=""
+          for v in BUN_VERSION_FILE GCP_NONPROD_PROJECT GCP_PROD_DEPLOYER_SA GCP_PROD_PROJECT GCP_REGION GCP_STAGING_DEPLOYER_SA GCP_WIF_PROVIDER; do
+            [ -n "${!v:-}" ] || missing="$missing $v"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::unset repository variables:$missing"
+            exit 1
+          fi
+
+      - name: verify the typed confirmation
+        env:
+          SERVICE: ${{ inputs.service }}
+          REVISION: ${{ inputs.revision }}
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          set -euo pipefail
+          if [ "$CONFIRM" != "${SERVICE}/${REVISION}" ]; then
+            echo "::error::confirm must equal \"<service>/<revision>\" for this dispatch exactly — refusing to shift traffic"
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: ${{ vars.BUN_VERSION_FILE }}
+
+      # See publish.yml for why this is not an unconditional `bun install` and what the
+      # `exit 1` arm catches. The bodies must not drift. It sits before `auth` because a
+      # rollback that cannot even resolve its own scripts should fail without minting a
+      # credential — the same reason the receipt and input gates sit where they do.
+      - name: install the deploy scripts' dependencies
+        run: |
+          set -euo pipefail
+          if [ -f bun.lock ]; then
+            bun install --frozen-lockfile
+          elif grep -hoE 'from "[^"]+"' deploy/*.ts | grep -qvE 'from "(\.|node:|bun:)'; then
+            echo "::error::deploy/*.ts imports a package but this repo has no root bun.lock"
+            exit 1
+          fi
+
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ inputs.environment == 'production' && vars.GCP_PROD_DEPLOYER_SA || vars.GCP_STAGING_DEPLOYER_SA }}
+          create_credentials_file: true
+
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      # §8 rule 1. Both inputs are free text on a `workflow_dispatch` form, and the
+      # service name reaches a gcloud call that mutates production traffic.
+      #
+      # TEMPLATE-BUG(rollback-auth-order), found by the dev-profile adoption: this step
+      # used to run BEFORE auth + setup-gcloud. It is handed the GCP project and region
+      # and is expected to confirm the revision exists, and with no credential on the
+      # runner yet it could not reach the Cloud Run API to do it — the allowlist half
+      # passed and the existence half was structurally unable to run.
+      #
+      # Moving a security check LATER deserves the justification: nothing between checkout
+      # and this step touches cloud state. `auth` mints a credential and `setup-gcloud`
+      # installs a CLI; neither reads or writes a service, and no traffic mutation happens
+      # until the update-traffic step below, which is still downstream of this gate. The
+      # check runs at the same point in the sequence that matters — before the first
+      # mutation — it just now runs with the credential it always needed.
+      #
+      # This deliberately INVERTS the ordering deploy-production.yml states for its own
+      # gates ("both checks sit BEFORE `auth` on purpose"), and the difference is not an
+      # oversight in either file: production's gates are pure — plan.ts reads a manifest
+      # and the provenance assert reads a downloaded file — so they cost nothing to run
+      # first. This gate is not pure: half of it is a Cloud Run existence lookup, which
+      # cannot run without a credential. Do not "fix" one file to match the other.
+      #
+      # What that ordering does buy an attacker is worth naming, since it is the axis the
+      # justification above does not cover: the first consumer of attacker-controlled
+      # input now runs holding a credential. It happens to be safe — validate-rollback.ts
+      # regex-checks the revision BEFORE it spawns gcloud, and passes argv as an array —
+      # and that is a property each adopting repo owes, not one this file can enforce.
+      - name: validate service + revision against strict allowlists
+        id: check
+        env:
+          SERVICE: ${{ inputs.service }}
+          REVISION: ${{ inputs.revision }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          GCP_NONPROD_PROJECT: ${{ vars.GCP_NONPROD_PROJECT }}
+          GCP_PROD_PROJECT: ${{ vars.GCP_PROD_PROJECT }}
+          GCP_REGION: ${{ vars.GCP_REGION }}
+        run: bun run deploy/validate-rollback.ts >> "$GITHUB_OUTPUT"
+
+      # The provenance half of the gate. The deploy workflows — and this workflow, below —
+      # write one "SERVICE REVISION" line per service into rollback-revisions.txt before
+      # changing anything, and upload it as "<environment>-rollback-revisions". Those
+      # files are the pipeline's record that a revision once held traffic.
+      #
+      # Stated at its real strength: `evidence_run_id` is unconstrained, so this proves
+      # some run in this repo published an artifact of that name listing the pair. Both
+      # dispatching a rollback and uploading such an artifact need repo write, so it adds
+      # no escalation surface — it is an operator-error gate, not a privilege boundary,
+      # and the evidence is unsigned.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ inputs.environment }}-rollback-revisions
+          run-id: ${{ inputs.evidence_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: rollback-evidence
+
+      - name: assert the revision served traffic in that run
+        env:
+          SERVICE: ${{ inputs.service }}
+          REVISION: ${{ inputs.revision }}
+          EVIDENCE_RUN_ID: ${{ inputs.evidence_run_id }}
+        run: |
+          set -euo pipefail
+          # The shape guard is not redundant with validate-rollback.ts, and the gap it
+          # closes is easy to miss: that script validates `process.env.SERVICE?.trim()`,
+          # while every step downstream — this grep, the traffic shift, smoke.ts — reads
+          # the RAW input. Any value that differs from its own trim is therefore approved
+          # by the gate and used un-approved. A revision of "name\n" passes the script's
+          # regex, and GNU grep -F splits a pattern on newlines, leaving an empty pattern
+          # that -x matches against an empty line. Rejecting whitespace here makes the
+          # value the shell sees identical to the value the gate approved.
+          #
+          # The empty case is the same defect from the other side: `required: true` on a
+          # workflow_dispatch input checks key PRESENCE, not non-emptiness, so the REST
+          # API accepts revision="". The needle then collapses to "svc " — a whole-line
+          # match against any line naming a service with no revision.
+          for v in "$SERVICE" "$REVISION"; do
+            case "$v" in
+              ''|*[[:space:]]*)
+                echo "::error::service and revision must be non-empty and contain no whitespace"
+                exit 1
+                ;;
+            esac
+          done
+          # -F and -x, both load-bearing. Without -F the revision name is a regex, so a
+          # dispatch form carrying `.*` matches any recorded line and the gate approves a
+          # revision it never saw. Without -x the match is a substring, so a prefix of a
+          # real revision name passes. Fixed string, whole line, and the needle is a shell
+          # variable rather than script text, so nothing in it is ever interpreted.
+          if ! grep -Fxq "$SERVICE $REVISION" rollback-evidence/rollback-revisions.txt; then
+            # Names the EVIDENCE run, not this one. $GITHUB_RUN_ID is the rollback run the
+            # operator has just started, which by definition holds no evidence — pointing
+            # a 3am reader at it withholds the one number they need to go look.
+            echo "::error::${REVISION} is not recorded as a served revision of ${SERVICE} in run ${EVIDENCE_RUN_ID}'s evidence"
+            exit 1
+          fi
+
+      # Every value below arrives through `env:`. Before, this step interpolated
+      # `${{ inputs.service }}` and `${{ inputs.revision }}` straight into the command
+      # line — two free-text dispatch fields becoming script source, in a step that runs
+      # AFTER auth and therefore holds a live GCP deployer credential. validate-rollback.ts
+      # checked those inputs, but the shell read the raw ones, so the validation protected
+      # nothing at this line.
+      # Recorded before the shift, and published under the SAME artifact name the deploy
+      # workflows use, because without it this workflow can refuse a legitimate rollback
+      # and leave no governed way to perform it.
+      #
+      # The deploy workflows record the revision they are REPLACING, so a revision only
+      # ever appears in evidence written by the run AFTER the one that deployed it — and
+      # this workflow used to write none at all. Concretely: run #101 deploys rev-B and
+      # records "svc rev-A"; rev-B breaks; you roll back to rev-A citing #101, which
+      # works. Ten minutes later rev-A turns out to be the worse of the two (it was rolled
+      # forward off for a reason). Returning to rev-B — which served 100% of production
+      # traffic minutes earlier — was impossible: no run's file lists it, the gate above
+      # fails closed, and the operator's only remaining path is a manual gcloud from a
+      # laptop, i.e. exactly the ungoverned act this workflow exists to replace.
+      - name: record the revision this rollback is replacing
+        env:
+          SERVICE: ${{ inputs.service }}
+          PROJECT: ${{ steps.check.outputs.project }}
+          REGION: ${{ vars.GCP_REGION }}
+        run: |
+          set -euo pipefail
+          # By percent, not `status.traffic[0]` — see the deploy workflows' record steps.
+          # Unlike them this records EVERY revision holding traffic, one line each: this is
+          # the recovery path for a stranded split, and each of those revisions did serve,
+          # which is exactly what the provenance gate above exists to prove.
+          revs="$(gcloud run services describe "$SERVICE" \
+            --project "$PROJECT" \
+            --region "$REGION" \
+            --format json |
+            jq -r '.status.traffic[]? | select((.percent // 0) > 0) | .revisionName')"
+          # No line rather than a line naming nothing — an empty second field is an exact
+          # whole-line match for an empty revision input at the gate above.
+          [ -n "$revs" ] || { echo "::error::${SERVICE} has no serving revision to record"; exit 1; }
+          while read -r rev; do
+            printf '%s %s\n' "$SERVICE" "$rev"
+          done <<< "$revs" | tee rollback-revisions.txt
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always() && hashFiles('rollback-revisions.txt') != ''
+        with:
+          name: ${{ inputs.environment }}-rollback-revisions
+          path: rollback-revisions.txt
+          if-no-files-found: error
+          overwrite: true
+
+      - name: shift traffic to the known-good revision
+        id: shift
+        env:
+          SERVICE: ${{ inputs.service }}
+          REVISION: ${{ inputs.revision }}
+          PROJECT: ${{ steps.check.outputs.project }}
+          REGION: ${{ vars.GCP_REGION }}
+        run: |
+          set -euo pipefail
+          gcloud run services update-traffic "$SERVICE" \
+            --project "$PROJECT" \
+            --region "$REGION" \
+            --to-revisions "${REVISION}=100"
+
+      # §8 rule 4: verify through Cloudflare, not against the run.app origin. The origin
+      # gate rejects a direct request by design, so a direct check cannot tell a healthy
+      # rollback from a broken one — and the public path is what the user is on.
+      - name: verify the public flow through Cloudflare
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          MODE: rollback
+          SERVICE: ${{ inputs.service }}
+          # Empty on repos with no Cloudflare Access app. smoke.ts calls the public
+          # hostname through Cloudflare, and an Access-protected hostname answers 302 to
+          # the login page without a service token — indistinguishable from a broken
+          # deploy. Never echo either value.
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: bun run deploy/smoke.ts
+
+      # §8 rule 5. Nothing here deletes the failed revision: it is the diagnosis.
+      #
+      # Same `env:` routing as the traffic shift, and for the same reason — this step also
+      # runs post-auth, and `if: always()` means it runs on the failure paths too.
+      #
+      # The describe output is trimmed rather than uploaded whole. `--format json` returns
+      # the entire service configuration: every environment variable NAME, the runtime
+      # service account, annotations, the full container spec. An artifact is downloadable
+      # by anyone with read access to the repo and is retained for the retention window,
+      # so uploading all of it publishes the service's shape to a much wider audience than
+      # the operator reading the rollback. The identifiers below are what a rollback
+      # actually has to prove: which service, what it now considers latest, and where the
+      # traffic ended up.
+      # `if: always()` is narrowed to runs where the validate gate PASSED. On a run it
+      # rejected, $SERVICE is whatever the dispatcher typed — requireService never
+      # approved it — and $PROJECT is empty, and this step would hand both to gcloud
+      # post-auth, holding a live deployer credential. Quoting closes shell injection but
+      # not gcloud's own option parsing: a value beginning with `-` is consumed as a flag
+      # rather than as the service positional. It also fed that same unvalidated string
+      # into the artifact NAME below, and the `>` redirect created a zero-byte
+      # rollback-state.json before gcloud failed, so `if-no-files-found: error` was
+      # satisfied by an empty file.
+      #
+      # Evidence is still produced on every path that matters — a failed traffic shift, a
+      # failed smoke, and (since the provenance gate landed) an artifact-missing or
+      # provenance-miss run, all of which have a green `check`.
+      - name: rollback evidence
+        if: always() && steps.check.outcome == 'success'
+        env:
+          SERVICE: ${{ inputs.service }}
+          PROJECT: ${{ steps.check.outputs.project }}
+          REGION: ${{ vars.GCP_REGION }}
+          # A run refused at the provenance gate still produces a well-formed traffic
+          # snapshot, and a reader months later cannot tell that from a rollback that
+          # happened. Record the shift's own outcome inside the artifact rather than
+          # leaving the run's status as the only marker.
+          SHIFT_OUTCOME: ${{ steps.shift.outcome }}
+        run: |
+          set -euo pipefail
+          # No -c here on purpose: this jq writes a FILE for a human to read, not a
+          # single-line `key=value` into $GITHUB_ENV or $GITHUB_OUTPUT. Those writes take
+          # one line by definition, and jq pretty-prints by default, so any captured or
+          # env/output-bound jq in this pipeline must pass -c or it silently truncates.
+          #
+          # Captured, then written. A `… | jq > rollback-state.json` opens the redirect
+          # before either command runs, so a describe that fails AFTER a green `check`
+          # (expired credential, 429, wrong region) left a zero-byte file — and hashFiles of
+          # an empty file is non-empty, so the upload below published it as evidence. Under
+          # `set -euo pipefail` a failed describe or jq aborts this assignment before any
+          # file exists, and the hashFiles guard stays inert.
+          state="$(gcloud run services describe "$SERVICE" \
+            --project "$PROJECT" \
+            --region "$REGION" \
+            --format json |
+            jq '{
+              service: .metadata.name,
+              latestReadyRevisionName: .status.latestReadyRevisionName,
+              traffic: [.status.traffic[]? | {revisionName, percent, tag}],
+              traffic_shift: env.SHIFT_OUTCOME
+            }')"
+          printf '%s\n' "$state" > rollback-state.json
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always() && hashFiles('rollback-state.json') != ''
+        with:
+          name: rollback-evidence-${{ inputs.service }}
+          path: rollback-state.json
+          if-no-files-found: error
+          overwrite: true

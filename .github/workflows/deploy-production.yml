@@ -1,0 +1,705 @@
+# T28 reference: production rollout (doc 07 §6, evidence §11).
+#
+# COPY VERBATIM into each app repo as `.github/workflows/deploy-production.yml`.
+#
+# Doc 07 §6 in one line: "A 'canary' that jumps from 0% to 100% is not a canary." The
+# progression below is 0 -> 5 -> 25 -> 100 with an observation hold at each step, and the
+# hold times are workflow inputs because they are policy, not physics.
+#
+# EXPAND migrations only. A contract migration runs in a later release, after the
+# rollback window closes and no compatible old revision remains (doc 07 §6) — this
+# workflow has no path for one and must not grow one.
+
+name: deploy production
+
+on:
+  workflow_dispatch:
+    inputs:
+      # The operator gate receipt doc 07 §11 requires. It is first on the form because it
+      # is first in the job: nothing else runs until it matches. See the `verify the
+      # operator deploy receipt` step for why the gate is a workflow step rather than the
+      # environment protection rule the doc originally named.
+      receipt:
+        description: The production deploy receipt (matches the PROD_DEPLOY_RECEIPT secret)
+        required: true
+        type: string
+      digests:
+        description: 'JSON: {"<service>": "sha256:..."} — the digests staging proved'
+        required: true
+        type: string
+      # "the digests staging proved" was, until now, a description and nothing more —
+      # production accepted any digest that validated against the manifest, so a digest
+      # that never ran anywhere could be promoted straight to production. doc 07 §5-§6
+      # intends production to promote what staging PROVED; this input is what makes that
+      # claim checkable, by naming the run whose evidence has to back it.
+      staging_run_id:
+        description: Run ID of the deploy-staging run that proved these digests
+        required: true
+        type: string
+      hold_seconds:
+        description: Observation hold at each traffic step
+        required: false
+        default: "300"
+        type: string
+      skip_migration:
+        description: This release ships no schema change
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  rollout:
+    runs-on: ${{ vars.CI_RUNNER_LINUX || 'ubuntu-latest' }}
+    timeout-minutes: 90
+    # doc 07 §11 wants an "operator gate receipt where the change affects secrets,
+    # production data or migration", and names the GitHub environment as that receipt.
+    # Naming the environment here is necessary but NOT sufficient: environment protection
+    # rules are plan-gated, and on this account only a PUBLIC repo gets them. Measured
+    # 2026-08-21 — gridwork (public) carries 2 protection rules on `production`; caisson,
+    # gridwork-studio and dev-profile (private) carry ZERO, so on those three there is no
+    # reviewer and no deployment-branch policy and this line buys only secret scoping.
+    # Do not read it as a gate on a repo that has none; check before relying on it.
+    #
+    # The receipt gate below is what actually binds on all four, and this line is still
+    # required for it to work: `PROD_DEPLOY_RECEIPT` is an ENVIRONMENT secret, so without
+    # `environment: production` it resolves to empty and the gate fails closed.
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+      # Reading another run's artifact (the staging evidence, below) needs this. It is the
+      # narrowest scope that lets `download-artifact` cross a run boundary.
+      actions: read
+    steps:
+      # See publish.yml's `select` job for why an unset repository variable is a
+      # vendor-chosen value rather than a failure — an empty `BUN_VERSION_FILE` installs the
+      # newest Bun on a green run instead of erroring.
+      #
+      # This runs ahead of the receipt gate below, which is a deliberate exception to "the
+      # receipt is first": it reads no dispatch input, touches no secret, and cannot be
+      # influenced by whoever pressed the button. The receipt is still the first step that
+      # consumes a dispatch INPUT (the ref check below reads only the ref, which picks this
+      # file and cannot be steered by it), and nothing before it can be steered.
+      - name: assert the repository variables are set
+        env:
+          BUN_VERSION_FILE: ${{ vars.BUN_VERSION_FILE }}
+          GCP_PROD_DEPLOYER_SA: ${{ vars.GCP_PROD_DEPLOYER_SA }}
+          GCP_PROD_PROJECT: ${{ vars.GCP_PROD_PROJECT }}
+          GCP_REGION: ${{ vars.GCP_REGION }}
+          GCP_REGISTRY: ${{ vars.GCP_REGISTRY }}
+          GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
+        run: |
+          set -euo pipefail
+          missing=""
+          for v in BUN_VERSION_FILE GCP_PROD_DEPLOYER_SA GCP_PROD_PROJECT GCP_REGION GCP_REGISTRY GCP_WIF_PROVIDER; do
+            [ -n "${!v:-}" ] || missing="$missing $v"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::unset repository variables:$missing"
+            exit 1
+          fi
+
+      # Production dispatches from `main` only. `workflow_dispatch` accepts any ref, and
+      # the ref chooses which copy of THIS FILE and of deploy/*.ts runs under the production
+      # deployer credential `auth` mints below. This step is the fail-fast, not the
+      # boundary: a branch can carry a copy of this file without it, and the WIF binding
+      # keys on the environment claim alone today. The boundary is the WIF provider's
+      # attribute condition on the ref (gridwork-infra stacks, tracked separately); until
+      # it lands this stops the honest mistake, not the adversary. Reads only the ref,
+      # which picks this file and cannot be steered by it.
+      - name: refuse a dispatch from any ref but main
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [ "$REF" != "refs/heads/main" ]; then
+            echo "::error::production deploys dispatch from refs/heads/main only, not ${REF}"
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: ${{ vars.BUN_VERSION_FILE }}
+
+      # The operator gate receipt doc 07 §11 requires, and the FIRST thing this job does
+      # after it can run a script at all. Doc 07 names the `production` environment's
+      # required reviewers as that receipt; measured 2026-08-21, environment protection is
+      # plan-gated and only the one PUBLIC repo of the four has any, so on three of them
+      # every `workflow_dispatch` reached production unreviewed. The gate is therefore a
+      # step: the dispatcher supplies `receipt`, the workflow holds `PROD_DEPLOY_RECEIPT`
+      # as an environment secret, and a mismatch ends the run before `auth` mints a
+      # production credential.
+      #
+      # It runs before the dependency install (and before every other check) on purpose,
+      # which is why `verify-receipt.ts` is the one deploy script with no imports outside
+      # `node:`. The comparison is SHA-256-prehash + `timingSafeEqual` per
+      # identity/security.md — see that file's header for why a raw compare on two
+      # variable-length operator strings is a length oracle rather than a comparison.
+      #
+      # What this is NOT: proof a second person reviewed the change. It proves the
+      # dispatcher held a secret. A possession check, not a four-eyes gate.
+      - name: verify the operator deploy receipt
+        env:
+          RECEIPT: ${{ inputs.receipt }}
+          PROD_DEPLOY_RECEIPT: ${{ secrets.PROD_DEPLOY_RECEIPT }}
+        run: bun run deploy/verify-receipt.ts
+
+      # See publish.yml for why this is not an unconditional `bun install` and what the
+      # `exit 1` arm catches. The bodies must not drift.
+      - name: install the deploy scripts' dependencies
+        run: |
+          set -euo pipefail
+          if [ -f bun.lock ]; then
+            bun install --frozen-lockfile
+          elif grep -hoE 'from "[^"]+"' deploy/*.ts | grep -qvE 'from "(\.|node:|bun:)'; then
+            echo "::error::deploy/*.ts imports a package but this repo has no root bun.lock"
+            exit 1
+          fi
+
+      # `hold_seconds` is free text on a dispatch form and ends up at `sleep "$HOLD"`. It
+      # is quoted there, so it is not an injection — the damage is different. An
+      # unparseable value fails `sleep` halfway through a live rollout, with traffic
+      # already split. And a value the form will happily accept — 0, or 86400 — silently
+      # defeats the observation gate that is the entire reason the progression has steps
+      # at all. Checked here, before any credential or cloud mutation, where a bad value
+      # costs nothing but a red run.
+      #
+      # The `?????*` arm (five or more characters) is not cosmetic and it is not a length
+      # policy. `[ "$HOLD" -lt 30 ]` on a 20-digit value exits 2 with "integer expected",
+      # and because that test sits in an `if` condition `set -e` does not fire and a
+      # status of 2 reads as FALSE — so both range tests errored, the `if` was false, and
+      # the validator PASSED the exact class of value it exists to stop. Capping the
+      # digits first keeps the arithmetic inside what `[` can evaluate.
+      #
+      # The ceiling is 900, not 3600, and that is a correctness bound rather than taste:
+      # the progression holds three times, so an accepted 3600 guarantees 10800s of sleep
+      # against this job's `timeout-minutes: 90`. The job is then CANCELLED mid-rollout
+      # with traffic parked at 5% or 25%. 3 x 900 = 45 minutes leaves the other half of
+      # the budget for checkout, plan, migration and the three smokes. Raising it means
+      # raising `timeout-minutes` in the same edit; they are one number in two places.
+      #
+      # Neither message echoes the submitted value back. A dispatch input can carry a
+      # newline, and a newline in an `::error::` line lets the rest of the value start a
+      # workflow command of its own (`::stop-commands::` suppresses every later
+      # annotation, including the traffic-restore alarm). The operator knows what they
+      # typed; the message says what is required instead.
+      - name: validate the rollout inputs
+        env:
+          HOLD: ${{ inputs.hold_seconds }}
+        run: |
+          set -euo pipefail
+          case "$HOLD" in
+            ''|*[!0-9]*|?????*)
+              echo "::error::hold_seconds must be a whole number of seconds, at most 4 digits"
+              exit 1
+              ;;
+          esac
+          if [ "$HOLD" -lt 30 ] || [ "$HOLD" -gt 900 ]; then
+            echo "::error::hold_seconds must be between 30 and 900 inclusive (three holds must fit inside timeout-minutes)"
+            exit 1
+          fi
+
+      - name: validate inputs against the manifest
+        id: plan
+        env:
+          DIGESTS: ${{ inputs.digests }}
+          ENVIRONMENT: production
+          # See deploy-staging.yml — plan.ts cannot build an image reference without it.
+          GCP_REGISTRY: ${{ vars.GCP_REGISTRY }}
+        run: bun run deploy/plan.ts >> "$GITHUB_OUTPUT"
+
+      # plan.ts proves the digests are well-formed and named in the manifest. It cannot
+      # prove they were ever run. Both checks sit BEFORE `auth` on purpose: a request with
+      # no staging provenance behind it should never reach a production credential.
+      - name: fetch the staging evidence this promotion claims
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: staging-evidence
+          path: staging-evidence
+          run-id: ${{ inputs.staging_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: assert every digest was proved in staging
+        env:
+          DIGESTS: ${{ inputs.digests }}
+          STAGING_RUN_ID: ${{ inputs.staging_run_id }}
+        run: |
+          set -euo pipefail
+          # deploy-staging.yml records its digests through a toJSON() of the dispatch
+          # input, which renders the JSON *string* that run was dispatched with, not an
+          # object. Accept either shape rather than let this gate hinge on that detail
+          # staying put. (Written without an expression even in this comment: the runner
+          # substitutes over the whole script text, comments included.)
+          # `download-artifact` with a dispatcher-chosen `run-id` will return an artifact
+          # named `staging-evidence` from ANY run in this repo — nothing about the fetch
+          # says the run was a staging deploy. Assert it from the evidence itself. This is
+          # not a privilege boundary and is not claimed as one: dispatching production and
+          # uploading an artifact both require repo write, so it adds no escalation
+          # surface. It is an operator-error gate, and it is the difference between "some
+          # run produced a file with this name" and "a staging deploy produced it".
+          env_claimed="$(jq -r '.environment // ""' staging-evidence/staging-evidence.json)"
+          if [ "$env_claimed" != "staging" ]; then
+            echo "::error::the named run's evidence is not a staging deploy"
+            exit 1
+          fi
+          staged="$(jq -c '.digests | if type == "string" then fromjson else . end' \
+            staging-evidence/staging-evidence.json)"
+          # SUBSET, not equality: promoting one service out of a two-service staging run is
+          # a legitimate release, so a staging run covering MORE than this request is fine.
+          # What is not fine is a (service, digest) pair that staging never saw, or saw at
+          # a different digest. Read DIGESTS out of the environment inside jq — it never
+          # becomes a shell argument.
+          # gsub before join: the keys come out of the dispatcher's own JSON, and a JSON
+          # key may contain a newline. Echoed into an `::error::` line below, a newline
+          # lets the remainder of the key start a workflow command of its own — a key
+          # ending in a line reading `::stop-commands::<token>` suppresses every
+          # annotation after it, including the traffic-restore alarm this rollout depends
+          # on being visible. Flatten the value where it is produced, once.
+          unproved="$(jq -rcn --argjson staged "$staged" \
+            '(env.DIGESTS | fromjson)
+             | to_entries
+             | map(select($staged[.key] != .value) | .key | gsub("[\\r\\n]"; " "))
+             | join(", ")')"
+          if [ -n "$unproved" ]; then
+            # Name every one of them. A gate that reports only the first failure gets run
+            # N times to discover N problems, and each of those runs is a dispatch.
+            echo "::error::not proved by staging run ${STAGING_RUN_ID}: ${unproved}"
+            exit 1
+          fi
+
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_PROD_DEPLOYER_SA }}
+          create_credentials_file: true
+
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      # Recorded BEFORE anything changes. doc 07 §11 wants the rollback revision in the
+      # evidence, and the only moment it is knowable is before the new revision exists.
+      - name: record the rollback revision
+        id: previous
+        # Every value below arrives through the environment, not through `${{ }}` in the
+        # script. The runner substitutes `${{ }}` into the script SOURCE before any shell
+        # sees it, so a value containing `$(...)` lands as executable text; single-quoting
+        # it is not a fix, because a value containing a quote closes the quoting. An
+        # `env:` mapping puts the value in the process environment instead, where it is
+        # data. This holds for every `run:` block in this file.
+        env:
+          SERVICES: ${{ steps.plan.outputs.services }}
+          GCP_PROD_PROJECT: ${{ vars.GCP_PROD_PROJECT }}
+          GCP_REGION: ${{ vars.GCP_REGION }}
+        run: |
+          set -euo pipefail
+          # See deploy-staging.yml's record step: `status.traffic[0]` was an array position
+          # held up by gcloud's undocumented serialisation order. Select by percent; refuse
+          # on a split (rollback.yml first, then deploy).
+          serving='[.status.traffic[]? | select((.percent // 0) > 0) | .revisionName]
+            | if length == 1 then .[0] else error("expected exactly one serving revision, got \(length)") end'
+          printf '%s' "$SERVICES" | jq -r '.[].service' |
+          while read -r svc; do
+            # Fail loudly on any error EXCEPT "the service does not exist", which records
+            # nothing. Bare suppression (`|| true`) would turn an expired credential or a
+            # missing run.viewer binding into a green run with no rollback target. NOT_FOUND
+            # is NOT the first-deploy path: every service is pre-created by the production
+            # stack with a serving bootstrap revision (modules/cloud_run_service — image and
+            # traffic under ignore_changes), so a first CI deploy always records one, and
+            # `services update` below cannot create a service — an absent one fails there
+            # at zero traffic, before any tag or shift exists.
+            if ! rev="$(gcloud run services describe "$svc" \
+              --project "$GCP_PROD_PROJECT" \
+              --region "$GCP_REGION" \
+              --format json 2>describe-err.txt | jq -r "$serving")"; then
+              if ! grep -qi 'NOT_FOUND\|not found' describe-err.txt; then
+                cat describe-err.txt >&2
+                echo "::error::could not read the serving revision of ${svc} — refusing to roll out without a rollback target"
+                exit 1
+              fi
+              rev=""
+            fi
+            # No line rather than a line naming nothing. "svc " is an exact whole-line
+            # match for rollback.yml's `grep -Fxq "$SERVICE $REVISION"` when the operator
+            # submits an empty revision, which would let the provenance gate approve a
+            # revision that never held traffic.
+            [ -n "$rev" ] || continue
+            # Appended per line, not `done | tee file`: the loop's `::error::` annotation is
+            # stdout too, and through a trailing tee it became a LINE IN THE ROLLBACK FILE —
+            # which the restore step then fed to update-traffic as a service name, so a
+            # record-step failure (zero traffic touched) ended in a red "TRAFFIC RESTORE
+            # FAILED" page. No pre-truncate either: the file exists only once a real line
+            # was written, so the hashFiles guards stay inert on an early failure.
+            printf '%s %s\n' "$svc" "$rev" | tee -a rollback-revisions.txt
+          done
+
+      # §6 step 1: zero traffic, tagged. The revision exists and is addressable by tag,
+      # and no user has reached it.
+      - name: deploy zero-traffic tagged revisions
+        env:
+          SERVICES: ${{ steps.plan.outputs.services }}
+          GCP_PROD_PROJECT: ${{ vars.GCP_PROD_PROJECT }}
+          GCP_REGION: ${{ vars.GCP_REGION }}
+        run: |
+          set -euo pipefail
+          tag="r${GITHUB_RUN_ID}"
+          echo "CANARY_TAG=$tag" >> "$GITHUB_ENV"
+          printf '%s' "$SERVICES" | jq -r '.[] | "\(.service) \(.image)"' |
+          while read -r svc image; do
+            gcloud run services update "$svc" \
+              --project "$GCP_PROD_PROJECT" \
+              --region "$GCP_REGION" \
+              --image "$image" \
+              --tag "$tag" \
+              --no-traffic
+          done
+
+      # doc 07 §6 step 5 asks for the tagged revision to be smoke-tested BEFORE any
+      # traffic reaches it, and the first cut of this template had no way to do it. A
+      # Cloud Run traffic tag is addressable only at its own run.app URL; the T27 origin
+      # gate rejects a direct run.app request by design; and Cloudflare routes to the
+      # service's default URL, never to a tag. The caisson and gridwork adoptions hit
+      # this independently and both degraded the pre-traffic smokes to public-edge
+      # baselines against the CURRENT revision — which is not a canary check at all, and
+      # would have left the 5% step as the canary's first real exercise.
+      #
+      # Operator ruling 2026-08-21: the deploy workflow carries the origin secret and
+      # calls the tag URL directly, satisfying the gate as the caller rather than routing
+      # around it. Resolve the URLs from the service description — do not synthesize them
+      # from the tag name, because a URL that is merely well-formed proves nothing.
+      - name: resolve the tagged revision URLs
+        env:
+          SERVICES: ${{ steps.plan.outputs.services }}
+          GCP_PROD_PROJECT: ${{ vars.GCP_PROD_PROJECT }}
+          GCP_REGION: ${{ vars.GCP_REGION }}
+        run: |
+          set -euo pipefail
+          # The service list is resolved into a variable FIRST, and asserted non-empty,
+          # rather than being read from `< <(printf … | jq …)`. A process substitution has
+          # no exit-status path at all: if jq rejects $SERVICES the loop runs ZERO times,
+          # every guard below it is skipped, and the step exits 0 having proved nothing —
+          # `CANARY_URLS={}` then reaches smoke.ts, which has a public-hostname path and
+          # passes against the CURRENT revision. A failing command substitution in an
+          # assignment does abort under `set -e`, and `pipefail` carries the jq failure
+          # out of the pipe, so this shape fails where the other silently succeeded.
+          svcs="$(printf '%s' "$SERVICES" | jq -r '.[].service')"
+          if [ -z "$svcs" ]; then
+            echo "::error::the plan produced no services — refusing to report a canary that was never resolved"
+            exit 1
+          fi
+          urls='{}'
+          while read -r svc; do
+            # `first(...)` rather than a bare filter: two traffic entries carrying the same
+            # tag would otherwise make $url multiline, and every check below assumes one
+            # line. `// ""` turns "no match" into the empty string the next guard expects.
+            url="$(gcloud run services describe "$svc" \
+              --project "$GCP_PROD_PROJECT" \
+              --region "$GCP_REGION" \
+              --format json |
+              jq -rc --arg t "$CANARY_TAG" 'first(.status.traffic[] | select(.tag == $t) | .url) // "" | gsub("[\\r\\n]"; "")')"
+            # Fail loudly. An empty URL here would otherwise reach smoke.ts, which has a
+            # public-hostname path and would happily pass against the CURRENT revision —
+            # a green pre-traffic check that tested nothing.
+            if [ -z "$url" ]; then
+              echo "::error::no URL for tag ${CANARY_TAG} on ${svc}"
+              exit 1
+            fi
+            # This URL is the address the next two steps send $ORIGIN_SECRETS to. Whatever
+            # it names receives the production origin secret, so it has to be a Cloud Run
+            # host and nothing else — the check is on the value that will actually be
+            # called, not on the shape of the tag it was derived from.
+            #
+            # `[[ =~ ]]` and not `grep -Eq`: grep anchors per LINE, so a two-line value
+            # whose first line is a run.app host passes grep while carrying a second host
+            # along with it. Bash anchors against the whole string, which is what "this is
+            # the only host we will talk to" actually means. The gsub above additionally
+            # strips newlines at the source, so the value echoed in the refusal below
+            # cannot start a workflow command of its own.
+            run_app_re='^https://[A-Za-z0-9.-]+\.run\.app$'
+            if [[ ! "$url" =~ $run_app_re ]]; then
+              echo "::error::${svc}: resolved tag URL is not a Cloud Run host, refusing to send the origin secret to it: ${url}"
+              exit 1
+            fi
+            # -c on every jq that feeds a shell variable. Without it jq pretty-prints, and
+            # this accumulator is what gets written to $GITHUB_ENV below as one line.
+            urls="$(printf '%s' "$urls" | jq -c --arg k "$svc" --arg v "$url" '. + {($k): $v}')"
+          done <<< "$svcs"
+          # One line, no heredoc. The heredoc this replaced used a FIXED delimiter, so a
+          # value containing that delimiter on a line of its own closed the block early and
+          # everything after it became attacker-chosen environment variables for every
+          # later step — the documented Actions env-injection class. A single-line write
+          # cannot be extended: a newline in the value would break the write, not smuggle
+          # variables past it, and jq -c above guarantees there is none.
+          printf 'CANARY_URLS=%s\n' "$urls" >> "$GITHUB_ENV"
+
+      # §6 step 2: checks that do NOT require the new schema. Running schema-dependent
+      # checks here would fail every expand release for the wrong reason and train
+      # everyone to ignore this gate.
+      #
+      # CANARY_TAG and CANARY_URLS are inherited from $GITHUB_ENV and deliberately NOT
+      # re-declared here: a step-level `env:` mapping overrides the inherited value, so a
+      # passthrough that expanded to empty would blank them and take smoke.ts down its
+      # public-hostname path without saying so.
+      - name: pre-migration boot + origin checks
+        env:
+          ENVIRONMENT: production
+          MODE: pre-migration
+          # The per-service origin secrets, as a JSON object keyed by service key, so one
+          # environment secret covers a multi-service repo and this file stays identical
+          # across all four. smoke.ts sends its repo's own origin header — the header NAME
+          # is per-repo and belongs in that repo's smoke.ts, only the value comes from here.
+          ORIGIN_SECRETS: ${{ secrets.ORIGIN_SECRETS }}
+          # Empty on repos with no Cloudflare Access app. smoke.ts calls the public
+          # hostname through Cloudflare, and an Access-protected hostname answers 302 to
+          # the login page without a service token — indistinguishable from a broken
+          # deploy. Never echo either value.
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: bun run deploy/smoke.ts
+
+      # §6 steps 3-4. Update-then-execute, same as staging, same reason. Fail closed:
+      # a partially applied expand migration with traffic still on the old revision is
+      # recoverable; the same migration with traffic already shifted is not.
+      # The `if:` keys keep their `${{ }}` — expression keys are evaluated, never pasted
+      # into a shell. Only the script bodies had to move to `env:`.
+      - name: point the migration Job at this digest
+        if: inputs.skip_migration != true && steps.plan.outputs.migration_job != ''
+        env:
+          MIGRATION_JOB: ${{ steps.plan.outputs.migration_job }}
+          MIGRATION_IMAGE: ${{ steps.plan.outputs.migration_image }}
+          GCP_PROD_PROJECT: ${{ vars.GCP_PROD_PROJECT }}
+          GCP_REGION: ${{ vars.GCP_REGION }}
+        run: |
+          set -euo pipefail
+          gcloud run jobs update "$MIGRATION_JOB" \
+            --project "$GCP_PROD_PROJECT" \
+            --region "$GCP_REGION" \
+            --image "$MIGRATION_IMAGE"
+
+      - name: execute the expand migration
+        if: inputs.skip_migration != true && steps.plan.outputs.migration_job != ''
+        env:
+          MIGRATION_JOB: ${{ steps.plan.outputs.migration_job }}
+          GCP_PROD_PROJECT: ${{ vars.GCP_PROD_PROJECT }}
+          GCP_REGION: ${{ vars.GCP_REGION }}
+        run: |
+          set -euo pipefail
+          gcloud run jobs execute "$MIGRATION_JOB" \
+            --project "$GCP_PROD_PROJECT" \
+            --region "$GCP_REGION" \
+            --wait
+
+      # §6 step 5: authenticated origin headers, representative read AND write flows.
+      # Read-only smoke on a release that changed writes proves nothing.
+      - name: smoke the tagged revision
+        env:
+          ENVIRONMENT: production
+          MODE: post-migration
+          # As above: CANARY_TAG / CANARY_URLS are inherited, never re-declared.
+          ORIGIN_SECRETS: ${{ secrets.ORIGIN_SECRETS }}
+          # Empty on repos with no Cloudflare Access app. smoke.ts calls the public
+          # hostname through Cloudflare, and an Access-protected hostname answers 302 to
+          # the login page without a service token — indistinguishable from a broken
+          # deploy. Never echo either value.
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: bun run deploy/smoke.ts
+
+      # §6 steps 6-8. Each step observes before the next shift; deploy/observe.ts is the
+      # gate and it must exit non-zero on a breach, not warn. An observation step that
+      # cannot fail is decoration.
+      - name: progressive traffic shift
+        id: shift
+        env:
+          HOLD: ${{ inputs.hold_seconds }}
+          SERVICES: ${{ steps.plan.outputs.services }}
+          ENVIRONMENT: production
+          GCP_PROD_PROJECT: ${{ vars.GCP_PROD_PROJECT }}
+          GCP_REGION: ${{ vars.GCP_REGION }}
+        run: |
+          set -euo pipefail
+          # Resolved into a variable and asserted non-empty for the same reason as the URL
+          # step: `done < <(… | jq …)` swallows a jq failure entirely, and a step that
+          # shifts traffic to zero services while exiting 0 is a fully green rollout that
+          # deployed nothing (observe.ts passes, because the OLD revision is healthy).
+          svcs="$(printf '%s' "$SERVICES" | jq -r '.[].service')"
+          if [ -z "$svcs" ]; then
+            echo "::error::the plan produced no services — nothing to shift traffic to"
+            exit 1
+          fi
+          for pct in 5 25 100; do
+            echo "::group::shift to ${pct}%"
+            while read -r svc; do
+              gcloud run services update-traffic "$svc" \
+                --project "$GCP_PROD_PROJECT" \
+                --region "$GCP_REGION" \
+                --to-tags "${CANARY_TAG}=${pct}"
+            done <<< "$svcs"
+            sleep "$HOLD"
+            # ENVIRONMENT / GCP_PROD_PROJECT / GCP_REGION are inherited from the step env
+            # above; only STEP varies per iteration.
+            STEP="$pct" bun run deploy/observe.ts
+            echo "::endgroup::"
+          done
+
+      # §6 step 9. The previous revision is retained deliberately — `update-traffic` does
+      # not delete it, and nothing here should. It is the rollback target.
+      - name: post-deploy synthetic flows
+        env:
+          ENVIRONMENT: production
+          MODE: post-deploy
+          # Traffic is at 100% and the promoted revision is what the public hostname
+          # serves, so this one goes through Cloudflare — the only step that proves the
+          # real end-to-end path. Blanked here rather than left to smoke.ts's discipline:
+          # the tag URL is still valid at this point, so a mode bug would otherwise smoke
+          # the canary a third time and never test the edge at all.
+          CANARY_URLS: ""
+          ORIGIN_SECRETS: ""
+          # Empty on repos with no Cloudflare Access app. smoke.ts calls the public
+          # hostname through Cloudflare, and an Access-protected hostname answers 302 to
+          # the login page without a service token — indistinguishable from a broken
+          # deploy. Never echo either value.
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: bun run deploy/smoke.ts
+
+      # Put traffic back on the revisions recorded before this run started.
+      #
+      # This is a TRAFFIC restore, NOT a database rollback. doc 07 §8 is explicit that the
+      # two are not the same thing: the expand migration executed above is not reversed
+      # here and never will be. That makes this safe only while the old revision still
+      # reads what the new one wrote — which is exactly the window an expand migration is
+      # designed to hold open. Past that window the recorded revision is not a safe target
+      # and the approved database recovery procedure is the right tool, not this.
+      #
+      # A STEP, not an `ERR` trap inside the shift step, and the difference is three
+      # separate defects the trap form had:
+      #
+      #   1. `set -eEuo` propagates the trap into a process substitution, so a jq failure
+      #      in `done < <(…)` ran the handler INSIDE that subshell: it printed its own
+      #      `::error::` onto the very fd `while read` was consuming, issued a real
+      #      update-traffic for every service, exited the subshell only — and the outer
+      #      loop then fed the handler's own message to gcloud as a service name while the
+      #      step exited 0. Reproduced.
+      #   2. Each `run:` is its own process, so the trap could not see a failure in
+      #      `post-deploy synthetic flows` — the only step that proves the real Cloudflare
+      #      path. Traffic was already at 100% by then, with no restore.
+      #   3. A cancelled job (the operator pressing Cancel, or `timeout-minutes` expiring
+      #      mid-hold) delivers a signal. An `ERR` trap does not fire on a signal, so the
+      #      case most likely to strand traffic was the one case never covered.
+      #
+      # `failure() || cancelled()` covers all three, and the hashFiles guard makes it an
+      # inert no-op on a run that failed before the record step. The alarm is deliberately
+      # separate from the cause: a restore that itself failed means production is still
+      # serving the canary and needs a human now, and it must not read as the thing that
+      # broke.
+      - name: restore traffic if the rollout did not complete
+        id: restore
+        if: (failure() || cancelled()) && hashFiles('rollback-revisions.txt') != ''
+        env:
+          GCP_PROD_PROJECT: ${{ vars.GCP_PROD_PROJECT }}
+          GCP_REGION: ${{ vars.GCP_REGION }}
+        run: |
+          set -uo pipefail
+          echo "::error::rollout did not complete — restoring traffic to the revisions recorded before this run"
+          failed=0
+          while read -r svc rev; do
+            # The producer above omits lines with no revision, so reaching one here means
+            # the file was written by something else. Say so and count it: skipping in
+            # silence let the restore report clean while a service still served the canary.
+            if [ -z "${rev:-}" ]; then
+              echo "::error::no recorded revision for ${svc} — restore it by hand"
+              failed=1
+              continue
+            fi
+            gcloud run services update-traffic "$svc" \
+              --project "$GCP_PROD_PROJECT" \
+              --region "$GCP_REGION" \
+              --to-revisions "${rev}=100" || failed=1
+          done < rollback-revisions.txt
+          # `|| echo` alone exits 0 — this step read GREEN while its own annotation said
+          # production may still be serving the canary, and the reader triaging the red job
+          # was sent to the wrong step. `-e` stays off above so the loop finishes every
+          # service before reporting; the exit is here instead.
+          [ "$failed" -eq 0 ] || {
+            echo "::error::TRAFFIC RESTORE FAILED — production may still be serving the canary; restore by hand from rollback-revisions.txt"
+            exit 1
+          }
+
+      # No `if:` meant the default `success()`: the evidence was skipped on exactly the runs
+      # it exists for — a failed shift, a failed smoke, a restore — and the run that
+      # stranded traffic left no record of where it stopped. Same shape rollback.yml
+      # already uses: `always()`, narrowed to runs where the plan and the record step
+      # produced the inputs this needs, with the shift's and the restore's own outcomes
+      # inside the file. `skipped` for the restore is the normal value on a clean run.
+      #
+      # `workflow_commit`, not `commit` — see deploy-staging.yml's evidence step.
+      - name: deployment evidence
+        if: always() && steps.plan.outcome == 'success' && hashFiles('rollback-revisions.txt') != ''
+        env:
+          COMMIT: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+          STAGING_RUN_ID: ${{ inputs.staging_run_id }}
+          SERVICES: ${{ steps.plan.outputs.services }}
+          MIGRATION: ${{ inputs.skip_migration && 'skipped' || steps.plan.outputs.migration_job }}
+          ROLLOUT: ${{ steps.shift.outcome }}
+          RESTORE: ${{ steps.restore.outcome }}
+        run: |
+          set -euo pipefail
+          # jq -n was already the right call, but the values were still reaching it as
+          # SHELL ARGUMENTS pasted in by the runner — `--argjson services` took a
+          # single-quoted expression, which ends its own quoting at the first single quote
+          # in the value, and the remainder is command source. Through `env:` each value is
+          # one argv element, quoted by the shell, and jq is the only thing that parses it.
+          jq -n \
+            --arg workflow_commit "$COMMIT" \
+            --arg run_id "$RUN_ID" \
+            --arg staging_run_id "$STAGING_RUN_ID" \
+            --arg tag "${CANARY_TAG:-}" \
+            --argjson services "$SERVICES" \
+            --arg migration "$MIGRATION" \
+            --arg rollout "$ROLLOUT" \
+            --arg restore "$RESTORE" \
+            --rawfile rollback rollback-revisions.txt \
+            '{environment:"production", workflow_commit:$workflow_commit, run_id:$run_id,
+              staging_run_id:$staging_run_id, canary_tag:$tag,
+              services:$services, migration:$migration, rollback_revisions:$rollback,
+              rollout:$rollout, restore:$restore,
+              traffic_progression:[0,5,25,100]}' > production-evidence.json
+
+      # `if: always()` with `if-no-files-found: error` was a guaranteed second red step on
+      # any run that failed in input validation, plan, or the provenance gate: neither
+      # path exists yet at that point, so the upload errored on top of the real failure.
+      # The hashFiles guard is the same one the dedicated upload below already carried.
+      # `overwrite: true` because artifact names are unique per RUN, not per attempt —
+      # without it "Re-run failed jobs" 409s on the second attempt.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always() && hashFiles('production-evidence.json', 'rollback-revisions.txt') != ''
+        with:
+          name: production-evidence
+          path: |
+            production-evidence.json
+            rollback-revisions.txt
+          if-no-files-found: error
+          overwrite: true
+
+      # The same file again, under its own name. rollback.yml's provenance check fetches
+      # the recorded revisions by artifact name, and `production-evidence` is a bundle
+      # whose file list is expected to grow — a dedicated name is a stable contract for
+      # that fetch, where "some file inside a bundle" is not. The hashFiles guard keeps a
+      # run that failed before the record step from adding a second red step to a run that
+      # already has one; `if-no-files-found: error` still applies once the file exists.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always() && hashFiles('rollback-revisions.txt') != ''
+        with:
+          name: production-rollback-revisions
+          path: rollback-revisions.txt
+          if-no-files-found: error
+          overwrite: true

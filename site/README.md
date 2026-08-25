@@ -22,13 +22,14 @@ Before committing a site change, run the local gates:
 
 ```bash
 cd site
+bun test
 bun run check:docs
 bun run typecheck
 bun run build
 ```
 
-`bun run build` also refreshes the public share card and checks documentation
-freshness before invoking `next build`.
+`bun run build` also runs the site tests, refreshes the public share card, and checks
+documentation freshness before invoking `next build`.
 
 ## Curated documentation
 
@@ -75,16 +76,49 @@ These generated paths are untracked. In Docker, `source.config.ts` must be copie
 empty `content/docs/`, then the build layer regenerates `.source/` after copying the real
 curated content.
 
+## Origin verification
+
+The production service is an origin behind the Cloudflare Worker. `proxy.ts` deliberately
+declares no matcher, so every request — including health, API, metadata, and asset routes —
+must present `X-Gridwork-Origin-Secret` before routing continues.
+
+- `GRIDWORK_ORIGIN_SECRET_CURRENT` is required and contains the unpadded base64url encoding
+  of exactly 32 random bytes.
+- `GRIDWORK_ORIGIN_SECRET_NEXT` is optional and is accepted alongside the current value
+  during two-phase rotation.
+- `GRIDWORK_ORIGIN_SECRET_MODE=disabled` is a local-development and mutation-test control.
+  `bun run dev` sets it automatically; the proxy honors it only when `NODE_ENV` is
+  `development` or `test`, so production configuration cannot disable the gate.
+
+Missing or malformed configuration makes the external uptime check fail closed because
+`/health` returns `403` unless the Worker supplied the valid header. Cloud Run uses a
+`tcpSocket` startup probe on the container port and no HTTP probe, so the platform probe
+does not create a route exemption. The header is an origin filter, not route authorization;
+API and Server Function handlers must still enforce their own authentication and
+authorization.
+
+To prove the gate can fail, run the mutation suite and require every direct-route assertion
+to turn red:
+
+```bash
+GRIDWORK_ORIGIN_SECRET_MODE=disabled bun test proxy.test.ts
+```
+
 ## Production image
 
 The Docker build context is the repository root:
 
 ```bash
-docker build -f site/Dockerfile -t gridwork-site .
-docker run --rm -p 127.0.0.1:3000:3000 -e PORT=3000 gridwork-site
+docker build --build-arg GIT_SHA="$(git rev-parse HEAD)" -f site/Dockerfile -t gridwork-site .
+docker run --rm -p 127.0.0.1:3000:3000 \
+  -e PORT=3000 \
+  -e GRIDWORK_ORIGIN_SECRET_CURRENT \
+  gridwork-site
 ```
 
-The final image serves the standalone app on port 3000 as an unprivileged user.
+The final image serves the standalone app on port 3000 as an unprivileged user. Requests
+must send `X-Gridwork-Origin-Secret` with the same runtime value; do not put the value on a
+command line or in a tracked file.
 
 Railway deployment is operator-run. Root `railway.json` retains
 `build.dockerfilePath: site/Dockerfile`, so every Docker `COPY` source is relative to the

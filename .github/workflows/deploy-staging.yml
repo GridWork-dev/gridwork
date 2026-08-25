@@ -1,0 +1,341 @@
+# T28 reference: stable staging flow (doc 07 §5).
+#
+# COPY VERBATIM into each app repo as `.github/workflows/deploy-staging.yml`.
+#
+# The ordering here is the whole point and it is not stylistic:
+#
+#   publish digest -> record the rollback revision -> update the migration Job TO that
+#   digest -> execute the Job -> deploy the same digest to the services -> smoke
+#   -> record evidence
+#
+# The Job definition is updated BEFORE it is executed. `gcloud run jobs execute` has no
+# way to select an image ad hoc, so an execute against a stale Job definition silently
+# runs last release's migration and reports success (doc 07 §5, and the linked gcloud
+# reference). That is the failure this ordering exists to prevent.
+
+name: deploy staging
+
+on:
+  workflow_dispatch:
+    inputs:
+      digests:
+        description: 'JSON: {"<service>": "sha256:..."} — from a publish run'
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      digests:
+        required: true
+        type: string
+
+# doc 07 §8 rule 2: serialize against any other deploy or rollback touching this
+# environment. Two concurrent traffic mutations produce a state neither run intended.
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ${{ vars.CI_RUNNER_LINUX || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    environment: staging
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      # See publish.yml's `select` job for why an unset repository variable is a
+      # vendor-chosen value rather than a failure — an empty `BUN_VERSION_FILE` installs the
+      # newest Bun on a green run instead of erroring. First step, before any credential.
+      - name: assert the repository variables are set
+        env:
+          BUN_VERSION_FILE: ${{ vars.BUN_VERSION_FILE }}
+          GCP_NONPROD_PROJECT: ${{ vars.GCP_NONPROD_PROJECT }}
+          GCP_REGION: ${{ vars.GCP_REGION }}
+          GCP_REGISTRY: ${{ vars.GCP_REGISTRY }}
+          GCP_STAGING_DEPLOYER_SA: ${{ vars.GCP_STAGING_DEPLOYER_SA }}
+          GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
+        run: |
+          set -euo pipefail
+          missing=""
+          for v in BUN_VERSION_FILE GCP_NONPROD_PROJECT GCP_REGION GCP_REGISTRY GCP_STAGING_DEPLOYER_SA GCP_WIF_PROVIDER; do
+            [ -n "${!v:-}" ] || missing="$missing $v"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::unset repository variables:$missing"
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: ${{ vars.BUN_VERSION_FILE }}
+
+      # See publish.yml for why this is not an unconditional `bun install` and what the
+      # `exit 1` arm catches. The bodies must not drift.
+      - name: install the deploy scripts' dependencies
+        run: |
+          set -euo pipefail
+          if [ -f bun.lock ]; then
+            bun install --frozen-lockfile
+          elif grep -hoE 'from "[^"]+"' deploy/*.ts | grep -qvE 'from "(\.|node:|bun:)'; then
+            echo "::error::deploy/*.ts imports a package but this repo has no root bun.lock"
+            exit 1
+          fi
+
+      # Every service key and every digest is validated against the repo's own manifest
+      # before a single gcloud call. doc 07 §8 rule 1 asks for strict allowlists on
+      # rollback inputs; the same reasoning applies to a deploy — `gcloud run services
+      # update` will cheerfully point a service at any digest string you hand it.
+      - name: validate inputs against the manifest
+        id: plan
+        env:
+          DIGESTS: ${{ inputs.digests }}
+          ENVIRONMENT: staging
+          # plan.ts emits fully-qualified image references and cannot build one without
+          # the registry prefix. Omitted in the first cut of this template; caught by the
+          # gridwork adoption, which had to add it locally to make plan.ts implementable.
+          GCP_REGISTRY: ${{ vars.GCP_REGISTRY }}
+        run: bun run deploy/plan.ts >> "$GITHUB_OUTPUT"
+
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_STAGING_DEPLOYER_SA }}
+          create_credentials_file: true
+
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      # Recorded BEFORE anything changes — before the migration Job runs, not after it,
+      # which is where this step sat in the first cut of the fix and is why the comment
+      # claiming parity with deploy-production.yml was untrue. Production records at this
+      # same point (immediately after setup-gcloud) and for the same reason: if the
+      # migration fails, the run must still have published a rollback target.
+      #
+      # Staging previously recorded nothing at all, so a staging rollback had no
+      # provenance source — rollback.yml accepts `staging` as an environment and its
+      # revision check had nothing to validate the operator's input against, which makes a
+      # staging rollback unauthorizable even when it is the correct move.
+      #
+      # The `echo '${{ ... }}'` shape used elsewhere is not repeated here: a single quote
+      # anywhere in the value ends the quoting and the rest of the value is parsed as
+      # script. `printf '%s' "$SERVICES"` reads the value from the environment instead.
+      - name: record the rollback revision
+        env:
+          SERVICES: ${{ steps.plan.outputs.services }}
+          PROJECT: ${{ vars.GCP_NONPROD_PROJECT }}
+          REGION: ${{ vars.GCP_REGION }}
+        run: |
+          set -euo pipefail
+          # `status.traffic[0]` was an array POSITION, and the array keeps every zero-percent
+          # tagged canary this template leaves behind. gcloud happens to serialise
+          # percent-bearing targets first, which is the only reason index 0 was right: an
+          # undocumented tool-side ordering holding up the sole restore target. Select by
+          # percent, and refuse on a split — a stranded 5/95 from a failed run wants
+          # rollback.yml first, not a deploy on top of it. A jq `error()` exits non-zero with
+          # an EMPTY describe-err.txt and takes the loud branch below; jq's own message is on
+          # this step's stderr.
+          serving='[.status.traffic[]? | select((.percent // 0) > 0) | .revisionName]
+            | if length == 1 then .[0] else error("expected exactly one serving revision, got \(length)") end'
+          printf '%s' "$SERVICES" | jq -r '.[].service' |
+          while read -r svc; do
+            # `2>/dev/null || true` was the first shape here and it was wrong in a way
+            # that is invisible: it swallowed EVERY non-zero exit, not just the one the
+            # comment claimed. An expired credential, a wrong GCP_REGION, a missing
+            # run.viewer binding on one service, a 429 — each produced an empty revision,
+            # a green run, and a release with no rollback target, with the error text
+            # thrown away. Discriminate instead: a service absent from Cloud Run records
+            # nothing; anything else fails the deploy loudly. Absent is NOT a first-deploy
+            # path — the stacks bootstrap every service with a serving revision, and
+            # `services update` below cannot create one, so an absent service fails there.
+            if ! rev="$(gcloud run services describe "$svc" \
+              --project "$PROJECT" \
+              --region "$REGION" \
+              --format json 2>describe-err.txt | jq -r "$serving")"; then
+              if ! grep -qi 'NOT_FOUND\|not found' describe-err.txt; then
+                cat describe-err.txt >&2
+                echo "::error::could not read the serving revision of ${svc} — refusing to deploy without a rollback target"
+                exit 1
+              fi
+              rev=""
+            fi
+            # A line with no revision names nothing, and rollback.yml's gate is
+            # `grep -Fxq "$SERVICE $REVISION"` — so "svc " is an exact whole-line match
+            # for an EMPTY revision input, and the gate whose whole purpose is proving a
+            # revision once held traffic would approve one that never existed. Omit the
+            # line rather than write an unmatchable one.
+            [ -n "$rev" ] || continue
+            # Appended per line, not `done | tee file`: the loop's `::error::` annotation is
+            # stdout too, and through a trailing tee it became a LINE IN THE ROLLBACK FILE —
+            # which the restore step then fed to update-traffic as a service name, so a
+            # record-step failure (zero traffic touched) ended in a red "TRAFFIC RESTORE
+            # FAILED" page. No pre-truncate either: the file exists only once a real line
+            # was written, so the hashFiles guards stay inert on an early failure.
+            printf '%s %s\n' "$svc" "$rev" | tee -a rollback-revisions.txt
+          done
+
+      # Uploaded immediately, not batched with the evidence at the end of the job. The
+      # run this file matters most for is the one where the deploy or the smoke fails —
+      # a rollback target that only ships on a green run is not a rollback target, and
+      # position alone did not buy that: with no `if:` the default is `success()`, so the
+      # upload was skipped on exactly the runs it exists for. `overwrite: true` because
+      # artifact names are unique per RUN, not per attempt — without it "Re-run failed
+      # jobs" 409s here and can never reach the deploy step it was re-run to retry.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always() && hashFiles('rollback-revisions.txt') != ''
+        with:
+          name: staging-rollback-revisions
+          path: rollback-revisions.txt
+          if-no-files-found: error
+          overwrite: true
+
+      # Step 1 of §5. The direct Neon URL, never the pooled one: a migration takes
+      # session-scoped locks and advisory state that a transaction pooler discards
+      # between statements (doc 02, doc 01 §6).
+      # Every value this script needs arrives through `env:` and is read as "$VAR". No
+      # ${{ }} appears in a `run:` body anywhere in this file, and that is a hard rule,
+      # not a style: the runner substitutes ${{ }} TEXTUALLY into the script source
+      # before any shell parses it, so a value containing $(...) lands as executable
+      # source and runs — here, holding the staging deployer credential, because this
+      # step is after google-github-actions/auth. Quoting does not fix it; a value
+      # carrying a quote character closes the quoting it was meant to be inside. An
+      # `env:` mapping puts the value in the process environment, never in the script
+      # text, which is why it is the only shape that holds. `if:`, `with:`, `uses:` and
+      # the right-hand side of `env:` are not shell and keep their expressions.
+      - name: point the migration Job at this digest
+        if: steps.plan.outputs.migration_job != ''
+        env:
+          MIGRATION_JOB: ${{ steps.plan.outputs.migration_job }}
+          MIGRATION_IMAGE: ${{ steps.plan.outputs.migration_image }}
+          PROJECT: ${{ vars.GCP_NONPROD_PROJECT }}
+          REGION: ${{ vars.GCP_REGION }}
+        run: |
+          set -euo pipefail
+          gcloud run jobs update "$MIGRATION_JOB" \
+            --project "$PROJECT" \
+            --region "$REGION" \
+            --image "$MIGRATION_IMAGE"
+
+      # Same routing, same reason as the step above.
+      - name: execute the migration Job
+        if: steps.plan.outputs.migration_job != ''
+        env:
+          MIGRATION_JOB: ${{ steps.plan.outputs.migration_job }}
+          PROJECT: ${{ vars.GCP_NONPROD_PROJECT }}
+          REGION: ${{ vars.GCP_REGION }}
+        run: |
+          set -euo pipefail
+          gcloud run jobs execute "$MIGRATION_JOB" \
+            --project "$PROJECT" \
+            --region "$REGION" \
+            --wait
+
+      - name: deploy each service to its digest
+        env:
+          SERVICES: ${{ steps.plan.outputs.services }}
+          PROJECT: ${{ vars.GCP_NONPROD_PROJECT }}
+          REGION: ${{ vars.GCP_REGION }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$SERVICES" | jq -r '.[] | "\(.service) \(.image)"' |
+          while read -r svc image; do
+            echo "::group::$svc"
+            gcloud run services update "$svc" \
+              --project "$PROJECT" \
+              --region "$REGION" \
+              --image "$image"
+            # A prior staging rollback pins traffic to a revision NAME (rollback.yml's
+            # `--to-revisions`), and `services update` does not unpin it: the next deploy
+            # creates a 0% revision, the smoke below proves the OLD one, and the evidence
+            # records a digest that never served — which production then promotes. A no-op
+            # when traffic is already LATEST. Production deliberately does not get this
+            # line: it shifts by `--to-tags`.
+            gcloud run services update-traffic "$svc" \
+              --project "$PROJECT" \
+              --region "$REGION" \
+              --to-latest
+            echo "::endgroup::"
+          done
+
+      # doc 04 §4 + the T30 bypass suite. A staging deploy that does not re-prove the
+      # origin gate is how the gate silently regresses: nothing else in the pipeline
+      # touches it, and the first place you would notice is production.
+      - name: origin + Access bypass suite
+        env:
+          ENVIRONMENT: staging
+          # Every other caller of smoke.ts passes a MODE and this one passed none, so
+          # smoke.ts saw it undefined and had to guess. `staging` is its own mode: unlike
+          # production's pre/post-migration modes there is no tagged revision to address
+          # here, and unlike post-deploy this run must also exercise the origin + Access
+          # bypass suite rather than only the happy path.
+          MODE: staging
+          # Empty on repos with no Cloudflare Access app. smoke.ts calls the public
+          # hostname through Cloudflare, and an Access-protected hostname answers 302 to
+          # the login page without a service token — indistinguishable from a broken
+          # deploy. Never echo either value.
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: bun run deploy/smoke.ts
+
+      # This step used to build the JSON with `cat > … <<JSON` — an UNQUOTED heredoc
+      # delimiter — with ${{ toJSON(inputs.digests) }} and the plan outputs interpolated
+      # into the body. That was a working remote-execution path, and the route through it
+      # is worth stating exactly, because it defeats the validation step above rather
+      # than evading it:
+      #
+      #   an attacker dispatches digests with a DUPLICATE key, e.g.
+      #     {"svc":"$(payload)","svc":"sha256:<a real digest>"}
+      #   plan.ts calls JSON.parse, which keeps the LAST value for a duplicate key, so
+      #   validation sees only the clean digest and passes. toJSON() then embeds the RAW
+      #   input string — still carrying the earlier $(payload) — into the heredoc body,
+      #   the unquoted delimiter makes the shell perform command substitution, and the
+      #   payload runs after google-github-actions/auth, holding the staging deployer
+      #   credential. Validate one thing, execute another.
+      #
+      # Quoting the delimiter <<'JSON' is NOT the fix and was rejected: a value carrying
+      # the delimiter line still terminates the heredoc early, and this step also has to
+      # write values into surrounding quotes elsewhere. jq -n with every value arriving
+      # through `env:` is the fix — nothing reaches the script text.
+      #
+      # jq --arg also does the JSON escaping the heredoc never did. A digest or service
+      # name containing a quote character previously produced malformed evidence: a
+      # promotion record that no consumer can parse, discovered at the moment someone
+      # needs it.
+      #
+      # `digests` stays a JSON STRING, matching what toJSON() produced, and stays the RAW
+      # input rather than plan.ts's parsed view — so a duplicate-key payload is preserved
+      # verbatim in the evidence instead of being silently collapsed to its last value.
+      # `workflow_commit`, not `commit`: this is the DISPATCHER's checkout, i.e. which copy
+      # of this file and of deploy/*.ts ran. The digests were built from whatever commit
+      # publish ran on, and that binding lives in publish's image-manifest artifact — a
+      # manual promote of an older digest must not record a commit the image was never
+      # built from under a name that says it was.
+      - name: promotion evidence
+        env:
+          COMMIT: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+          DIGESTS: ${{ inputs.digests }}
+          MIGRATION_JOB: ${{ steps.plan.outputs.migration_job }}
+          SERVICES: ${{ steps.plan.outputs.services }}
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg workflow_commit "$COMMIT" \
+            --arg run_id "$RUN_ID" \
+            --arg digests "$DIGESTS" \
+            --arg migration_job "$MIGRATION_JOB" \
+            --argjson services "$SERVICES" \
+            --rawfile rollback rollback-revisions.txt \
+            '{environment:"staging", workflow_commit:$workflow_commit, run_id:$run_id, digests:$digests,
+              migration_job:$migration_job, services:$services,
+              rollback_revisions:$rollback}' > staging-evidence.json
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: staging-evidence
+          path: staging-evidence.json
+          if-no-files-found: error
+          overwrite: true
