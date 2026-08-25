@@ -529,6 +529,43 @@ jobs:
               cargo test -p "$crate" --doc --locked --offline
             done
           '
+      # The two sorted-key guards in `gwk-kernel`'s checkpoint module CANNOT
+      # fail in a default build: with `serde_json::Map` backed by `BTreeMap` the
+      # uncanonicalized bytes already equal the canonical ones, so deleting the
+      # sort leaves them green. They only discriminate where `preserve_order` is
+      # unified in — which is THIS job, because `gwk-adapter-opencode` pulls it
+      # through agent-client-protocol. So run them here, against the map backing
+      # a joint build actually produces.
+      #
+      # The premise is asserted first, the same way `:91-109` asserts its
+      # negation: a lane that stopped being poisoned has stopped proving
+      # anything, and must say so rather than go quietly green. So must a filter
+      # that matched nothing, which is why the two guards are checked by name in
+      # the run's own output instead of trusting a zero-test exit 0.
+      - name: the checkpoint digest holds under a preserve_order build
+        run: |
+          set -euo pipefail
+          eval "$(./tools/pty-toolchain.sh --env)"
+          features=/tmp/opencode-serde-json-features.txt
+          required='serde_json feature "preserve_order"'
+          cargo tree -p gwk-adapter-opencode -e features,no-dev -i serde_json --offline > "$features"
+          if ! grep -Fq "$required" "$features"; then
+            echo 'gwk-adapter-opencode no longer enables serde_json/preserve_order — the sorted-key guards below would run under BTreeMap and prove nothing' >&2
+            exit 1
+          fi
+          out=$(cargo test -p gwk-kernel -p gwk-adapter-opencode --lib --locked --offline checkpoint:: 2>&1) || {
+            printf '%s\n' "$out" >&2
+            exit 1
+          }
+          printf '%s\n' "$out"
+          for guard in an_ingested_payload_is_hashed_by_sorted_keys_discriminating_only_under_preserve_order \
+                       a_message_payload_is_hashed_by_sorted_keys_discriminating_only_under_preserve_order; do
+            if ! printf '%s' "$out" | grep -Fq "$guard ... ok"; then
+              echo "$guard did not run here — the filter matched nothing and the step is decoration" >&2
+              exit 1
+            fi
+          done
+          echo 'the checkpoint digest is key-order independent under the poisoned backing, and both guards ran'
       # The conformance corpus is only a gate if it can fail. The step above
       # already RAN it; these seeds show it says no to the three ways it could
       # be hollowed out — a frame that stopped matching the parser, a fixture

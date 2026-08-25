@@ -782,4 +782,41 @@ mod tests {
         let back: Message = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back, msg);
     }
+
+    #[test]
+    fn exactly_two_entity_fields_carry_free_form_json() {
+        // Every other field here is typed and serializes in declaration order.
+        // A raw `serde_json::Value` does not: its object keys come out in
+        // whatever order `serde_json::Map` iterates, which is sorted under the
+        // default `BTreeMap` and insertion-ordered the moment something in the
+        // same cargo invocation turns on `preserve_order`. `gwk-kernel`'s
+        // `canonical_line` sorts exactly these two before they reach the
+        // projection digest; a third one added here and not taught to it would
+        // make that digest a property of the build again — which is what made a
+        // kernel read its own checkpoint as `Diverged`.
+        //
+        // Cut at the test module so this comment and the expectation below are
+        // not themselves counted. `expect`, so a file that lost its tests reds
+        // rather than scanning an empty half and passing on nothing.
+        let (types, _) = include_str!("entity.rs")
+            .split_once("#[cfg(test)]")
+            .expect("entity.rs carries a test module");
+        let free_form: Vec<&str> = types
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.contains("serde_json::Value"))
+            .collect();
+        // Set equality, not a floor: an addition, a removal, and a rename all
+        // red, and the length is settled before anything else is compared.
+        assert_eq!(
+            free_form,
+            [
+                "pub payload: Option<serde_json::Value>,",
+                "pub payload: serde_json::Value,",
+            ],
+            "a free-form JSON field appeared, moved, or vanished — gwk-kernel's \
+             canonical_line must learn about it or the projection digest goes \
+             back to depending on which serde_json::Map backing the build used"
+        );
+    }
 }
