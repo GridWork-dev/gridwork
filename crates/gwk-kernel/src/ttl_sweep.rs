@@ -401,4 +401,24 @@ mod tests {
              a threshold nothing reaches is the defect, not the fix"
         );
     }
+
+    /// A source-level pin on the wiring itself: `sweep_once` must pass the
+    /// owned const, verbatim. Behavioural coverage cannot reach this line —
+    /// `updated_at` is written by the store on every command and cannot be
+    /// backdated, so no test fixture can age an attempt past a real
+    /// [`STALE_AFTER`] — and without this pin, rewiring `sweep_once` to any
+    /// other duration leaves the whole suite green while the shipped defect
+    /// (a threshold nothing reaches) returns in full.
+    #[test]
+    fn sweep_once_wires_the_owned_const() {
+        // concat!: `include_str!` sees this test's own source too, so a
+        // one-piece needle would match its own string literal and the pin
+        // could never fail.
+        let wiring = concat!("sweep_once_with(store, STALE_", "AFTER).await");
+        assert!(
+            include_str!("ttl_sweep.rs").contains(wiring),
+            "sweep_once must wire STALE_AFTER into sweep_once_with verbatim — \
+             the production threshold is this file's, never a caller's"
+        );
+    }
 }
