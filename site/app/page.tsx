@@ -484,6 +484,12 @@ $ gw kernel health
           <p>
             <strong>GridWork</strong>
             <span>One log. One kernel. Terminal only.</span>
+            <span>
+              by{" "}
+              <a href="https://gridworkdigital.com" rel="noreferrer">
+                GridWork Digital
+              </a>
+            </span>
           </p>
 
           <div className="landing-footer-columns">
