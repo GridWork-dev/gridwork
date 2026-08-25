@@ -98,6 +98,23 @@ if ! git merge-base --is-ancestor HEAD FETCH_HEAD; then
   exit 1
 fi
 
+# ---------------------------------------------------------------------------------------
+# 4b. A tree that gates every request on a secret must not ship to a service without one.
+#
+# site/proxy.ts (Wave 3) answers 403 to any request whose X-Gridwork-Origin-Secret header
+# does not match GRIDWORK_ORIGIN_SECRET_CURRENT/NEXT, and it has no production bypass.
+# Deploying it to a service whose environment lacks the variable takes the whole site down
+# while every check above passes — the tree is clean, published, and wrong for this target.
+# Only the variable NAMES are inspected: the listing goes straight into jq and nothing
+# prints a value. A failed listing refuses too; an unreadable environment is not a passing one.
+if [ -e site/proxy.ts ]; then
+  if ! railway variables --service "$EXPECT_SERVICE" --json | jq -e 'has("GRIDWORK_ORIGIN_SECRET_CURRENT")' >/dev/null; then
+    echo "deploy: site/proxy.ts gates every request on GRIDWORK_ORIGIN_SECRET_CURRENT and the '${EXPECT_SERVICE}' service does not carry it — refusing" >&2
+    echo "deploy: this tree is deploy-frozen until the origin secret is set on the service (T34a)" >&2
+    exit 1
+  fi
+fi
+
 sha="$(git rev-parse HEAD)"
 echo "deploy: ${EXPECT_PROJECT}/${EXPECT_SERVICE} at ${sha}"
 

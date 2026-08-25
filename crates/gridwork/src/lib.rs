@@ -114,6 +114,21 @@ async fn execute(verb: Verb, pretty: bool, human_tables: bool) -> Result<(), Fai
         Verb::Daemon => admin::daemon(pretty).await,
         Verb::AdminInit => admin::init(pretty).await,
         Verb::AdminVerify => admin::verify(pretty).await,
+        Verb::AdminMigrate {
+            scratch,
+            backup,
+            from,
+            dry_run,
+        } => {
+            admin::migrate(
+                scratch.as_str(),
+                backup.as_deref(),
+                from.as_deref(),
+                dry_run,
+                pretty,
+            )
+            .await
+        }
         Verb::AdminRebuildProjections { scratch } => {
             admin::rebuild_projections(&scratch, pretty).await
         }

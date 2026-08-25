@@ -343,6 +343,24 @@ pub fn validate_role(role: &str) -> Result<()> {
     if !bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_') {
         return invalid("contains a character outside [a-z0-9_]");
     }
+    // Four strings that match the pattern above and are not identifiers.
+    // PostgreSQL reads them as `RoleSpec` keywords wherever a role name is
+    // expected, so `GRANT ... TO public` does not grant to a role called
+    // "public" — it grants to PUBLIC, which is every role in the cluster, and
+    // the privilege matrix this validator guards would land on all of them.
+    // The other three resolve to whoever happens to be connected, which makes
+    // the grant depend on the credential that ran the verb rather than on
+    // configuration.
+    //
+    // `admin::init` also refuses these for free, because none of them exists in
+    // `pg_roles` and it looks the role up before granting. Refusing them here
+    // covers every caller rather than the one that happens to check.
+    if matches!(
+        role,
+        "public" | "current_user" | "session_user" | "current_role"
+    ) {
+        return invalid("is a PostgreSQL role keyword rather than a role name");
+    }
     Ok(())
 }
 
@@ -584,8 +602,35 @@ mod tests {
             "dash--comment",
             "role; DROP SCHEMA gwk CASCADE",
             "a".repeat(64).as_str(),
+            // The four that pass every character test above and are still not
+            // role names. `public` is the one that matters: it is a legal bare
+            // lowercase identifier by shape, and `GRANT ... TO public` hands the
+            // whole runtime privilege matrix to every role in the cluster.
+            "public",
+            "current_user",
+            "session_user",
+            "current_role",
         ] {
             validate_role(bad).expect_err(&format!("{bad:?} must be refused"));
+        }
+    }
+
+    /// The keyword rejection is about the keywords, not about a typo near them.
+    ///
+    /// Without this, widening the guard to anything that merely CONTAINS one of
+    /// the four — a `contains`, a prefix test — would pass the arm above while
+    /// locking out every legitimate role named for what it does.
+    #[test]
+    fn a_role_named_near_a_keyword_is_still_a_role() {
+        for good in [
+            "public_reader",
+            "gwk_public",
+            "publication",
+            "current_user_shadow",
+            "session_users",
+        ] {
+            validate_role(good)
+                .unwrap_or_else(|e| panic!("{good:?} is a real identifier, not a keyword: {e}"));
         }
     }
 }

@@ -1,4 +1,4 @@
--- Durable post-commit delivery state for PTY controls.
+-- 0005_pty_delivery.sql — durable post-commit delivery state for PTY controls.
 --
 -- The command event and this pending row land in one transaction. Delivery
 -- attempts take a short durable lease, release the database transaction before
