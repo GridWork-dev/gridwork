@@ -15,7 +15,8 @@
 //! projection snapshots, and the recovery that decides what a restart may claim
 //! about them. The wire server lands on top of them, and the TTL sweep rides
 //! beside it — the kernel's own periodic answer to a lease-holder that died
-//! rather than released. Beside the embedded DDL sits the migration chain: the
+//! rather than released, and to an attempt no live lease is backing at all.
+//! Beside the embedded DDL sits the migration chain: the
 //! authored steps that carry a database from one contract digest to the next,
 //! and the resolver that decides whether this build knows a route between two
 //! of them.
