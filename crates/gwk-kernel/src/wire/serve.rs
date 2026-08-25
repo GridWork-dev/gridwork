@@ -401,6 +401,22 @@ impl Daemon {
             // command the transaction would have allowed, or wave one through
             // that it then refuses anyway.
             KernelRequest::SubmitCommand { envelope } => {
+                // One namespace is not forwardable: the sweep mints its
+                // idempotency keys under `ttl_sweep:`, and a stale row's
+                // version does not advance while it waits — so a client
+                // command landed on one of those keys would refuse the
+                // kernel's own burial identically on every later tick,
+                // forever, with nothing in the journal to say why. The
+                // kernel's own envelopes reach `submit` directly and never
+                // pass through here, so the refusal costs no legitimate
+                // caller anything.
+                if envelope.idempotency_key.as_str().starts_with("ttl_sweep:") {
+                    return Ok(KernelResult::Error {
+                        code: KernelErrorCode::Validation,
+                        message: "idempotency keys under `ttl_sweep:` are reserved for the kernel's own sweep".to_owned(),
+                        detail: None,
+                    });
+                }
                 match KernelCommand::from_envelope(envelope) {
                     Ok(
                         KernelCommand::ResizePtySession { .. }

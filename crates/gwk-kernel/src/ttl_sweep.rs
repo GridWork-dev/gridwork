@@ -22,7 +22,8 @@
 //! 2. For every attempt this lease was backing
 //!    ([`gwk_domain::entity::Attempt::worktree_lease_id`]) and that is still
 //!    in a state with an edge to [`gwk_domain::fsm::AttemptState::Unknown`]
-//!    (`starting`, `running`, `blocked`, `canceling`) — `TransitionAttempt`
+//!    (the FSM-derived set [`crate::recover::uncertain_states`] names, not a
+//!    literal here that could drift from it) — `TransitionAttempt`
 //!    to `unknown`, the FSM's own answer to "an attempt whose real outcome
 //!    cannot be determined". The attempt is chosen over `engine_session`
 //!    because that table carries `started_at`/`ended_at` only, no state of
@@ -47,11 +48,17 @@
 //! in flight that nothing was performing.
 //!
 //! So the pass has a second trigger: an attempt in
-//! one of the same uncertain states that NO live lease is backing and that
-//! has not produced a single event for [`STALE_AFTER`] is marked `unknown`
-//! too. "No live lease" rather than "no lease" on purpose — it also catches
+//! one of the uncertain states except `blocked` (silence is evidence only
+//! where silence is abnormal — see [`stale_state_names`]) that NO live lease
+//! is backing and that has not produced a single event for [`STALE_AFTER`]
+//! is marked `unknown` too. "No live lease" rather than "no lease" on purpose — it also catches
 //! the attempt whose lease is already `expired` or `released`, which the
-//! lease loop can never re-find (it only ever reads `state = 'held'`).
+//! lease loop can never re-find (it only ever reads `state = 'held'`), and
+//! the one whose `held` lease carries no `expires_at` at all, which neither
+//! loop could otherwise reach: a lease that never expires is a declaration,
+//! not proof of life. A consequence worth naming: `ReleaseLease` carries no
+//! holder check, so releasing an attempt's lease — anyone's to do on this
+//! same-uid socket — is also what strips it of this arm's protection.
 //!
 //! Both writes are per-row CAS, so a lost race on either one is not an
 //! error — the next tick re-reads the current state and decides again. A
@@ -88,11 +95,24 @@ pub const SWEEP_INTERVAL: Duration = Duration::from_secs(15);
 /// ([`gwk_domain::fsm::AttemptState`] gives it no outgoing edge), so a false
 /// positive is permanent. The value therefore has to exceed the longest
 /// legitimate quiet stretch of a live lease-less dispatch, not merely the
-/// sweep's own cadence. It is affordable because five commands refresh
+/// sweep's own cadence. It is affordable because six commands refresh
 /// `gwk.attempt.updated_at` — `TransitionAttempt`, `UpdateBudget`,
-/// `RecordAttemptRuntime`, `RecordAttemptOutcome` and `RecordRound` — so an
-/// attempt that is doing anything at all advances it.
+/// `RecordAttemptRuntime`, `RecordAttemptOutcome`, `RecordRound` and
+/// `RecordFinding` — so an attempt that is doing anything at all advances it.
 pub const STALE_AFTER: Duration = Duration::from_secs(3600);
+
+/// The most rows one stale pass will act on.
+///
+/// The stale query runs inside the daemon's own sweep task every
+/// [`SWEEP_INTERVAL`], and each hit costs a CAS command under the writer
+/// lock — unbounded, a backlog would turn one tick into a writer-lock hog
+/// that starves client commands for its whole length. Bounded, the pass
+/// makes deterministic forward progress (`ORDER BY a.id`) and a backlog
+/// drains across ticks at a rate the lock can absorb.
+/// `ponytail:` the query is a seq scan (no index on `gwk.attempt.state` /
+/// `updated_at`) — fine at the hundreds-of-rows table this estate carries;
+/// a partial index via the migration chain is the upgrade if it ever grows.
+const STALE_SWEEP_BATCH: i64 = 256;
 
 /// What one sweep pass did.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -133,6 +153,10 @@ pub async fn sweep_once(store: &PgEventStore) -> Result<SweepReport> {
 /// Postgres's own `now()` at append, and `assert_transition` requires every
 /// UPDATE to advance `version` by exactly one — so a fixture cannot be
 /// backdated by SQL or by command, and the threshold is the only lever left.
+/// Hidden for the same reason it is public: the integration tests need it,
+/// and nothing else should call it — an arbitrary threshold is a "bury
+/// everything now" lever, not a supported entry point.
+#[doc(hidden)]
 pub async fn sweep_once_with(store: &PgEventStore, stale_after: Duration) -> Result<SweepReport> {
     let mut report = SweepReport::default();
     // One instant for every command this pass issues — the same thing one
@@ -166,10 +190,18 @@ pub async fn sweep_once_with(store: &PgEventStore, stale_after: Duration) -> Res
             &project_id,
             &issued_at,
         );
-        let KernelResult::CommandApplied { .. } = store.submit(&envelope).await else {
+        let result = store.submit(&envelope).await;
+        let KernelResult::CommandApplied { .. } = result else {
             // Raced: renewed since the read above (the holder is alive) or
-            // already expired by another tick. Either way this lease's
+            // already expired by another tick — benign. A refusal is not, and
+            // would repeat on every tick (see `not_buried`); the printed
+            // result is what tells the two apart. Either way this lease's
             // attempts are not this pass's to touch.
+            let detail: String = format!("{result:?}").chars().take(300).collect();
+            eprintln!(
+                "gwk-kernel: ttl_sweep did not expire lease {} (version {version}): {detail}",
+                shown(&lease_id)
+            );
             continue;
         };
         report.leases_expired.push(LeaseId::new(lease_id.clone()));
@@ -222,16 +254,43 @@ async fn sweep_dead_attempts(
             &project_id,
             issued_at,
         );
-        if let KernelResult::CommandApplied { .. } = store.submit(&envelope).await {
+        let result = store.submit(&envelope).await;
+        if let KernelResult::CommandApplied { .. } = result {
             report
                 .attempts_marked_unknown
                 .push(AttemptId::new(attempt_id));
+        } else {
+            not_buried("lease", &attempt_id, version, &result);
         }
-        // A lost CAS here means the attempt moved on its own between the read
-        // above and this write (finished, was stopped, whatever it was doing
-        // completed) — not a sweep failure, just stale by the time it landed.
     }
     Ok(())
+}
+
+/// The journal line for a burial that did not land.
+///
+/// A lost CAS is benign — the row moved on its own between the read and this
+/// write — but an idempotency or storage refusal means this row's key can
+/// never land, and its version will not advance while it sits stale, so the
+/// same refusal would repeat silently on every tick forever. Printing the
+/// result is what makes the two distinguishable from the journal; the wire
+/// refuses client envelopes in the sweep's key namespace precisely so the
+/// second kind cannot be manufactured.
+fn not_buried(arm: &str, attempt_id: &str, version: u32, result: &KernelResult) {
+    let detail: String = format!("{result:?}").chars().take(300).collect();
+    eprintln!(
+        "gwk-kernel: ttl_sweep ({arm} arm) did not bury attempt {} (version {version}): {detail}",
+        shown(attempt_id)
+    );
+}
+
+/// A client-minted id, bounded and `Debug`-escaped for the journal.
+///
+/// Ids arrive over the wire without charset or length validation, so a raw
+/// interpolation would let one carry newlines or terminal control bytes into
+/// the operator's journal as forged `gwk-kernel:` lines.
+fn shown(id: &str) -> String {
+    let truncated: String = id.chars().take(128).collect();
+    format!("{truncated:?}")
 }
 
 /// Mark `unknown` every attempt that no live lease is backing and that has
@@ -240,9 +299,12 @@ async fn sweep_dead_attempts(
 /// The lease arm cannot reach these: an attempt created with
 /// `worktree_lease_id` NULL has no lease whose expiry would trigger it, and
 /// one whose lease already left `held` is equally unreachable, because the
-/// lease loop only ever re-reads `state = 'held'`. `NOT EXISTS (... 'held')`
-/// is one predicate for both spellings of the same fact — nothing is proving
-/// this attempt alive.
+/// lease loop only ever re-reads `state = 'held'`. The `NOT EXISTS` is one
+/// predicate for every spelling of the same fact — nothing is proving this
+/// attempt alive — and it demands `expires_at IS NOT NULL` because a `held`
+/// lease with no TTL is a declaration nothing ever has to renew: counting it
+/// as proof would leave its attempt unreachable by both arms forever, the
+/// shipped defect in a third shape.
 async fn sweep_stale_attempts(
     store: &PgEventStore,
     stale_after: Duration,
@@ -263,11 +325,14 @@ async fn sweep_stale_attempts(
            AND NOT EXISTS ( \
                SELECT 1 FROM gwk.lease l \
                WHERE l.id = a.worktree_lease_id AND l.state = 'held' \
+                 AND l.expires_at IS NOT NULL \
            ) \
-         ORDER BY a.id",
+         ORDER BY a.id \
+         LIMIT $3",
     )
-    .bind(uncertain_state_names()?)
+    .bind(stale_state_names()?)
     .bind(stale_after.as_secs_f64())
+    .bind(STALE_SWEEP_BATCH)
     .fetch_all(store.pool())
     .await
     .map_err(KernelError::Database)?;
@@ -288,20 +353,22 @@ async fn sweep_stale_attempts(
             &project_id,
             issued_at,
         );
-        if let KernelResult::CommandApplied { .. } = store.submit(&envelope).await {
+        let result = store.submit(&envelope).await;
+        if let KernelResult::CommandApplied { .. } = result {
             // `run` discards the report, so stderr is the operational trace
             // this leaves behind — burying an attempt is not routine, and an
             // operator reading the journal should see which ones and why.
             eprintln!(
-                "gwk-kernel: ttl_sweep buried attempt {attempt_id} (version {version}) \
-                 after {age_secs:.0}s with no live lease backing it"
+                "gwk-kernel: ttl_sweep buried attempt {} (version {version}) \
+                 after {age_secs:.0}s with no live lease backing it",
+                shown(&attempt_id)
             );
             report
                 .attempts_marked_unknown
                 .push(AttemptId::new(attempt_id));
+        } else {
+            not_buried("stale", &attempt_id, version, &result);
         }
-        // A lost CAS is the same benign race as in the lease arm: the attempt
-        // moved on its own between the read above and this write.
     }
     Ok(())
 }
@@ -313,6 +380,29 @@ async fn sweep_stale_attempts(
 fn uncertain_state_names() -> Result<Vec<String>> {
     crate::recover::uncertain_states()
         .map_err(|e| KernelError::Schema(format!("uncertain states: {e}")))
+}
+
+/// The stale arm's own candidate set: [`uncertain_state_names`] minus
+/// `blocked`.
+///
+/// The two arms hold different evidence. The lease arm has proof of death —
+/// an elapsed TTL — so it acts on every state with an edge to `unknown`. The
+/// stale arm has only silence, and `blocked` is the one state whose declared
+/// meaning IS legitimate silence: the running <-> blocked flip is receipted
+/// by the liveness producer ([`gwk_domain::transition`]), so a blocked
+/// attempt sitting quiet is doing exactly what it said it would — and
+/// `unknown` is terminal, so burying it on wall-clock silence would replace
+/// the defect this arm closes with its irreversible mirror image. A blocked
+/// attempt whose lease dies is still buried, by the lease arm, on proof.
+/// Subtractive from the shared derivation on purpose: a future FSM edge
+/// change flows through without a second literal to drift.
+fn stale_state_names() -> Result<Vec<String>> {
+    let blocked = crate::project::wire_str(&AttemptState::Blocked)
+        .map_err(|e| KernelError::Schema(format!("blocked wire name: {e}")))?;
+    Ok(uncertain_state_names()?
+        .into_iter()
+        .filter(|state| *state != blocked)
+        .collect())
 }
 
 /// Narrow a `bigint` version column to the `u32` the domain carries.
@@ -384,16 +474,18 @@ mod tests {
     /// Both bounds are load-bearing in opposite directions. Too low and the
     /// sweep buries live work, because `unknown` is terminal and a lease-less
     /// dispatch can legitimately go a long time between events; the floor is
-    /// stated against [`SWEEP_INTERVAL`] so it stays many ticks of headroom
-    /// rather than a number that happens to be large. Too high and the defect
+    /// a literal on purpose — anchored to [`SWEEP_INTERVAL`] it would move
+    /// whenever the cadence did, and a guard whose two sides travel together
+    /// cannot fail in the direction that matters. Too high and the defect
     /// this arm exists to close is simply back — an attempt nothing is
     /// running keeps reading `running` for longer than anyone will wait.
     #[test]
     fn the_stale_threshold_is_bounded() {
         assert!(
-            STALE_AFTER >= SWEEP_INTERVAL * 20,
-            "STALE_AFTER ({STALE_AFTER:?}) must leave many sweep ticks of headroom \
-             over SWEEP_INTERVAL ({SWEEP_INTERVAL:?}) — `unknown` is terminal"
+            STALE_AFTER >= Duration::from_secs(30 * 60),
+            "STALE_AFTER ({STALE_AFTER:?}) must exceed the longest legitimate quiet \
+             stretch of a live lease-less dispatch — `unknown` is terminal, so a \
+             short threshold buries real work permanently"
         );
         assert!(
             STALE_AFTER <= Duration::from_secs(24 * 60 * 60),
@@ -409,6 +501,20 @@ mod tests {
     /// [`STALE_AFTER`] — and without this pin, rewiring `sweep_once` to any
     /// other duration leaves the whole suite green while the shipped defect
     /// (a threshold nothing reaches) returns in full.
+    /// The stale arm may act on silence only where silence is evidence:
+    /// `blocked` is a receipted declaration that silence is expected, and
+    /// `unknown` is terminal — so it is excluded, and this pins the exact
+    /// remainder the way `recover`'s own test pins the full set. Widening
+    /// the arm back to the shared derivation reds here.
+    #[test]
+    fn the_stale_arm_excludes_what_declared_it_was_waiting() {
+        assert_eq!(
+            stale_state_names().expect("wire names"),
+            ["starting", "running", "canceling"],
+            "the stale set is the FSM's uncertain states minus `blocked`"
+        );
+    }
+
     #[test]
     fn sweep_once_wires_the_owned_const() {
         // concat!: `include_str!` sees this test's own source too, so a
@@ -418,7 +524,9 @@ mod tests {
         assert!(
             include_str!("ttl_sweep.rs").contains(wiring),
             "sweep_once must wire STALE_AFTER into sweep_once_with verbatim — \
-             the production threshold is this file's, never a caller's"
+             the production threshold is this file's, never a caller's. (This is \
+             a source-text pin: a rename or reflow of the wiring line reds it \
+             too — update the needle alongside, don't hunt a threshold bug.)"
         );
     }
 }

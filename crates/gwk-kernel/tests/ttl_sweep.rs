@@ -10,10 +10,12 @@ mod common;
 
 use std::time::Duration;
 
-use common::{apply, drop_database, fresh_store, maintenance_pool, state_row, task};
+use common::{
+    actor, apply, apply_as, drop_database, fresh_store, maintenance_pool, state_row, task,
+};
 use gwk_domain::command::KernelCommand;
 use gwk_domain::fsm::{AttemptState, LeaseMode};
-use gwk_domain::ids::{AttemptId, EngineId, LeaseId, TaskId, Timestamp};
+use gwk_domain::ids::{AttemptId, EngineId, LeaseId, ReceiptId, TaskId, Timestamp};
 use gwk_kernel::store::PgEventStore;
 use gwk_kernel::ttl_sweep::{sweep_once, sweep_once_with};
 
@@ -34,7 +36,10 @@ fn attempt(id: &str, task_id: &str, lease_id: Option<&str>) -> KernelCommand {
     }
 }
 
-fn lease(id: &str, holder: &str, expires_at: &str) -> KernelCommand {
+/// `expires_at: None` is the TTL-less acquisition the wire allows — a lease
+/// nothing ever has to renew, which is why the sweep must not read one as
+/// proof of life.
+fn lease(id: &str, holder: &str, expires_at: Option<&str>) -> KernelCommand {
     KernelCommand::AcquireLease {
         lease_id: LeaseId::new(id),
         mode: LeaseMode::Exclusive,
@@ -44,7 +49,7 @@ fn lease(id: &str, holder: &str, expires_at: &str) -> KernelCommand {
         path: Some(format!("/w/{id}")),
         branch: Some("feature/x".into()),
         base_sha: None,
-        expires_at: Some(Timestamp::new(expires_at)),
+        expires_at: expires_at.map(Timestamp::new),
     }
 }
 
@@ -104,7 +109,7 @@ async fn a_dead_holders_attempt_goes_unknown_and_a_live_ones_does_not() {
     apply(
         &store,
         "lease-dead",
-        lease("l-dead", "host-dead", "2000-01-01T00:00:00Z"),
+        lease("l-dead", "host-dead", Some("2000-01-01T00:00:00Z")),
     )
     .await;
     apply(
@@ -121,7 +126,7 @@ async fn a_dead_holders_attempt_goes_unknown_and_a_live_ones_does_not() {
     apply(
         &store,
         "lease-alive",
-        lease("l-alive", "host-alive", "2099-01-01T00:00:00Z"),
+        lease("l-alive", "host-alive", Some("2099-01-01T00:00:00Z")),
     )
     .await;
     apply(
@@ -171,7 +176,7 @@ async fn a_dead_holders_attempt_goes_unknown_and_a_live_ones_does_not() {
 /// it read `running` forever with nothing performing it.
 ///
 /// Three arms off one fixture, so "nothing happened" can never be a fixture
-/// that would not have qualified anyway: the same two rows are swept twice,
+/// that would not have qualified anyway: the same three rows are swept twice,
 /// once under the shipped threshold and once under a zero one.
 #[tokio::test]
 #[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
@@ -192,7 +197,7 @@ async fn a_lease_less_attempt_ages_out_and_a_leased_or_fresh_one_does_not() {
     apply(
         &store,
         "lease-held",
-        lease("l-held", "host-held", "2099-01-01T00:00:00Z"),
+        lease("l-held", "host-held", Some("2099-01-01T00:00:00Z")),
     )
     .await;
     apply(
@@ -202,6 +207,39 @@ async fn a_lease_less_attempt_ages_out_and_a_leased_or_fresh_one_does_not() {
     )
     .await;
     drive_to_running(&store, "a-held").await;
+
+    // The third shape of the same defect: a lease that is `held` but was
+    // acquired with no `expires_at` at all. Nothing ever has to renew it, so
+    // it proves nothing — the lease arm can never select it (no TTL to
+    // elapse), and were it counted as live, this attempt would be
+    // unreachable by both arms forever.
+    apply(&store, "lease-nottl", lease("l-nottl", "host-nottl", None)).await;
+    apply(
+        &store,
+        "attempt-nottl",
+        attempt("a-nottl", "t-1", Some("l-nottl")),
+    )
+    .await;
+    drive_to_running(&store, "a-nottl").await;
+
+    // The declared-waiting negative: lease-less, but flipped to `blocked` —
+    // the receipted transition only the liveness producer may write. This is
+    // not silence the sweep may read as death; it is a receipt that silence
+    // is expected, so no threshold may bury it.
+    apply(&store, "attempt-blocked", attempt("a-blocked", "t-1", None)).await;
+    drive_to_running(&store, "a-blocked").await;
+    apply_as(
+        &store,
+        "a-blocked-flip",
+        actor("liveness_producer"),
+        KernelCommand::TransitionAttempt {
+            attempt_id: AttemptId::new("a-blocked"),
+            to: AttemptState::Blocked,
+            expected_version: 4,
+            receipt_id: Some(ReceiptId::new("r-blocked")),
+        },
+    )
+    .await;
 
     // Arm 1: under an hour-long threshold, a row created seconds ago has not
     // been silent long enough for anything. The threshold is read, not
@@ -215,18 +253,38 @@ async fn a_lease_less_attempt_ages_out_and_a_leased_or_fresh_one_does_not() {
         report.attempts_marked_unknown
     );
     assert_eq!(attempt_state(&store, "a-null").await, ("running".into(), 4));
+    assert_eq!(
+        attempt_state(&store, "a-nottl").await,
+        ("running".into(), 4)
+    );
 
     // Arm 2: with the threshold at zero the lease-less one is buried, through
     // the ordinary command path — created(1) -> leased(2) -> starting(3) ->
-    // running(4) -> unknown(5), the same ladder the lease arm produces.
+    // running(4) -> unknown(5), the same ladder the lease arm produces. The
+    // one whose held lease has no TTL is buried by the same pass: a lease
+    // nothing ever has to renew is a declaration, not proof of life.
     let report = sweep_once_with(&store, Duration::ZERO)
         .await
         .expect("sweep at zero");
     assert_eq!(
         report.attempts_marked_unknown,
-        vec![AttemptId::new("a-null")]
+        vec![AttemptId::new("a-nottl"), AttemptId::new("a-null")]
     );
     assert_eq!(attempt_state(&store, "a-null").await, ("unknown".into(), 5));
+    assert_eq!(
+        attempt_state(&store, "a-nottl").await,
+        ("unknown".into(), 5)
+    );
+    // Its lease is discounted as proof, never expired — it has no TTL for the
+    // lease arm to act on, and the stale arm touches attempts only.
+    assert_eq!(lease_state(&store, "l-nottl").await, ("held".into(), 1));
+    // The declared-waiting one survived the same zero-threshold pass: the
+    // stale arm's candidate set excludes `blocked` by derivation, so even
+    // infinite silence is not evidence against it.
+    assert_eq!(
+        attempt_state(&store, "a-blocked").await,
+        ("blocked".into(), 5)
+    );
 
     // Arm 3: the same pass left the attempt with a live holder alone. Nothing
     // else in the sweep could have touched it — its lease expires in 2099, so

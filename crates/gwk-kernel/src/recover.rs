@@ -93,7 +93,11 @@ pub struct RecoveryReport {
     pub rejected: Vec<(Seq, String)>,
     /// Attempts a restart left in a state the FSM says can end in `unknown`.
     ///
-    /// Reported, never acted on. See [`PgEventStore::recover`].
+    /// Reported here, never acted on by `recover` itself — but no longer
+    /// inert: within [`crate::ttl_sweep::STALE_AFTER`] the sweep transitions
+    /// every one of these that no live lease is backing to terminal
+    /// `unknown`. Same derivation, different actor. See
+    /// [`PgEventStore::recover`].
     pub uncertain: Vec<String>,
 }
 
