@@ -1435,6 +1435,66 @@ async fn generic_submit_refuses_delivery_only_pty_commands() {
     drop_database(&maintenance, &name).await;
 }
 
+/// The sweep's idempotency namespace is not reachable from the wire.
+///
+/// A stale attempt's version does not advance while it waits, so the sweep
+/// recomputes the identical key every tick — a client command landed on that
+/// key first would make the kernel's own burial refuse identically forever,
+/// silently disabling the sweep for that row. The reject arm proves the
+/// namespace is closed; the accept arm proves the gate is the prefix, not
+/// the command.
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
+async fn the_sweeps_idempotency_namespace_is_refused_at_the_wire() {
+    use gwk_domain::TaskId;
+
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "wire_reserved_key", 8).await;
+    let served = Running::open(store, "reservedkey").await;
+    let mut client = served.client_with_capabilities(&[]).await;
+
+    let command = KernelCommand::CreateTask {
+        task_id: TaskId::new("t-reserved"),
+        kind: None,
+        title: None,
+        spec_ref: None,
+        project: None,
+        priority: None,
+        tracker_ref: None,
+    };
+
+    let result = submit_kernel_command(
+        &mut client,
+        "reserved-1",
+        "ttl_sweep:attempt_stale:a-victim:4",
+        "operator",
+        &command,
+    )
+    .await;
+    let KernelResult::Error { code, message, .. } = result else {
+        panic!("a ttl_sweep:-prefixed key was accepted: {result:?}");
+    };
+    assert_eq!(code, KernelErrorCode::Validation);
+    assert!(message.contains("reserved"), "{message}");
+
+    let result = submit_kernel_command(
+        &mut client,
+        "reserved-2",
+        "client-key-1",
+        "operator",
+        &command,
+    )
+    .await;
+    assert!(
+        matches!(result, KernelResult::CommandApplied { .. }),
+        "an ordinary key stopped working: {result:?}"
+    );
+
+    drop(client);
+    served.close().await;
+    drop_database(&maintenance, &name).await;
+}
+
 #[tokio::test]
 #[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
 async fn dedicated_pty_requests_validate_their_command_before_commit() {
