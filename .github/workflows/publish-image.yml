@@ -12,10 +12,8 @@
 name: publish image
 
 on:
-  # push-to-main publish disabled 2026-08-25 per the Wave-3 cut (merge-inert, deploy-frozen):
-  # the GCP_* vars and the per-service origin secrets this job needs do not exist yet, so a
-  # push trigger would only make every merge to main a red run against a registry it cannot
-  # reach. T34a restores `push: branches: [main]` here when they do. Dispatch and call stay.
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       service:
