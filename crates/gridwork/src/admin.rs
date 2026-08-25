@@ -397,7 +397,11 @@ pub async fn migrate(
         // describes the contract the run replaces. A rehearsal that named the
         // steps and said nothing about that would be a rehearsal of the half
         // that is recoverable from the repository.
-        let (checkpoints_to_discard, _) = gwk_kernel::checkpoint::census(&pool)
+        let mut conn = pool
+            .acquire()
+            .await
+            .map_err(|e| Failure::new(KernelErrorCode::Storage, e.to_string()))?;
+        let (checkpoints_to_discard, _) = gwk_kernel::checkpoint::census(&mut conn)
             .await
             .map_err(refusal)?;
 
@@ -624,17 +628,38 @@ fn digest_backup(path: &str) -> Result<String, Failure> {
 pub async fn discard_checkpoints(dry_run: bool, pretty: bool) -> Result<(), Failure> {
     let revision = revision()?;
     let config = AdminConfig::from_env().map_err(configuration)?;
-    let _lock = WriterLock::acquire(config.admin_database_url())
+    // `kernel_failure` rather than a blanket `Fenced`: exit 3 tells the operator
+    // "another kernel holds the lock — go stop it", and a DSN typo or a
+    // postgres that is down would send them hunting a kernel that is not
+    // running, during the incident that brought them here. The lock-is-held
+    // case still maps to `Fenced`.
+    let lock = WriterLock::acquire(config.admin_database_url())
         .await
-        .map_err(|e| Failure::new(KernelErrorCode::Fenced, e.to_string()))?;
+        .map_err(kernel_failure)?;
     let pool = gwk_kernel::connect_pool(config.admin_database_url(), 2)
         .await
         .map_err(configuration)?;
+    // Recorded, so the receipt can say WHICH database lost its evidence. The
+    // verb takes no target and deletes from whatever the environment names,
+    // and an ambient variable retargeting a CLI is a failure this fleet has
+    // already had. `is_database_name` gates it, so a DSN this cannot parse
+    // emits nothing rather than a fragment of itself.
+    let database = database_name(config.admin_database_url());
+
+    // One transaction for both statements. The writer lock excludes a kernel
+    // but not a second admin session, so a count taken on one connection and a
+    // delete issued on another can describe two different tables — and the
+    // count is the only record of what the delete cost. The rehearsal simply
+    // never commits.
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| Failure::new(KernelErrorCode::Storage, e.to_string()))?;
 
     // Read BEFORE the delete: afterwards there is no table state left to
     // describe what was there, and the highest sequence is what says which
     // restart's comparison this cost.
-    let (present, through_seq_max) = gwk_kernel::checkpoint::census(&pool)
+    let (present, through_seq_max) = gwk_kernel::checkpoint::census(&mut tx)
         .await
         .map_err(refusal)?;
 
@@ -644,6 +669,7 @@ pub async fn discard_checkpoints(dry_run: bool, pretty: bool) -> Result<(), Fail
                 "type": "checkpoints_discard_planned",
                 "checkpoints_to_discard": present,
                 "through_seq_max_before": through_seq_max,
+                "database": database,
                 "public_revision": revision,
             }),
             pretty,
@@ -651,15 +677,31 @@ pub async fn discard_checkpoints(dry_run: bool, pretty: bool) -> Result<(), Fail
         return Ok(());
     }
 
-    let checkpoints_discarded = gwk_kernel::checkpoint::discard_all(&pool)
+    // The lock is held on its own connection and a probe notices it dying only
+    // on the next interval. In that window the server has already released the
+    // advisory lock, so a kernel can start and begin appending checkpoints
+    // beside us — which is the one thing this lock exists to prevent. Asked
+    // immediately before the delete, so the answer is as fresh as it can be.
+    if lock.is_cancelled() {
+        return Err(Failure::new(
+            KernelErrorCode::Fenced,
+            "write authority was lost between taking the lock and the discard".to_owned(),
+        ));
+    }
+
+    let checkpoints_discarded = gwk_kernel::checkpoint::discard_all(&mut tx)
         .await
         .map_err(refusal)?;
+    tx.commit()
+        .await
+        .map_err(|e| Failure::new(KernelErrorCode::Storage, e.to_string()))?;
 
     emit(
         &json!({
             "type": "checkpoints_discarded",
             "checkpoints_discarded": checkpoints_discarded,
             "through_seq_max_before": through_seq_max,
+            "database": database,
             "public_revision": revision,
         }),
         pretty,
@@ -933,6 +975,22 @@ fn is_database_name(database: &str) -> bool {
         && database
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+/// The database a DSN names, and nothing else in it.
+///
+/// For receipts written by a verb that takes no target: the operator afterwards
+/// needs to know WHICH database lost its evidence, and an ambient variable
+/// retargeting a CLI is a mistake this fleet has already made. The name is the
+/// last `/`-separated segment with any query string dropped — credentials in a
+/// PostgreSQL DSN sit before the host, so nothing before that separator can
+/// reach the caller. [`is_database_name`] is the second guard rather than the
+/// first: a DSN this cannot parse yields `None`, so the receipt says nothing
+/// rather than a fragment of the URL.
+fn database_name(url: &SecretString) -> Option<String> {
+    let (_, tail) = url.expose_secret().rsplit_once('/')?;
+    let name = tail.split('?').next().unwrap_or(tail);
+    is_database_name(name).then(|| name.to_owned())
 }
 
 fn beside(url: &SecretString, database: &str) -> Result<SecretString, Failure> {

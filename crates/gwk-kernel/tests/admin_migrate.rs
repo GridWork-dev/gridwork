@@ -299,7 +299,7 @@ async fn checkpoint_count(pool: &PgPool) -> i64 {
 
 /// Seed one checkpoint at `through_seq`, in the shape the kernel writes.
 ///
-/// Valid rather than merely insertable: the table's four CHECKs all hold, and
+/// Valid rather than merely insertable: all three of the table's CHECKs hold, and
 /// `records_ref` carries a real `PayloadRef` with `byte_size` as the decimal
 /// string that type serializes to. The applier deletes by table and would clear
 /// a malformed row just as happily — but a fixture the production writer could

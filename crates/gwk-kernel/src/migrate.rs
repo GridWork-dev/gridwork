@@ -502,16 +502,15 @@ pub async fn apply(
     // Discarded rather than reinterpreted, on the domain's own terms: nothing in
     // the contract depends on a checkpoint existing, so losing one costs a
     // comparison and not a recovery. The next start says `Unverified` and
-    // serves, and the first append re-anchors.
+    // serves, and the first append re-anchors — which is true only because
+    // `discard_all` also puts the barrier back, and is the reason this calls it
+    // instead of spelling the `DELETE` again here.
     //
     // Inside the transaction, which is load-bearing rather than tidy: a step
     // that fails must leave the checkpoints where it found them, because a
     // migration that changed nothing must not destroy the evidence the
     // still-current contract's next restart is entitled to compare against.
-    let checkpoints_discarded = sqlx::query("DELETE FROM gwk_internal.checkpoint")
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
+    let checkpoints_discarded = crate::checkpoint::discard_all_raw(&mut tx).await?;
 
     let events_after: i64 = sqlx::query_scalar("SELECT count(*) FROM gwk.event")
         .fetch_one(&mut *tx)

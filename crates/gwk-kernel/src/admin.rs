@@ -76,6 +76,13 @@ pub struct RuntimePrivileges {
     pub can_update_receipt: bool,
     pub can_delete_receipt: bool,
     pub can_create_in_gwk: bool,
+    /// The checkpoints are the kernel's own recovery evidence, and a kernel
+    /// that can delete them can launder a divergence into an `Unverified`
+    /// start. `migrate::apply` asserts the whole grant matrix, but only at
+    /// migration time — a grant widened out of band afterwards persists
+    /// through restarts and dump/restore with nothing to surface it, which is
+    /// how this database got hand-cleared in the first place.
+    pub can_delete_checkpoint: bool,
 }
 
 impl RoleAttributes {
@@ -119,6 +126,9 @@ impl RuntimePrivileges {
         }
         if self.can_create_in_gwk {
             out.push("CREATE on schema gwk");
+        }
+        if self.can_delete_checkpoint {
+            out.push("DELETE on gwk_internal.checkpoint");
         }
         out
     }
@@ -225,7 +235,8 @@ pub async fn runtime_privileges<'e>(
            has_table_privilege('gwk.event', 'DELETE')   AS del_event, \
            has_table_privilege('gwk.receipt', 'UPDATE') AS upd_receipt, \
            has_table_privilege('gwk.receipt', 'DELETE') AS del_receipt, \
-           has_schema_privilege('gwk', 'CREATE')        AS create_gwk \
+           has_schema_privilege('gwk', 'CREATE')        AS create_gwk, \
+           has_table_privilege('gwk_internal.checkpoint', 'DELETE') AS del_checkpoint \
          FROM pg_roles WHERE rolname = current_user",
     )
     .fetch_one(executor)
@@ -242,6 +253,7 @@ pub async fn runtime_privileges<'e>(
         can_update_receipt: row.try_get("upd_receipt")?,
         can_delete_receipt: row.try_get("del_receipt")?,
         can_create_in_gwk: row.try_get("create_gwk")?,
+        can_delete_checkpoint: row.try_get("del_checkpoint")?,
     })
 }
 
@@ -681,6 +693,7 @@ mod tests {
             can_update_receipt: false,
             can_delete_receipt: false,
             can_create_in_gwk: false,
+            can_delete_checkpoint: false,
         };
         assert!(privileges.violations().is_empty());
         privileges.can_delete_event = true;
@@ -688,6 +701,16 @@ mod tests {
         assert_eq!(
             privileges.violations(),
             ["DELETE on gwk.event", "CREATE on schema gwk"]
+        );
+        // Its own arm, and asserted from a clean base rather than added to the
+        // two above: a `violations()` that pushed the checkpoint string from
+        // some other field's branch would pass the combined form.
+        privileges.can_delete_event = false;
+        privileges.can_create_in_gwk = false;
+        privileges.can_delete_checkpoint = true;
+        assert_eq!(
+            privileges.violations(),
+            ["DELETE on gwk_internal.checkpoint"]
         );
     }
 

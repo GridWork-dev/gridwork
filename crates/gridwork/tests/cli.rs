@@ -1902,7 +1902,7 @@ async fn seed_base_database(admin_dsn: &str) {
 /// Seed one checkpoint at `through_seq`, in the shape the kernel writes.
 ///
 /// `records_ref` carries a real `PayloadRef`, `byte_size` as the decimal string
-/// that type serializes to, and every one of the table's four CHECKs holds — a
+/// that type serializes to, and all three of the table's CHECKs hold — a
 /// row the production writer could have produced, rather than one only this
 /// test would ever insert.
 async fn seed_checkpoint(pool: &sqlx::PgPool, through_seq: i64) {
@@ -2174,6 +2174,23 @@ async fn discard_checkpoints_rehearses_refuses_a_held_lock_and_then_deletes() {
         2,
         "the fixture did not land, so every count below would pass over an empty table"
     );
+    // Move the barrier off its defaults, which are `0` and the row's own
+    // creation time. Without this the sequence half of the assertion at the end
+    // is a tautology — a database that never checkpointed already reads `0`, so
+    // it passes whether or not the discard resets anything. Set to where a
+    // kernel that had just written the seeded rows would have left it.
+    let barrier_seeded = sqlx::query(
+        "UPDATE gwk_internal.writer SET checkpoint_seq = 2, checkpoint_at = now() WHERE id = 1",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed the checkpoint barrier")
+    .rows_affected();
+    assert_eq!(
+        barrier_seeded, 1,
+        "the writer row is not where this test thinks it is, so the barrier assertions below \
+         would grade a row nobody wrote"
+    );
 
     let revision = "b1c2d3e4f5".repeat(4);
     let admin_env: Vec<(&str, &str)> = vec![
@@ -2181,6 +2198,23 @@ async fn discard_checkpoints_rehearses_refuses_a_held_lock_and_then_deletes() {
         ("GWK_RUNTIME_ROLE", &role),
         ("GWK_PUBLIC_REVISION", &revision),
     ];
+
+    // `revision` is what the environment OFFERS, which is not what a stamped
+    // binary reports: `build.rs` stamps `GW_PUBLIC_REVISION` from `git
+    // rev-parse HEAD` whenever the tree was clean, and a stamped build states a
+    // fact about its own bytes and refuses the environment. A developer's tree
+    // is usually dirty and a CI checkout never is, so asserting `revision`
+    // directly here is green locally and red on CI — the exact case the
+    // override test at the top of this file was written for. `build-info`
+    // reports the stamp only, so it is the oracle for which case this is.
+    let reported = json(&gw_env("build-info", &admin_env))["public_revision"]
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| revision.clone());
+    assert!(
+        reported.len() == 40 && reported.bytes().all(|b| b.is_ascii_hexdigit()),
+        "a reported revision is a full hex revision, got {reported:?}"
+    );
 
     // The rehearsal.
     let planned = gw_env("admin discard-checkpoints --dry-run", &admin_env);
@@ -2196,7 +2230,8 @@ async fn discard_checkpoints_rehearses_refuses_a_held_lock_and_then_deletes() {
     assert_eq!(plan["checkpoints_to_discard"], 2);
     // A decimal string, as `Seq` is everywhere else on this wire.
     assert_eq!(plan["through_seq_max_before"], "2");
-    assert_eq!(plan["public_revision"], revision);
+    assert_eq!(plan["database"], live);
+    assert_eq!(plan["public_revision"], reported);
     assert_eq!(
         checkpoint_count(&pool).await,
         2,
@@ -2256,11 +2291,33 @@ async fn discard_checkpoints_rehearses_refuses_a_held_lock_and_then_deletes() {
     assert_eq!(receipt["type"], "checkpoints_discarded");
     assert_eq!(receipt["checkpoints_discarded"], 2);
     assert_eq!(receipt["through_seq_max_before"], "2");
-    assert_eq!(receipt["public_revision"], revision);
+    assert_eq!(receipt["database"], live);
+    assert_eq!(receipt["public_revision"], reported);
     assert_eq!(
         checkpoint_count(&pool).await,
         0,
         "the verb reported a discard it did not perform"
+    );
+    // The barrier moved with the rows. Deleting the checkpoints and leaving
+    // `gwk_internal.writer` claiming one was taken moments ago at some sequence
+    // is what makes "the next append re-anchors" false — nothing is due, and on
+    // an idle kernel nothing ever becomes due. Asserted here rather than only
+    // on the applier's path because both discards go through one function
+    // precisely so this cannot be true of one and not the other.
+    let (barrier_seq, barrier_at): (String, String) = sqlx::query_as(
+        "SELECT checkpoint_seq::text, to_json(checkpoint_at) #>> '{}' \
+         FROM gwk_internal.writer WHERE id = 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read the checkpoint barrier");
+    assert_eq!(
+        barrier_seq, "0",
+        "the barrier still points at a checkpoint that no longer exists"
+    );
+    assert!(
+        barrier_at.starts_with("1970-01-01"),
+        "the barrier's clock was not reset, so the next checkpoint is not overdue: {barrier_at}"
     );
 
     pool.close().await;
