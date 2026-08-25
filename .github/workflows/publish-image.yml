@@ -130,8 +130,10 @@ jobs:
         service: ${{ fromJSON(needs.select.outputs.matrix) }}
     permissions:
       contents: read
-      id-token: write # doc 07 §1 rule 3: OIDC/WIF only, never a JSON key
-      attestations: write # doc 07 §4: provenance attestation on the published digest
+      # doc 07 §1 rule 3: OIDC/WIF only, never a JSON key. The same token is what cosign
+      # trades for its signing certificate below — one grant, two consumers, no key anywhere.
+      # `attestations: write` is gone with the attestation API (see "sign the digest").
+      id-token: write
     steps:
       # doc 07 §3: a fork PR gets nothing. This workflow is push/dispatch-only so a fork
       # cannot reach it, but say so out loud rather than relying on the trigger list
@@ -282,12 +284,43 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
 
-      - name: attest provenance
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+      # doc 07 §4 asks for provenance on the published digest. This was
+      # `actions/attest-build-provenance`, and on three of the four repos it failed AFTER
+      # the push: the GitHub attestations API is plan-gated for private repositories, so
+      # the step went red with the digest already in the registry, `collect` was skipped,
+      # and `digests` never published — a good build made unshippable by a billing tier.
+      # Operator ruling R44 (2026-08-25): sign with Sigstore directly, no GitHub API in
+      # the path.
+      #
+      # Keyless. cosign trades this job's OIDC token for a short-lived Fulcio certificate
+      # whose subject IS this workflow file at this ref, signs the digest, and records the
+      # signature in the public Rekor log. There is no key to hold, rotate, or leak, and
+      # the verifier — deploy-production.yml, the one place these digests become
+      # production revisions — checks an identity STRING, not a key it has to fetch: a
+      # digest that this workflow at refs/heads/main did not sign is refused there before
+      # any revision exists. A key-based alternative (a KMS key) would trade that for new
+      # infra, IAM on two identities, and a verifier that must hold a credential.
+      #
+      # Residual, stated rather than implied: the Rekor entry is public and names this
+      # repository, this workflow path, the commit, and the image reference (registry
+      # host, GCP project, service). Nothing secret — but a private repo's name and its
+      # registry path become discoverable. Accepted by the ruling.
+      #
+      # Signed by DIGEST: a tag is a pointer, and signing the pointer proves nothing about
+      # what it points at today. `--yes` is the non-interactive consent to the Rekor
+      # upload. The pinned `cosign-release` must match deploy-production.yml's — the two
+      # are one number in two files, and the template test holds them equal.
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
-          subject-name: ${{ vars.GCP_REGISTRY }}/${{ matrix.service }}
-          subject-digest: ${{ steps.build.outputs.digest }}
-          push-to-registry: true
+          cosign-release: v3.1.3
+
+      - name: sign the digest (keyless)
+        env:
+          IMAGE: ${{ vars.GCP_REGISTRY }}/${{ matrix.service }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes "${IMAGE}@${DIGEST}"
 
       - name: sbom
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
@@ -328,7 +361,20 @@ jobs:
       # same reason: a quote or backslash yields valid JSON, not a file collect cannot
       # parse. No -c, deliberately — this file is read by a human, and the -c rule binds
       # values captured into a variable or written to $GITHUB_OUTPUT.
+      #
+      # `if: always() && steps.build.outcome == 'success'`, here and on the evidence
+      # upload below (2026-08-25, measured on studio run 32904680804 and dev-profile's
+      # red main): once `build and push by digest` has succeeded the digest EXISTS in the
+      # registry, whatever fails after it. Until now both steps ran under the default
+      # `success()`, so a failed attest, scan, or SBOM skipped them and the run ended
+      # with a live digest and no manifest, no SBOM, no SARIF — a CVE the run could not
+      # name, and a digest that had to be re-scanned by hand. Keyed to the BUILD, not to
+      # any one predecessor: keying it to the scan is right for a repo whose scan fails
+      # and wrong for one whose attest fails. `collect` is still gated on the whole job
+      # succeeding, so nothing downstream consumes a digest from a failed publish; this
+      # only keeps the evidence of what was pushed.
       - name: source-to-image manifest
+        if: always() && steps.build.outcome == 'success'
         env:
           SERVICE: ${{ matrix.service }}
           REPOSITORY: ${{ github.repository }}
@@ -354,7 +400,13 @@ jobs:
             '{service: $service, repository: $repository, commit: $commit, ref: $ref, run_id: $run_id, image: $image, digest: $digest, dockerfile: $dockerfile, build_context: $build_context}' \
             > "image-manifest-$SERVICE.json"
 
+      # Same guard as the manifest step. The manifest is the anchor: it exists whenever
+      # the build succeeded, so `if-no-files-found: error` still binds — an upload with
+      # NOTHING to carry is a bug, an upload missing the SBOM because the SBOM step failed
+      # is the evidence of that failure. A `hashFiles` guard would be wrong here: it goes
+      # quiet on the day the manifest step itself breaks.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always() && steps.build.outcome == 'success'
         with:
           name: publish-evidence-${{ matrix.service }}
           path: |
