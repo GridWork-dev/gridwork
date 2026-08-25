@@ -1443,6 +1443,15 @@ async fn a_failing_step_moves_neither_the_fingerprint_nor_the_ledger_nor_the_che
     // checkpoints are here for the mirror-image reason: the discard is a real
     // deletion, and a migration that changed nothing must not take with it the
     // evidence the still-current contract's next restart is entitled to.
+    //
+    // TWO poisoned steps, and the second is the one the checkpoint claim rests
+    // on. A step that cannot run fails in the applier's step loop, which is
+    // BEFORE the discard — so the checkpoint survives it whether the discard is
+    // scoped to the transaction or not, and an arm built on that poison alone
+    // would be inert against exactly the mistake it names. The second step runs
+    // to completion, records its ledger row, reaches the discard, and is then
+    // refused by the protections rung inside the same transaction: the only
+    // window in which "inside the transaction" is an observable claim.
     let maintenance = maintenance_pool().await;
     let role = role_for("failing");
     create_role(&maintenance, &role).await;
@@ -1498,7 +1507,51 @@ async fn a_failing_step_moves_neither_the_fingerprint_nor_the_ledger_nor_the_che
     assert_eq!(
         checkpoint_count(&pool).await,
         1,
-        "the failed transaction discarded a checkpoint anyway — the discard ran outside it"
+        "the failed transaction discarded a checkpoint anyway — and it never even reached the \
+         discard, so something outside the applier deleted the row"
+    );
+
+    // The discriminating arm. This step applies cleanly, stamps the fingerprint,
+    // carries its backend migrations, writes its ledger row and reaches the
+    // discard — and then leaves `gwk.event`'s TRUNCATE guard disabled, which the
+    // protections rung refuses INSIDE the transaction, after the checkpoints are
+    // gone. A discard executed on the pool rather than on the transaction is
+    // invisible to every other assertion here and fatal to this one.
+    let late = Step {
+        sql: Box::leak(
+            format!(
+                "{}\nALTER TABLE gwk.event DISABLE TRIGGER event_no_truncate;\n",
+                chain[0].sql
+            )
+            .into_boxed_str(),
+        ),
+        ..*chain[0]
+    };
+    let refusal = gwk_kernel::migrate::apply(
+        &pool,
+        &[&late],
+        &role,
+        BASE_CONTRACT_SHA256,
+        "0000000000000000000000000000000000000000",
+        None,
+    )
+    .await
+    .expect_err("a step that leaves a protection disabled");
+    assert!(
+        refusal.to_string().contains("TRUNCATE guard"),
+        "the refusal came from somewhere other than the protections rung, so it may have \
+         preceded the discard: {refusal}"
+    );
+    assert_eq!(
+        checkpoint_count(&pool).await,
+        1,
+        "a step refused AFTER the discard still took the checkpoints with it: the discard is \
+         running outside the applier's transaction"
+    );
+    assert_eq!(
+        recorded_contract(&pool).await,
+        BASE_CONTRACT_SHA256,
+        "the fingerprint moved under a step the protections rung refused"
     );
 
     drop(pool);
