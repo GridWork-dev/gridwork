@@ -474,11 +474,22 @@ async fn records(conn: &mut PgConnection, derived_only: bool) -> Result<Vec<u8>,
 /// engine adapter read a checkpoint a solo build had written as `Diverged`.
 ///
 /// Sorted is what the default backing already emits, so no checkpoint a clean
-/// build recorded changes value here.
+/// build recorded changes value here. A checkpoint a POISONED build recorded is
+/// the complement, and it is worth stating rather than leaving to be discovered:
+/// its digest was taken over jsonb key order and will never match a recomputed
+/// one again, so a kernel whose newest checkpoint sits exactly at the watermark
+/// reads `Diverged` and refuses to serve. That is not a regression — a clean
+/// build already disagreed with it — and it clears itself as soon as one more
+/// event lands past that sequence, because the verdict then falls to
+/// `Unverified`, which serves. `gw admin discard-checkpoints` is the direct cure.
 ///
-/// The `_` arm is where this rots: a third free-form field would be hashed
-/// unsorted and silently reintroduce the whole defect, which is what
-/// `exactly_two_entity_fields_carry_free_form_json` in `gwk-domain` refuses.
+/// **No `_` arm, deliberately.** The other eighteen variants are spelled out, so
+/// a twenty-first stops the build until someone classifies it. A wildcard here
+/// is where this rots: a new free-form field would be hashed unsorted and
+/// silently reintroduce the whole defect, and no test that scans source text can
+/// be relied on to notice a type it was never pointed at.
+/// `exactly_two_entity_fields_carry_free_form_json` in `gwk-domain` is the field-
+/// level half of the same guard.
 fn canonical_line(record: &mut ProjectionRecord, out: &mut Vec<u8>) -> Result<(), Refusal> {
     match record {
         ProjectionRecord::Message { message } => {
@@ -489,7 +500,26 @@ fn canonical_line(record: &mut ProjectionRecord, out: &mut Vec<u8>) -> Result<()
         ProjectionRecord::IngestedRecord { ingested_record } => {
             sort_object_keys(&mut ingested_record.payload);
         }
-        _ => {}
+        // Every field of these is typed, so declaration order settles their
+        // bytes and there is nothing to canonicalize.
+        ProjectionRecord::Task { .. }
+        | ProjectionRecord::Attempt { .. }
+        | ProjectionRecord::AttentionItem { .. }
+        | ProjectionRecord::AuthorityGrant { .. }
+        | ProjectionRecord::Command { .. }
+        | ProjectionRecord::CostEntry { .. }
+        | ProjectionRecord::DispatchNode { .. }
+        | ProjectionRecord::EngineSession { .. }
+        | ProjectionRecord::Evidence { .. }
+        | ProjectionRecord::Gate { .. }
+        | ProjectionRecord::Lease { .. }
+        | ProjectionRecord::OrchestratorCheckpoint { .. }
+        | ProjectionRecord::PtySession { .. }
+        | ProjectionRecord::PtySessionTemplate { .. }
+        | ProjectionRecord::Receipt { .. }
+        | ProjectionRecord::WorkflowRun { .. }
+        | ProjectionRecord::WorkspaceNode { .. }
+        | ProjectionRecord::Worktree { .. } => {}
     }
     serde_json::to_writer(&mut *out, record)
         .map_err(|e| Refusal::storage(format!("serialize projection record: {e}")))?;
@@ -835,6 +865,13 @@ mod tests {
         // not the other would make the row a client is served differ from the
         // row the checkpoint hashed — a disagreement nothing else in the system
         // is positioned to notice. Only the tail after `FROM` may differ.
+        //
+        // In SQL SHAPE, which is the whole claim: `canonical_line` sorts the
+        // free-form payloads on the way into the digest and the serve path does
+        // not, so under a poisoned build a served payload's key order genuinely
+        // differs from the hashed one. That is deliberate and costs nothing —
+        // `projection_hash` has no caller outside this crate, so no client ever
+        // re-hashes a row it was served.
         for projection in PROJECTIONS {
             let head = |q: &'static str| {
                 q.split_once(" FROM ")
