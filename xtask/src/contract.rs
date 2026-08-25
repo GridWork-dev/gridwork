@@ -1531,6 +1531,10 @@ pub fn run(check: bool) {
     inspect_context_truth_schema(&contract_sql).unwrap_or_else(|message| panic!("{message}"));
     let contract_sql_rs = crate::schema::contract_sql_rs(&contract_sql);
 
+    let contract_steps_path = root.join(crate::steps::GENERATED_PATH);
+    let parsed_steps = crate::steps::read_steps(&root.join(crate::steps::STEPS_DIR));
+    let contract_steps_rs = crate::steps::contract_steps_rs(&parsed_steps);
+
     if !check {
         std::fs::create_dir_all(&goldens_dir).expect("create contracts/goldens");
         std::fs::write(contracts.join("bindings.ts"), &bindings_ts).expect("write bindings.ts");
@@ -1540,10 +1544,17 @@ pub fn run(check: bool) {
             std::fs::write(goldens_dir.join(name), content).expect("write golden");
         }
         std::fs::write(&contract_sql_path, &contract_sql_rs).expect("write contract_sql.rs");
+        std::fs::write(&contract_steps_path, &contract_steps_rs).expect("write contract_steps.rs");
+        // The step count is printed rather than left implied: an empty
+        // `schema/steps/` is a legitimate state, and the only way to tell it
+        // apart from a generator that read the wrong directory is to say how
+        // many files it found.
         eprintln!(
-            "contract: wrote bindings.ts, signal-theme.json, {} goldens, {}",
+            "contract: wrote bindings.ts, signal-theme.json, {} goldens, {}, {} (steps: {})",
             golden_files.len(),
-            crate::schema::GENERATED_PATH
+            crate::schema::GENERATED_PATH,
+            crate::steps::GENERATED_PATH,
+            parsed_steps.len()
         );
         return;
     }
@@ -1551,6 +1562,40 @@ pub fn run(check: bool) {
     let mut drift: Vec<String> = Vec::new();
     check_file(&contracts.join("bindings.ts"), &bindings_ts, &mut drift);
     check_file(&contract_sql_path, &contract_sql_rs, &mut drift);
+    check_file(&contract_steps_path, &contract_steps_rs, &mut drift);
+    // Check-only, deliberately. Editing the DDL and regenerating is how a
+    // contract change BEGINS, and a generator that refused it would leave no
+    // way to produce the digest the new step has to name. `--check` is where
+    // the incomplete state stops being a work in progress.
+    if let Err(message) = crate::steps::inspect_step_chain(&contract_sql, &parsed_steps) {
+        drift.push(message);
+    }
+    // Set equality over `crates/gwk-kernel/migrations/`: every file is claimed
+    // by exactly one step or was already in place at the chain's base. Same
+    // shape as the chain check above, over the other half of the schema.
+    let migration_stems =
+        crate::steps::read_backend_migrations(&root.join(crate::steps::MIGRATIONS_DIR));
+    if let Err(message) =
+        crate::steps::inspect_backend_migration_claims(&migration_stems, &parsed_steps)
+    {
+        drift.push(message);
+    }
+    // And the bytes of each are the ones they were pinned at. The claim check
+    // above is about which files a database gets; this is about whether they are
+    // still the files it got, which nothing else in this repository can see.
+    if let Err(message) = crate::steps::inspect_frozen_backend_migrations(
+        &root.join(crate::steps::MIGRATIONS_DIR),
+        &migration_stems,
+    ) {
+        drift.push(message);
+    }
+    // And every registered step is named by the suite that applies steps to a
+    // real database. Crude on purpose — see `inspect_step_coverage`.
+    let migrate_suite = std::fs::read_to_string(root.join(crate::steps::MIGRATE_SUITE))
+        .unwrap_or_else(|err| panic!("read {}: {err}", crate::steps::MIGRATE_SUITE));
+    if let Err(message) = crate::steps::inspect_step_coverage(&parsed_steps, &migrate_suite) {
+        drift.push(message);
+    }
     check_file(
         &contracts.join("signal-theme.json"),
         &theme_json,

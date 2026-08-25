@@ -15,7 +15,10 @@
 //! projection snapshots, and the recovery that decides what a restart may claim
 //! about them. The wire server lands on top of them, and the TTL sweep rides
 //! beside it — the kernel's own periodic answer to a lease-holder that died
-//! rather than released.
+//! rather than released. Beside the embedded DDL sits the migration chain: the
+//! authored steps that carry a database from one contract digest to the next,
+//! and the resolver that decides whether this build knows a route between two
+//! of them.
 
 pub mod admin;
 pub mod authority;
@@ -24,6 +27,7 @@ pub mod checkpoint;
 pub mod config;
 pub mod epoch;
 pub mod error;
+pub mod migrate;
 pub mod numeric;
 pub mod project;
 pub mod recover;
@@ -44,6 +48,12 @@ pub use error::{KernelError, Result};
 // against. See `xtask/src/schema.rs` for why a constant and not `include_str!`.
 pub use gwk_domain::contract_sql;
 pub use gwk_domain::contract_sql::{CONTRACT_SQL, CONTRACT_SQL_SHA256};
+// The migration steps travel the same road for the same reason, and land beside
+// the DDL they amend. See `xtask/src/steps.rs` for the file format they are
+// generated from.
+pub use gwk_domain::contract_steps;
+pub use gwk_domain::contract_steps::{CONTRACT_STEPS, Step};
+pub use migrate::{ChainRefusal, resolve};
 pub use project::Refusal;
 pub use recover::{RebuildReport, RecoveryReport, Verdict};
 pub use store::{EVENT_CHANNEL, MAX_INFLIGHT_APPENDS, PgEventStore, connect_pool};
