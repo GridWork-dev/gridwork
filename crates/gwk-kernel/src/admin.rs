@@ -29,6 +29,7 @@ const BACKEND_MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0003_blob.sql"),
     include_str!("../migrations/0004_checkpoint.sql"),
     include_str!("../migrations/0005_pty_delivery.sql"),
+    include_str!("../migrations/0006_schema_migration.sql"),
 ];
 
 // ponytail: still no migration runner, and now for a better reason than "there
@@ -460,13 +461,84 @@ pub async fn driving_figures(pool: &PgPool, window: &ReceiptWindow) -> Result<Dr
 /// the live tree, the `workspace_node_closed` event is the history, and a
 /// replay reproduces the same deletion. The parentage trigger and the parent
 /// FK stay ENABLE ALWAYS, so the grant widens nothing about tree legality.
+///
+/// `gwk_internal.schema_migration` is NAMED rather than covered, and the
+/// distinction is the whole reason it is a separate line. The blanket
+/// `GRANT ... ON ALL TABLES IN SCHEMA gwk` above reaches schema `gwk` and
+/// stops there, so every `gwk_internal` relation starts with no privileges and
+/// receives exactly what some line here hands it. That default is the safe one
+/// and it is also the quiet one: a table nobody grants is a table nobody
+/// notices, which is why `tests/admin_init.rs` now counts this schema's
+/// relations and demands a declared class for each.
+///
+/// SELECT is all the ledger gets. The kernel reports which contract it carries
+/// and how it got there; it does not migrate itself, and a serving process that
+/// could append to its own provenance could also invent one. Withholding the
+/// write is not what makes the ledger append-only, though — a grant binds the
+/// runtime role and nothing else, while the credential that applies a migration
+/// is the admin one and a superuser is bound by neither. The append-only
+/// TRIGGER in migration 0006 is what covers all three, and
+/// `the_ledger_refuses_mutation_from_a_superuser` is what proves the trigger
+/// rather than the grant.
 pub fn backend_script(role: &str, contract_sha256: &str) -> String {
     let migrations = BACKEND_MIGRATIONS.join("\n");
+    let privileges = privilege_statements(role);
     format!(
         "{migrations}\n\
          INSERT INTO gwk_internal.schema_fingerprint (id, contract_sha256) \
          VALUES (1, '{contract_sha256}');\n\
-         GRANT USAGE ON SCHEMA gwk TO {role};\n\
+         {privileges}"
+    )
+}
+
+/// One backend migration by its file stem, or `None`.
+///
+/// The applier needs a single migration rather than the whole list:
+/// `BACKEND_MIGRATIONS` runs once at initialization, and everything added after
+/// that reaches an existing database only because a step named it. Looked up by
+/// stem so the name in a step's `-- carries:` header, the name on disk, and the
+/// name in the ledger row are the same string.
+pub fn backend_migration(stem: &str) -> Option<&'static str> {
+    BACKEND_MIGRATION_STEMS
+        .iter()
+        .position(|known| *known == stem)
+        .map(|index| BACKEND_MIGRATIONS[index])
+}
+
+/// The stems of [`BACKEND_MIGRATIONS`], in the same order.
+///
+/// `include_str!` keeps no file name, so the two lists are positional and a
+/// test asserts they stay the same length. Adding a migration means adding a
+/// line to each — which is the one place in this mechanism a second list was
+/// unavoidable, and it is guarded rather than trusted.
+pub const BACKEND_MIGRATION_STEMS: [&str; 6] = [
+    "0001_kernel_internal",
+    "0002_writer",
+    "0003_blob",
+    "0004_checkpoint",
+    "0005_pty_delivery",
+    "0006_schema_migration",
+];
+
+/// The privilege matrix, and nothing else.
+///
+/// Split out of [`backend_script`] because `gw admin migrate` re-applies this
+/// third of it and neither of the other two. It cannot re-run the migrations —
+/// only `CREATE SCHEMA IF NOT EXISTS gwk_internal` is idempotent, and the
+/// dozen bare `CREATE`s after it raise `relation already exists`. It cannot
+/// re-run the fingerprint INSERT either: that row is `id integer PRIMARY KEY
+/// CHECK (id = 1)`, so a migration UPDATEs it.
+///
+/// Re-applied WHOLESALE rather than as a delta, and that is the #147 lesson
+/// stated as code: the grant surface is a function of the table set, because
+/// `GRANT ... ON ALL TABLES IN SCHEMA gwk` reaches every relation that exists
+/// when it runs. A delta would have to know which relations the step created,
+/// which is the migration-to-relation map this mechanism refuses to keep. Every
+/// statement is idempotent; on relations that already carry these grants it
+/// changes nothing.
+pub fn privilege_statements(role: &str) -> String {
+    format!(
+        "GRANT USAGE ON SCHEMA gwk TO {role};\n\
          GRANT USAGE ON SCHEMA gwk_internal TO {role};\n\
          GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA gwk TO {role};\n\
          REVOKE UPDATE ON gwk.event, gwk.receipt, gwk.ingested_record, \
@@ -476,6 +548,7 @@ pub fn backend_script(role: &str, contract_sha256: &str) -> String {
          REVOKE INSERT, UPDATE ON gwk.transition FROM {role};\n\
          GRANT DELETE ON gwk.workspace_node TO {role};\n\
          GRANT SELECT ON gwk_internal.schema_fingerprint TO {role};\n\
+         GRANT SELECT ON gwk_internal.schema_migration TO {role};\n\
          GRANT SELECT, UPDATE ON gwk_internal.writer TO {role};\n\
          GRANT SELECT, INSERT, UPDATE ON gwk_internal.pty_delivery TO {role};\n\
          GRANT SELECT, INSERT, UPDATE, DELETE ON \
@@ -619,6 +692,33 @@ mod tests {
     }
 
     #[test]
+    fn every_backend_migration_has_a_stem_and_every_stem_a_migration() {
+        // `include_str!` discards the file name, so the stems are a parallel
+        // list and a parallel list can drift. Lengths first — a zip over two
+        // lists of different length silently stops at the shorter one, which is
+        // exactly how a lookup starts returning the wrong file's SQL.
+        assert_eq!(
+            BACKEND_MIGRATIONS.len(),
+            BACKEND_MIGRATION_STEMS.len(),
+            "a migration was added to one list and not the other"
+        );
+        // And the pairing is right, not merely equinumerous: each migration's
+        // own leading comment names its file.
+        for (stem, sql) in BACKEND_MIGRATION_STEMS.iter().zip(BACKEND_MIGRATIONS) {
+            assert!(
+                sql.starts_with(&format!("-- {stem}.sql")),
+                "{stem} is paired with SQL that opens {:?}",
+                sql.lines().next().unwrap_or_default()
+            );
+        }
+        assert_eq!(
+            backend_migration("0006_schema_migration"),
+            Some(BACKEND_MIGRATIONS[5])
+        );
+        assert_eq!(backend_migration("0099_absent"), None);
+    }
+
+    #[test]
     fn the_grant_script_withholds_history_mutation_and_all_deletion() {
         let script = backend_script("gwk_runtime", &"a".repeat(64));
         assert!(script.contains("CREATE SCHEMA IF NOT EXISTS gwk_internal;"));
@@ -629,7 +729,31 @@ mod tests {
         assert!(script.contains("gwk.context_observation, gwk.context_finalization FROM"));
         assert!(script.contains("REVOKE INSERT, UPDATE ON gwk.transition"));
         assert!(script.contains("GRANT SELECT, INSERT, UPDATE ON gwk_internal.pty_delivery"));
-        assert!(!script.contains("TRUNCATE"), "{script}");
+        // Named, not covered. `gwk_internal` has no blanket grant, so the
+        // ledger is unreachable to the runtime role unless this exact line
+        // exists — and SELECT is the whole of what it may have.
+        assert!(script.contains("GRANT SELECT ON gwk_internal.schema_migration TO "));
+        // TRUNCATE is granted nowhere. Scoped to the GRANT lines, which is
+        // narrower than this check used to be and has to be: migration 0006
+        // carries a `BEFORE TRUNCATE` trigger, so the word now appears in the
+        // DDL that FORBIDS truncation — and a bare `!contains("TRUNCATE")`
+        // cannot tell that apart from a line handing it out. The lines are
+        // counted before they are filtered: a fold over a GRANT list that
+        // stopped matching would report zero TRUNCATE grants just as happily
+        // as a script that has none.
+        let grants: Vec<&str> = script
+            .lines()
+            .filter(|line| line.starts_with("GRANT"))
+            .collect();
+        assert_eq!(grants.len(), 10, "the grant matrix changed shape: {script}");
+        assert_eq!(
+            grants
+                .iter()
+                .filter(|line| line.contains("TRUNCATE"))
+                .count(),
+            0,
+            "{script}"
+        );
 
         // Deletion is granted on the blob tables and on gwk.workspace_node —
         // NOWHERE else. The check is spelled as "every DELETE-granting line is

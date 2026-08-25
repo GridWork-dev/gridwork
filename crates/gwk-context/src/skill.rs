@@ -164,6 +164,9 @@ pub enum SkillError {
     TooDeeplyNested,
     /// A top-level line that is not `key:` at column zero.
     MalformedTopLevelKey,
+    /// A top-level key this scan read as text that the parsed document does not
+    /// carry under that name.
+    KeyNotInDocument(String),
     /// The YAML did not decode into the expected shape.
     Malformed(String),
     /// `name` is empty, oversized, or outside `[a-z0-9-]`.
@@ -203,6 +206,10 @@ impl std::fmt::Display for SkillError {
             Self::MalformedTopLevelKey => {
                 f.write_str("skill frontmatter has a top-level line that is not `key:`")
             }
+            Self::KeyNotInDocument(key) => write!(
+                f,
+                "skill frontmatter key `{key}` is absent from the parsed document"
+            ),
             Self::Malformed(why) => write!(f, "skill frontmatter did not decode: {why}"),
             Self::InvalidName => {
                 f.write_str("skill name must be 1-64 bytes of lowercase letters, digits, and `-`")
@@ -788,6 +795,13 @@ fn scan_line(trimmed: &str) -> Result<LineFacts, SkillError> {
         // `node_start`, and the alias behind it was RESOLVED into the record.
         // Mid-scalar is not a boundary, so `a#b` stays the plain scalar the
         // parser says it is.
+        //
+        // `i == 0` is the bounds guard for `chars[i - 1]`, not a third boundary
+        // term: `node_start` starts true, so `between_tokens` already holds at
+        // the head of the line and the index is never reached there. Deleting
+        // it changes no verdict and no test can red it — it stops a panic that
+        // the initializer currently makes unreachable, which is a guarantee
+        // worth keeping local to this line.
         if c == '#' && (i == 0 || between_tokens || matches!(chars[i - 1].1, ' ' | '\t')) {
             break;
         }
@@ -1142,8 +1156,30 @@ impl SkillManifest {
             if opaque.len() == SKILL_OPAQUE_FIELD_MAX_COUNT {
                 return Err(SkillError::TooManyEntries("unrecognized fields"));
             }
-            let value = take(&key).map(|v| render_opaque(&v)).unwrap_or_default();
-            opaque.push(OpaquePortableField { key, value });
+            // This scan reads a key as text; the parser resolves it as a YAML
+            // scalar, and the two disagree on every spelling whose text is not
+            // a string. `12:` is the integer 12 to the parser, `null:` is null,
+            // `2026-08-19:` is a date — so a lookup for the string `"12"` finds
+            // nothing and the field was recorded with an EMPTY value. That is
+            // the silently dropped field this module's header rules out, one
+            // class over from the quoted key `is_plain_key` already refuses for
+            // exactly the same reason.
+            //
+            // Refusing on the miss covers every spelling without this file
+            // carrying a copy of YAML's scalar resolution rules — which is the
+            // point, because that copy would be wrong. Resolution is the
+            // reader's, not the scanner's, and readers disagree in BOTH
+            // directions: the pinned crate resolves the 1.2 core schema, so
+            // `0o17` and `1e3` are numbers here and strings to a YAML 1.1
+            // reader, while `yes`, `on` and `2026-08-19` are strings here and a
+            // boolean, a boolean and a date there. This check asks only whether
+            // the parser kept the key this scan saw, so it keeps holding when
+            // the pin's answer moves.
+            let value = take(&key).ok_or_else(|| SkillError::KeyNotInDocument(key.clone()))?;
+            opaque.push(OpaquePortableField {
+                key,
+                value: render_opaque(&value),
+            });
         }
 
         Ok(Self {
@@ -2000,6 +2036,103 @@ mod tests {
             Some("JSON like {\"a\":1}{\"b\":2} ok")
         );
         manifest("name: n\ndescription: d\nx: [\"a\", b]").expect("a quoted flow entry");
+    }
+
+    #[test]
+    fn a_key_the_parser_does_not_carry_as_a_string_is_refused_by_name() {
+        // `is_plain_key` admits every one of these as text, and the parser
+        // resolves none of them to the string this scan read. The lookup then
+        // missed and the field was recorded with an EMPTY value.
+        for key in [
+            "12", "-7", "1.5", "1e3", "0x1f", "0o17", ".inf", ".nan", "true", "false", "True",
+            "TRUE", "null", "Null", "NULL",
+        ] {
+            assert_eq!(
+                manifest(&format!("name: n\ndescription: d\n{key}: v")).expect_err("refused"),
+                SkillError::KeyNotInDocument(key.to_owned()),
+                "{key}"
+            );
+        }
+        // Spellings this pin does carry as strings, so the refusal tracks the
+        // parser's resolution rather than a guess at what looks like a scalar.
+        //
+        // The list is also the honest limit of the guard. `yes`, `on` and
+        // `2026-08-19` are strings to the 1.2 core schema this crate resolves
+        // and a boolean, a boolean and a date to a YAML 1.1 reader — so a
+        // manifest carrying one means two different things to two readers of
+        // the same portable format, and under a 1.1 reader `true: a` and
+        // `yes: b` collapse onto one key where the later silently wins. That is
+        // a wider refusal than this defect, aimed at a different failure, and
+        // it is recorded rather than smuggled in here.
+        let m = manifest("name: n\ndescription: d\nv12: a\ny: b\nyes: c\non: d\n2026-08-19: e")
+            .expect("string keys");
+        assert_eq!(
+            m.opaque
+                .iter()
+                .map(|f| (f.key.as_str(), f.value.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("v12", "a"),
+                ("y", "b"),
+                ("yes", "c"),
+                ("on", "d"),
+                ("2026-08-19", "e")
+            ]
+        );
+    }
+
+    #[test]
+    fn a_comment_after_a_blank_ends_the_line() {
+        // The boundary terms do not reach here: after a plain scalar nothing is
+        // open, so a blank before the `#` is the only thing that makes this a
+        // comment. Dropped, the scan reads the comment text as YAML — and the
+        // `: ` inside it opens a node start, where the anchor behind it is
+        // refused on a document the parser accepts with `description: hello`.
+        let m = manifest("name: n\ndescription: hello # note: &anchor here")
+            .expect("a trailing comment");
+        assert_eq!(m.description, "hello");
+    }
+
+    #[test]
+    fn a_closed_quoted_scalar_stops_being_a_boundary_at_the_next_character() {
+        // `after_quoted` marks the position immediately after a closing quote
+        // and is cleared at the end of every iteration. Left set, it makes the
+        // rest of the line a boundary, and the indicator table then refuses an
+        // ordinary plain scalar: `b!c` is a flow entry to the parser, because
+        // `!` opens a tag only at the head of a node.
+        let m = manifest("name: n\ndescription: d\nallowed-tools: [\"a\", b!c]")
+            .expect("a plain entry after a quoted one");
+        assert_eq!(m.allowed_tools.claimed(), ["a", "b!c"]);
+    }
+
+    #[test]
+    fn a_whole_line_comment_is_not_a_key() {
+        // `scan_subset` skips a comment line before `scan_line` ever sees it —
+        // the third comment rule in this file. Without the skip the line
+        // reaches the walk, breaks at the `#` with no key behind it, and a
+        // document the parser accepts is refused as a malformed top-level key.
+        let m = manifest("name: n\n# a note\ndescription: d\nmetadata:\n  # nested\n  team: infra")
+            .expect("comment lines");
+        assert_eq!(m.description, "d");
+        assert_eq!(m.metadata.get("team").map(String::as_str), Some("infra"));
+        assert!(m.opaque.is_empty(), "a comment is not an opaque field");
+    }
+
+    #[test]
+    fn an_oversized_opaque_value_is_truncated_on_a_character_boundary() {
+        // Evidence is bounded and lossy by design. The bound is in BYTES and
+        // the truncation walks back to a character boundary, so a multi-byte
+        // value cuts below the bound rather than at it — and unbounded, this
+        // field is a byte pump into every record that carries a manifest.
+        let wide = "\u{2603}".repeat(SKILL_OPAQUE_VALUE_MAX_BYTES); // 3 bytes each
+        let m = manifest(&format!("name: n\ndescription: d\nvendor: {wide}")).expect("oversized");
+        let [field] = &m.opaque[..] else {
+            panic!("one opaque field, got {:?}", m.opaque)
+        };
+        assert_eq!(field.key, "vendor");
+        assert_eq!(field.value.len(), 1023, "3 does not divide the bound");
+        assert!(field.value.len() <= SKILL_OPAQUE_VALUE_MAX_BYTES);
+        assert!(field.value.chars().all(|c| c == '\u{2603}'));
     }
 
     #[test]
