@@ -109,11 +109,14 @@ jobs:
       # Production dispatches from `main` only. `workflow_dispatch` accepts any ref, and
       # the ref chooses which copy of THIS FILE and of deploy/*.ts runs under the production
       # deployer credential `auth` mints below. This step is the fail-fast, not the
-      # boundary: a branch can carry a copy of this file without it, and the WIF binding
-      # keys on the environment claim alone today. The boundary is the WIF provider's
-      # attribute condition on the ref (gridwork-infra stacks, tracked separately); until
-      # it lands this stops the honest mistake, not the adversary. Reads only the ref,
-      # which picks this file and cannot be steered by it.
+      # boundary: the WIF binding for the production deployer requires refs/heads/main
+      # alongside the environment claim, so from any other ref `auth` below fails on its
+      # own — this step names the reason first instead of leaving an opaque IAM error.
+      # The boundary is the principalSet member on the impersonation binding (a composite
+      # repository_id:environment:ref claim), NOT the provider's attribute_condition — that
+      # gates pool admission by repository and would break the environment-only staging
+      # bindings if it pinned a ref. Reads only the ref, which picks this file and cannot
+      # be steered by it.
       - name: refuse a dispatch from any ref but main
         env:
           REF: ${{ github.ref }}
@@ -283,6 +286,50 @@ jobs:
           create_credentials_file: true
 
       - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      # R44 (2026-08-25): the verification point for publish.yml's keyless signature. The
+      # staging-evidence gate above proves these digests RAN; this proves they were BUILT
+      # by this repository's publish workflow on refs/heads/main. It is an identity check
+      # against the Fulcio certificate — the workflow path and ref that GitHub's OIDC
+      # token carried when the digest was signed — not a key. A digest pushed by hand with
+      # the publisher credential, or built by a dispatch from another ref, fails here,
+      # before the rollback revision is even recorded and long before a revision exists.
+      #
+      # It sits AFTER `auth` because the registry is private: cosign has to fetch the
+      # signature next to the image, so it logs in with the deployer's own access token.
+      # The login host is GCP_REGISTRY's first segment. publish.yml asserts that
+      # GCP_REGISTRY_HOST is exactly that segment before it sends the PUBLISHER's token
+      # anywhere; deriving the host here instead of reading a second variable means no
+      # variable can point this token at a host the image does not live on.
+      #
+      # Every image the plan produced, not just the first: `while read` over a resolved
+      # variable, asserted non-empty, for the reasons the URL step below spells out. A
+      # failing `cosign verify` aborts under `set -e` and names the image in its own error.
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.3
+
+      - name: verify every digest was signed by publish on main
+        env:
+          SERVICES: ${{ steps.plan.outputs.services }}
+          REPOSITORY: ${{ github.repository }}
+          GCP_REGISTRY: ${{ vars.GCP_REGISTRY }}
+        run: |
+          set -euo pipefail
+          images="$(printf '%s' "$SERVICES" | jq -r '.[].image')"
+          if [ -z "$images" ]; then
+            echo "::error::the plan produced no images — refusing to deploy what was never verified"
+            exit 1
+          fi
+          gcloud auth print-access-token |
+            cosign login "${GCP_REGISTRY%%/*}" --username oauth2accesstoken --password-stdin
+          identity="https://github.com/${REPOSITORY}/.github/workflows/publish-image.yml@refs/heads/main"
+          while read -r image; do
+            cosign verify \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              --certificate-identity "$identity" \
+              "$image"
+          done <<< "$images"
 
       # Recorded BEFORE anything changes. doc 07 §11 wants the rollback revision in the
       # evidence, and the only moment it is knowable is before the new revision exists.

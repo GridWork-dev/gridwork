@@ -105,6 +105,23 @@ jobs:
             exit 1
           fi
 
+      # Production rollbacks dispatch from `main` only, for the same reason as
+      # deploy-production.yml: the ref picks this file and deploy/*.ts, and the WIF
+      # binding for the production deployer requires refs/heads/main alongside the
+      # environment claim — so from any other ref `auth` below would fail with an
+      # opaque IAM error, mid-incident. This names the reason first. Staging rollback
+      # is environment-only at the WIF layer and is not gated here.
+      - name: refuse a production rollback from any ref but main
+        if: inputs.environment == 'production'
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [ "$REF" != "refs/heads/main" ]; then
+            echo "::error::production rollbacks dispatch from refs/heads/main only, not ${REF}"
+            exit 1
+          fi
+
       - name: verify the typed confirmation
         env:
           SERVICE: ${{ inputs.service }}
