@@ -132,6 +132,9 @@ async fn execute(verb: Verb, pretty: bool, human_tables: bool) -> Result<(), Fai
         Verb::AdminRebuildProjections { scratch } => {
             admin::rebuild_projections(&scratch, pretty).await
         }
+        Verb::AdminDiscardCheckpoints { dry_run } => {
+            admin::discard_checkpoints(dry_run, pretty).await
+        }
         Verb::AdminBlob { what } => admin::retention(&what, pretty).await,
         Verb::AdminReceipt { from, to } => admin::receipt(&from, to.as_deref(), pretty).await,
 
