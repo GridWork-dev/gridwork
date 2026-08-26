@@ -290,6 +290,37 @@ async fn recorded_contract(pool: &PgPool) -> String {
         .expect("read the fingerprint")
 }
 
+async fn checkpoint_count(pool: &PgPool) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM gwk_internal.checkpoint")
+        .fetch_one(pool)
+        .await
+        .expect("count the checkpoints")
+}
+
+/// Seed one checkpoint at `through_seq`, in the shape the kernel writes.
+///
+/// Valid rather than merely insertable: all three of the table's CHECKs hold, and
+/// `records_ref` carries a real `PayloadRef` with `byte_size` as the decimal
+/// string that type serializes to. The applier deletes by table and would clear
+/// a malformed row just as happily — but a fixture the production writer could
+/// not have produced would make the test's subject a row that never exists.
+async fn seed_checkpoint(pool: &PgPool, through_seq: i64) {
+    sqlx::query(
+        "INSERT INTO gwk_internal.checkpoint \
+           (through_seq, schema_version, projection_hash, records_ref, created_at) \
+         VALUES ($1::numeric, 1, $2, $3::jsonb, now())",
+    )
+    .bind(through_seq)
+    .bind("a".repeat(64))
+    .bind(format!(
+        r#"{{"digest": "sha256:{}", "media_type": "application/x-ndjson", "byte_size": "4096"}}"#,
+        "a".repeat(64)
+    ))
+    .execute(pool)
+    .await
+    .expect("seed a checkpoint");
+}
+
 fn pg_dump(database: &str) -> Vec<String> {
     let output = std::process::Command::new("pg_dump")
         .arg("--schema-only")
@@ -1355,18 +1386,85 @@ async fn dispatch_node_is_truncate_protected_only_by_a_neighbour() {
     drop_role(&maintenance, &role).await;
 }
 
+/// A migration leaves no checkpoint from the contract it replaced.
+///
+/// Every row in `gwk_internal.checkpoint` when the applier runs was written
+/// under the base contract — the verb holds the writer lock, so nothing
+/// appended while it ran — and its `projection_hash` was taken over the OLD
+/// `ProjectionRecord` shape. A row that survived would sit at the watermark of
+/// the next restart, be compared against a hash taken over the NEW shape, and
+/// make `recover()` report `Diverged` for a database that is not divergent:
+/// the kernel would refuse to serve.
 #[tokio::test]
 #[ignore = "needs a PostgreSQL; see the module docs"]
-async fn a_failing_step_moves_neither_the_fingerprint_nor_the_ledger() {
-    // Criterion 4. Both, because a fingerprint that held while a ledger row
+async fn a_migration_leaves_no_checkpoint_from_the_contract_it_replaced() {
+    let maintenance = maintenance_pool().await;
+    let role = role_for("discard");
+    create_role(&maintenance, &role).await;
+    let database = fresh_database(&maintenance, "discard").await;
+    let pool = PgPool::connect(&url_for(&database)).await.expect("connect");
+    build_base(&pool, &role).await;
+
+    seed_checkpoint(&pool, 1).await;
+    // BEFORE the migration, and this is the assertion that gives the two below
+    // a subject. "It discarded everything" and "there was nothing to discard"
+    // are the same observation over an empty table, and a fold over nothing
+    // agrees with any claim made about it.
+    assert_eq!(
+        checkpoint_count(&pool).await,
+        1,
+        "the fixture did not land, so the counts below would pass over an empty table"
+    );
+
+    let applied = migrate(&pool, &role).await;
+
+    assert_eq!(
+        applied.checkpoints_discarded, 1,
+        "the receipt is the only artifact that will ever say how much evidence this run dropped"
+    );
+    assert_eq!(
+        checkpoint_count(&pool).await,
+        0,
+        "a checkpoint written under the replaced contract survived: the next restart would \
+         compare its old-shape hash against the new shape and refuse to serve"
+    );
+
+    drop(pool);
+    drop_database(&maintenance, &database).await;
+    drop_role(&maintenance, &role).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see the module docs"]
+async fn a_failing_step_moves_neither_the_fingerprint_nor_the_ledger_nor_the_checkpoints() {
+    // Criterion 4. All three, because a fingerprint that held while a ledger row
     // leaked would be a receipt claiming a migration that did not happen — and
-    // the ledger is append-only, so the claim would be permanent.
+    // the ledger is append-only, so the claim would be permanent. The
+    // checkpoints are here for the mirror-image reason: the discard is a real
+    // deletion, and a migration that changed nothing must not take with it the
+    // evidence the still-current contract's next restart is entitled to.
+    //
+    // TWO poisoned steps, and the second is the one the checkpoint claim rests
+    // on. A step that cannot run fails in the applier's step loop, which is
+    // BEFORE the discard — so the checkpoint survives it whether the discard is
+    // scoped to the transaction or not, and an arm built on that poison alone
+    // would be inert against exactly the mistake it names. The second step runs
+    // to completion, records its ledger row, reaches the discard, and is then
+    // refused by the protections rung inside the same transaction: the only
+    // window in which "inside the transaction" is an observable claim.
     let maintenance = maintenance_pool().await;
     let role = role_for("failing");
     create_role(&maintenance, &role).await;
     let database = fresh_database(&maintenance, "failing").await;
     let pool = PgPool::connect(&url_for(&database)).await.expect("connect");
     build_base(&pool, &role).await;
+
+    seed_checkpoint(&pool, 1).await;
+    assert_eq!(
+        checkpoint_count(&pool).await,
+        1,
+        "the fixture did not land, so the count after the refusal would prove nothing"
+    );
 
     let chain = resolved_chain();
     let poisoned = Step {
@@ -1405,6 +1503,55 @@ async fn a_failing_step_moves_neither_the_fingerprint_nor_the_ledger() {
     assert!(
         !ledger_exists,
         "the failed transaction left the ledger table behind"
+    );
+    assert_eq!(
+        checkpoint_count(&pool).await,
+        1,
+        "the failed transaction discarded a checkpoint anyway — and it never even reached the \
+         discard, so something outside the applier deleted the row"
+    );
+
+    // The discriminating arm. This step applies cleanly, stamps the fingerprint,
+    // carries its backend migrations, writes its ledger row and reaches the
+    // discard — and then leaves `gwk.event`'s TRUNCATE guard disabled, which the
+    // protections rung refuses INSIDE the transaction, after the checkpoints are
+    // gone. A discard executed on the pool rather than on the transaction is
+    // invisible to every other assertion here and fatal to this one.
+    let late = Step {
+        sql: Box::leak(
+            format!(
+                "{}\nALTER TABLE gwk.event DISABLE TRIGGER event_no_truncate;\n",
+                chain[0].sql
+            )
+            .into_boxed_str(),
+        ),
+        ..*chain[0]
+    };
+    let refusal = gwk_kernel::migrate::apply(
+        &pool,
+        &[&late],
+        &role,
+        BASE_CONTRACT_SHA256,
+        "0000000000000000000000000000000000000000",
+        None,
+    )
+    .await
+    .expect_err("a step that leaves a protection disabled");
+    assert!(
+        refusal.to_string().contains("TRUNCATE guard"),
+        "the refusal came from somewhere other than the protections rung, so it may have \
+         preceded the discard: {refusal}"
+    );
+    assert_eq!(
+        checkpoint_count(&pool).await,
+        1,
+        "a step refused AFTER the discard still took the checkpoints with it: the discard is \
+         running outside the applier's transaction"
+    );
+    assert_eq!(
+        recorded_contract(&pool).await,
+        BASE_CONTRACT_SHA256,
+        "the fingerprint moved under a step the protections rung refused"
     );
 
     drop(pool);

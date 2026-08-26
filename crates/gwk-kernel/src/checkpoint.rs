@@ -693,6 +693,82 @@ pub async fn checkpoints(conn: &mut PgConnection) -> Result<Vec<Checkpoint>, Ref
         .collect()
 }
 
+/// How many checkpoints this database holds, and the newest sequence one
+/// anchors at.
+///
+/// One statement for the pair, because they are only ever wanted together: the
+/// caller is about to discard these rows and is asking how much evidence that
+/// costs and which restart's comparison it was.
+///
+/// A connection rather than a pool, so a caller that must not see the table
+/// change between counting it and emptying it can do both on one — and so the
+/// applier can ask inside its own transaction.
+pub async fn census(conn: &mut PgConnection) -> Result<(i64, Option<Seq>), Refusal> {
+    let (held, newest): (i64, Option<String>) =
+        sqlx::query_as("SELECT count(*), max(through_seq)::text FROM gwk_internal.checkpoint")
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(|e| Refusal::storage(format!("count checkpoints: {e}")))?;
+    let newest = newest
+        .map(|text| from_numeric_text(&text).map(Seq::new))
+        .transpose()
+        .map_err(|e| Refusal::storage(format!("column through_seq: {e}")))?;
+    Ok((held, newest))
+}
+
+/// Delete every checkpoint and put the barrier back where an empty table says
+/// it should be, returning how many rows went.
+///
+/// **Two statements, and the second is why this is a function rather than a
+/// `DELETE` spelled at each call site.** The barrier that decides when the NEXT
+/// checkpoint is taken does not live in this table — [`record_checkpoint`]
+/// writes `gwk_internal.writer.checkpoint_seq` and `checkpoint_at` in the same
+/// transaction as the row they describe, and `checkpoint_due` reads those two
+/// and nothing else. Deleting the rows without moving them leaves a database
+/// with no checkpoint claiming one was taken moments ago at some sequence: the
+/// next append is not due, and on a kernel with no traffic nothing is ever due,
+/// so "the first append re-anchors" would be false for up to the whole interval
+/// and unbounded while idle. Reset to the epoch and to zero, which is what
+/// `checkpoint_due` reads as overdue on both of its terms.
+///
+/// The caller supplies the connection, so both statements land wherever the
+/// caller's atomicity is — inside the applier's transaction, where a refused
+/// migration must leave the barrier exactly as it found it.
+///
+/// An ADMIN act by construction: the runtime role holds SELECT and INSERT on
+/// this table and no DELETE, which the privilege sweep asserts and, since this
+/// change, the daemon re-checks at every boot. A kernel that could erase the
+/// evidence its own recovery is graded against would be able to launder a
+/// divergence into an `Unverified` start.
+pub async fn discard_all(conn: &mut PgConnection) -> Result<u64, Refusal> {
+    discard_all_raw(conn)
+        .await
+        .map_err(|e| Refusal::storage(format!("discard checkpoints: {e}")))
+}
+
+/// [`discard_all`] with the driver's own error, for the applier.
+///
+/// `migrate::apply` reports `KernelError`, which converts from [`sqlx::Error`]
+/// and not from [`Refusal`]. Splitting the wrapper off is what lets both
+/// callers share one definition of what discarding IS — the alternative was
+/// spelling the two statements twice, and the barrier reset is exactly the kind
+/// of second statement a second copy forgets.
+pub(crate) async fn discard_all_raw(conn: &mut PgConnection) -> Result<u64, sqlx::Error> {
+    let discarded = sqlx::query("DELETE FROM gwk_internal.checkpoint")
+        .execute(&mut *conn)
+        .await?
+        .rows_affected();
+
+    sqlx::query(
+        "UPDATE gwk_internal.writer \
+            SET checkpoint_seq = 0, checkpoint_at = to_timestamp(0) WHERE id = 1",
+    )
+    .execute(&mut *conn)
+    .await?;
+
+    Ok(discarded)
+}
+
 #[cfg(test)]
 mod tests {
     use gwk_domain::entity::{IngestedRecord, Message};

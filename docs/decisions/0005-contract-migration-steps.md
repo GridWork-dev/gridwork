@@ -412,3 +412,62 @@ and the only test named for it called the applier directly, below the layer wher
 lives. Two reviewers reading independently both found it in the same pass. The lesson is
 narrower than "write more tests": a flag whose entire purpose is to *relax* a guard has to be
 tested through the layer that holds the guard, or the test cannot fail for the right reason.
+
+## Addendum, 2026-08-25: a migration discards the checkpoints of the contract it replaced
+
+A checkpoint carries no contract identity. It records a schema version that has been the
+constant `1` since the table was created, and a hash over the projection rows as the
+`ProjectionRecord` type serialized them at the moment it was taken. A migration changes that
+shape — the one authored step both adds columns and rewrites values — so a checkpoint that
+survives one is a hash of the old shape sitting at a sequence the next restart compares
+against a hash of the new one. `recover()` has no state for "incomparable": it reports
+`Diverged`, readiness is refused, and the kernel will not serve a database that has lost
+nothing at all. That is not a hypothetical. It is what a production kernel did on 2026-08-20,
+and what an operator cleared by deleting the rows by hand.
+
+**The applier deletes them, inside its own transaction.** `migrate::apply()` runs one
+`DELETE FROM gwk_internal.checkpoint` after the ledger rows are written and before the
+post-migration measurements, and carries `rows_affected()` out on `Applied` and into the
+receipt as `checkpoints_discarded`. Inside the transaction is load-bearing rather than tidy:
+a step that fails must leave the checkpoints where it found them, because a migration that
+changed nothing must not destroy the evidence the still-current contract's next restart is
+entitled to compare against. `--dry-run` reports the same number as
+`checkpoints_to_discard` and deletes nothing — the discard is the only destructive act a
+real run performs that leaves no DDL behind, and a rehearsal silent about it would be a
+rehearsal of the recoverable half.
+
+**Blunt on purpose: every migration, not the ones that look like they need it.** The
+alternative is a shape oracle inside `apply()`, and the existing step defeats it — its gate
+backfill rewrites projection VALUES without changing any shape, which changes the hash and
+would pass any structural comparison. Keying on the event rather than on the bytes needs no
+oracle and covers both. What it costs is one restart's verdict on a migration that changed
+no projection: `Unverified` instead of `Verified`. That asymmetry is the decision. Keeping a
+possibly-incomparable checkpoint fails toward refusing to serve; discarding a comparable one
+fails toward serving with a weaker claim, and the claim recovers on the first append.
+
+**Discarding is a cure only because a checkpoint-less database serves.** With the table
+empty the recovery ladder finds nothing, the warm path lands on `Unverified { reason: "no
+valid checkpoint" }`, and `ready()` permits it. Nothing pinned that arm before this change —
+the nearest existing test reached `Unverified` through the sequence-gap branch, which is a
+different one — so it is pinned now, in `tests/recover.rs`. If it ever became a refusal,
+discarding would be a second way to produce the outage it exists to prevent.
+
+**The count is durable only in the receipt.** `gwk_internal.schema_migration` has no column
+for it, and adding one means a backend migration, which reaches an already-initialized
+database only when a FUTURE step names it in its `-- carries:` header. It could never be
+retroactive for the migration that needs it. A run whose output was not captured cannot be
+asked afterwards how much evidence it dropped.
+
+**`gw admin discard-checkpoints [--dry-run]` is the escape hatch, and it belongs in this
+change.** The applier's discard cannot reach a database that is already stranded: R1 refuses
+to migrate a database already at this binary's contract, so there is no run left to clear the
+rows. The same is true of a checkpoint written by a build whose payload hashing has since
+been corrected. Both present identically — `Diverged` at the same sequence, a kernel that
+will not start — and neither is a divergence. The verb takes the writer lock the way
+`migrate` does and never waits, because these rows are a running kernel's own recovery
+evidence and the answer to "the kernel is up" is to stop it, not to queue behind it. It
+reads the count and the highest sequence before deleting, and prints both with the public
+revision. The rows stay an admin-connection matter: the runtime role holds SELECT and INSERT
+on that table and no DELETE, and the privilege sweep is what keeps it that way — a kernel
+able to erase the evidence its own recovery is graded against could launder a divergence
+into an `Unverified` start.
