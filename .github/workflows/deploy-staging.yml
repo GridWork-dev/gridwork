@@ -322,7 +322,11 @@ jobs:
           SERVICES: ${{ steps.plan.outputs.services }}
         run: |
           set -euo pipefail
-          jq -n \
+          # Captured, then written (T28-AUDIT-3, same as production and rollback): the
+          # upload here is `success()`-gated so a zero-byte file could not publish, but
+          # one template carrying the direct redirect is the copy the next evidence step
+          # gets pasted from. Uniform on purpose.
+          evidence="$(jq -n \
             --arg workflow_commit "$COMMIT" \
             --arg run_id "$RUN_ID" \
             --arg digests "$DIGESTS" \
@@ -331,7 +335,8 @@ jobs:
             --rawfile rollback rollback-revisions.txt \
             '{environment:"staging", workflow_commit:$workflow_commit, run_id:$run_id, digests:$digests,
               migration_job:$migration_job, services:$services,
-              rollback_revisions:$rollback}' > staging-evidence.json
+              rollback_revisions:$rollback}')"
+          printf '%s\n' "$evidence" > staging-evidence.json
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

@@ -277,12 +277,58 @@ jobs:
 
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
+      # CORE-73: a workflow_dispatch re-run of an already-published sha used to go RED at
+      # push time — the rebuild is not byte-reproducible, so the same :sha tag arrives
+      # with a new manifest and Artifact Registry's tag immutability refuses it. A red
+      # that reads as a regression while saying only "this was already published". The
+      # registry's existing digest IS the truth for that sha, so a re-run re-emits it and
+      # skips the build instead of failing. It is the truth about WHAT the bytes are —
+      # not about whether they were signed or scanned: the run that pushed may have died
+      # between the push and either claim, so the evidence chain below keys on the
+      # resolved digest (see `resolve digest`) and re-earns both on every run.
+      #
+      # Three outcomes, fail-closed: the tag resolves -> published=true plus its digest;
+      # the registry says the tag/repo does not exist -> published=false, build proceeds;
+      # anything else (auth, network, parse) -> red. "Cannot tell" must never build —
+      # guessing "not published" here would recreate the immutability red this exists to
+      # remove, one step later and with less context. `imagetools inspect` reads through
+      # the docker login above and returns the same index digest buildx emitted when it
+      # pushed, which is what every deploy and rollback consumes.
+      - name: already published at this sha?
+        id: preflight
+        env:
+          IMAGE: ${{ vars.GCP_REGISTRY }}/${{ matrix.service }}
+          TAG: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if out="$(docker buildx imagetools inspect "${IMAGE}:${TAG}" --format '{{json .Manifest}}' 2>preflight-err.txt)"; then
+            digest="$(printf '%s' "$out" | jq -r '.digest // empty')"
+            case "$digest" in
+              sha256:?*) ;;
+              *) echo "::error::registry answered for ${IMAGE}:${TAG} but returned no parseable digest"; exit 1 ;;
+            esac
+            printf 'published=true\ndigest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+            echo "::notice title=already published (CORE-73)::${IMAGE}:${TAG}@${digest} — build skipped, digest re-emitted"
+          elif grep -qiE 'not found|NAME_UNKNOWN|MANIFEST_UNKNOWN' preflight-err.txt; then
+            printf 'published=false\n' >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::cannot determine whether ${IMAGE}:${TAG} is already published — refusing to guess"
+            cat preflight-err.txt >&2
+            exit 1
+          fi
+
       # No `latest`. Doc 07 §4: human-readable tags may carry the full SHA, but nothing
       # in a deploy or a rollback ever resolves a tag — they consume the digest this step
       # emits. A floating tag in a rollback path is how you roll back to the thing you
       # were trying to escape.
+      #
+      # Skipped when preflight found the tag (CORE-73). The evidence chain below does NOT
+      # skip with it: sign, SBOM, scan, manifest, and the evidence upload key on the
+      # resolved digest, not on this step — evidence follows the digest, whichever run
+      # pushed it (see `resolve digest`).
       - name: build and push by digest
         id: build
+        if: steps.preflight.outputs.published != 'true'
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: ${{ steps.svc.outputs.build_context }}
@@ -296,6 +342,40 @@ jobs:
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+      # One digest, one fact. `steps.build.outcome == 'success'` used to key all five
+      # attestation steps below (sign, SBOM, scan, manifest, evidence upload) — a proxy
+      # for three different facts (a digest exists / it is signed / it is scanned) that
+      # went wrong on the CORE-73 skip path: a skipped build's outcome is 'skipped', so
+      # all five guards skipped with it, `record digest` re-emitted the preflight digest
+      # ungated, and the re-run went green carrying an unearned "already signed, already
+      # scanned" claim. Two live shapes of that hole: a TRIVY_EXIT_CODE=1 repo whose run
+      # 1 pushed, signed, then went red on a CRITICAL — "Re-run failed jobs" published
+      # the blocked digest green, with production's cosign verify passing because run 1
+      # genuinely signed; and a sign that died after the push, whose digest no later run
+      # could ever sign — every re-run entered the skip path and skipped sign with it.
+      #
+      # This step resolves THE digest — the build's, or the one preflight read back —
+      # and everything below keys on its existence: `always() && steps.image.outputs.digest != ''`.
+      # A skipped step's outputs are empty strings, so a failed build still skips the
+      # chain and a red preflight still reds the job: fail-closed unchanged. On the skip
+      # path the run re-EARNS the claims instead of inheriting them: cosign sign is
+      # idempotent (one more Rekor entry, same verification), the SBOM and the scan read
+      # the digest from the registry by ref — no rebuild — and a repo that set
+      # TRIVY_EXIT_CODE=1 keeps its gate: a re-run of a scan-blocked publish re-scans
+      # and goes red again. The deliberate cost: with TRIVY_EXIT_CODE=1, a re-dispatch
+      # of an old green sha can go red on a CVE published since — that is the repo's own
+      # policy speaking, not a liveness failure; the unset-default ('0') re-dispatch
+      # stays green and keeps the liveness-probe property.
+      - name: resolve digest
+        id: image
+        env:
+          # Whichever path ran: the build's digest, or the one preflight read back from
+          # the registry (CORE-73). Exactly one is ever non-empty.
+          DIGEST: ${{ steps.build.outputs.digest || steps.preflight.outputs.digest }}
+        run: |
+          set -euo pipefail
+          printf 'digest=%s\n' "$DIGEST" >> "$GITHUB_OUTPUT"
 
       # doc 07 §4 asks for provenance on the published digest. This was
       # `actions/attest-build-provenance`, and on three of the four repos it failed AFTER
@@ -328,9 +408,10 @@ jobs:
           cosign-release: v3.1.3
 
       - name: sign the digest (keyless)
+        if: always() && steps.image.outputs.digest != ''
         env:
           IMAGE: ${{ vars.GCP_REGISTRY }}/${{ matrix.service }}
-          DIGEST: ${{ steps.build.outputs.digest }}
+          DIGEST: ${{ steps.image.outputs.digest }}
         run: |
           set -euo pipefail
           cosign sign --yes "${IMAGE}@${DIGEST}"
@@ -340,25 +421,28 @@ jobs:
       # `success()` a failed sign skipped both, so the run ended with a live digest and a
       # CVE list it could not show — studio's report measured exactly that shape.
       - name: sbom
-        if: always() && steps.build.outcome == 'success'
+        if: always() && steps.image.outputs.digest != ''
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
-          image: ${{ vars.GCP_REGISTRY }}/${{ matrix.service }}@${{ steps.build.outputs.digest }}
+          image: ${{ vars.GCP_REGISTRY }}/${{ matrix.service }}@${{ steps.image.outputs.digest }}
           artifact-name: sbom-${{ matrix.service }}.spdx.json
           output-file: sbom-${{ matrix.service }}.spdx.json
 
       - name: vulnerability scan
-        if: always() && steps.build.outcome == 'success'
+        if: always() && steps.image.outputs.digest != ''
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: ${{ vars.GCP_REGISTRY }}/${{ matrix.service }}@${{ steps.build.outputs.digest }}
+          image-ref: ${{ vars.GCP_REGISTRY }}/${{ matrix.service }}@${{ steps.image.outputs.digest }}
           format: sarif
           output: trivy-${{ matrix.service }}.sarif
-          # Report, do not gate — a scan that blocks every publish on a base-image CVE
-          # with no fix available gets disabled within a week, and a disabled scan is
-          # worth less than a recorded one. Gating belongs at the deploy picker, against
-          # a policy that names which severities actually stop a release.
-          exit-code: "0"
+          # Report by default, gate by repo policy (CORE-74) — a template that blocks
+          # every publish on a base-image CVE with no fix available gets disabled within
+          # a week, and a disabled scan is worth less than a recorded one. So the dial is
+          # a repository variable, never a workflow edit: unset resolves to '0' (record
+          # in SARIF, never block); a repo that wants CRITICAL,HIGH findings to fail the
+          # publish sets TRIVY_EXIT_CODE=1. Deliberately absent from the assert loop —
+          # unset is the documented default, not a misconfiguration.
+          exit-code: ${{ vars.TRIVY_EXIT_CODE || '0' }}
           severity: CRITICAL,HIGH
 
       # doc 07 §11: the evidence IS the deliverable. A deploy that cannot show its
@@ -381,20 +465,21 @@ jobs:
       # parse. No -c, deliberately — this file is read by a human, and the -c rule binds
       # values captured into a variable or written to $GITHUB_OUTPUT.
       #
-      # `if: always() && steps.build.outcome == 'success'`, on the SBOM and scan above,
-      # here, and on the evidence upload below (2026-08-25, measured on studio run
-      # 32904680804 and dev-profile's red main): once `build and push by digest` has
-      # succeeded the digest EXISTS in the
-      # registry, whatever fails after it. Until now both steps ran under the default
-      # `success()`, so a failed attest, scan, or SBOM skipped them and the run ended
-      # with a live digest and no manifest, no SBOM, no SARIF — a CVE the run could not
-      # name, and a digest that had to be re-scanned by hand. Keyed to the BUILD, not to
-      # any one predecessor: keying it to the scan is right for a repo whose scan fails
-      # and wrong for one whose attest fails. `collect` is still gated on the whole job
-      # succeeding, so nothing downstream consumes a digest from a failed publish; this
-      # only keeps the evidence of what was pushed.
+      # `if: always() && steps.image.outputs.digest != ''`, on the sign, SBOM, and scan
+      # above, here, and on the evidence upload below (2026-08-25, measured on studio run
+      # 32904680804 and dev-profile's red main; re-keyed 2026-08-26, see `resolve
+      # digest`): once a digest EXISTS in the registry — this run's build, or a prior
+      # run's read back by the preflight — the evidence runs, whatever fails around it.
+      # Under the default `success()` a failed attest, scan, or SBOM skipped them and
+      # the run ended with a live digest and no manifest, no SBOM, no SARIF — a CVE the
+      # run could not name, and a digest that had to be re-scanned by hand. Keyed to the
+      # DIGEST, not to any one predecessor: keying it to the scan is right for a repo
+      # whose scan fails and wrong for one whose attest fails, and keying it to the
+      # build was wrong for the run whose build correctly SKIPPED. `collect` is still
+      # gated on the whole job succeeding, so nothing downstream consumes a digest from
+      # a failed publish; this only keeps the evidence of what was pushed.
       - name: source-to-image manifest
-        if: always() && steps.build.outcome == 'success'
+        if: always() && steps.image.outputs.digest != ''
         env:
           SERVICE: ${{ matrix.service }}
           REPOSITORY: ${{ github.repository }}
@@ -402,7 +487,7 @@ jobs:
           REF: ${{ github.ref }}
           RUN_ID: ${{ github.run_id }}
           IMAGE: ${{ vars.GCP_REGISTRY }}/${{ matrix.service }}
-          DIGEST: ${{ steps.build.outputs.digest }}
+          DIGEST: ${{ steps.image.outputs.digest }}
           DOCKERFILE: ${{ steps.svc.outputs.dockerfile }}
           BUILD_CONTEXT: ${{ steps.svc.outputs.build_context }}
         run: |
@@ -421,12 +506,12 @@ jobs:
             > "image-manifest-$SERVICE.json"
 
       # Same guard as the manifest step. The manifest is the anchor: it exists whenever
-      # the build succeeded, so `if-no-files-found: error` still binds — an upload with
+      # a digest was resolved, so `if-no-files-found: error` still binds — an upload with
       # NOTHING to carry is a bug, an upload missing the SBOM because the SBOM step failed
       # is the evidence of that failure. A `hashFiles` guard would be wrong here: it goes
       # quiet on the day the manifest step itself breaks.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: always() && steps.build.outcome == 'success'
+        if: always() && steps.image.outputs.digest != ''
         with:
           name: publish-evidence-${{ matrix.service }}
           path: |
@@ -444,9 +529,18 @@ jobs:
       - name: record digest
         env:
           SERVICE: ${{ matrix.service }}
-          DIGEST: ${{ steps.build.outputs.digest }}
+          # The one resolved digest — same value every attestation step above signed,
+          # SBOM'd, and scanned. Under the default `success()` this step is unreachable
+          # when any of them failed, so a recorded digest is one whose attestation ran
+          # and passed ON THIS RUN; the empty-digest refusal below is the belt for the
+          # pathological build-emitted-nothing path.
+          DIGEST: ${{ steps.image.outputs.digest }}
         run: |
           set -euo pipefail
+          if [ -z "$DIGEST" ]; then
+            echo "::error::no digest from the build or the preflight — nothing to record"
+            exit 1
+          fi
           mkdir -p digests
           printf '%s\n' "$DIGEST" > "digests/$SERVICE"
 
