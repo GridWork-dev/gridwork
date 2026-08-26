@@ -97,3 +97,26 @@ branch_prefix = "feature/"
 #
 # Clean-room: paths in .github/cleanroom-paths.txt are legally constrained.
 # Read CLAUDE.md before touching them.
+
+# Merge-hold posture. `self` means this repo classifies its own phases; the
+# governor is what a branch carrying no phase docs holds and points at.
+#
+# `governed_by` names a PHASE, not a repo, and that is deliberate — the
+# convention elsewhere is `<repo>:<slug>`, but the governing repo is private and
+# this one is public, so the repo half cannot come along. Same rule as the
+# schema-citation note above: describe it, do not link to it. Restoring a
+# `<repo>:` prefix reintroduces a leak that the scanner catches locally and that
+# hosted CI cannot — CI runs the generic pattern set only, so a green there
+# proves nothing about this line.
+#
+# Nothing dereferences this value. It is checked for emptiness — which is what
+# makes `expires` mandatory and selects hold-and-point over a receipted
+# fall-through — and interpolated into the hold message for a human to read.
+#
+# `expires` is QUOTED on purpose. A bare TOML date parses in Python's tomllib
+# but fails Bun's parser on the whole document, which reds `gw verify system`
+# while leaving the merge gate green. The cap is 90 days; this is 89.
+[merge_hold]
+posture = "self"
+governed_by = "infra-gcp-topology (T20-T28), operator-held"
+expires = "2026-11-23"
