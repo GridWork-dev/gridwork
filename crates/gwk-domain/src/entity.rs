@@ -782,4 +782,80 @@ mod tests {
         let back: Message = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back, msg);
     }
+
+    #[test]
+    fn exactly_two_entity_fields_carry_free_form_json() {
+        // Every other field here is typed and serializes in declaration order.
+        // A raw `serde_json::Value` does not: its object keys come out in
+        // whatever order `serde_json::Map` iterates, which is sorted under the
+        // default `BTreeMap` and insertion-ordered the moment something in the
+        // same cargo invocation turns on `preserve_order`. `gwk-kernel`'s
+        // `canonical_line` sorts exactly these two before they reach the
+        // projection digest; a third one added here and not taught to it would
+        // make that digest a property of the build again — which is what made a
+        // kernel read its own checkpoint as `Diverged`.
+        //
+        // BOTH files, because `ProjectionRecord` reaches both. Nineteen of its
+        // twenty payload types are declared here; `OrchestratorCheckpoint` and
+        // the four types nested inside it live in `inherited.rs`, and a scan
+        // that read only this file would have passed over a free-form field
+        // added there — the one type in the set that exists precisely because
+        // something used to be schema-less JSON.
+        //
+        // Cut at the test module so these comments and the expectation below
+        // are not themselves counted. `expect`, so a file that lost its tests
+        // reds rather than scanning an empty half and passing on nothing.
+        let sources = [
+            ("entity.rs", include_str!("entity.rs")),
+            ("inherited.rs", include_str!("inherited.rs")),
+        ];
+        let mut free_form: Vec<String> = Vec::new();
+        for (name, source) in sources {
+            let (types, _) = source
+                .split_once("#[cfg(test)]")
+                .unwrap_or_else(|| panic!("{name} carries a test module"));
+            // `split_once` cuts at the FIRST occurrence anywhere, so a
+            // `#[cfg(test)]` helper landing above the types would silently
+            // shrink the scanned region — and a cut that still left both
+            // matches behind would pass over the truncation. Anchor on the last
+            // type each file declares.
+            let last = match name {
+                "entity.rs" => "pub struct DispatchNode",
+                _ => "pub struct RoundFindingSummary",
+            };
+            assert!(
+                types.contains(last),
+                "the {name} cut landed above {last}, so this scan is grading a \
+                 region someone else chose"
+            );
+            // A text scan sees the spelling, not the type. `use serde_json as
+            // sj;` or `use serde_json::{Map, Value};` would hide a field from
+            // the filter below in a way nothing else here could catch, so the
+            // import form is refused outright rather than accommodated.
+            assert!(
+                !types.contains("use serde_json"),
+                "{name} imports serde_json — spell the full path at the field so \
+                 the scan below can see it"
+            );
+            free_form.extend(
+                types
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| line.contains("serde_json::Value"))
+                    .map(|line| format!("{name}: {line}")),
+            );
+        }
+        // Set equality, not a floor: an addition, a removal, and a rename all
+        // red, and the length is settled before anything else is compared.
+        assert_eq!(
+            free_form,
+            [
+                "entity.rs: pub payload: Option<serde_json::Value>,",
+                "entity.rs: pub payload: serde_json::Value,",
+            ],
+            "a free-form JSON field appeared, moved, or vanished — gwk-kernel's \
+             canonical_line must learn about it or the projection digest goes \
+             back to depending on which serde_json::Map backing the build used"
+        );
+    }
 }

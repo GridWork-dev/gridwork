@@ -17,7 +17,10 @@
 //! a column and it moves. Deserializing each row into its [`ProjectionRecord`]
 //! and serializing that back means the bytes are determined by the type
 //! declaration instead, so two kernels serving the same log agree, and so does
-//! the same kernel after a `VACUUM FULL`.
+//! the same kernel after a `VACUUM FULL`. The two fields a type declaration
+//! does NOT order — the free-form JSON payloads — have their object keys sorted
+//! on the way out, so the digest does not depend on which `serde_json::Map`
+//! backing the build unified in (see `canonical_line`).
 //!
 //! **The visit order is a written-down constant, not a catalog query.** The
 //! hash depends on which table comes first, so that has to be something a
@@ -449,17 +452,97 @@ async fn records(conn: &mut PgConnection, derived_only: bool) -> Result<Vec<u8>,
             // `deny_unknown_fields` on every entity makes this the parity check
             // between the DDL and the contract types: a column with no field
             // fails here rather than silently dropping out of the hash.
-            let record: ProjectionRecord = serde_json::from_str(&raw).map_err(|e| {
+            let mut record: ProjectionRecord = serde_json::from_str(&raw).map_err(|e| {
                 Refusal::storage(format!(
                     "projection row does not match the contract type: {e}"
                 ))
             })?;
-            serde_json::to_writer(&mut out, &record)
-                .map_err(|e| Refusal::storage(format!("serialize projection record: {e}")))?;
-            out.push(b'\n');
+            canonical_line(&mut record, &mut out)?;
         }
     }
     Ok(out)
+}
+
+/// One record's line: the free-form payloads sorted, then serialized.
+///
+/// Every other field of a [`ProjectionRecord`] is a typed struct field and
+/// serializes in declaration order. These two are raw `serde_json::Value`,
+/// whose object key order is whatever `serde_json::Map` iterates in — sorted
+/// under the default `BTreeMap` backing, INSERTION-ordered the moment anything
+/// in the same cargo invocation turns on `preserve_order`. That made the digest
+/// a property of the build rather than of the data: a kernel compiled beside an
+/// engine adapter read a checkpoint a solo build had written as `Diverged`.
+///
+/// Sorted is what the default backing already emits, so no checkpoint a clean
+/// build recorded changes value here. A checkpoint a POISONED build recorded is
+/// the complement, and it is worth stating rather than leaving to be discovered:
+/// its digest was taken over jsonb key order and will never match a recomputed
+/// one again, so a kernel whose newest checkpoint sits exactly at the watermark
+/// reads `Diverged` and refuses to serve. That is not a regression — a clean
+/// build already disagreed with it — and it clears itself as soon as one more
+/// event lands past that sequence, because the verdict then falls to
+/// `Unverified`, which serves. `gw admin discard-checkpoints` is the direct cure.
+///
+/// **No `_` arm, deliberately.** The other eighteen variants are spelled out, so
+/// a twenty-first stops the build until someone classifies it. A wildcard here
+/// is where this rots: a new free-form field would be hashed unsorted and
+/// silently reintroduce the whole defect, and no test that scans source text can
+/// be relied on to notice a type it was never pointed at.
+/// `exactly_two_entity_fields_carry_free_form_json` in `gwk-domain` is the field-
+/// level half of the same guard.
+fn canonical_line(record: &mut ProjectionRecord, out: &mut Vec<u8>) -> Result<(), Refusal> {
+    match record {
+        ProjectionRecord::Message { message } => {
+            if let Some(payload) = message.payload.as_mut() {
+                sort_object_keys(payload);
+            }
+        }
+        ProjectionRecord::IngestedRecord { ingested_record } => {
+            sort_object_keys(&mut ingested_record.payload);
+        }
+        // Every field of these is typed, so declaration order settles their
+        // bytes and there is nothing to canonicalize.
+        ProjectionRecord::Task { .. }
+        | ProjectionRecord::Attempt { .. }
+        | ProjectionRecord::AttentionItem { .. }
+        | ProjectionRecord::AuthorityGrant { .. }
+        | ProjectionRecord::Command { .. }
+        | ProjectionRecord::CostEntry { .. }
+        | ProjectionRecord::DispatchNode { .. }
+        | ProjectionRecord::EngineSession { .. }
+        | ProjectionRecord::Evidence { .. }
+        | ProjectionRecord::Gate { .. }
+        | ProjectionRecord::Lease { .. }
+        | ProjectionRecord::OrchestratorCheckpoint { .. }
+        | ProjectionRecord::PtySession { .. }
+        | ProjectionRecord::PtySessionTemplate { .. }
+        | ProjectionRecord::Receipt { .. }
+        | ProjectionRecord::WorkflowRun { .. }
+        | ProjectionRecord::WorkspaceNode { .. }
+        | ProjectionRecord::Worktree { .. } => {}
+    }
+    serde_json::to_writer(&mut *out, record)
+        .map_err(|e| Refusal::storage(format!("serialize projection record: {e}")))?;
+    out.push(b'\n');
+    Ok(())
+}
+
+/// Sort every object's keys in place, at every depth — arrays included, because
+/// a nested object is exactly as order-dependent as a top-level one.
+fn sort_object_keys(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut entries: Vec<(String, serde_json::Value)> =
+                std::mem::take(map).into_iter().collect();
+            entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+            for (_, nested) in &mut entries {
+                sort_object_keys(nested);
+            }
+            *map = entries.into_iter().collect();
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(sort_object_keys),
+        _ => {}
+    }
 }
 
 /// The digest the checkpoint records, over exactly the bytes it stores.
@@ -688,6 +771,11 @@ pub(crate) async fn discard_all_raw(conn: &mut PgConnection) -> Result<u64, sqlx
 
 #[cfg(test)]
 mod tests {
+    use gwk_domain::entity::{IngestedRecord, Message};
+    use gwk_domain::fsm::MessageState;
+    use gwk_domain::ids::{IdempotencyKey, IngestedRecordId, MessageId};
+    use gwk_domain::ingestion::IngestionKind;
+
     use super::*;
 
     #[test]
@@ -771,6 +859,81 @@ mod tests {
         );
     }
 
+    /// VACUOUS IN A DEFAULT BUILD, AND THAT IS IN THE NAME.
+    ///
+    /// With `serde_json::Map` backed by `BTreeMap` the uncanonicalized bytes
+    /// already equal the canonical ones, so deleting the sort — or reversing
+    /// the comparator — leaves this green. It only discriminates where
+    /// `preserve_order` is unified in, which is the `pty` job's
+    /// `cargo test -p gwk-kernel -p gwk-adapter-opencode --lib checkpoint::`
+    /// step. That step asserts the premise with a `cargo tree` grep before it
+    /// runs these, so the lane going non-discriminating fails loud instead of
+    /// passing quietly.
+    #[test]
+    fn an_ingested_payload_is_hashed_by_sorted_keys_discriminating_only_under_preserve_order() {
+        let mut record = ProjectionRecord::IngestedRecord {
+            ingested_record: IngestedRecord {
+                id: IngestedRecordId::new("ingest:proj-1:key-1"),
+                kind: IngestionKind::GraphSnapshot,
+                // Written out of alphabetical order deliberately, with one
+                // object nested inside an array: a top-level-only sort leaves
+                // that one in insertion order.
+                payload: serde_json::json!({
+                    "nodes": 12000,
+                    "edges": 48122,
+                    "z": [{ "b": 1, "a": 2 }],
+                }),
+                payload_ref: None,
+                ingested_by: None,
+                event_seq: Seq::new(7),
+                ingested_at: Timestamp::new("2026-07-27T00:00:00Z"),
+            },
+        };
+        let mut out = Vec::new();
+        canonical_line(&mut record, &mut out).expect("a record serializes");
+        let line = String::from_utf8(out).expect("the line is utf-8");
+        assert!(
+            line.contains(r#""payload":{"edges":48122,"nodes":12000,"z":[{"a":2,"b":1}]}"#),
+            "the payload was not sorted at every depth: {line}"
+        );
+        assert!(line.ends_with('\n'), "records are line-delimited: {line}");
+    }
+
+    /// The Message half of the same fix. Without it, deleting only the
+    /// `Message` arm of `canonical_line` leaves the ingested test green and the
+    /// hole uncovered. Same build-time caveat as its sibling above.
+    #[test]
+    fn a_message_payload_is_hashed_by_sorted_keys_discriminating_only_under_preserve_order() {
+        let mut record = ProjectionRecord::Message {
+            message: Message {
+                id: MessageId::new("m-1"),
+                version: 1,
+                state: MessageState::Accepted,
+                idempotency_key: IdempotencyKey::new("k-1"),
+                correlation_id: None,
+                reply_to: None,
+                sender: None,
+                recipient: None,
+                channel: None,
+                kind: None,
+                payload: Some(serde_json::json!({ "b": 2, "a": 1 })),
+                deadline: None,
+                delivery_attempts: 0,
+                dead_letter_reason: None,
+                delivery_refs: None,
+                created_at: Timestamp::new("2026-07-27T00:00:00Z"),
+                updated_at: Timestamp::new("2026-07-27T00:00:00Z"),
+            },
+        };
+        let mut out = Vec::new();
+        canonical_line(&mut record, &mut out).expect("a record serializes");
+        let line = String::from_utf8(out).expect("the line is utf-8");
+        assert!(
+            line.contains(r#""payload":{"a":1,"b":2}"#),
+            "the message payload was not sorted: {line}"
+        );
+    }
+
     #[test]
     fn a_served_row_is_the_same_row_the_hash_canonicalizes() {
         // Each projection now spells its record-building expression twice, once
@@ -778,6 +941,13 @@ mod tests {
         // not the other would make the row a client is served differ from the
         // row the checkpoint hashed — a disagreement nothing else in the system
         // is positioned to notice. Only the tail after `FROM` may differ.
+        //
+        // In SQL SHAPE, which is the whole claim: `canonical_line` sorts the
+        // free-form payloads on the way into the digest and the serve path does
+        // not, so under a poisoned build a served payload's key order genuinely
+        // differs from the hashed one. That is deliberate and costs nothing —
+        // `projection_hash` has no caller outside this crate, so no client ever
+        // re-hashes a row it was served.
         for projection in PROJECTIONS {
             let head = |q: &'static str| {
                 q.split_once(" FROM ")

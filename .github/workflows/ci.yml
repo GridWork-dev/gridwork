@@ -88,25 +88,44 @@ jobs:
       # unification means building one beside `gw` would then change the key
       # order in values the kernel hashes, even though the `gw` graph alone is
       # deterministic. Guard the deployable's resolved graph, not Cargo.toml.
-      - name: the gw feature graph excludes serde_json preserve_order
+      - name: the gw feature graph excludes the build-dependent serde_json features
         run: |
           set -euo pipefail
           features=/tmp/gridwork-serde-json-features.txt
-          seeded=/tmp/seeded-gridwork-serde-json-features.txt
-          forbidden='serde_json feature "preserve_order"'
           cargo tree -p gridwork -e features,no-dev -i serde_json > "$features"
-          if grep -Fq "$forbidden" "$features"; then
-            echo 'gridwork enables serde_json/preserve_order — kernel hashes now depend on insertion order' >&2
-            grep -F "$forbidden" "$features" >&2
+          # THREE features, not the one that has bitten. Each makes the kernel's
+          # projection digest a property of the build rather than of the data:
+          # `preserve_order` moves object key order, `arbitrary_precision`
+          # changes how a JSON number round-trips, `float_roundtrip` changes
+          # float parsing. `canonical_line` sorts keys and can do nothing at all
+          # about the other two, so this rung is the only thing standing between
+          # them and a hash that two honest builds disagree about.
+          checked=0
+          for feature in preserve_order arbitrary_precision float_roundtrip; do
+            forbidden="serde_json feature \"$feature\""
+            if grep -Fq "$forbidden" "$features"; then
+              echo "gridwork enables serde_json/$feature — kernel hashes now depend on the build" >&2
+              grep -F "$forbidden" "$features" >&2
+              exit 1
+            fi
+            # Its OWN positive control. One seed standing for three would leave
+            # two greps that have never been shown to match anything.
+            seeded="/tmp/seeded-gridwork-$feature.txt"
+            cp "$features" "$seeded"
+            printf '%s\n' "$forbidden" >> "$seeded"
+            if ! grep -Fq "$forbidden" "$seeded"; then
+              echo "the seeded $feature was not detected — that grep is decoration" >&2
+              exit 1
+            fi
+            checked=$((checked + 1))
+          done
+          # The count before the verdict. A loop over an empty list reaches the
+          # same success line as one that checked all three.
+          if [ "$checked" -ne 3 ]; then
+            echo "only $checked of 3 features were checked" >&2
             exit 1
           fi
-          cp "$features" "$seeded"
-          printf '%s\n' "$forbidden" >> "$seeded"
-          if ! grep -Fq "$forbidden" "$seeded"; then
-            echo 'the seeded preserve_order feature was not detected — the guard is decoration' >&2
-            exit 1
-          fi
-          echo 'gridwork excludes serde_json/preserve_order; the seeded positive control is detected'
+          echo 'gridwork excludes all three build-dependent serde_json features; each seeded control is detected'
       # P6(a): the console is a THIN CLIENT. PTY sessions and engine adapters
       # live server-side in their own host crate and the console consumes frames
       # as wire data, which is what makes attach-from-anywhere fall out instead
@@ -529,6 +548,66 @@ jobs:
               cargo test -p "$crate" --doc --locked --offline
             done
           '
+      # The two sorted-key guards in `gwk-kernel`'s checkpoint module CANNOT
+      # fail in a default build: with `serde_json::Map` backed by `BTreeMap` the
+      # uncanonicalized bytes already equal the canonical ones, so deleting the
+      # sort leaves them green. They only discriminate where `preserve_order` is
+      # unified in — which is THIS job, because `gwk-adapter-opencode` pulls it
+      # through agent-client-protocol. So run them here, against the map backing
+      # a joint build actually produces.
+      #
+      # The premise is PROVED, not inferred. Reading `cargo tree` would only show
+      # that the adapter's graph asks for the feature — one step removed from the
+      # claim that matters, which is that the binary these guards just ran in
+      # linked an insertion-ordered map. So seed the violation instead: reverse
+      # the comparator, require both guards to CATCH it here, on this runner,
+      # then restore and require them to pass. A lane that stopped being poisoned
+      # then fails loudly rather than going quietly green, which is the whole
+      # reason this step exists. Restoring through a trap, and with a `touch`,
+      # because copy-back preserves mtime and cargo would reuse the mutated
+      # build.
+      #
+      # A filter that matched nothing exits 0 too, so both guards are also
+      # checked by name in the run's own output rather than trusted to a
+      # zero-test success.
+      - name: the checkpoint digest holds under a preserve_order build
+        run: |
+          set -euo pipefail
+          eval "$(./tools/pty-toolchain.sh --env)"
+          guarded=crates/gwk-kernel/src/checkpoint.rs
+          original=/tmp/checkpoint-rs.original
+          cp "$guarded" "$original"
+          restore() { cp "$original" "$guarded"; touch "$guarded"; }
+          trap restore EXIT
+
+          sed -i 's/entries.sort_by(|(a, _), (b, _)| a.cmp(b));/entries.sort_by(|(a, _), (b, _)| b.cmp(a));/' "$guarded"
+          if ! grep -Fq 'entries.sort_by(|(a, _), (b, _)| b.cmp(a));' "$guarded"; then
+            echo 'the seeded comparator did not land — the sort was renamed and this control proves nothing' >&2
+            exit 1
+          fi
+          touch "$guarded"
+          if cargo test -p gwk-kernel -p gwk-adapter-opencode --lib --locked --offline checkpoint:: >/dev/null 2>&1; then
+            echo 'the guards accepted a REVERSED key comparator: this lane is not linking the insertion-ordered map, so both guards below are vacuous here and nothing is checking the digest' >&2
+            exit 1
+          fi
+          restore
+
+          out=$(cargo test -p gwk-kernel -p gwk-adapter-opencode --lib --locked --offline checkpoint:: 2>&1) || {
+            printf '%s\n' "$out" >&2
+            exit 1
+          }
+          printf '%s\n' "$out"
+          for guard in an_ingested_payload_is_hashed_by_sorted_keys_discriminating_only_under_preserve_order \
+                       a_message_payload_is_hashed_by_sorted_keys_discriminating_only_under_preserve_order; do
+            # A herestring, not `printf | grep -q`: grep exits on its first match
+            # and closes the pipe, printf takes SIGPIPE, and `pipefail` turns a
+            # guard that PASSED into a 141 the `!` reads as failure.
+            if ! grep -Fq "$guard ... ok" <<<"$out"; then
+              echo "$guard did not run here — the filter matched nothing and the step is decoration" >&2
+              exit 1
+            fi
+          done
+          echo 'the checkpoint digest is key-order independent under the poisoned backing; both guards ran, and both caught a seeded reversal'
       # The conformance corpus is only a gate if it can fail. The step above
       # already RAN it; these seeds show it says no to the three ways it could
       # be hollowed out — a frame that stopped matching the parser, a fixture
