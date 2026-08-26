@@ -392,6 +392,19 @@ pub async fn migrate(
     }
 
     if dry_run {
+        // The one destructive act the real run performs that leaves no DDL
+        // behind: it deletes every checkpoint, because every one of them
+        // describes the contract the run replaces. A rehearsal that named the
+        // steps and said nothing about that would be a rehearsal of the half
+        // that is recoverable from the repository.
+        let mut conn = pool
+            .acquire()
+            .await
+            .map_err(|e| Failure::new(KernelErrorCode::Storage, e.to_string()))?;
+        let (checkpoints_to_discard, _) = gwk_kernel::checkpoint::census(&mut conn)
+            .await
+            .map_err(refusal)?;
+
         // No R3 here, and its absence is the fix rather than an omission. The
         // grant matrix rung asserts a relation count that belongs to the
         // MIGRATED schema — `EXPECTED_RELATIONS`, 35 — and a dry run by
@@ -417,6 +430,9 @@ pub async fn migrate(
                 "backend_migrations": carried,
                 "backup_sha256": backup_sha256,
                 "public_revision": revision,
+                // Counted, not applied: this row count is what the real run
+                // would delete, and the rehearsal leaves every one of them.
+                "checkpoints_to_discard": checkpoints_to_discard,
                 // Named so nobody has to infer it from a missing field. A dry
                 // run resolves the chain and asserts the base; it does not
                 // rehearse, and it does not check the grant matrix — that rung
@@ -483,7 +499,7 @@ pub async fn migrate(
 /// live migration did, and a field that quietly stops being emitted takes its
 /// evidence with it.
 ///
-/// Fifteen keys, and two of them are disclaimers. The SPEC's criterion 8 names
+/// Sixteen keys, and two of them are disclaimers. The SPEC's criterion 8 names
 /// eight and criterion 2 names the watermark pair; the rest are here because the
 /// operator reading this afterwards needs them just as much — what the
 /// fingerprint said BEFORE the run, and what the run did NOT do.
@@ -533,6 +549,12 @@ fn migrated_receipt(
         // strings, as `Seq` is everywhere else; `null` on an empty log.
         "watermark_before": applied.watermark_before,
         "watermark_after": applied.watermark_after,
+        // Every checkpoint the database held, discarded inside the same
+        // transaction because each one describes the contract this run
+        // replaced. This receipt is the only place the number is recorded —
+        // the ledger has no column for it — so a run whose output was not
+        // captured cannot be asked afterwards how much evidence it dropped.
+        "checkpoints_discarded": applied.checkpoints_discarded,
         "elapsed_ms": applied.elapsed_ms,
     })
 }
@@ -578,6 +600,113 @@ fn digest_backup(path: &str) -> Result<String, Failure> {
             let _ = write!(acc, "{byte:02x}");
             acc
         }))
+}
+
+/// Drop every projection checkpoint this database holds.
+///
+/// The escape hatch for the two databases `migrate`'s own discard cannot reach,
+/// and it exists because both of them refuse to serve until somebody does this
+/// by hand:
+///
+/// * one stranded by a migration that ran under a binary from before the
+///   discard existed — its checkpoints describe a contract the database no
+///   longer carries, and `migrate` will not run again to clear them, because
+///   the database is already at this binary's contract;
+/// * one carrying a checkpoint written by a build whose free-form payload
+///   hashing was ordering-dependent, which the next start compares against a
+///   hash the fixed build takes differently.
+///
+/// Both look identical from the outside: `Verdict::Diverged` at the same
+/// sequence, and a kernel that will not start. Neither is a divergence.
+///
+/// The writer lock first, and never waited on. These rows are the running
+/// kernel's own recovery evidence and it is still writing more of them; a
+/// held lock means the kernel is up, and the answer to that is to stop it, not
+/// to queue behind it. `--dry-run` counts and deletes nothing — an operator
+/// reaching for this verb is already having a bad day, and the count is what
+/// tells them whether they are about to delete what they think they are.
+pub async fn discard_checkpoints(dry_run: bool, pretty: bool) -> Result<(), Failure> {
+    let revision = revision()?;
+    let config = AdminConfig::from_env().map_err(configuration)?;
+    // `kernel_failure` rather than a blanket `Fenced`: exit 3 tells the operator
+    // "another kernel holds the lock — go stop it", and a DSN typo or a
+    // postgres that is down would send them hunting a kernel that is not
+    // running, during the incident that brought them here. The lock-is-held
+    // case still maps to `Fenced`.
+    let lock = WriterLock::acquire(config.admin_database_url())
+        .await
+        .map_err(kernel_failure)?;
+    let pool = gwk_kernel::connect_pool(config.admin_database_url(), 2)
+        .await
+        .map_err(configuration)?;
+    // Recorded, so the receipt can say WHICH database lost its evidence. The
+    // verb takes no target and deletes from whatever the environment names,
+    // and an ambient variable retargeting a CLI is a failure this fleet has
+    // already had. `is_database_name` gates it, so a DSN this cannot parse
+    // emits nothing rather than a fragment of itself.
+    let database = database_name(config.admin_database_url());
+
+    // One transaction for both statements. The writer lock excludes a kernel
+    // but not a second admin session, so a count taken on one connection and a
+    // delete issued on another can describe two different tables — and the
+    // count is the only record of what the delete cost. The rehearsal simply
+    // never commits.
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| Failure::new(KernelErrorCode::Storage, e.to_string()))?;
+
+    // Read BEFORE the delete: afterwards there is no table state left to
+    // describe what was there, and the highest sequence is what says which
+    // restart's comparison this cost.
+    let (present, through_seq_max) = gwk_kernel::checkpoint::census(&mut tx)
+        .await
+        .map_err(refusal)?;
+
+    if dry_run {
+        emit(
+            &json!({
+                "type": "checkpoints_discard_planned",
+                "checkpoints_to_discard": present,
+                "through_seq_max_before": through_seq_max,
+                "database": database,
+                "public_revision": revision,
+            }),
+            pretty,
+        );
+        return Ok(());
+    }
+
+    // The lock is held on its own connection and a probe notices it dying only
+    // on the next interval. In that window the server has already released the
+    // advisory lock, so a kernel can start and begin appending checkpoints
+    // beside us — which is the one thing this lock exists to prevent. Asked
+    // immediately before the delete, so the answer is as fresh as it can be.
+    if lock.is_cancelled() {
+        return Err(Failure::new(
+            KernelErrorCode::Fenced,
+            "write authority was lost between taking the lock and the discard".to_owned(),
+        ));
+    }
+
+    let checkpoints_discarded = gwk_kernel::checkpoint::discard_all(&mut tx)
+        .await
+        .map_err(refusal)?;
+    tx.commit()
+        .await
+        .map_err(|e| Failure::new(KernelErrorCode::Storage, e.to_string()))?;
+
+    emit(
+        &json!({
+            "type": "checkpoints_discarded",
+            "checkpoints_discarded": checkpoints_discarded,
+            "through_seq_max_before": through_seq_max,
+            "database": database,
+            "public_revision": revision,
+        }),
+        pretty,
+    );
+    Ok(())
 }
 
 /// Read the machine half of a driving-window receipt.
@@ -848,6 +977,22 @@ fn is_database_name(database: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
+/// The database a DSN names, and nothing else in it.
+///
+/// For receipts written by a verb that takes no target: the operator afterwards
+/// needs to know WHICH database lost its evidence, and an ambient variable
+/// retargeting a CLI is a mistake this fleet has already made. The name is the
+/// last `/`-separated segment with any query string dropped — credentials in a
+/// PostgreSQL DSN sit before the host, so nothing before that separator can
+/// reach the caller. [`is_database_name`] is the second guard rather than the
+/// first: a DSN this cannot parse yields `None`, so the receipt says nothing
+/// rather than a fragment of the URL.
+fn database_name(url: &SecretString) -> Option<String> {
+    let (_, tail) = url.expose_secret().rsplit_once('/')?;
+    let name = tail.split('?').next().unwrap_or(tail);
+    is_database_name(name).then(|| name.to_owned())
+}
+
 fn beside(url: &SecretString, database: &str) -> Result<SecretString, Failure> {
     if !is_database_name(database) {
         return Err(Failure::usage(format!(
@@ -944,7 +1089,7 @@ mod tests {
     /// a field that can stop being emitted between one release and the next,
     /// and this receipt is the only artifact that will ever say what a live
     /// migration did to a database nobody can re-run the migration against.
-    const RECEIPT_KEYS: [&str; 15] = [
+    const RECEIPT_KEYS: [&str; 16] = [
         "type",
         "scratch_database_requested",
         "rehearsal",
@@ -959,6 +1104,7 @@ mod tests {
         "events_after",
         "watermark_before",
         "watermark_after",
+        "checkpoints_discarded",
         "elapsed_ms",
     ];
 
@@ -986,6 +1132,7 @@ mod tests {
             events_after: 42,
             watermark_before: Some(gwk_domain::ids::Seq::new(41)),
             watermark_after: Some(gwk_domain::ids::Seq::new(42)),
+            checkpoints_discarded: 7,
             elapsed_ms: 12,
         };
         let receipt = migrated_receipt(
@@ -1028,6 +1175,10 @@ mod tests {
         assert_eq!(object["backup_sha256"], "c".repeat(64));
         assert_eq!(object["events_before"], 41);
         assert_eq!(object["events_after"], 42);
+        // 7, which is no other number in this fixture. A discard count emitted
+        // from `events_before` or from either watermark would keep the key,
+        // keep the count, and be wrong — and only a distinct value says so.
+        assert_eq!(object["checkpoints_discarded"], 7);
         assert_eq!(object["elapsed_ms"], 12);
         assert_eq!(object["steps"][0], "aaaaaaaa-bbbbbbbb.sql");
         assert_eq!(object["backend_migrations"][0], "0005_pty_delivery");

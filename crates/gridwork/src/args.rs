@@ -124,6 +124,11 @@ pub enum Verb {
     AdminRebuildProjections {
         scratch: String,
     },
+    /// Drop every projection checkpoint, so the next start re-anchors instead
+    /// of comparing against evidence written under another contract.
+    AdminDiscardCheckpoints {
+        dry_run: bool,
+    },
     AdminBlob {
         what: crate::admin::Retention,
     },
@@ -273,6 +278,7 @@ gw — the GridWork kernel's command line
   gw admin migrate --scratch-database <name> (--backup <path> | --no-backup)
                    [--from <sha256>] [--dry-run]
   gw admin rebuild-projections --scratch-database <name>
+  gw admin discard-checkpoints [--dry-run]
   gw admin receipt --from <rfc3339> [--to <rfc3339>]
   gw admin blob pin <address> <evidence-id>
   gw admin blob unpin <address> <evidence-id>
@@ -628,6 +634,12 @@ fn admin(rest: &mut Rest) -> Result<Verb, Failure> {
         "migrate" => admin_migrate(rest),
         "rebuild-projections" => Ok(Verb::AdminRebuildProjections {
             scratch: rest.required("--scratch-database")?,
+        }),
+        // No `--scratch-database` and nothing to name: it deletes rows from the
+        // database the admin credential already points at, and the only choice
+        // it offers is whether to do it.
+        "discard-checkpoints" => Ok(Verb::AdminDiscardCheckpoints {
+            dry_run: rest.switch("--dry-run"),
         }),
         // Here and not on the client socket because the figures are SQL
         // aggregations over the log, and the wire grammar has no reason to
