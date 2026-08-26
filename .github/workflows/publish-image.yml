@@ -277,12 +277,54 @@ jobs:
 
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
+      # CORE-73: a workflow_dispatch re-run of an already-published sha used to go RED at
+      # push time — the rebuild is not byte-reproducible, so the same :sha tag arrives
+      # with a new manifest and Artifact Registry's tag immutability refuses it. A red
+      # that reads as a regression while saying only "this was already published". The
+      # registry's existing digest IS the truth for that sha (built, signed, scanned at
+      # first publish), so a re-run re-emits it and skips the build instead of failing.
+      #
+      # Three outcomes, fail-closed: the tag resolves -> published=true plus its digest;
+      # the registry says the tag/repo does not exist -> published=false, build proceeds;
+      # anything else (auth, network, parse) -> red. "Cannot tell" must never build —
+      # guessing "not published" here would recreate the immutability red this exists to
+      # remove, one step later and with less context. `imagetools inspect` reads through
+      # the docker login above and returns the same index digest buildx emitted when it
+      # pushed, which is what every deploy and rollback consumes.
+      - name: already published at this sha?
+        id: preflight
+        env:
+          IMAGE: ${{ vars.GCP_REGISTRY }}/${{ matrix.service }}
+          TAG: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if out="$(docker buildx imagetools inspect "${IMAGE}:${TAG}" --format '{{json .Manifest}}' 2>preflight-err.txt)"; then
+            digest="$(printf '%s' "$out" | jq -r '.digest // empty')"
+            case "$digest" in
+              sha256:?*) ;;
+              *) echo "::error::registry answered for ${IMAGE}:${TAG} but returned no parseable digest"; exit 1 ;;
+            esac
+            printf 'published=true\ndigest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+            echo "::notice title=already published (CORE-73)::${IMAGE}:${TAG}@${digest} — build skipped, digest re-emitted"
+          elif grep -qiE 'not found|NAME_UNKNOWN|MANIFEST_UNKNOWN' preflight-err.txt; then
+            printf 'published=false\n' >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::cannot determine whether ${IMAGE}:${TAG} is already published — refusing to guess"
+            cat preflight-err.txt >&2
+            exit 1
+          fi
+
       # No `latest`. Doc 07 §4: human-readable tags may carry the full SHA, but nothing
       # in a deploy or a rollback ever resolves a tag — they consume the digest this step
       # emits. A floating tag in a rollback path is how you roll back to the thing you
       # were trying to escape.
+      #
+      # Skipped when preflight found the tag (CORE-73): every step below that is keyed on
+      # `steps.build.outcome == 'success'` then skips with it — the sign, SBOM, scan, and
+      # evidence of record all belong to the run that actually pushed the digest.
       - name: build and push by digest
         id: build
+        if: steps.preflight.outputs.published != 'true'
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: ${{ steps.svc.outputs.build_context }}
@@ -328,6 +370,7 @@ jobs:
           cosign-release: v3.1.3
 
       - name: sign the digest (keyless)
+        if: steps.build.outcome == 'success'
         env:
           IMAGE: ${{ vars.GCP_REGISTRY }}/${{ matrix.service }}
           DIGEST: ${{ steps.build.outputs.digest }}
@@ -354,11 +397,14 @@ jobs:
           image-ref: ${{ vars.GCP_REGISTRY }}/${{ matrix.service }}@${{ steps.build.outputs.digest }}
           format: sarif
           output: trivy-${{ matrix.service }}.sarif
-          # Report, do not gate — a scan that blocks every publish on a base-image CVE
-          # with no fix available gets disabled within a week, and a disabled scan is
-          # worth less than a recorded one. Gating belongs at the deploy picker, against
-          # a policy that names which severities actually stop a release.
-          exit-code: "0"
+          # Report by default, gate by repo policy (CORE-74) — a template that blocks
+          # every publish on a base-image CVE with no fix available gets disabled within
+          # a week, and a disabled scan is worth less than a recorded one. So the dial is
+          # a repository variable, never a workflow edit: unset resolves to '0' (record
+          # in SARIF, never block); a repo that wants CRITICAL,HIGH findings to fail the
+          # publish sets TRIVY_EXIT_CODE=1. Deliberately absent from the assert loop —
+          # unset is the documented default, not a misconfiguration.
+          exit-code: ${{ vars.TRIVY_EXIT_CODE || '0' }}
           severity: CRITICAL,HIGH
 
       # doc 07 §11: the evidence IS the deliverable. A deploy that cannot show its
@@ -444,9 +490,15 @@ jobs:
       - name: record digest
         env:
           SERVICE: ${{ matrix.service }}
-          DIGEST: ${{ steps.build.outputs.digest }}
+          # Whichever path ran: the build's digest, or the one preflight read back from
+          # the registry (CORE-73). Exactly one is ever non-empty.
+          DIGEST: ${{ steps.build.outputs.digest || steps.preflight.outputs.digest }}
         run: |
           set -euo pipefail
+          if [ -z "$DIGEST" ]; then
+            echo "::error::no digest from the build or the preflight — nothing to record"
+            exit 1
+          fi
           mkdir -p digests
           printf '%s\n' "$DIGEST" > "digests/$SERVICE"
 
