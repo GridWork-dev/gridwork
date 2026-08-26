@@ -705,7 +705,18 @@ jobs:
           # single-quoted expression, which ends its own quoting at the first single quote
           # in the value, and the remainder is command source. Through `env:` each value is
           # one argv element, quoted by the shell, and jq is the only thing that parses it.
-          jq -n \
+          #
+          # Captured, then written — the pattern rollback.yml's evidence step wrote down
+          # (T28-AUDIT-3). A direct `jq -n … > production-evidence.json` opens the
+          # redirect before jq runs, so a jq refusal — a malformed $SERVICES from an
+          # adopter's plan is the one failable input — left a ZERO-BYTE file, and the
+          # upload below is guarded by hashFiles over this file OR rollback-revisions.txt,
+          # which this step's own `if:` guarantees exists: the guard was satisfied
+          # regardless and the empty file published as the deploy's evidence of record.
+          # Under `set -euo pipefail` a failed jq aborts the assignment before any file
+          # exists, and the upload carries the revisions file alone — a red step with
+          # honest evidence instead of a green artifact with none.
+          evidence="$(jq -n \
             --arg workflow_commit "$COMMIT" \
             --arg run_id "$RUN_ID" \
             --arg staging_run_id "$STAGING_RUN_ID" \
@@ -719,7 +730,8 @@ jobs:
               staging_run_id:$staging_run_id, canary_tag:$tag,
               services:$services, migration:$migration, rollback_revisions:$rollback,
               rollout:$rollout, restore:$restore,
-              traffic_progression:[0,5,25,100]}' > production-evidence.json
+              traffic_progression:[0,5,25,100]}')"
+          printf '%s\n' "$evidence" > production-evidence.json
 
       # `if: always()` with `if-no-files-found: error` was a guaranteed second red step on
       # any run that failed in input validation, plan, or the provenance gate: neither
