@@ -54,34 +54,46 @@ use crate::inherited::OrchestratorCheckpoint;
 /// — rather than failing inside `Deserialize` as a generic validation error
 /// indistinguishable from malformed JSON. That distinction is the whole reason
 /// to name a major before serving it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ProtocolVersion {
-    V1,
+// One list yields the enum, `ALL`, and both number maps. `ALL` as a second
+// array literal could fall behind the enum, and `ALL.len()` on a hand-typed
+// `[Self; N]` is `N` by type — the count assertion in the tests compiled to
+// `N == N` and could not notice a major added everywhere but here. Derived
+// from the declaration, the count moves with the enum and the assertion is a
+// real growth guard.
+macro_rules! protocol_versions {
+    ($($(#[$vdoc:meta])* $variant:ident = $number:literal),* $(,)?) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub enum ProtocolVersion {
+            $($(#[$vdoc])* $variant,)*
+        }
+
+        impl ProtocolVersion {
+            /// Every major the grammar knows, ascending. Not every major served.
+            pub const ALL: [Self; [$($number),*].len()] = [$(Self::$variant),*];
+
+            pub const fn as_u32(self) -> u32 {
+                match self {
+                    $(Self::$variant => $number,)*
+                }
+            }
+
+            pub const fn from_u32(value: u32) -> Option<Self> {
+                match value {
+                    $($number => Some(Self::$variant),)*
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+protocol_versions! {
+    V1 = 1,
     /// The Context major. At V2 the Context commands, queries, events, and
     /// handshake semantics in `gwk_context::wire` are MANDATORY — there is no
     /// optional V1 Context mode and no capability name that enables one.
     /// Nothing serves this yet.
-    V2,
-}
-
-impl ProtocolVersion {
-    /// Every major the grammar knows, ascending. Not every major served.
-    pub const ALL: [Self; 2] = [Self::V1, Self::V2];
-
-    pub const fn as_u32(self) -> u32 {
-        match self {
-            Self::V1 => 1,
-            Self::V2 => 2,
-        }
-    }
-
-    pub const fn from_u32(value: u32) -> Option<Self> {
-        match value {
-            1 => Some(Self::V1),
-            2 => Some(Self::V2),
-            _ => None,
-        }
-    }
+    V2 = 2,
 }
 
 impl std::fmt::Display for ProtocolVersion {
@@ -1357,6 +1369,9 @@ mod tests {
     fn protocol_major_is_exact_and_unknown_majors_are_refused() {
         // The count first: every arm below is a lookup, and a lookup table with
         // a missing entry answers `None` exactly like an unknown major does.
+        // `ALL` is macro-derived from the declaration, so a named third major
+        // moves the left side and this line is what reds — it is no longer the
+        // `[Self; 2].len() == 2` tautology it used to be.
         assert_eq!(ProtocolVersion::ALL.len(), 2);
         for version in ProtocolVersion::ALL {
             assert_eq!(

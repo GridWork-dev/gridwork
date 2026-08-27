@@ -445,7 +445,11 @@ pub async fn driving_figures(pool: &PgPool, window: &ReceiptWindow) -> Result<Dr
 ///
 /// The privilege list grants exactly what the daemon does: read everything,
 /// append history, and update the projections it rebuilds. Nothing in the
-/// CONTRACT schema is deletable or truncatable, so the log never shrinks.
+/// CONTRACT schema is truncatable, and exactly one relation in it is deletable
+/// — `workspace_node`, whose paragraph below owns the reason — so the log
+/// never shrinks. (This sentence used to claim nothing was deletable, an
+/// absolute its own sixth paragraph contradicted; the schema was right and
+/// the summary was wrong — carryover row 11, corrected 2026-08-27.)
 /// `event`, `receipt`, `ingested_record`, and `cost_entry` are append-only and
 /// lose UPDATE — the last two are projections the kernel DOES rebuild, but only
 /// ever by inserting, so granting them UPDATE would widen the role for a write

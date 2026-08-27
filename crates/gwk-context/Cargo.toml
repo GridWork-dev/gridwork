@@ -38,6 +38,11 @@ yaml_serde.workspace = true
 # yet, and `deny_unknown_fields` is worth nothing unproven.
 serde_json.workspace = true
 
+# The dependency seam guard in tests/public_seam.rs parses the workspace
+# manifest as TOML rather than matching spellings — a table-form dependency or
+# a differently-quoted path walked past the line-based scan (carryover row 6).
+toml.workspace = true
+
 # E2's four immutable truth records are public contract roots. Exporting their
 # data shapes does not activate the V2 protocol; E3 owns that grammar.
 

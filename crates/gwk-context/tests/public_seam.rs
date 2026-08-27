@@ -30,46 +30,28 @@ fn workspace_root() -> &'static Path {
 // Guard 1 — dependency sources
 // ============================================================
 
-/// One dependency declaration, reduced to the two facts that matter.
-#[derive(Debug, PartialEq, Eq)]
-struct Declared {
-    name: String,
-    line: String,
-}
-
-/// Pull `[workspace.dependencies]` out of a workspace manifest.
+/// Pull `[workspace.dependencies]` out of a workspace manifest — PARSED, not
+/// line-matched.
 ///
-/// Comment lines are dropped, which matters here more than it usually would:
-/// this workspace documents its pins in long comment blocks, and several of
-/// them quote the very strings this guard rejects while explaining why they are
-/// not used. A guard that read comments would refuse the explanation of why it
-/// exists.
-fn declared_dependencies(manifest: &str) -> Vec<Declared> {
-    let mut out = Vec::new();
-    let mut inside = false;
-    for raw in manifest.lines() {
-        let line = raw.trim();
-        if line.starts_with('[') {
-            inside = line == "[workspace.dependencies]";
-            continue;
-        }
-        if !inside || line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let Some((name, rest)) = line.split_once('=') else {
-            continue;
-        };
-        let name = name.trim();
-        // `foo.workspace = true` style keys are not declarations here.
-        if name.is_empty() || name.contains('.') {
-            continue;
-        }
-        out.push(Declared {
-            name: name.to_owned(),
-            line: rest.trim().to_owned(),
-        });
-    }
-    out
+/// The predecessor scanned lines and matched spellings, and ordinary TOML
+/// walked past it twice over (carryover row 6): a table-form dependency
+/// (`[workspace.dependencies.sneaky]`) flipped its `inside` flag off at the
+/// sub-table header and was never seen at all, and its path arm knew exactly
+/// one spelling (`path = "…"`), so `path='…'`, `path="…"` without spaces, and
+/// every other legal quoting was invisible. The parser also drops comments for
+/// free, which matters here: this workspace documents its pins in long comment
+/// blocks that quote the very strings this guard rejects.
+fn declared_dependencies(manifest: &str) -> Result<toml::Table, String> {
+    let parsed: toml::Table = manifest
+        .parse()
+        .map_err(|e| format!("workspace manifest is not TOML: {e}"))?;
+    let deps = parsed
+        .get("workspace")
+        .and_then(|workspace| workspace.get("dependencies"))
+        .and_then(|dependencies| dependencies.as_table())
+        .cloned()
+        .unwrap_or_default();
+    Ok(deps)
 }
 
 /// Refuse a dependency the public root cannot vouch for.
@@ -84,28 +66,27 @@ fn declared_dependencies(manifest: &str) -> Vec<Declared> {
 /// Returns the number of declarations inspected, so the caller can tell a clean
 /// manifest from a manifest this function failed to read.
 fn inspect_dependency_sources(manifest: &str) -> Result<usize, String> {
-    let declared = declared_dependencies(manifest);
+    let declared = declared_dependencies(manifest)?;
     if declared.is_empty() {
         return Err(
             "inspected 0 workspace dependency declarations — the guard is broken, not the manifest"
                 .into(),
         );
     }
-    for dep in &declared {
-        if dep.line.contains("git =") || dep.line.contains("git=") {
-            return Err(format!("{} declares a git source: {}", dep.name, dep.line));
+    for (name, value) in &declared {
+        // A plain string (`serde = "1"`) is a registry version; only the
+        // table form can carry a source.
+        let Some(table) = value.as_table() else {
+            continue;
+        };
+        if let Some(git) = table.get("git") {
+            return Err(format!("{name} declares a git source: {git}"));
         }
-        if let Some(rest) = dep.line.split_once("path =").map(|(_, r)| r) {
-            let path = rest
-                .trim()
-                .trim_start_matches('"')
-                .split('"')
-                .next()
-                .unwrap_or_default();
+        if let Some(path) = table.get("path") {
+            let path = path.as_str().unwrap_or_default();
             if !path.starts_with("crates/") {
                 return Err(format!(
-                    "{} declares a path source outside the public root: {path}",
-                    dep.name
+                    "{name} declares a path source outside the public root: {path}"
                 ));
             }
         }
@@ -166,8 +147,9 @@ fn every_dependency_this_crate_takes_comes_from_the_public_root() {
     // so a dependency added directly to this crate with its own git source
     // cannot slip past a guard that only reads the workspace table.
     let declared: BTreeSet<String> = declared_dependencies(&workspace)
+        .expect("workspace manifest parses")
         .into_iter()
-        .map(|d| d.name)
+        .map(|(name, _)| name)
         .collect();
     for name in &names {
         assert!(
@@ -175,6 +157,47 @@ fn every_dependency_this_crate_takes_comes_from_the_public_root() {
             "{name} is not declared in the workspace table; its source is unchecked"
         );
     }
+}
+
+#[test]
+fn the_dependency_guard_refuses_a_table_form_external_path() {
+    // Carryover row 6's exact mutation: the spelling that walked past the
+    // line-based scan entirely — the sub-table header flipped its `inside`
+    // flag off, so this dependency was never inspected at all.
+    let seeded = "[workspace.dependencies]\n\
+                  serde = \"1\"\n\n\
+                  [workspace.dependencies.local]\n\
+                  path = \"../../elsewhere/local\"\n";
+    let error =
+        inspect_dependency_sources(seeded).expect_err("a table-form outside path must be refused");
+    assert!(error.contains("outside the public root"), "{error}");
+    assert!(error.contains("local"), "{error}");
+
+    // And the quoting variants the old path arm could not see.
+    let single_quoted = "[workspace.dependencies]\n\
+                         serde = \"1\"\n\
+                         local = { path = '../../elsewhere/local' }\n";
+    let error = inspect_dependency_sources(single_quoted)
+        .expect_err("a single-quoted outside path must be refused");
+    assert!(error.contains("outside the public root"), "{error}");
+
+    let no_spaces = "[workspace.dependencies]\n\
+                     serde = \"1\"\n\
+                     local = { path=\"../../elsewhere/local\" }\n";
+    let error = inspect_dependency_sources(no_spaces)
+        .expect_err("an unspaced outside path must be refused");
+    assert!(error.contains("outside the public root"), "{error}");
+
+    // The in-repo shape stays legal, spelled both ways.
+    let legal = "[workspace.dependencies]\n\
+                 serde = \"1\"\n\
+                 gwk-domain = { path = \"crates/gwk-domain\", version = \"0.0.3\" }\n\n\
+                 [workspace.dependencies.gwk-theme]\n\
+                 path = \"crates/gwk-theme\"\n";
+    assert_eq!(
+        inspect_dependency_sources(legal).expect("legal manifest"),
+        3
+    );
 }
 
 #[test]
