@@ -167,6 +167,10 @@ pub enum SkillError {
     /// A top-level key this scan read as text that the parsed document does not
     /// carry under that name.
     KeyNotInDocument(String),
+    /// A plain key whose text a YAML 1.1 reader resolves as a non-string
+    /// (F-8B-YAML, ruled (a) 2026-08-27): under such a reader it collapses
+    /// onto its resolved twin and the later value silently wins.
+    Yaml11AmbiguousKey(String),
     /// The YAML did not decode into the expected shape.
     Malformed(String),
     /// `name` is empty, oversized, or outside `[a-z0-9-]`.
@@ -209,6 +213,11 @@ impl std::fmt::Display for SkillError {
             Self::KeyNotInDocument(key) => write!(
                 f,
                 "skill frontmatter key `{key}` is absent from the parsed document"
+            ),
+            Self::Yaml11AmbiguousKey(key) => write!(
+                f,
+                "skill frontmatter key `{key}` is a spelling a YAML 1.1 reader \
+                 resolves as a non-string; quote or respell it"
             ),
             Self::Malformed(why) => write!(f, "skill frontmatter did not decode: {why}"),
             Self::InvalidName => {
@@ -551,6 +560,25 @@ fn scan_subset(front: &str) -> Result<Vec<String>, SkillError> {
             return Err(SkillError::UnsupportedYaml("document marker or directive"));
         }
         let facts = scan_line(trimmed)?;
+        // F-8B-YAML: a plain key whose text a 1.1 reader resolves as a
+        // non-string is refused at ANY level, before the parser sees it. The
+        // key must sit at the line's head for its text to be extractable here,
+        // which covers every ordinary `key: value` spelling including
+        // `metadata:`'s sub-keys; a QUOTED spelling does not satisfy
+        // `is_plain_key` and stays legal, so nothing becomes inexpressible.
+        // Two named residuals share one property — the ban sees only block
+        // keys at their line's head: a key on its sequence-marker line
+        // (`- yes: x`) and a flow-mapping key (`{yes: 1}`) are not inspected.
+        // Both spell the same document down the page in the form this DOES
+        // inspect, and neither appears in any portable manifest this repo has
+        // seen.
+        if let Some(end) = facts.key_end
+            && let Some(key) = trimmed.get(..end)
+            && is_plain_key(key)
+            && yaml11_ambiguous_key(key)
+        {
+            return Err(SkillError::Yaml11AmbiguousKey(key.to_owned()));
+        }
         if facts.block_scalar {
             // The skip floor is the line's indentation, and that is the column
             // of the node owning the scalar only when nothing on this line
@@ -682,6 +710,100 @@ fn is_plain_key(key: &str) -> bool {
         && key
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+// ============================================================
+// F-8B-YAML — the 1.1-ambiguous plain-key ban (ruled (a), 2026-08-27)
+// ============================================================
+//
+// The lookup-miss refusal in `SkillManifest::parse` covers one direction of
+// cross-reader key drift: a spelling the PINNED parser resolves as a
+// non-string never survives the lookup. This covers the other direction — a
+// spelling that is a string HERE and a non-string to a YAML 1.1 reader, under
+// which `yes: b` collapses onto a `y: a` twin and the later value silently
+// wins. The duplicate check compares text, so that loss is invisible to it.
+//
+// The families are transliterated from the YAML 1.1 type-repository
+// resolution regexes (yaml.org/type/{bool,int,float,timestamp}) — NEVER from
+// the PyYAML oracle, which shares libyaml's scanner but resolves 1.1 and is
+// wrong about this exact question in both directions (carryover row 12) —
+// then narrowed twice, each cut measured rather than assumed:
+//
+// - to spellings `is_plain_key` admits: sexagesimals (`1:30`) carry a `:` and
+//   are refused as `MalformedTopLevelKey` before any resolution question
+//   arises, so a sexagesimal arm here would be unreachable;
+// - minus spellings the pinned parser itself resolves, which already refuse
+//   as `KeyNotInDocument`: measured against the pin (2026-08-27), that
+//   excludes `true/false` casings, plain numerics, AND — beyond strict 1.2
+//   core — `0b101` and `-0xff`. The tests pin those measurements, so a
+//   narrower future pin surfaces as a red test, not a silent gap.
+//
+// What remains reachable: the 1.1 boolean case family, underscored numerics,
+// and date-shaped tokens.
+
+/// The y/yes/n/no/on/off casings of the 1.1 bool regex; the true/false
+/// casings are omitted because the pinned parser resolves them itself.
+fn yaml11_bool_not_pinned(key: &str) -> bool {
+    matches!(
+        key,
+        "y" | "Y"
+            | "yes"
+            | "Yes"
+            | "YES"
+            | "n"
+            | "N"
+            | "no"
+            | "No"
+            | "NO"
+            | "on"
+            | "On"
+            | "ON"
+            | "off"
+            | "Off"
+            | "OFF"
+    )
+}
+
+/// A 1.1 int or float spelled with `_` separators, which the pinned parser
+/// keeps as a string. The 1.1 regexes require the body to START with a digit
+/// (`_1` is a string in both readers), and the 1.1 float exponent requires a
+/// sign, which `is_plain_key`'s charset cannot carry — so no exponent arm.
+fn yaml11_underscored_number(key: &str) -> bool {
+    let body = key.strip_prefix('-').unwrap_or(key);
+    if !body.contains('_') || !body.starts_with(|c: char| c.is_ascii_digit()) {
+        return false;
+    }
+    let compact: String = body.chars().filter(|&c| c != '_').collect();
+    let all_digits = |s: &str| s.chars().all(|c| c.is_ascii_digit());
+    let is_int = all_digits(&compact)
+        || compact
+            .strip_prefix("0x")
+            .is_some_and(|hex| !hex.is_empty() && hex.chars().all(|c| c.is_ascii_hexdigit()))
+        || compact
+            .strip_prefix("0b")
+            .is_some_and(|bin| !bin.is_empty() && bin.chars().all(|c| matches!(c, '0' | '1')));
+    let is_float = compact
+        .split_once('.')
+        .is_some_and(|(int, frac)| !int.is_empty() && all_digits(int) && all_digits(frac));
+    is_int || is_float
+}
+
+/// The 1.1 timestamp regex's `ymd` arm. The full date-time arms carry `:` and
+/// spaces, which `is_plain_key` already refuses.
+fn yaml11_date(key: &str) -> bool {
+    let bytes = key.as_bytes();
+    bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && [0usize, 1, 2, 3, 5, 6, 8, 9]
+            .iter()
+            .all(|&i| bytes[i].is_ascii_digit())
+}
+
+/// True when a 1.1 reader resolves this plain key as a non-string while the
+/// pinned parser keeps it — the collapse hazard the ban exists for.
+fn yaml11_ambiguous_key(key: &str) -> bool {
+    yaml11_bool_not_pinned(key) || yaml11_underscored_number(key) || yaml11_date(key)
 }
 
 /// Walk one frontmatter line, refusing every node indicator at a node start.
@@ -1159,8 +1281,13 @@ impl SkillManifest {
             // This scan reads a key as text; the parser resolves it as a YAML
             // scalar, and the two disagree on every spelling whose text is not
             // a string. `12:` is the integer 12 to the parser, `null:` is null,
-            // `2026-08-19:` is a date — so a lookup for the string `"12"` finds
-            // nothing and the field was recorded with an EMPTY value. That is
+            // `1e3:` is a float — so a lookup for the string `"12"` finds
+            // nothing and the field was recorded with an EMPTY value. (An
+            // earlier version of this comment claimed `2026-08-19:` is a date
+            // to the parser; measured 2026-08-27, it is not — the pin keeps it
+            // as a string, which is exactly why dates are in the
+            // `yaml11_ambiguous_key` ban instead of relying on this miss.)
+            // That is
             // the silently dropped field this module's header rules out, one
             // class over from the quoted key `is_plain_key` already refuses for
             // exactly the same reason.
@@ -1217,6 +1344,75 @@ mod tests {
 
     fn manifest(front: &str) -> Result<SkillManifest, SkillError> {
         SkillManifest::parse(&format!("---\n{front}\n---\nBody.\n"))
+    }
+
+    #[test]
+    fn yaml11_ambiguous_plain_keys_are_refused_per_family() {
+        // F-8B-YAML ruled (a): one arm per derived family, so deleting a
+        // family's predicate reds its own named case rather than a shared one.
+        // Family 1 — the 1.1 boolean case family.
+        assert_eq!(
+            manifest("yes: a"),
+            Err(SkillError::Yaml11AmbiguousKey("yes".into()))
+        );
+        assert_eq!(
+            manifest("ON: a"),
+            Err(SkillError::Yaml11AmbiguousKey("ON".into()))
+        );
+        // Family 2 — underscored numerics (int and float arms).
+        assert_eq!(
+            manifest("1_000: a"),
+            Err(SkillError::Yaml11AmbiguousKey("1_000".into()))
+        );
+        assert_eq!(
+            manifest("1_0.5: a"),
+            Err(SkillError::Yaml11AmbiguousKey("1_0.5".into()))
+        );
+        // Family 3 — date-shaped tokens.
+        assert_eq!(
+            manifest("2026-08-19: a"),
+            Err(SkillError::Yaml11AmbiguousKey("2026-08-19".into()))
+        );
+
+        // The ban reaches sub-level plain keys too — `metadata:`'s mapping is
+        // where a 1.1 reader collapses siblings just as readily.
+        assert_eq!(
+            manifest("metadata:\n  on: a"),
+            Err(SkillError::Yaml11AmbiguousKey("on".into()))
+        );
+        // A QUOTED sub-key spelling of the same word stays legal, so the word
+        // itself is still expressible where quoting is available.
+        let quoted = manifest("name: review-diff\ndescription: d.\nmetadata:\n  \"on\": a")
+            .expect("quoted sub-key is legal");
+        assert_eq!(quoted.metadata.get("on").map(String::as_str), Some("a"));
+
+        // Near-misses stay legal: not 1.1-resolvable, no refusal.
+        for near_miss in ["yesterday", "v1_2", "_1", "2026-08-1"] {
+            manifest(&format!(
+                "name: review-diff\ndescription: d.\n{near_miss}: a"
+            ))
+            .unwrap_or_else(|e| panic!("{near_miss} must stay legal: {e}"));
+        }
+    }
+
+    #[test]
+    fn the_ban_list_is_cut_where_other_refusals_already_hold() {
+        // Each excluded family is excluded because a DIFFERENT arm refuses it,
+        // and this test names that arm — if either measurement moves (a
+        // narrower pin, a widened key charset), the spelling would start
+        // parsing clean and the assert here is what notices.
+        //
+        // Sexagesimals never reach resolution: `:` fails `is_plain_key`.
+        assert_eq!(manifest("1:30: a"), Err(SkillError::MalformedTopLevelKey));
+        // The pinned parser resolves these itself (measured 2026-08-27), so
+        // the lookup-miss refusal owns them — broader than strict 1.2 core.
+        for key in ["0b101", "-0xff", "true"] {
+            assert_eq!(
+                manifest(&format!("name: review-diff\ndescription: d.\n{key}: a")),
+                Err(SkillError::KeyNotInDocument(key.to_owned())),
+                "{key}"
+            );
+        }
     }
 
     #[test]
@@ -2053,31 +2249,24 @@ mod tests {
                 "{key}"
             );
         }
-        // Spellings this pin does carry as strings, so the refusal tracks the
-        // parser's resolution rather than a guess at what looks like a scalar.
+        // A spelling the pin carries as a string survives the lookup, so this
+        // refusal tracks the parser's resolution rather than a guess at what
+        // looks like a scalar.
         //
-        // The list is also the honest limit of the guard. `yes`, `on` and
-        // `2026-08-19` are strings to the 1.2 core schema this crate resolves
-        // and a boolean, a boolean and a date to a YAML 1.1 reader — so a
-        // manifest carrying one means two different things to two readers of
-        // the same portable format, and under a 1.1 reader `true: a` and
-        // `yes: b` collapse onto one key where the later silently wins. That is
-        // a wider refusal than this defect, aimed at a different failure, and
-        // it is recorded rather than smuggled in here.
-        let m = manifest("name: n\ndescription: d\nv12: a\ny: b\nyes: c\non: d\n2026-08-19: e")
-            .expect("string keys");
+        // This arm used to accept `y`, `yes`, `on` and `2026-08-19` here and
+        // recorded that acceptance as the guard's honest limit — those are
+        // strings to the pin and a boolean, a boolean, a boolean and a date to
+        // a YAML 1.1 reader. F-8B-YAML (ruled (a), 2026-08-27) closed that
+        // limit: the 1.1-ambiguous spellings now refuse in `scan_subset`
+        // before the parser runs, per-family coverage in
+        // `yaml11_ambiguous_plain_keys_are_refused_per_family`.
+        let m = manifest("name: n\ndescription: d\nv12: a").expect("string keys");
         assert_eq!(
             m.opaque
                 .iter()
                 .map(|f| (f.key.as_str(), f.value.as_str()))
                 .collect::<Vec<_>>(),
-            [
-                ("v12", "a"),
-                ("y", "b"),
-                ("yes", "c"),
-                ("on", "d"),
-                ("2026-08-19", "e")
-            ]
+            [("v12", "a")]
         );
     }
 

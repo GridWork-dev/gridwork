@@ -17,46 +17,38 @@
 //! set this" and "everybody set it to a different thing" are both *not a
 //! value*, and a resolver returning `Option` alone reports them identically.
 
-use crate::participation::ParticipationReason;
+use crate::participation::{ParticipationReason, closed_token_enum};
 
-/// The precedence tiers, highest authority first (ADR-0032 D5).
-///
-/// `Ord` runs highest-authority-first: `Security < RunDeclaration` means
-/// security **wins**. That inversion is deliberate and load-bearing — the
-/// derived ordering follows declaration order, so the enum reads top-down in
-/// the same order D5 states it, and `min()` selects the winner.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum PrecedenceTier {
-    /// Security and authority resolution. Never overridable: context may
-    /// narrow what authority granted, never widen it (D3).
-    Security,
-    /// Explicit declarations on the run itself.
-    RunDeclaration,
-    /// Project, route, role, and capability configuration.
-    RouteConfig,
-    /// Skills the request explicitly asked for, in verified trust state.
-    RequestedSkill,
-    /// Skills the compiler selected on its own.
-    AutomaticSkill,
-    /// Memory, knowledge, graph, eval, and optimization annotations — advisory
-    /// input, lowest authority.
-    Annotation,
+closed_token_enum! {
+    /// The precedence tiers, highest authority first (ADR-0032 D5).
+    ///
+    /// `Ord` runs highest-authority-first: `Security < RunDeclaration` means
+    /// security **wins**. That inversion is deliberate and load-bearing — the
+    /// derived ordering follows declaration order, so the enum reads top-down in
+    /// the same order D5 states it, and `min()` selects the winner.
+    #[derive(
+        Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+    )]
+    #[serde(rename_all = "snake_case")]
+    pub enum PrecedenceTier {
+        /// Security and authority resolution. Never overridable: context may
+        /// narrow what authority granted, never widen it (D3).
+        Security,
+        /// Explicit declarations on the run itself.
+        RunDeclaration,
+        /// Project, route, role, and capability configuration.
+        RouteConfig,
+        /// Skills the request explicitly asked for, in verified trust state.
+        RequestedSkill,
+        /// Skills the compiler selected on its own.
+        AutomaticSkill,
+        /// Memory, knowledge, graph, eval, and optimization annotations — advisory
+        /// input, lowest authority.
+        Annotation,
+    }
 }
 
 impl PrecedenceTier {
-    /// Every tier, highest authority first.
-    pub const ALL: [Self; 6] = [
-        Self::Security,
-        Self::RunDeclaration,
-        Self::RouteConfig,
-        Self::RequestedSkill,
-        Self::AutomaticSkill,
-        Self::Annotation,
-    ];
-
     /// True if `self` outranks `other`.
     ///
     /// Spelled out rather than left to `<` at call sites, because the ordering
@@ -250,6 +242,9 @@ mod tests {
 
     #[test]
     fn tier_order_is_d5_order_and_outranks_reads_forward() {
+        // ALL is macro-derived from the enum's declaration, so this count is a
+        // real growth guard against D5's six documented tiers, not the
+        // `[Self; 6].len() == 6` tautology it used to be.
         assert_eq!(PrecedenceTier::ALL.len(), 6);
         for pair in PrecedenceTier::ALL.windows(2) {
             assert!(

@@ -18,34 +18,67 @@
 
 use crate::digest::Digest;
 
-/// Whether a candidate participated, and how far it got.
-///
-/// Per ADR-0032 D5. Not a state machine: see the module docs.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-    specta::Type,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum ParticipationState {
-    /// Known to the catalog and admissible, but not eligible for this route.
-    Available,
-    /// Eligible for this route and offered to the compiler.
-    Selectable,
-    /// Selected into the resolved manifest.
-    Active,
-    /// Eligible, but the compiler ruled it out — always carries a reason.
-    Excluded,
-    /// Could not be considered at all: unreadable, unverified, or absent.
-    Unavailable,
+// One list per closed enum, in the `context_event_names!` / `context_aggregates!`
+// shape from `wire.rs`, and for the same reason those macros exist: `ALL` as a
+// second array literal is a list that can fall behind the enum, and
+// `ALL.len()` on a `[Self; N]` is `N` BY TYPE — the assertion that was supposed
+// to notice the drift compiled to `N == N` and could never fire. Deriving both
+// the enum and `ALL` from one token list is the only version of "these agree"
+// that does not depend on two places being edited together; the `.len()`
+// assertions in the tests then pin the list against the externally documented
+// count, which growth CAN fail.
+macro_rules! closed_token_enum {
+    (
+        $(#[$attr:meta])*
+        pub enum $name:ident {
+            $($(#[$vdoc:meta])* $variant:ident),* $(,)?
+        }
+    ) => {
+        $(#[$attr])*
+        pub enum $name {
+            $($(#[$vdoc])* $variant,)*
+        }
+
+        impl $name {
+            /// Every variant, in declaration order. Derived from the one list
+            /// that also declares the enum, so it cannot fall behind it.
+            pub const ALL: [Self; [$(stringify!($variant)),*].len()] =
+                [$(Self::$variant),*];
+        }
+    };
+}
+pub(crate) use closed_token_enum;
+
+closed_token_enum! {
+    /// Whether a candidate participated, and how far it got.
+    ///
+    /// Per ADR-0032 D5. Not a state machine: see the module docs.
+    #[derive(
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        PartialOrd,
+        Ord,
+        Hash,
+        serde::Serialize,
+        serde::Deserialize,
+        specta::Type,
+    )]
+    #[serde(rename_all = "snake_case")]
+    pub enum ParticipationState {
+        /// Known to the catalog and admissible, but not eligible for this route.
+        Available,
+        /// Eligible for this route and offered to the compiler.
+        Selectable,
+        /// Selected into the resolved manifest.
+        Active,
+        /// Eligible, but the compiler ruled it out — always carries a reason.
+        Excluded,
+        /// Could not be considered at all: unreadable, unverified, or absent.
+        Unavailable,
+    }
 }
 
 impl ParticipationState {
@@ -58,57 +91,45 @@ impl ParticipationState {
     }
 }
 
-/// The closed set of reasons a candidate did not become `Active`.
-///
-/// A new reason is a contract change with a new binding, never a string a
-/// caller invents — the same rule `KernelCommand` states for itself.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-    specta::Type,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum ParticipationReason {
-    /// A higher precedence tier supplied a conflicting value (D5).
-    PrecedenceLoss,
-    /// Authority resolution excluded it. Upstream of context compilation and
-    /// never overridable by it — context may narrow, never widen (D3).
-    PermissionDenied,
-    /// Dropped to stay inside a declared budget.
-    BudgetCut,
-    /// Third-party material still in its initial quarantined trust state (D5).
-    Quarantined,
-    /// Reviewed and rejected for this exact digest.
-    Rejected,
-    /// The verified pin does not match the digest actually found — an upstream
-    /// change mints a new quarantined candidate, never a silent update (D5).
-    PinDrift,
-    /// The route, role, or capability does not admit it.
-    NotEligible,
-    /// The source could not be read at all.
-    Unavailable,
-}
-
-impl ParticipationReason {
-    /// Every reason, for exhaustive UI and test coverage.
-    pub const ALL: [Self; 8] = [
-        Self::PrecedenceLoss,
-        Self::PermissionDenied,
-        Self::BudgetCut,
-        Self::Quarantined,
-        Self::Rejected,
-        Self::PinDrift,
-        Self::NotEligible,
-        Self::Unavailable,
-    ];
+closed_token_enum! {
+    /// The closed set of reasons a candidate did not become `Active`.
+    ///
+    /// A new reason is a contract change with a new binding, never a string a
+    /// caller invents — the same rule `KernelCommand` states for itself.
+    #[derive(
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        PartialOrd,
+        Ord,
+        Hash,
+        serde::Serialize,
+        serde::Deserialize,
+        specta::Type,
+    )]
+    #[serde(rename_all = "snake_case")]
+    pub enum ParticipationReason {
+        /// A higher precedence tier supplied a conflicting value (D5).
+        PrecedenceLoss,
+        /// Authority resolution excluded it. Upstream of context compilation and
+        /// never overridable by it — context may narrow, never widen (D3).
+        PermissionDenied,
+        /// Dropped to stay inside a declared budget.
+        BudgetCut,
+        /// Third-party material still in its initial quarantined trust state (D5).
+        Quarantined,
+        /// Reviewed and rejected for this exact digest.
+        Rejected,
+        /// The verified pin does not match the digest actually found — an upstream
+        /// change mints a new quarantined candidate, never a silent update (D5).
+        PinDrift,
+        /// The route, role, or capability does not admit it.
+        NotEligible,
+        /// The source could not be read at all.
+        Unavailable,
+    }
 }
 
 /// One candidate's participation record inside a resolved manifest.
@@ -214,16 +235,12 @@ mod tests {
 
     #[test]
     fn exactly_the_refusing_states_owe_a_reason() {
-        let owing: Vec<_> = [
-            ParticipationState::Available,
-            ParticipationState::Selectable,
-            ParticipationState::Active,
-            ParticipationState::Excluded,
-            ParticipationState::Unavailable,
-        ]
-        .into_iter()
-        .filter(|s| s.requires_reason())
-        .collect();
+        // ALL, not a re-typed list: the macro derives it from the enum's own
+        // declaration, so a sixth state reaches this filter the day it exists.
+        let owing: Vec<_> = ParticipationState::ALL
+            .into_iter()
+            .filter(|s| s.requires_reason())
+            .collect();
         assert_eq!(
             owing,
             vec![
@@ -293,6 +310,15 @@ mod tests {
             serde_json::to_string(&ParticipationReason::PrecedenceLoss).expect("ok"),
             "\"precedence_loss\""
         );
+        // These counts pin the enums against their externally documented sets
+        // (the D5 exclusion vocabulary and the five-state participation model).
+        // They used to be tautologies — `ALL.len()` on a hand-typed `[Self; N]`
+        // is `N` by type — but `ALL` is now macro-derived from the enum's own
+        // declaration, so a ninth reason or a sixth state moves the left side
+        // and this is the test that reds. The DDL parity gate in
+        // `xtask/src/contract.rs` holds the SQL CHECK token sets to the same
+        // lists.
         assert_eq!(ParticipationReason::ALL.len(), 8);
+        assert_eq!(ParticipationState::ALL.len(), 5);
     }
 }

@@ -25,51 +25,43 @@
 //! level" means and the guess hardening into the wire contract. If a later
 //! reading collapses two of these, that is a contract change made on purpose.
 
-/// The five named stages a Context record can belong to.
-///
-/// Ordered as the pipeline runs, so `PartialOrd` means "no later than".
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-    specta::Type,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum ContextStage {
-    /// What was asked for, before resolution: run declarations, requested
-    /// skills, route hints. Not yet authority-checked.
-    Declared,
-    /// The immutable compiled manifest for one spawn attempt — the single
-    /// artifact the verifier checks and the adapter renders from.
-    Resolved,
-    /// The append-only release supplement, written exactly once at render.
-    Released,
-    /// Zero or more observation supplements written while the attempt runs.
-    Observed,
-    /// The one finalization supplement, written when the attempt settles.
-    Finalized,
+use crate::participation::closed_token_enum;
+
+closed_token_enum! {
+    /// The five named stages a Context record can belong to.
+    ///
+    /// Ordered as the pipeline runs, so `PartialOrd` means "no later than".
+    #[derive(
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        PartialOrd,
+        Ord,
+        Hash,
+        serde::Serialize,
+        serde::Deserialize,
+        specta::Type,
+    )]
+    #[serde(rename_all = "snake_case")]
+    pub enum ContextStage {
+        /// What was asked for, before resolution: run declarations, requested
+        /// skills, route hints. Not yet authority-checked.
+        Declared,
+        /// The immutable compiled manifest for one spawn attempt — the single
+        /// artifact the verifier checks and the adapter renders from.
+        Resolved,
+        /// The append-only release supplement, written exactly once at render.
+        Released,
+        /// Zero or more observation supplements written while the attempt runs.
+        Observed,
+        /// The one finalization supplement, written when the attempt settles.
+        Finalized,
+    }
 }
 
 impl ContextStage {
-    /// Every stage, in pipeline order.
-    ///
-    /// Exhaustive by construction rather than by discipline: adding a variant
-    /// without adding it here fails `covers_every_variant` below.
-    pub const ALL: [Self; 5] = [
-        Self::Declared,
-        Self::Resolved,
-        Self::Released,
-        Self::Observed,
-        Self::Finalized,
-    ];
-
     /// The wire/display token. Matches the serde representation exactly —
     /// one spelling, whether a stage is being written to a log or drawn in a
     /// lens tab.
@@ -104,10 +96,10 @@ mod tests {
 
     #[test]
     fn covers_every_variant() {
-        // The guard against ALL silently falling behind the enum: match
-        // exhaustively, and push each arm's value through ALL. A new variant
-        // fails to compile here, and one added to the enum but not to ALL
-        // fails the assert.
+        // ALL is macro-derived from the enum's own declaration, so it cannot
+        // fall behind it; what this match guards is `as_str` — a sixth stage
+        // fails to compile here until it gets a spelling, and the count pins
+        // the list against R4's externally documented five.
         for stage in ContextStage::ALL {
             let named = match stage {
                 ContextStage::Declared => "declared",

@@ -287,26 +287,28 @@ impl specta::Type for ParticipationRecords {
     }
 }
 
-/// The assurance level a completed Context run is eligible to claim.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-    specta::Type,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum Assurance {
-    /// Normal production assurance: immutable facts reconstruct what happened.
-    Trace,
-    /// Only pinned fixtures with controlled inputs and declared tolerances.
-    Deterministic,
+crate::participation::closed_token_enum! {
+    /// The assurance level a completed Context run is eligible to claim.
+    #[derive(
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        PartialOrd,
+        Ord,
+        Hash,
+        serde::Serialize,
+        serde::Deserialize,
+        specta::Type,
+    )]
+    #[serde(rename_all = "snake_case")]
+    pub enum Assurance {
+        /// Normal production assurance: immutable facts reconstruct what happened.
+        Trace,
+        /// Only pinned fixtures with controlled inputs and declared tolerances.
+        Deterministic,
+    }
 }
 
 /// The one immutable compiler output for a spawn attempt.
@@ -567,5 +569,46 @@ mod tests {
             "\"deterministic\""
         );
         assert!(serde_json::from_str::<Assurance>("\"ordinary_replay\"").is_err());
+        // Macro-derived, so a third level moves this count; the DDL parity gate
+        // in `xtask/src/contract.rs` holds the SQL CHECK to the same list.
+        assert_eq!(Assurance::ALL.len(), 2);
+    }
+
+    #[test]
+    fn the_participation_count_bound_is_enforced() {
+        // Nothing failed when this bound was removed: every prior test built a
+        // handful of rows, so `values.len() > CONTEXT_PARTICIPATION_MAX_COUNT`
+        // was an arm no input reached. This is the input — one past the bound
+        // refuses, the bound itself is legal, and deleting the check in
+        // `ParticipationRecords::new` reds exactly here.
+        let over: Vec<Participation> = (0..=CONTEXT_PARTICIPATION_MAX_COUNT)
+            .map(|_| Participation::active(digest()))
+            .collect();
+        assert_eq!(over.len(), CONTEXT_PARTICIPATION_MAX_COUNT + 1);
+        assert_eq!(
+            ParticipationRecords::new(over),
+            Err(TruthRecordError::TooManyParticipations)
+        );
+
+        let at_bound: Vec<Participation> = (0..CONTEXT_PARTICIPATION_MAX_COUNT)
+            .map(|_| Participation::active(digest()))
+            .collect();
+        assert!(ParticipationRecords::new(at_bound).is_ok());
+    }
+
+    #[test]
+    fn the_evidence_id_validity_sweep_is_enforced() {
+        // The count bound had a test; the per-id VALIDITY sweep did not, so
+        // removing the `id_is_valid` walk in `EvidenceRefs::new` left every
+        // test green while a `manifest/escape` id rode into a truth record.
+        // Both the construction path and the wire path must refuse it.
+        assert_eq!(
+            EvidenceRefs::new(vec![EvidenceId::new("evidence/escape")]),
+            Err(TruthRecordError::InvalidEvidenceRef)
+        );
+        assert!(serde_json::from_str::<EvidenceRefs>(r#"["evidence/escape"]"#).is_err());
+        // The positive control, so the refusals above cannot pass by the whole
+        // shape failing to parse.
+        assert!(serde_json::from_str::<EvidenceRefs>(r#"["evidence-1"]"#).is_ok());
     }
 }

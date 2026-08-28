@@ -19,8 +19,8 @@ use gwk_context::{
     Digest as ContextDigest, EvidenceRefs, ExplainSubject, FinalizationSupplement,
     FinalizationSupplementId, ManifestId, ManifestSelector, ObservationIndex,
     ObservationSupplement, ObservationSupplementId, Participation, ParticipationReason,
-    ParticipationRecords, RecordContextFact, RecordCount, ReleaseSupplement, ReleaseSupplementId,
-    ResolvedManifest, SupplementKind, VerificationVerdict,
+    ParticipationRecords, ParticipationState, RecordContextFact, RecordCount, ReleaseSupplement,
+    ReleaseSupplementId, ResolvedManifest, SupplementKind, VerificationVerdict,
 };
 use gwk_domain::blob::{BlobAddress, BlobDescriptor};
 use gwk_domain::checkpoint::{CHECKPOINT_SCHEMA_VERSION, Checkpoint};
@@ -110,7 +110,7 @@ const CONTEXT_MUTATION_TRIGGERS: [&str; 8] = [
 /// substring sweep for `author` matches inside `authority_digest`, and the
 /// tempting repair is to drop the word — which deletes the check for one of the
 /// names a spoofed record is most likely to use.
-const CONTEXT_ATTRIBUTION_FIELDS: [&str; 8] = [
+const CONTEXT_ATTRIBUTION_FIELDS: [&str; 10] = [
     "actor",
     "author",
     "principal",
@@ -119,6 +119,12 @@ const CONTEXT_ATTRIBUTION_FIELDS: [&str; 8] = [
     "requested_by",
     "submitted_by",
     "on_behalf_of",
+    // The two names CTX-12 itself uses (carryover row 4): `attribution` is the
+    // kernel-side field a client must never supply, and `compiler` is its most
+    // identifying component. The unit-level sweep in `wire.rs` always named
+    // them; this generated-surface guard did not.
+    "attribution",
+    "compiler",
 ];
 
 /// The generated types a client can construct and submit.
@@ -147,17 +153,57 @@ fn inspect_context_attribution(exported: &str) -> Result<usize, String> {
         !CONTEXT_CLIENT_SUBMITTABLE.is_empty() && !CONTEXT_ATTRIBUTION_FIELDS.is_empty(),
         "the CTX-12 expectation sets must not be empty"
     );
-    let mut inspected = 0usize;
-    for name in CONTEXT_CLIENT_SUBMITTABLE {
+    // The declaration text of one exported type, scoped to the next `export`,
+    // with `/** ... */` doc blocks removed. Docs are prose: a type NAMED in one
+    // is not a field's type, and following it walked the sweep out of the
+    // client-submittable grammar into kernel-side shapes whose fields it has
+    // no business judging (`ContextEventPayload`'s doc alone reaches
+    // `EventEnvelope` and its legitimate `actor`).
+    let declaration = |name: &str| -> Option<String> {
         let needle = format!("export type {name} =");
-        let Some(start) = exported.find(&needle) else {
-            return Err(format!(
-                "inspected {inspected} client-submittable context types; {name} is missing"
-            ));
-        };
+        let start = exported.find(&needle)?;
         let rest = &exported[start + needle.len()..];
         let end = rest.find("\nexport ").unwrap_or(rest.len());
-        let decl = &rest[..end];
+        let mut decl = &rest[..end];
+        let mut out = String::with_capacity(decl.len());
+        while let Some(open) = decl.find("/*") {
+            out.push_str(&decl[..open]);
+            match decl[open..].find("*/") {
+                Some(close) => decl = &decl[open + close + 2..],
+                None => {
+                    decl = "";
+                    break;
+                }
+            }
+        }
+        out.push_str(decl);
+        Some(out)
+    };
+
+    // Walk the four roots AND every named type reachable from them (carryover
+    // row 4): the previous sweep read only each root's own inline text, so a
+    // banned name one type reference away — `fact: SomeWrapper` where
+    // SomeWrapper declares `actor` — was invisible to it. Candidate references
+    // are the capitalized identifiers in a declaration; anything that is not
+    // itself an exported type resolves to nothing and drops out.
+    let mut queue: Vec<String> = Vec::new();
+    let mut visited = std::collections::BTreeSet::new();
+    for name in CONTEXT_CLIENT_SUBMITTABLE {
+        if declaration(name).is_none() {
+            return Err(format!(
+                "inspected 0 client-submittable context types; {name} is missing"
+            ));
+        }
+        if visited.insert(name.to_owned()) {
+            queue.push(name.to_owned());
+        }
+    }
+
+    let mut inspected = 0usize;
+    while let Some(name) = queue.pop() {
+        let Some(decl) = declaration(&name) else {
+            continue; // a capitalized word that is not an exported type
+        };
         for field in CONTEXT_ATTRIBUTION_FIELDS {
             // Whole property names only: a token that IS `field:` or `field?:`,
             // never a substring of a longer identifier.
@@ -167,15 +213,23 @@ fn inspect_context_attribution(exported: &str) -> Result<usize, String> {
             });
             if declared {
                 return Err(format!(
-                    "{name} declares `{field}`: a client could assert its own provenance (CTX-12)"
+                    "{name}, reachable from a client-submittable type, declares `{field}`: \
+                     a client could assert its own provenance (CTX-12)"
                 ));
             }
         }
         inspected += 1;
+        for word in decl.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+            if word.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                && visited.insert(word.to_owned())
+            {
+                queue.push(word.to_owned());
+            }
+        }
     }
-    if inspected != CONTEXT_CLIENT_SUBMITTABLE.len() {
+    if inspected < CONTEXT_CLIENT_SUBMITTABLE.len() {
         return Err(format!(
-            "inspected {inspected} client-submittable context types; expected {}",
+            "inspected {inspected} client-submittable context types; expected at least {}",
             CONTEXT_CLIENT_SUBMITTABLE.len()
         ));
     }
@@ -237,6 +291,80 @@ fn inspect_context_truth_roots(exported: &str) -> Result<usize, String> {
     Ok(present)
 }
 
+/// The quoted tokens of the parenthesized SQL list following `anchor`.
+///
+/// Zero tokens or a missing anchor is an error, never an empty set: a fold
+/// over nothing and a fold over a clean list end in the same place, and the
+/// difference is the whole point of parsing at all.
+fn sql_token_list(sql: &str, anchor: &str) -> Result<Vec<String>, String> {
+    let start = sql
+        .find(anchor)
+        .ok_or_else(|| format!("token-list anchor `{anchor}` is missing from the schema"))?;
+    let rest = &sql[start + anchor.len()..];
+    let open = rest
+        .find('(')
+        .ok_or_else(|| format!("no `(` follows `{anchor}`"))?;
+    let close = rest[open..]
+        .find(')')
+        .ok_or_else(|| format!("no `)` closes the list after `{anchor}`"))?
+        + open;
+    let tokens: Vec<String> = rest[open + 1..close]
+        .split('\'')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_owned)
+        .collect();
+    if tokens.is_empty() {
+        return Err(format!(
+            "parsed 0 tokens after `{anchor}` — the parse is broken, not the schema"
+        ));
+    }
+    Ok(tokens)
+}
+
+/// The wire tokens of a closed serde enum, via the serializer itself.
+///
+/// Serialized rather than re-spelled, so the expectation can never disagree
+/// with what actually goes on the wire.
+fn enum_tokens<T: serde::Serialize>(all: &[T]) -> Vec<String> {
+    all.iter()
+        .map(|variant| {
+            serde_json::to_value(variant)
+                .expect("closed enum serializes")
+                .as_str()
+                .expect("closed enum serializes as a string token")
+                .to_owned()
+        })
+        .collect()
+}
+
+/// One DDL token set held to its Rust enum: count first, then set equality.
+fn check_token_parity(
+    what: &str,
+    sql_tokens: &[String],
+    rust_tokens: &[String],
+) -> Result<(), String> {
+    if sql_tokens.len() != rust_tokens.len() {
+        return Err(format!(
+            "the schema's {what} CHECK lists {} tokens; the Rust enum has {} — \
+             the two are one macro list apart (carryover row 2)",
+            sql_tokens.len(),
+            rust_tokens.len()
+        ));
+    }
+    let mut sql_sorted = sql_tokens.to_vec();
+    let mut rust_sorted = rust_tokens.to_vec();
+    sql_sorted.sort();
+    rust_sorted.sort();
+    if sql_sorted != rust_sorted {
+        return Err(format!(
+            "the schema's {what} CHECK tokens {sql_sorted:?} do not match the \
+             Rust enum's {rust_sorted:?}"
+        ));
+    }
+    Ok(())
+}
+
 fn inspect_context_truth_schema(sql: &str) -> Result<(), String> {
     assert!(
         !CONTEXT_TRUTH_TABLES.is_empty()
@@ -287,6 +415,28 @@ fn inspect_context_truth_schema(sql: &str) -> Result<(), String> {
             CONTEXT_MUTATION_TRIGGERS.len()
         ));
     }
+
+    // The token sets INSIDE those CHECKs, held to the Rust enums they were
+    // hand-copied from (carryover row 2). Names alone let a ninth
+    // `ParticipationReason` regenerate bindings.ts with nine tokens while the
+    // SQL still listed eight — Rust-valid, TS-valid, `--check`-clean, and a
+    // constraint violation at the first INSERT. The expected side is the
+    // enum's own serialization, so this cannot drift into a third copy.
+    check_token_parity(
+        "participation state",
+        &sql_token_list(sql, "participation_state NOT IN")?,
+        &enum_tokens(&ParticipationState::ALL),
+    )?;
+    check_token_parity(
+        "participation reason",
+        &sql_token_list(sql, "participation ->> 'reason' NOT IN")?,
+        &enum_tokens(&ParticipationReason::ALL),
+    )?;
+    check_token_parity(
+        "assurance",
+        &sql_token_list(sql, "CHECK (assurance IN")?,
+        &enum_tokens(&Assurance::ALL),
+    )?;
     Ok(())
 }
 
@@ -1457,6 +1607,76 @@ fn goldens() -> Vec<(&'static str, String)> {
     ]
 }
 
+/// The golden file a registered Context truth root must have, by derivation:
+/// `ResolvedManifest` → `context-resolved-manifest.json`. Derived rather than
+/// listed so a fifth root cannot be registered without this map reaching it.
+fn context_golden_name(root: &str) -> String {
+    let mut out = String::from("context");
+    for ch in root.chars() {
+        if ch.is_ascii_uppercase() {
+            out.push('-');
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push_str(".json");
+    out
+}
+
+/// Every registered Context truth root has a golden (carryover row 10).
+///
+/// Without this, deregistering a golden — or registering a fifth root with no
+/// fixture — was silent: `check_file` only inspects the files `goldens()`
+/// names, so a root with no golden simply never came up.
+fn inspect_golden_coverage(golden_names: &[&str]) -> Result<usize, String> {
+    assert!(
+        !CONTEXT_TRUTH_ROOTS.is_empty() && !golden_names.is_empty(),
+        "the golden-coverage expectation sets must not be empty"
+    );
+    let mut covered = 0usize;
+    for root in CONTEXT_TRUTH_ROOTS {
+        let expected = context_golden_name(root);
+        if !golden_names.contains(&expected.as_str()) {
+            return Err(format!(
+                "covered {covered} context truth roots; {root} has no golden \
+                 ({expected} is not produced by goldens())"
+            ));
+        }
+        covered += 1;
+    }
+    Ok(covered)
+}
+
+/// Every golden has exactly one round-trip check, and nothing round-trips a
+/// golden that no longer exists (carryover row 10, the other half). The count
+/// decides first: two lists that merely overlap agree on membership questions
+/// asked one name at a time.
+fn inspect_round_trip_coverage(
+    golden_names: &[&str],
+    trip_names: &[&str],
+) -> Result<usize, String> {
+    if trip_names.len() != golden_names.len() {
+        return Err(format!(
+            "{} round-trip checks for {} goldens — a golden without its \
+             TS->Rust decode proof is silent coverage loss",
+            trip_names.len(),
+            golden_names.len()
+        ));
+    }
+    for name in golden_names {
+        if !trip_names.contains(name) {
+            return Err(format!("golden {name} has no round-trip check"));
+        }
+    }
+    for name in trip_names {
+        if !golden_names.contains(name) {
+            return Err(format!("round-trip check {name} names no golden"));
+        }
+    }
+    Ok(trip_names.len())
+}
+
 /// Decode a TS-re-emitted golden back into `T` and require value equality
 /// with the Rust fixture.
 fn round_trip<T: serde::de::DeserializeOwned + serde::Serialize>(
@@ -1524,6 +1744,8 @@ pub fn run(check: bool) {
     let bindings_ts = bindings();
     let theme_json = signal_theme_json();
     let golden_files = goldens();
+    let golden_names: Vec<&str> = golden_files.iter().map(|(name, _)| *name).collect();
+    inspect_golden_coverage(&golden_names).unwrap_or_else(|message| panic!("{message}"));
 
     let contract_sql_path = root.join(crate::schema::GENERATED_PATH);
     let contract_sql = std::fs::read_to_string(root.join("schema/0001_contract.sql"))
@@ -1601,7 +1823,6 @@ pub fn run(check: bool) {
         &theme_json,
         &mut drift,
     );
-    let golden_names: Vec<&str> = golden_files.iter().map(|(name, _)| *name).collect();
     for (name, content) in &golden_files {
         check_file(&goldens_dir.join(name), content, &mut drift);
     }
@@ -1617,102 +1838,45 @@ pub fn run(check: bool) {
             .expect("known golden")
             .1
     };
+    // Each entry carries its name so the coverage check below can hold this
+    // list to `goldens()` — the name is written once and reaches the decode,
+    // the lookup, and the coverage set from there.
+    macro_rules! trip {
+        ($t:ty, $name:literal) => {
+            ($name, round_trip::<$t>($name, &ts_goldens_dir, find($name)))
+        };
+    }
     let round_trips = [
-        round_trip::<EventEnvelope>(
-            "event-envelope-full.json",
-            &ts_goldens_dir,
-            find("event-envelope-full.json"),
+        trip!(EventEnvelope, "event-envelope-full.json"),
+        trip!(EventEnvelope, "event-envelope-minimal.json"),
+        trip!(ResolvedManifest, "context-resolved-manifest.json"),
+        trip!(ReleaseSupplement, "context-release-supplement.json"),
+        trip!(ObservationSupplement, "context-observation-supplement.json"),
+        trip!(
+            FinalizationSupplement,
+            "context-finalization-supplement.json"
         ),
-        round_trip::<EventEnvelope>(
-            "event-envelope-minimal.json",
-            &ts_goldens_dir,
-            find("event-envelope-minimal.json"),
-        ),
-        round_trip::<ResolvedManifest>(
-            "context-resolved-manifest.json",
-            &ts_goldens_dir,
-            find("context-resolved-manifest.json"),
-        ),
-        round_trip::<ReleaseSupplement>(
-            "context-release-supplement.json",
-            &ts_goldens_dir,
-            find("context-release-supplement.json"),
-        ),
-        round_trip::<ObservationSupplement>(
-            "context-observation-supplement.json",
-            &ts_goldens_dir,
-            find("context-observation-supplement.json"),
-        ),
-        round_trip::<FinalizationSupplement>(
-            "context-finalization-supplement.json",
-            &ts_goldens_dir,
-            find("context-finalization-supplement.json"),
-        ),
-        round_trip::<CommandEnvelope>(
-            "command-envelope.json",
-            &ts_goldens_dir,
-            find("command-envelope.json"),
-        ),
-        round_trip::<Task>("task.json", &ts_goldens_dir, find("task.json")),
-        round_trip::<Attempt>("attempt.json", &ts_goldens_dir, find("attempt.json")),
-        round_trip::<Message>("message.json", &ts_goldens_dir, find("message.json")),
-        round_trip::<Command>(
-            "command-verification-complete.json",
-            &ts_goldens_dir,
-            find("command-verification-complete.json"),
-        ),
-        round_trip::<WorkspaceNode>(
-            "workspace-node.json",
-            &ts_goldens_dir,
-            find("workspace-node.json"),
-        ),
-        round_trip::<WorkflowRun>(
-            "workflow-run.json",
-            &ts_goldens_dir,
-            find("workflow-run.json"),
-        ),
-        round_trip::<PtySession>(
-            "pty-session.json",
-            &ts_goldens_dir,
-            find("pty-session.json"),
-        ),
-        round_trip::<PtySessionTemplate>(
-            "pty-session-template.json",
-            &ts_goldens_dir,
-            find("pty-session-template.json"),
-        ),
-        round_trip::<Vec<TransitionResult<TaskState>>>(
-            "transition-results.json",
-            &ts_goldens_dir,
-            find("transition-results.json"),
-        ),
-        round_trip::<OrchestratorCheckpoint>(
-            "orchestrator-checkpoint.json",
-            &ts_goldens_dir,
-            find("orchestrator-checkpoint.json"),
-        ),
-        round_trip::<Vec<ClientControl>>(
-            "kernel-client-control.json",
-            &ts_goldens_dir,
-            find("kernel-client-control.json"),
-        ),
-        round_trip::<Vec<ServerControl>>(
-            "kernel-server-control.json",
-            &ts_goldens_dir,
-            find("kernel-server-control.json"),
-        ),
-        round_trip::<RawWireGolden>(
-            "pty-raw-wire.json",
-            &ts_goldens_dir,
-            find("pty-raw-wire.json"),
-        ),
-        round_trip::<Checkpoint>(
-            "kernel-checkpoint.json",
-            &ts_goldens_dir,
-            find("kernel-checkpoint.json"),
-        ),
+        trip!(CommandEnvelope, "command-envelope.json"),
+        trip!(Task, "task.json"),
+        trip!(Attempt, "attempt.json"),
+        trip!(Message, "message.json"),
+        trip!(Command, "command-verification-complete.json"),
+        trip!(WorkspaceNode, "workspace-node.json"),
+        trip!(WorkflowRun, "workflow-run.json"),
+        trip!(PtySession, "pty-session.json"),
+        trip!(PtySessionTemplate, "pty-session-template.json"),
+        trip!(Vec<TransitionResult<TaskState>>, "transition-results.json"),
+        trip!(OrchestratorCheckpoint, "orchestrator-checkpoint.json"),
+        trip!(Vec<ClientControl>, "kernel-client-control.json"),
+        trip!(Vec<ServerControl>, "kernel-server-control.json"),
+        trip!(RawWireGolden, "pty-raw-wire.json"),
+        trip!(Checkpoint, "kernel-checkpoint.json"),
     ];
-    for result in round_trips {
+    let trip_names: Vec<&str> = round_trips.iter().map(|(name, _)| *name).collect();
+    if let Err(message) = inspect_round_trip_coverage(&golden_names, &trip_names) {
+        drift.push(message);
+    }
+    for (_, result) in round_trips {
         if let Err(msg) = result {
             drift.push(msg);
         }
@@ -1770,10 +1934,10 @@ mod tests {
         let exported = bindings();
         let inspected =
             inspect_context_attribution(&exported).expect("the real grammar carries no actor");
-        assert_eq!(
-            inspected,
-            CONTEXT_CLIENT_SUBMITTABLE.len(),
-            "the guard did not inspect every client-submittable type"
+        assert!(
+            inspected >= CONTEXT_CLIENT_SUBMITTABLE.len(),
+            "the guard walked {inspected} declarations, fewer than the {} roots",
+            CONTEXT_CLIENT_SUBMITTABLE.len()
         );
 
         // Seeded: an actor field on a client-submittable type must be refused.
@@ -1793,6 +1957,34 @@ mod tests {
         let error = inspect_context_attribution("export type Unrelated = number;")
             .expect_err("a missing subject must not read as clean");
         assert!(error.contains("inspected 0"), "{error}");
+    }
+
+    #[test]
+    fn the_attribution_guard_follows_a_named_type_reference() {
+        // Carryover row 4's sharpened form: the old sweep read each root's own
+        // inline text, so a banned field one type reference away was invisible.
+        // Here the root itself is clean and the banned name sits behind
+        // `SneakyMeta` — the walk must reach it.
+        let sample = "export type RecordContextFact_Serialize = { fact: SneakyMeta }\n\
+                      export type RecordContextFact_Deserialize = { fact: string }\n\
+                      export type ContextFact_Serialize = { x: string }\n\
+                      export type ContextFact_Deserialize = { x: string }\n\
+                      export type SneakyMeta = { compiler: string }\n";
+        let error = inspect_context_attribution(sample)
+            .expect_err("a banned name behind one indirection must be refused");
+        assert!(error.contains("compiler"), "{error}");
+        assert!(error.contains("SneakyMeta"), "{error}");
+
+        // And the two names the blocklist gained (`attribution`, `compiler`)
+        // are refused when declared directly — deleting either from
+        // CONTEXT_ATTRIBUTION_FIELDS reds one of these two expectations.
+        let direct = "export type RecordContextFact_Serialize = { attribution: string }\n\
+                      export type RecordContextFact_Deserialize = { x: string }\n\
+                      export type ContextFact_Serialize = { x: string }\n\
+                      export type ContextFact_Deserialize = { x: string }\n";
+        let error = inspect_context_attribution(direct)
+            .expect_err("an attribution field on a client-submittable type must be refused");
+        assert!(error.contains("attribution"), "{error}");
     }
 
     #[test]
@@ -1893,6 +2085,93 @@ mod tests {
         let error = inspect_context_truth_schema(&mutated)
             .expect_err("a removed participation check must fail the schema guard");
         assert!(error.contains("4 value-validation constraints"), "{error}");
+    }
+
+    #[test]
+    fn token_parity_rejects_a_token_seeded_on_the_sql_side_alone() {
+        // Carryover row 2's exact mutation: a ninth reason token in the CHECK
+        // with no ninth enum variant. The count arm fires first and names both
+        // sides. The enum-side direction needs no separate seed — parity is
+        // symmetric, so a ninth variant against eight SQL tokens fails the
+        // same comparison.
+        let schema = include_str!("../../schema/0001_contract.sql");
+        inspect_context_truth_schema(schema).expect("real Context schema is complete");
+
+        let target = "'not_eligible',";
+        assert_eq!(schema.matches(target).count(), 1, "mutation target drifted");
+        let mutated = schema.replacen(target, "'not_eligible', 'ninth_reason',", 1);
+        let error = inspect_context_truth_schema(&mutated)
+            .expect_err("a ninth SQL reason token must fail parity");
+        assert!(error.contains("9 tokens"), "{error}");
+        assert!(error.contains("8"), "{error}");
+
+        // Same count, different spelling: the set-equality arm, not the count.
+        let renamed = schema.replacen("'not_eligible'", "'not_elligible'", 1);
+        let error = inspect_context_truth_schema(&renamed)
+            .expect_err("a respelled SQL reason token must fail parity");
+        assert!(error.contains("not_elligible"), "{error}");
+
+        // And the assurance list, which lives in a bare column CHECK rather
+        // than a validator function.
+        let assurance = schema.replacen("'deterministic'", "'deterministic', 'vibes'", 1);
+        let error = inspect_context_truth_schema(&assurance)
+            .expect_err("a third assurance token must fail parity");
+        assert!(error.contains("assurance"), "{error}");
+    }
+
+    #[test]
+    fn token_parity_refuses_a_missing_or_empty_list_rather_than_passing_it() {
+        // `sql_token_list` must never hand parity an empty set: zero parsed
+        // tokens and a clean list are different verdicts.
+        let error = sql_token_list("CHECK (assurance IN ())", "CHECK (assurance IN")
+            .expect_err("an empty list must not read as clean");
+        assert!(error.contains("parsed 0 tokens"), "{error}");
+        let error = sql_token_list("no anchor here", "CHECK (assurance IN")
+            .expect_err("a missing anchor must not read as clean");
+        assert!(error.contains("missing"), "{error}");
+    }
+
+    #[test]
+    fn golden_coverage_rejects_a_deregistered_context_golden() {
+        // Carryover row 10: a registered truth root whose golden is dropped
+        // from goldens() was silent. Derive the real names, prove they pass,
+        // then remove one and prove the guard names it.
+        let golden_files = goldens();
+        let names: Vec<&str> = golden_files.iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            inspect_golden_coverage(&names).expect("real goldens cover every root"),
+            CONTEXT_TRUTH_ROOTS.len()
+        );
+
+        let without: Vec<&str> = names
+            .iter()
+            .copied()
+            .filter(|name| *name != "context-release-supplement.json")
+            .collect();
+        assert_eq!(without.len(), names.len() - 1, "mutation target drifted");
+        let error = inspect_golden_coverage(&without)
+            .expect_err("a truth root with no golden must be refused");
+        assert!(error.contains("ReleaseSupplement"), "{error}");
+    }
+
+    #[test]
+    fn round_trip_coverage_rejects_a_dropped_and_an_orphaned_check() {
+        let goldens = ["a.json", "b.json"];
+        assert_eq!(
+            inspect_round_trip_coverage(&goldens, &["a.json", "b.json"]).expect("full coverage"),
+            2
+        );
+        // A golden without its round trip: the count arm decides first.
+        let error = inspect_round_trip_coverage(&goldens, &["a.json"])
+            .expect_err("a golden without a round trip must be refused");
+        assert!(
+            error.contains("1 round-trip checks for 2 goldens"),
+            "{error}"
+        );
+        // Same count, wrong membership: the set arms decide.
+        let error = inspect_round_trip_coverage(&goldens, &["a.json", "c.json"])
+            .expect_err("a round trip naming no golden must be refused");
+        assert!(error.contains("b.json"), "{error}");
     }
 
     #[test]
