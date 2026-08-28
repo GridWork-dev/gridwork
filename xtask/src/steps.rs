@@ -331,37 +331,13 @@ pub fn read_steps(dir: &Path) -> Vec<ParsedStep> {
         .collect()
 }
 
-/// The SHA-256 of `schema/0001_contract.sql` as it stood when this gate was
-/// introduced.
-///
-/// It is NOT the first contract this repository shipped, and nothing here
-/// should be read as a claim that it is: `git log schema/0001_contract.sql`
-/// lists more than twenty digests before this one, and a database is running on
-/// one of them. This constant makes no statement about history. It is one fixed
-/// point, and it does one job.
-///
-/// That job is to say when an EMPTY `schema/steps/` is tolerable — which is
-/// only while the contract still carries this exact digest. The moment the SQL
-/// changes, a database on the older contract needs a step, and noticing that
-/// requires something to compare against that this command does not itself
-/// rewrite. `CONTRACT_SQL_SHA256` cannot be that something: it is regenerated
-/// from the same bytes a moment earlier, so comparing the two agrees by
-/// construction and would pass every contract change ever made.
-///
-/// It is a bootstrap and it expires. Once ANY step is registered the
-/// empty-registry branch is unreachable and this value is never read again.
-/// When it stops matching the file, the honest move is to delete it and that
-/// branch — not to refresh it.
-pub const CONTRACT_SHA256_AT_GATE_INTRODUCTION: &str =
-    "7ebb2adaad295c28c60f1e789030ceef87d6fdd607b37a1186f173dc22647142";
-
 /// Refuse a contract digest that no authored step arrives at.
 ///
 /// `contract_sql` is the bytes of `schema/0001_contract.sql`; the digest
 /// compared against is computed HERE, from those bytes, and never read back out
-/// of `crates/gwk-domain/src/contract_sql.rs`. See
-/// [`CONTRACT_SHA256_AT_GATE_INTRODUCTION`] for why that distinction is the
-/// whole gate.
+/// of `crates/gwk-domain/src/contract_sql.rs` — that copy is regenerated from
+/// the same bytes a moment earlier, so comparing the two would agree by
+/// construction and pass every contract change ever made.
 ///
 /// Two arms are already settled before anything reaches here, and are not
 /// restated: [`parse_step`] refuses a file whose name disagrees with its header
@@ -372,27 +348,23 @@ pub fn inspect_step_chain(contract_sql: &str, steps: &[ParsedStep]) -> Result<()
     let current = crate::schema::sha256_hex(contract_sql.as_bytes());
 
     // The count decides first. An empty registry is a state, not a chain, and
-    // walking it would find nothing and report that nothing was wrong — so
-    // whether it is legitimate is settled before anything else looks at it.
+    // walking it would find nothing and report that nothing was wrong.
     //
-    // It is legitimate in exactly one case: the contract still carries the
-    // digest it carried when this gate was introduced, so nothing has moved
-    // that a step would have to describe. A registry that HAS steps is not
-    // second-guessed here on either side of that line; it goes to the chain
-    // checks below, where the only question worth asking is whether it arrives
-    // at the contract this repository actually ships.
+    // It is never legitimate any more. There was one window in which it was —
+    // between this gate's introduction and the first authored step, guarded
+    // then by a pinned bootstrap digest of the contract as it stood — and that
+    // constant's own documentation ordered its deletion the moment it stopped
+    // matching the file. It stopped matching when task 7's step moved the
+    // contract, with two steps registered; the branch it guarded had already
+    // been unreachable since the first.
     let registered = steps.len();
 
     if registered == 0 {
-        if current == CONTRACT_SHA256_AT_GATE_INTRODUCTION {
-            return Ok(());
-        }
         return Err(format!(
             "no migration step results in {current}, the contract digest \
-             schema/0001_contract.sql now carries: schema/steps/ holds no step files at all. \
-             The contract has moved off {CONTRACT_SHA256_AT_GATE_INTRODUCTION}, the digest it \
-             carried when this gate was introduced, and a database on an older contract has no \
-             way to follow it — author schema/steps/<base8>-{}.sql",
+             schema/0001_contract.sql now carries: schema/steps/ holds no step files at all, \
+             and a database on any earlier contract has no way to follow it — author \
+             schema/steps/<base8>-{}.sql",
             &current[..NAME_PREFIX_LEN]
         ));
     }
@@ -1099,22 +1071,16 @@ mod tests {
         parse_step(&id, &step_file(base, result, "SELECT 1;\n")).expect("well-formed step")
     }
 
-    /// The real `schema/0001_contract.sql`, whose digest is
-    /// [`CONTRACT_SHA256_AT_GATE_INTRODUCTION`] until somebody changes the
-    /// contract. Read from disk rather than synthesized: the anchor is only
-    /// meaningful against the bytes it was taken from.
-    fn anchored_sql() -> String {
+    /// The real `schema/0001_contract.sql`, read from disk rather than
+    /// synthesized, so the chain cases below are asked about the bytes the
+    /// repository actually ships.
+    fn real_contract_sql() -> String {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("xtask has a parent dir")
             .join("schema/0001_contract.sql");
         std::fs::read_to_string(path).expect("read schema/0001_contract.sql")
     }
-
-    // The gate has four states, and each has a test below. The two that matter
-    // most are the ones that look alike: an empty registry is tolerated at the
-    // anchor and refused off it, and that difference is the entire reason the
-    // anchor exists.
 
     /// A step declaring `carries`, over SQL the claims guard never reads.
     fn carrying(base: &str, result: &str, carries: &str) -> ParsedStep {
@@ -1262,51 +1228,42 @@ mod tests {
     }
 
     #[test]
-    fn state_1_at_the_anchor_an_empty_registry_is_tolerated() {
-        // Nothing has moved that a step would have to describe. This also
-        // catches the anchor drifting from the file, since a mismatch here
-        // takes the refusal branch.
-        //
-        // When the contract does eventually change, this test reds — and the
-        // honest fix is to DELETE it along with the anchor and the branch it
-        // covers, because by then the registry is non-empty and neither is ever
-        // read again. Refreshing the constant is the one move it must not
-        // prompt.
-        assert_eq!(inspect_step_chain(&anchored_sql(), &[]), Ok(()));
-    }
-
-    #[test]
-    fn state_2_at_the_anchor_a_chain_that_arrives_is_allowed() {
-        // A step that reproduces historical DDL migrates a database onto the
-        // contract this repository already ships, WITHOUT touching
-        // `schema/0001_contract.sql` — so the digest stays on the anchor while
-        // the registry stops being empty. The anchor must have nothing to say
-        // about that; the only question worth asking is whether the chain
-        // arrives, and it does.
-        let sql = anchored_sql();
+    fn a_chain_that_arrives_at_the_real_contract_is_allowed() {
+        // The only question the gate asks of a registered chain is whether it
+        // arrives at the contract this repository actually ships.
+        let sql = real_contract_sql();
         let current = crate::schema::sha256_hex(sql.as_bytes());
         let steps = [parsed(A, &current)];
         assert_eq!(inspect_step_chain(&sql, &steps), Ok(()));
     }
 
     #[test]
-    fn state_3_off_the_anchor_an_empty_registry_names_what_nothing_arrives_at() {
-        let moved = format!("{}-- moved\n", anchored_sql());
-        let err = inspect_step_chain(&moved, &[]).expect_err("the digest moved");
-        assert!(err.contains("no migration step results in"), "{err}");
-        // The digest in the message is the one computed HERE. It equals the one
-        // `contract_sql.rs` records only when the gate is doing nothing.
-        assert!(
-            err.contains(&crate::schema::sha256_hex(moved.as_bytes())),
-            "{err}"
-        );
+    fn an_empty_registry_is_a_refusal_that_names_the_digest() {
+        // Unconditionally, moved contract or not: the bootstrap window in
+        // which an empty registry was tolerable closed with the first authored
+        // step, and its anchor constant was deleted on its own instructions
+        // when task 7 moved the contract past it.
+        for sql in [
+            real_contract_sql(),
+            format!("{}-- moved\n", real_contract_sql()),
+        ] {
+            let err = inspect_step_chain(&sql, &[]).expect_err("an empty registry");
+            assert!(err.contains("no migration step results in"), "{err}");
+            // The digest in the message is the one computed HERE. It equals
+            // the one `contract_sql.rs` records only when the gate is doing
+            // nothing.
+            assert!(
+                err.contains(&crate::schema::sha256_hex(sql.as_bytes())),
+                "{err}"
+            );
+        }
     }
 
     #[test]
     fn a_forked_registry_is_refused_before_the_terminal_is_looked_for() {
         // Two ways forward from A. Either branch could be called the terminal,
         // which is the point: the fork has to be refused before anything picks.
-        let moved = format!("{}-- moved\n", anchored_sql());
+        let moved = format!("{}-- moved\n", real_contract_sql());
         let err = inspect_step_chain(&moved, &[parsed(A, B), parsed(A, C)])
             .expect_err("the registry forks at A");
         assert!(err.contains("both base on"), "{err}");
@@ -1318,7 +1275,7 @@ mod tests {
         // A loop: every result is somebody's base, so the filter finds nothing.
         // `find()` would have returned None here, and a gate that read None as
         // "no mismatch" would pass a registry that goes nowhere.
-        let moved = format!("{}-- moved\n", anchored_sql());
+        let moved = format!("{}-- moved\n", real_contract_sql());
         let err =
             inspect_step_chain(&moved, &[parsed(A, B), parsed(B, A)]).expect_err("A and B loop");
         assert!(err.contains("expected exactly one terminal step"), "{err}");
@@ -1326,8 +1283,8 @@ mod tests {
     }
 
     #[test]
-    fn state_4_off_the_anchor_a_chain_that_ends_elsewhere_is_refused() {
-        let moved = format!("{}-- moved\n", anchored_sql());
+    fn a_chain_that_ends_somewhere_else_is_refused() {
+        let moved = format!("{}-- moved\n", real_contract_sql());
         let err = inspect_step_chain(&moved, &[parsed(A, B), parsed(B, C)]).expect_err("ends at C");
         assert!(err.contains("no migration step results in"), "{err}");
         assert!(err.contains("the chain ends at"), "{err}");
@@ -1338,7 +1295,7 @@ mod tests {
     fn a_chain_that_ends_at_the_contract_digest_passes() {
         // The only shape that gets through: a line ending exactly where the SQL
         // is now, built by naming the real digest as the last result.
-        let moved = format!("{}-- moved\n", anchored_sql());
+        let moved = format!("{}-- moved\n", real_contract_sql());
         let target = crate::schema::sha256_hex(moved.as_bytes());
         let steps = [parsed(A, B), parsed(B, &target)];
         assert_eq!(inspect_step_chain(&moved, &steps), Ok(()));
@@ -1352,7 +1309,7 @@ mod tests {
         // some other member's predecessor — so the line's terminal is the only
         // one and the count agrees. The island's two files read as applicable
         // steps and no database can ever take them.
-        let moved = format!("{}-- moved\n", anchored_sql());
+        let moved = format!("{}-- moved\n", real_contract_sql());
         let target = crate::schema::sha256_hex(moved.as_bytes());
         let steps = [parsed(A, &target), parsed(D, E), parsed(E, D)];
         let err = inspect_step_chain(&moved, &steps).expect_err("an island nothing reaches");
@@ -1372,7 +1329,7 @@ mod tests {
         // LEAVING a digest, and these two ARRIVE at one. Bases stay unique, the
         // terminal stays single, the chain still ends where the contract is —
         // and "the step before this one" is a choice.
-        let moved = format!("{}-- moved\n", anchored_sql());
+        let moved = format!("{}-- moved\n", real_contract_sql());
         let target = crate::schema::sha256_hex(moved.as_bytes());
         let steps = [parsed(A, C), parsed(B, C), parsed(C, &target)];
         let err = inspect_step_chain(&moved, &steps).expect_err("two steps result in C");

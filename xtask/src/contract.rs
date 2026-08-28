@@ -25,6 +25,7 @@ use gwk_context::{
 use gwk_domain::blob::{BlobAddress, BlobDescriptor};
 use gwk_domain::checkpoint::{CHECKPOINT_SCHEMA_VERSION, Checkpoint};
 use gwk_domain::command::KernelCommand;
+use gwk_domain::context::{ContentClass, RedactionClass, RetentionClass};
 use gwk_domain::entity::{
     Attempt, Budget, Command, Message, PtySession, PtySessionTemplate, Task, WorkflowRun,
     WorkspaceNode, WorkspaceNodeKind,
@@ -93,7 +94,7 @@ const CONTEXT_PARTICIPATION_GUARD: &str =
     "CHECK (gwk.context_participations_are_valid(participations))";
 const CONTEXT_VALUE_GUARD_COUNT: usize = 5;
 
-const CONTEXT_MUTATION_TRIGGERS: [&str; 8] = [
+const CONTEXT_MUTATION_TRIGGERS: [&str; 10] = [
     "context_manifest_append_only",
     "context_manifest_no_truncate",
     "context_release_append_only",
@@ -102,7 +103,15 @@ const CONTEXT_MUTATION_TRIGGERS: [&str; 8] = [
     "context_observation_no_truncate",
     "context_finalization_append_only",
     "context_finalization_no_truncate",
+    "context_blob_append_only",
+    "context_blob_no_truncate",
 ];
+
+/// The Context blob-classification table — CAS metadata beside the blob, not a
+/// fifth truth record: it has no TypeScript root and no golden, and its
+/// contract surface is the three closed class sets its CHECKs carry, each held
+/// to its `gwk_domain::context` enum by the token-parity gate below.
+const CONTEXT_CLASS_TABLE: &str = "gwk.context_blob";
 
 /// Field names that would let a caller assert who it is.
 ///
@@ -436,6 +445,36 @@ fn inspect_context_truth_schema(sql: &str) -> Result<(), String> {
         "assurance",
         &sql_token_list(sql, "CHECK (assurance IN")?,
         &enum_tokens(&Assurance::ALL),
+    )?;
+
+    // The classification table and its three closed class sets (task 7).
+    // Presence first: over a schema the table dropped out of, three anchored
+    // parses would each fail complaining about anchors, and "the table is
+    // gone" is the real fact.
+    if !sql.contains(&format!("CREATE TABLE {CONTEXT_CLASS_TABLE} (")) {
+        return Err(format!(
+            "the schema does not declare {CONTEXT_CLASS_TABLE}, the Context CAS \
+             classification table"
+        ));
+    }
+    // These enums carry their tokens as `as_str` rather than serde — no wire
+    // surface serializes them yet — so the expected side is the same single
+    // source the adapter binds into SQL, and it still cannot drift into a
+    // third copy.
+    check_token_parity(
+        "content class",
+        &sql_token_list(sql, "CHECK (content_class IN")?,
+        &ContentClass::ALL.map(|class| class.as_str().to_owned()),
+    )?;
+    check_token_parity(
+        "redaction class",
+        &sql_token_list(sql, "CHECK (redaction_class IN")?,
+        &RedactionClass::ALL.map(|class| class.as_str().to_owned()),
+    )?;
+    check_token_parity(
+        "retention class",
+        &sql_token_list(sql, "CHECK (retention_class IN")?,
+        &RetentionClass::ALL.map(|class| class.as_str().to_owned()),
     )?;
     Ok(())
 }
@@ -2117,6 +2156,63 @@ mod tests {
         let error = inspect_context_truth_schema(&assurance)
             .expect_err("a third assurance token must fail parity");
         assert!(error.contains("assurance"), "{error}");
+    }
+
+    #[test]
+    fn the_class_table_and_its_three_token_sets_are_each_guarded() {
+        let schema = include_str!("../../schema/0001_contract.sql");
+        inspect_context_truth_schema(schema).expect("real Context schema is complete");
+
+        // The table itself, gone: the presence arm answers, not an anchor
+        // complaint from a parse that never found its CHECK.
+        let dropped = schema.replacen(
+            "CREATE TABLE gwk.context_blob (",
+            "CREATE TABLE gwk.context_blob_x (",
+            1,
+        );
+        let error = inspect_context_truth_schema(&dropped)
+            .expect_err("a missing classification table must be named");
+        assert!(error.contains("gwk.context_blob"), "{error}");
+
+        // One seeded extra token per axis — the count arm — plus one respelling
+        // — the set arm — so each of the three parities is proven to fire on
+        // its own CHECK rather than riding a sibling's.
+        for (axis, target, seeded) in [
+            (
+                "content class",
+                "'conformance', 'private'",
+                "'conformance', 'private', 'secret'",
+            ),
+            (
+                "redaction class",
+                "'none', 'redacted'",
+                "'none', 'redacted', 'partial'",
+            ),
+            (
+                "retention class",
+                "'release', 'observation'",
+                "'release', 'observation', 'weekly'",
+            ),
+        ] {
+            assert_eq!(
+                schema.matches(target).count(),
+                1,
+                "{axis}: mutation target drifted"
+            );
+            let mutated = schema.replacen(target, seeded, 1);
+            let error = inspect_context_truth_schema(&mutated)
+                .expect_err(&format!("{axis}: an extra SQL token must fail parity"));
+            assert!(error.contains(axis), "{axis}: {error}");
+            assert!(
+                error.contains("3 tokens") || error.contains("5 tokens"),
+                "{axis}: {error}"
+            );
+        }
+
+        let respelled = schema.replacen("'redacted'", "'redcated'", 1);
+        let error = inspect_context_truth_schema(&respelled)
+            .expect_err("a respelled class token must fail the set arm");
+        assert!(error.contains("redcated"), "{error}");
     }
 
     #[test]

@@ -1238,4 +1238,48 @@ ALTER TABLE gwk.context_observation ENABLE ALWAYS TRIGGER context_observation_no
 ALTER TABLE gwk.context_finalization ENABLE ALWAYS TRIGGER context_finalization_append_only;
 ALTER TABLE gwk.context_finalization ENABLE ALWAYS TRIGGER context_finalization_no_truncate;
 
+-- Context blob classification: one row per classified CAS object, beside the
+-- blob and never inside the container (the v1 container bytes are untouched;
+-- classification is a metadata-layer concern, exactly how evidence pinning was
+-- added without a format change).
+--
+-- Each class column is a CLOSED set, like `ingested_record.kind`: the closed
+-- set IS the property. `content_class` is the KEK domain — one key-encryption
+-- key per content class, so the public-conformance/private-real seam is a
+-- cryptographic boundary, not a convention. `redaction_class` records what
+-- treatment the plaintext received before sealing. `retention_class` is the
+-- family the retention sweep keys on — the class set is contract, while each
+-- class's window is backend configuration, and a class with no configured
+-- window is retained (the sweep fails safe toward keeping bytes).
+--
+-- Digest-keyed and append-only: one digest is one blob, a blob is sealed under
+-- exactly one class KEK, and reclassification is not a thing a row can mean —
+-- the same bytes under a different classification are a refused write. The row
+-- outlives the blob's bytes on purpose, like `gwk.evidence`: after a retention
+-- sweep or a crypto-shred it is the auditable record that classified content
+-- existed and what class it was, which is precisely what a retention audit
+-- asks.
+CREATE TABLE gwk.context_blob (
+  digest           text PRIMARY KEY
+                     CHECK (digest ~ '^sha256:[0-9a-f]{64}$'),
+  content_class    text NOT NULL
+                     CHECK (content_class IN ('conformance', 'private')),
+  redaction_class  text NOT NULL
+                     CHECK (redaction_class IN ('none', 'redacted')),
+  retention_class  text NOT NULL
+                     CHECK (retention_class IN ('permanent', 'manifest',
+                                                'release', 'observation')),
+  created_at       timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TRIGGER context_blob_append_only
+  BEFORE UPDATE OR DELETE ON gwk.context_blob
+  FOR EACH ROW EXECUTE FUNCTION gwk.forbid_context_truth_mutation();
+CREATE TRIGGER context_blob_no_truncate
+  BEFORE TRUNCATE ON gwk.context_blob
+  FOR EACH STATEMENT EXECUTE FUNCTION gwk.forbid_context_truth_mutation();
+
+ALTER TABLE gwk.context_blob ENABLE ALWAYS TRIGGER context_blob_append_only;
+ALTER TABLE gwk.context_blob ENABLE ALWAYS TRIGGER context_blob_no_truncate;
+
 COMMIT;

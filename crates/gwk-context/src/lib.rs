@@ -47,6 +47,7 @@ pub mod participation;
 pub mod precedence;
 pub mod skill;
 pub mod stage;
+pub mod store;
 pub mod wire;
 
 pub use digest::{DIGEST_SCHEME, Digest, DigestError};
@@ -63,6 +64,7 @@ pub use participation::{
 };
 pub use precedence::{Contribution, PrecedenceConflict, PrecedenceTier, resolve};
 pub use stage::ContextStage;
+pub use store::ContextTruthStore;
 pub use wire::{
     AttributionPart, CONTEXT_ATTRIBUTION_MAX_BYTES, CONTEXT_CANDIDATE_ROUTE_MAX_COUNT,
     CONTEXT_COMPARE_STAGE_MAX_COUNT, CONTEXT_GRAPH_DEPTH_MAX, CONTEXT_MANDATORY_FROM,

@@ -1,12 +1,13 @@
-//! Proves the retroactive contract step against a real PostgreSQL.
+//! Proves the contract step chain against a real PostgreSQL.
 //!
-//! The step in `schema/steps/` claims that a database initialized from the
-//! contract at `4d54bba` — which is the one running in production — reaches the
-//! contract this binary carries. That claim is only worth what it is tested
-//! against, and it cannot be tested without a server: whether the DDL applies
-//! at all, whether a decided gate row survives the CHECK that arrives with it,
-//! and whether the result is the same schema a fresh initialization produces
-//! are all questions only PostgreSQL can answer.
+//! The chain in `schema/steps/` claims that a database initialized from the
+//! contract at `4d54bba` — the retroactive step's base — reaches the contract
+//! this binary carries, through every registered step: the retroactive step,
+//! then task 7's Context CAS classification step. That claim is only worth
+//! what it is tested against, and it cannot be tested without a server:
+//! whether the DDL applies at all, whether a decided gate row survives the
+//! CHECK that arrives with it, and whether the result is the same schema a
+//! fresh initialization produces are all questions only PostgreSQL can answer.
 //!
 //! ```text
 //! docker run --rm -d -p 127.0.0.1:55432:5432 -e POSTGRES_HOST_AUTH_METHOD=trust \
@@ -241,11 +242,16 @@ async fn build_base(pool: &PgPool, role: &str) {
         .expect("apply the base grant matrix");
 }
 
-/// The step the registry says carries the live contract to this binary's.
+/// The chain the registry says carries the live contract to this binary's.
 ///
 /// Resolved rather than looked up by name, which makes this the one place the
 /// whole mechanism is exercised end to end: the generator emitted the registry,
 /// the resolver walked it, and what came back is what gets applied.
+///
+/// Two steps, and each is NAMED so the coverage tripwire in the contract gate
+/// can hold this suite to the registry: the retroactive step (#158's chain
+/// introduction), then task 7's Context CAS classification step,
+/// `7ebb2ada-be73d920.sql`.
 fn resolved_chain() -> Vec<&'static Step> {
     let chain =
         gwk_kernel::migrate::resolve(CONTRACT_STEPS, BASE_CONTRACT_SHA256, CONTRACT_SQL_SHA256)
@@ -253,11 +259,9 @@ fn resolved_chain() -> Vec<&'static Step> {
                 panic!("no chain from the live contract to this binary's: {refusal}")
             });
     assert_eq!(
-        chain.len(),
-        1,
-        "expected exactly one step between {BASE_CONTRACT_SHA256} and {CONTRACT_SQL_SHA256}, \
-         got {:?}",
-        chain.iter().map(|step| step.id).collect::<Vec<_>>()
+        chain.iter().map(|step| step.id).collect::<Vec<_>>(),
+        ["aba2f647-7ebb2ada.sql", "7ebb2ada-be73d920.sql"],
+        "the chain from {BASE_CONTRACT_SHA256} to {CONTRACT_SQL_SHA256} is not the registered two"
     );
     chain
 }
@@ -495,7 +499,7 @@ async fn gate_decided_by(pool: &PgPool, gate_id: &str) -> serde_json::Value {
 
 #[tokio::test]
 #[ignore = "needs a PostgreSQL; see the module docs"]
-async fn the_retroactive_step_reaches_this_binarys_contract() {
+async fn the_step_chain_reaches_this_binarys_contract() {
     let maintenance = maintenance_pool().await;
     let role = role_for("reaches");
     create_role(&maintenance, &role).await;
@@ -520,7 +524,7 @@ async fn the_retroactive_step_reaches_this_binarys_contract() {
         // The receipt distinguishes the two halves. Crediting the step with the
         // backend migrations would make the ledger claim the contract DDL
         // created relations it never mentions.
-        assert_eq!(applied.steps.len(), 1, "{:?}", applied.steps);
+        assert_eq!(applied.steps.len(), 2, "{:?}", applied.steps);
         assert_eq!(
             applied.backend_migrations,
             ["0005_pty_delivery", "0006_schema_migration"],
@@ -682,30 +686,29 @@ async fn a_regraded_gate_takes_its_latest_decision() {
     drop_role(&maintenance, &role).await;
 }
 
-/// The ledger row this migration wrote, as (base, result, step_id,
-/// backend_migrations, backup_sha256).
-async fn ledger_row(pool: &PgPool) -> (String, String, String, Vec<String>, Option<String>) {
-    let rows: Vec<_> = sqlx::query(
+/// The ledger rows a migration wrote, each as (base, result, step_id,
+/// backend_migrations, backup_sha256), in application order.
+async fn ledger_rows(pool: &PgPool) -> Vec<(String, String, String, Vec<String>, Option<String>)> {
+    sqlx::query(
         "SELECT base_sha256, result_sha256, step_id, backend_migrations, \
                 backup_sha256 \
            FROM gwk_internal.schema_migration ORDER BY seq",
     )
     .fetch_all(pool)
     .await
-    .expect("read the ledger");
-    // Counted before it is read out of: `fetch_one` on an empty ledger is an
-    // error with a worse message, and on a ledger with two rows it would
-    // silently describe one of them.
-    assert_eq!(rows.len(), 1, "expected exactly one ledger row");
-    let row = &rows[0];
-    (
-        row.try_get("base_sha256").expect("base"),
-        row.try_get("result_sha256").expect("result"),
-        row.try_get("step_id").expect("step_id"),
-        row.try_get("backend_migrations")
-            .expect("backend_migrations"),
-        row.try_get("backup_sha256").expect("backup_sha256"),
-    )
+    .expect("read the ledger")
+    .iter()
+    .map(|row| {
+        (
+            row.try_get("base_sha256").expect("base"),
+            row.try_get("result_sha256").expect("result"),
+            row.try_get("step_id").expect("step_id"),
+            row.try_get("backend_migrations")
+                .expect("backend_migrations"),
+            row.try_get("backup_sha256").expect("backup_sha256"),
+        )
+    })
+    .collect()
 }
 
 #[tokio::test]
@@ -743,16 +746,31 @@ async fn a_carried_backend_migration_lands_is_recorded_and_is_reachable() {
         ["0005_pty_delivery", "0006_schema_migration"]
     );
 
-    let (base, result, step_id, carried, backup) = ledger_row(&pool).await;
+    // One row per applied step, in order, each crediting exactly what its own
+    // step carried: the backend migrations belong to the retroactive step's
+    // row and to no other.
+    let chain = resolved_chain();
+    let rows = ledger_rows(&pool).await;
+    assert_eq!(rows.len(), 2, "one ledger row per applied step");
+    let (base, result, step_id, carried, backup) = &rows[0];
     assert_eq!(base, BASE_CONTRACT_SHA256);
-    assert_eq!(result, CONTRACT_SQL_SHA256);
+    assert_eq!(result, chain[0].result);
     assert_eq!(step_id, "aba2f647-7ebb2ada.sql");
     assert_eq!(
         carried,
-        ["0005_pty_delivery", "0006_schema_migration"],
+        &["0005_pty_delivery", "0006_schema_migration"],
         "the row does not name what the run carried"
     );
-    assert_eq!(backup, None);
+    assert_eq!(*backup, None);
+    let (base, result, step_id, carried, backup) = &rows[1];
+    assert_eq!(base, chain[0].result);
+    assert_eq!(result, CONTRACT_SQL_SHA256);
+    assert_eq!(step_id, "7ebb2ada-be73d920.sql");
+    assert!(
+        carried.is_empty(),
+        "task 7's step carries no backend migration"
+    );
+    assert_eq!(*backup, None);
 
     // Reachable, and counted. "One query succeeded" is what a grant on one
     // table proves; the question is whether every relation the run created got
@@ -777,11 +795,12 @@ async fn a_carried_backend_migration_lands_is_recorded_and_is_reachable() {
         "every gwk_internal table the run left behind must be readable by the runtime role"
     );
     // And the ledger specifically, since it is the one this commit adds.
-    let ledger_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM gwk_internal.schema_migration")
-        .fetch_one(&mut conn)
-        .await
-        .expect("the runtime role reads the ledger");
-    assert_eq!(ledger_rows, 1);
+    let ledger_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM gwk_internal.schema_migration")
+            .fetch_one(&mut conn)
+            .await
+            .expect("the runtime role reads the ledger");
+    assert_eq!(ledger_count, 2);
     conn.close().await.expect("close");
 
     drop(pool);
@@ -841,12 +860,18 @@ async fn a_stated_base_is_checked_like_any_other_and_never_overrides() {
     .expect("apply");
     assert_eq!(applied.result, CONTRACT_SQL_SHA256);
 
-    let (_, _, _, _, backup) = ledger_row(&pool).await;
-    assert_eq!(
-        backup,
-        Some("c".repeat(64)),
-        "the backup digest the verb computed is not what the row records"
-    );
+    // On every row of the chain: one backup was taken before the one
+    // transaction both steps ran in, so it is equally the restore point for
+    // each.
+    let rows = ledger_rows(&pool).await;
+    assert_eq!(rows.len(), 2, "one ledger row per applied step");
+    for (_, _, step_id, _, backup) in &rows {
+        assert_eq!(
+            backup.as_deref(),
+            Some("c".repeat(64)).as_deref(),
+            "{step_id}: the backup digest the verb computed is not what the row records"
+        );
+    }
 
     drop(pool);
     drop_database(&maintenance, &database).await;
@@ -875,13 +900,13 @@ async fn r1_refuses_a_database_already_at_this_binarys_contract() {
     assert!(message.contains("nothing to migrate"), "{message}");
     assert!(message.contains(CONTRACT_SQL_SHA256), "{message}");
 
-    // And it applied nothing: still exactly the one ledger row the migration
-    // above wrote.
+    // And it applied nothing: still exactly the two ledger rows the migration
+    // above wrote, one per step.
     let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM gwk_internal.schema_migration")
         .fetch_one(&pool)
         .await
         .expect("count ledger rows");
-    assert_eq!(rows, 1, "the refused rung left a second row behind");
+    assert_eq!(rows, 2, "the refused rung left an extra row behind");
 
     drop(pool);
     drop_database(&maintenance, &database).await;
@@ -961,7 +986,7 @@ async fn r4_goes_red_when_a_protection_is_disabled() {
     // `tgenabled = 'A'` drops a disabled guard out of the set, so the count
     // falls to 17 and refuses before any relation is probed.
     assert!(
-        message.contains("expected exactly 18 relations with a TRUNCATE guard and found 17"),
+        message.contains("expected exactly 19 relations with a TRUNCATE guard and found 18"),
         "a disabled guard must be caught by the count arm, not left to the probe: {message}"
     );
     assert!(
@@ -993,7 +1018,7 @@ async fn r4_goes_red_when_a_protection_is_disabled() {
     // refuses one whether or not its table held a row to prove it with.
     assert!(
         message
-            .contains("expected exactly 19 relations with a row-level DELETE guard and found 18"),
+            .contains("expected exactly 20 relations with a row-level DELETE guard and found 19"),
         "a disabled row guard must be caught by the count arm, not left to the probe: {message}"
     );
     assert!(
@@ -1059,7 +1084,7 @@ async fn r4_goes_red_when_a_guard_is_present_enabled_and_no_longer_refuses() {
         .await
         .expect("the protections hold after a migration");
     let before = truncate_guarded_relations(&pool).await;
-    assert_eq!(before, 18, "the mutation below must not move this count");
+    assert_eq!(before, 19, "the mutation below must not move this count");
 
     // Present, enabled, ALWAYS — and it no longer refuses anything. A BEFORE
     // STATEMENT trigger cannot cancel by returning NULL, so the TRUNCATE
@@ -1511,25 +1536,31 @@ async fn a_failing_step_moves_neither_the_fingerprint_nor_the_ledger_nor_the_che
          discard, so something outside the applier deleted the row"
     );
 
-    // The discriminating arm. This step applies cleanly, stamps the fingerprint,
-    // carries its backend migrations, writes its ledger row and reaches the
-    // discard — and then leaves `gwk.event`'s TRUNCATE guard disabled, which the
-    // protections rung refuses INSIDE the transaction, after the checkpoints are
-    // gone. A discard executed on the pool rather than on the transaction is
-    // invisible to every other assertion here and fatal to this one.
+    // The discriminating arm. This chain applies cleanly, stamps the
+    // fingerprint, carries its backend migrations, writes its ledger rows and
+    // reaches the discard — and then leaves `gwk.event`'s TRUNCATE guard
+    // disabled, which the protections rung refuses INSIDE the transaction,
+    // after the checkpoints are gone. A discard executed on the pool rather
+    // than on the transaction is invisible to every other assertion here and
+    // fatal to this one. The poison rides the LAST step of the full chain so
+    // the refusal comes from the disabled guard, not from a partial chain
+    // failing the terminal-pinned guard counts.
+    let last = chain[chain.len() - 1];
     let late = Step {
         sql: Box::leak(
             format!(
                 "{}\nALTER TABLE gwk.event DISABLE TRIGGER event_no_truncate;\n",
-                chain[0].sql
+                last.sql
             )
             .into_boxed_str(),
         ),
-        ..*chain[0]
+        ..*last
     };
+    let mut borrowed: Vec<&Step> = chain[..chain.len() - 1].to_vec();
+    borrowed.push(&late);
     let refusal = gwk_kernel::migrate::apply(
         &pool,
-        &[&late],
+        &borrowed,
         &role,
         BASE_CONTRACT_SHA256,
         "0000000000000000000000000000000000000000",
@@ -1583,7 +1614,12 @@ async fn r5_catches_a_step_that_holds_the_event_count_and_moves_the_watermark() 
     seed_gate_decided_event(&pool, 1, "gate-watermark", r#"{"kind": "operator"}"#).await;
     seed_gate_decided_event(&pool, 2, "gate-watermark", r#"{"kind": "engine"}"#).await;
 
+    // The poison rides the LAST step of the full chain: the protections rung
+    // inside the applier is pinned to the terminal schema's guard counts, so a
+    // hand-sliced partial chain is refused for arriving mid-chain — a true
+    // refusal about the wrong subject, and this test needs the commit.
     let chain = resolved_chain();
+    let last = chain[chain.len() - 1];
     let poisoned = Step {
         sql: Box::leak(
             format!(
@@ -1597,15 +1633,17 @@ async fn r5_catches_a_step_that_holds_the_event_count_and_moves_the_watermark() 
                    'gate_decided', 1, now(), now(), '{{\"kind\": \"engine\"}}'::jsonb, \
                    '{{}}'::jsonb, '{{}}'::jsonb);\n\
                  ALTER TABLE gwk.event ENABLE ALWAYS TRIGGER event_append_only;\n",
-                chain[0].sql
+                last.sql
             )
             .into_boxed_str(),
         ),
-        ..*chain[0]
+        ..*last
     };
+    let mut borrowed: Vec<&Step> = chain[..chain.len() - 1].to_vec();
+    borrowed.push(&poisoned);
     let applied = gwk_kernel::migrate::apply(
         &pool,
-        &[&poisoned],
+        &borrowed,
         &role,
         BASE_CONTRACT_SHA256,
         "0000000000000000000000000000000000000000",
@@ -1673,7 +1711,7 @@ async fn r3_and_r5_hold_over_a_migrated_database() {
 /// A chain of `count` steps from `base`, each one stamping the fingerprint and
 /// touching nothing else.
 ///
-/// Synthetic because the registry holds one step and the property under test
+/// Synthetic because the registry holds two steps and the property under test
 /// only appears at several: the ledger's `step_id` is bounded at 128 characters
 /// and a step id is 21 of them, so a run that wrote one row naming the whole
 /// chain fitted five steps and violated the CHECK at the sixth — at the last
@@ -1764,11 +1802,11 @@ async fn the_ledger_writes_one_row_per_step_and_a_six_step_chain_fits() {
     .expect("read the ledger");
     assert_eq!(
         rows.len(),
-        1 + chain.len(),
-        "the real migration's row plus one per synthetic step"
+        2 + chain.len(),
+        "the real migration's two rows — one per applied step — plus one per synthetic step"
     );
 
-    for (step, row) in chain.iter().zip(rows.iter().skip(1)) {
+    for (step, row) in chain.iter().zip(rows.iter().skip(2)) {
         let step_id: String = row.get("step_id");
         let base: String = row.get("base_sha256");
         let result: String = row.get("result_sha256");
