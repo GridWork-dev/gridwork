@@ -9,4 +9,5 @@
 //! database, no clock. That is what lets its golden vectors be exact.
 
 pub mod container;
+pub mod context;
 pub mod store;

@@ -11,6 +11,7 @@
 use std::path::{Path, PathBuf};
 
 use base64::prelude::{BASE64_STANDARD, Engine as _};
+use gwk_domain::context::{ContentClass, RetentionClass};
 use secrecy::{SecretBox, SecretString};
 
 use crate::blob::container::DEK_BYTES;
@@ -43,6 +44,38 @@ pub const BLOB_KEK_NEXT_ENV: &str = "GWK_BLOB_KEK_NEXT";
 
 /// The recorded policy default. Evidence pins override this age indefinitely.
 pub const DEFAULT_PTY_RECORDING_RETENTION_DAYS: i32 = 30;
+
+/// The variables carrying one Context content class's KEK and its nonsecret
+/// label (R19: one key-encryption key per content class).
+///
+/// An explicit arm per class and no wildcard, so a new content class fails
+/// this match at compile time and names its variables here before anything
+/// can construct a store that silently lacks its key.
+pub const fn context_kek_env(class: ContentClass) -> (&'static str, &'static str) {
+    match class {
+        ContentClass::Conformance => (
+            "GWK_CONTEXT_KEK_CONFORMANCE",
+            "GWK_CONTEXT_KEK_CONFORMANCE_ID",
+        ),
+        ContentClass::Private => ("GWK_CONTEXT_KEK_PRIVATE", "GWK_CONTEXT_KEK_PRIVATE_ID"),
+    }
+}
+
+/// The variable carrying one retention class's window in days, or `None` for
+/// a class that age can never reclaim.
+///
+/// A bounded class whose variable is absent has NO window — the sweep keeps
+/// its blobs. Retention is an opt-in policy per deployment; the class SET is
+/// contract, the numbers are not, and an unconfigured deployment fails safe
+/// toward keeping bytes.
+pub const fn context_retention_env(class: RetentionClass) -> Option<&'static str> {
+    match class {
+        RetentionClass::Permanent => None,
+        RetentionClass::Manifest => Some("GWK_CONTEXT_RETENTION_DAYS_MANIFEST"),
+        RetentionClass::Release => Some("GWK_CONTEXT_RETENTION_DAYS_RELEASE"),
+        RetentionClass::Observation => Some("GWK_CONTEXT_RETENTION_DAYS_OBSERVATION"),
+    }
+}
 
 /// The default socket path (ADR 0002: UDS only, no network listener).
 pub const DEFAULT_SOCKET_PATH: &str = "/run/gridwork/gwk.sock";
@@ -152,6 +185,12 @@ pub struct BlobConfig {
     kek: SecretBox<[u8; DEK_BYTES]>,
     kek_id: String,
     pty_recording_retention_days: i32,
+    /// Configured Context retention windows, one entry per BOUNDED class the
+    /// deployment opted into. Read by the sweep; a class with no entry is
+    /// retained. Lives here rather than on [`ContextBlobConfig`] because the
+    /// sweep is the MAIN store's operation — retention policy belongs with the
+    /// process that enforces it.
+    context_retention: Vec<(RetentionClass, i32)>,
 }
 
 impl BlobConfig {
@@ -183,23 +222,29 @@ impl BlobConfig {
 
         let pty_recording_retention_days = match get(PTY_RECORDING_RETENTION_DAYS_ENV) {
             None => DEFAULT_PTY_RECORDING_RETENTION_DAYS,
-            Some(value) => value
-                .trim()
-                .parse::<i32>()
-                .ok()
-                .filter(|days| *days > 0)
-                .ok_or_else(|| {
-                    KernelError::Config(format!(
-                        "{PTY_RECORDING_RETENTION_DAYS_ENV} must be a positive whole number of days"
-                    ))
-                })?,
+            Some(value) => positive_days(PTY_RECORDING_RETENTION_DAYS_ENV, &value)?,
         };
+
+        // Only classes whose variable is set get a window; the rest are
+        // retained. No default number: the pty default above is a recorded
+        // legacy policy, and repeating that shape here would have this file
+        // choosing how long a deployment keeps content nobody configured.
+        let mut context_retention = Vec::new();
+        for class in RetentionClass::ALL {
+            let Some(name) = context_retention_env(class) else {
+                continue;
+            };
+            if let Some(value) = get(name) {
+                context_retention.push((class, positive_days(name, &value)?));
+            }
+        }
 
         Ok(Self {
             root,
             kek: SecretBox::new(kek),
             kek_id,
             pty_recording_retention_days,
+            context_retention,
         })
     }
 
@@ -228,7 +273,15 @@ impl BlobConfig {
             kek: SecretBox::new(Box::new(kek)),
             kek_id,
             pty_recording_retention_days: DEFAULT_PTY_RECORDING_RETENTION_DAYS,
+            context_retention: Vec::new(),
         })
+    }
+
+    /// The same config with these Context retention windows — the test-side
+    /// twin of the `GWK_CONTEXT_RETENTION_DAYS_*` variables.
+    pub fn with_context_retention(mut self, windows: Vec<(RetentionClass, i32)>) -> Self {
+        self.context_retention = windows;
+        self
     }
 
     pub fn root(&self) -> &Path {
@@ -246,6 +299,112 @@ impl BlobConfig {
     pub fn pty_recording_retention_days(&self) -> i32 {
         self.pty_recording_retention_days
     }
+
+    /// The configured Context retention windows. A class absent here has no
+    /// window and its blobs are retained.
+    pub fn context_retention(&self) -> &[(RetentionClass, i32)] {
+        &self.context_retention
+    }
+}
+
+/// The per-class Context KEK material (R19), read from the environment.
+///
+/// R18's custody answer, formalized: every key is supplied through the
+/// process environment — in deployment, a root-owned environment file the
+/// service manager loads — and only the nonsecret labels are ever persisted
+/// (each travels in the clear inside the container headers of the blobs its
+/// key wraps). No key touches the database, which is D4's one MUST; key and
+/// ciphertext sharing a host remains the disclosed residual the 8B
+/// certification review re-asks with evidence.
+///
+/// Construction is all-or-nothing over [`ContentClass::ALL`]: a deployment
+/// missing any class's key or label is refused AT PROCESS START with the
+/// variable named, never at the first write that happens to need it. That is
+/// the fail-closed half of "one KEK per content class" — a store that could
+/// come up with half its key ring would classify content it cannot protect.
+///
+/// `Debug` is safe to log: every key is a [`SecretBox`], which redacts itself.
+#[derive(Debug)]
+pub struct ContextBlobConfig {
+    keks: Vec<(ContentClass, SecretBox<[u8; DEK_BYTES]>, String)>,
+}
+
+impl ContextBlobConfig {
+    pub fn from_env() -> Result<Self> {
+        Self::from_lookup(env_lookup)
+    }
+
+    pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Self> {
+        let mut keks: Vec<(ContentClass, SecretBox<[u8; DEK_BYTES]>, String)> = Vec::new();
+        for class in ContentClass::ALL {
+            let (kek_var, id_var) = context_kek_env(class);
+            let kek = read_kek(kek_var, &get)?;
+            let kek_id =
+                get(id_var).ok_or_else(|| KernelError::Config(format!("{id_var} is not set")))?;
+            validate_kek_id_for(id_var, &kek_id)?;
+            // One label names one key. Rotation matches on the label and the
+            // container header carries it, so two classes sharing a label
+            // would make "which key wraps this blob" unanswerable from the
+            // header — the exact question the label exists to answer.
+            if let Some((other, _, _)) = keks.iter().find(|(_, _, seen)| *seen == kek_id) {
+                return Err(KernelError::Config(format!(
+                    "{id_var} carries {kek_id:?}, already used by the {} class: every content \
+                     class's KEK label must be distinct",
+                    other.as_str()
+                )));
+            }
+            keks.push((class, SecretBox::new(kek), kek_id));
+        }
+        Ok(Self { keks })
+    }
+
+    /// Build directly from held material, for tests. The same completeness
+    /// rule as `from_lookup`: every content class, exactly once, distinct
+    /// labels.
+    pub fn new(material: Vec<(ContentClass, [u8; DEK_BYTES], String)>) -> Result<Self> {
+        let mut keks: Vec<(ContentClass, SecretBox<[u8; DEK_BYTES]>, String)> = Vec::new();
+        for (class, kek, kek_id) in material {
+            validate_kek_id_for("context kek id", &kek_id)?;
+            if keks.iter().any(|(seen, _, _)| *seen == class)
+                || keks.iter().any(|(_, _, seen)| *seen == kek_id)
+            {
+                return Err(KernelError::Config(format!(
+                    "duplicate context class or kek label ({}, {kek_id:?})",
+                    class.as_str()
+                )));
+            }
+            keks.push((class, SecretBox::new(Box::new(kek)), kek_id));
+        }
+        if keks.len() != ContentClass::ALL.len() {
+            return Err(KernelError::Config(format!(
+                "context kek material covers {} of {} content classes",
+                keks.len(),
+                ContentClass::ALL.len()
+            )));
+        }
+        Ok(Self { keks })
+    }
+
+    /// The class's key and its nonsecret label.
+    pub fn kek(&self, class: ContentClass) -> (&SecretBox<[u8; DEK_BYTES]>, &str) {
+        match self.keks.iter().find(|(seen, _, _)| *seen == class) {
+            Some((_, kek, kek_id)) => (kek, kek_id),
+            // Construction covers ContentClass::ALL, refused otherwise.
+            None => unreachable!("ContextBlobConfig is constructed over every content class"),
+        }
+    }
+}
+
+/// Parse a positive whole number of days, named by the variable it came from.
+fn positive_days(name: &str, value: &str) -> Result<i32> {
+    value
+        .trim()
+        .parse::<i32>()
+        .ok()
+        .filter(|days| *days > 0)
+        .ok_or_else(|| {
+            KernelError::Config(format!("{name} must be a positive whole number of days"))
+        })
 }
 
 /// Decode one base64 KEK, named by the variable it came from.
@@ -276,9 +435,16 @@ fn read_kek(name: &str, get: &impl Fn(&str) -> Option<String>) -> Result<Box<[u8
 /// parser, nothing that could carry material, nothing that changes meaning
 /// under a different locale.
 pub fn validate_kek_id(kek_id: &str) -> Result<()> {
+    validate_kek_id_for(BLOB_KEK_ID_ENV, kek_id)
+}
+
+/// The same rule, naming the variable that carried the label — the Context
+/// classes each have their own, and an error blaming [`BLOB_KEK_ID_ENV`] for
+/// a value it never held would send the operator to the wrong line.
+pub fn validate_kek_id_for(name: &str, kek_id: &str) -> Result<()> {
     let invalid = |why: &str| {
         Err(KernelError::Config(format!(
-            "{BLOB_KEK_ID_ENV} {why}: expected 1..={MAX_KEK_ID_BYTES} bytes matching \
+            "{name} {why}: expected 1..={MAX_KEK_ID_BYTES} bytes matching \
              [A-Za-z0-9._-], got {kek_id:?}"
         )))
     };
@@ -563,6 +729,114 @@ mod tests {
                 "{why}: {message}"
             );
         }
+    }
+
+    /// Every class variable, set — the ring `from_lookup` accepts.
+    fn context_ring(overrides: &[(&str, &str)]) -> Vec<(String, String)> {
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        for (index, class) in ContentClass::ALL.iter().enumerate() {
+            let (kek_var, id_var) = context_kek_env(*class);
+            // A distinct key per class, so a test that swaps them can tell.
+            pairs.push((
+                kek_var.to_owned(),
+                BASE64_STANDARD.encode([index as u8 + 1; DEK_BYTES]),
+            ));
+            pairs.push((id_var.to_owned(), format!("kek-{}", class.as_str())));
+        }
+        for (name, value) in overrides {
+            pairs.retain(|(k, _)| k != name);
+            pairs.push(((*name).to_owned(), (*value).to_owned()));
+        }
+        pairs
+    }
+
+    fn lookup_pairs(pairs: Vec<(String, String)>) -> impl Fn(&str) -> Option<String> {
+        move |key| pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
+    }
+
+    #[test]
+    fn the_context_key_ring_is_all_or_nothing() {
+        let config =
+            ContextBlobConfig::from_lookup(lookup_pairs(context_ring(&[]))).expect("full ring");
+        // Every class answers, with its own key and its own label — asserted
+        // over ALL so a new class extends this test by construction.
+        let mut labels: Vec<String> = Vec::new();
+        for class in ContentClass::ALL {
+            let (kek, kek_id) = config.kek(class);
+            assert_eq!(kek.expose_secret().len(), DEK_BYTES);
+            assert!(!labels.contains(&kek_id.to_owned()), "{kek_id}");
+            labels.push(kek_id.to_owned());
+        }
+        assert_eq!(labels.len(), ContentClass::ALL.len());
+
+        // Fail closed at construction: each variable, removed alone, is a
+        // refusal that names it. This is the "missing class key fails at
+        // process start, not at first use" arm.
+        for class in ContentClass::ALL {
+            let (kek_var, id_var) = context_kek_env(class);
+            for missing in [kek_var, id_var] {
+                let pairs: Vec<(String, String)> = context_ring(&[])
+                    .into_iter()
+                    .filter(|(k, _)| k != missing)
+                    .collect();
+                let err = ContextBlobConfig::from_lookup(lookup_pairs(pairs))
+                    .expect_err("a missing class variable must refuse");
+                assert!(err.to_string().contains(missing), "{missing}: {err}");
+            }
+        }
+
+        // Two classes wearing one label: refused, naming both the variable and
+        // the class already holding it.
+        let (_, private_id_var) = context_kek_env(ContentClass::Private);
+        let err = ContextBlobConfig::from_lookup(lookup_pairs(context_ring(&[(
+            private_id_var,
+            "kek-conformance",
+        )])))
+        .expect_err("a shared label must refuse");
+        let message = err.to_string();
+        assert!(message.contains(private_id_var), "{message}");
+        assert!(message.contains("conformance"), "{message}");
+    }
+
+    #[test]
+    fn context_retention_windows_are_opt_in_per_bounded_class() {
+        let base = |extra: Vec<(&str, String)>| {
+            let mut pairs = vec![
+                (BLOB_ROOT_ENV, "/var/lib/gridwork/blobs".to_owned()),
+                (BLOB_KEK_ENV, kek_b64()),
+                (BLOB_KEK_ID_ENV, "kek-2026-07".to_owned()),
+            ];
+            pairs.extend(extra);
+            let owned: Vec<(String, String)> =
+                pairs.into_iter().map(|(k, v)| (k.to_owned(), v)).collect();
+            lookup_pairs(owned)
+        };
+
+        // Nothing configured: no windows, and that is a complete answer — the
+        // sweep retains every class.
+        let config = BlobConfig::from_lookup(base(vec![])).expect("config");
+        assert!(config.context_retention().is_empty());
+
+        // One bounded class configured: exactly that window.
+        let manifest_var =
+            context_retention_env(RetentionClass::Manifest).expect("manifest is bounded");
+        let config =
+            BlobConfig::from_lookup(base(vec![(manifest_var, "45".to_owned())])).expect("config");
+        assert_eq!(
+            config.context_retention(),
+            &[(RetentionClass::Manifest, 45)]
+        );
+
+        // A malformed window is a refusal naming its variable, same rule as
+        // the pty window.
+        for bad in ["0", "-1", "forever"] {
+            let err = BlobConfig::from_lookup(base(vec![(manifest_var, bad.to_owned())]))
+                .expect_err("invalid window must refuse");
+            assert!(err.to_string().contains(manifest_var), "{bad}: {err}");
+        }
+
+        // Permanent has no variable at all: nothing to set is the design.
+        assert_eq!(context_retention_env(RetentionClass::Permanent), None);
     }
 
     #[test]

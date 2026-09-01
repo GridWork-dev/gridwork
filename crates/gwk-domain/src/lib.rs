@@ -7,6 +7,7 @@
 pub mod blob;
 pub mod checkpoint;
 pub mod command;
+pub mod context;
 pub mod contract_sql;
 pub mod contract_steps;
 pub mod engine;
@@ -31,6 +32,13 @@ pub use checkpoint::{
 pub use command::{
     CommandDecodeError, KernelCommand, PTY_CONTROL_ACTION_CLASS, PTY_INPUT_ACTION_CLASS,
     PTY_START_ACTION_CLASS, PTY_TEMPLATE_ACTION_CLASS,
+};
+// Like `engine`, deliberately NOT in the generated TypeScript contract: the
+// class tokens live in the DDL and in backend configuration, and no wire
+// surface carries them until a consumer is wired (task 32's territory).
+pub use context::{
+    BlobClasses, ContentClass, ContextBlobRecord, ContextCasError, ContextCasStore, RedactionClass,
+    RetentionClass,
 };
 // Deliberately NOT in the generated TypeScript contract: nothing in `engine`
 // derives `specta::Type` and nothing is registered in xtask's export registry.

@@ -957,8 +957,10 @@ async fn assert_no_half_closed_update(tx: &mut sqlx::PgTransaction<'_>) -> crate
 
 /// How many relations [`assert_protections`]'s TRUNCATE sweep must find.
 ///
-/// Seventeen are the contract's, in `schema/0001_contract.sql`; the eighteenth
-/// is the ledger's own, in `migrations/0006_schema_migration.sql`.
+/// Eighteen are the contract's, in `schema/0001_contract.sql` —
+/// `gwk.context_blob` joined them with the Context CAS classification (task
+/// 7) — and the nineteenth is the ledger's own, in
+/// `migrations/0006_schema_migration.sql`.
 ///
 /// EQUALITY, and asserted the same way [`EXPECTED_RELATIONS`] is. An earlier
 /// draft made it a floor, reasoning that a relation GAINING a guard is always
@@ -974,11 +976,11 @@ async fn assert_no_half_closed_update(tx: &mut sqlx::PgTransaction<'_>) -> crate
 /// which the digest gate then correctly refuses until a step results in it —
 /// and that step is the change where this number moves with it. There is no
 /// benign direction for this count to drift in.
-const EXPECTED_TRUNCATE_GUARDS: usize = 18;
+const EXPECTED_TRUNCATE_GUARDS: usize = 19;
 
 /// How many relations [`assert_protections`]'s row-level DELETE sweep must find.
 ///
-/// Nineteen, one more than the TRUNCATE count above, and the extra one is the
+/// Twenty, one more than the TRUNCATE count above, and the extra one is the
 /// point. `gwk.dispatch_node` carries `dispatch_node_no_delete` and no TRUNCATE
 /// guard, so it appears in this set and not in that one — which is why the
 /// DELETE arm cannot reuse that list, and why for as long as it did there was a
@@ -989,7 +991,7 @@ const EXPECTED_TRUNCATE_GUARDS: usize = 18;
 /// rows; the DELETE probe reaches only the ones that happen to hold a row when
 /// a migration runs. For all the others this count IS the check, so a floor
 /// would leave them proven by nothing at all.
-const EXPECTED_DELETE_GUARDS: usize = 19;
+const EXPECTED_DELETE_GUARDS: usize = 20;
 
 /// R5 — the database ends where the chain said it would, measured rather than
 /// inferred.
@@ -1146,6 +1148,10 @@ fn grant_class(schema: &str, relation: &str) -> Option<GrantClass> {
             "gwk",
             "context_manifest" | "context_release" | "context_observation" | "context_finalization",
         ) => History,
+        // The CAS classification row: appended at the put's claim, read by the
+        // sweep and every class-checked read, never edited — a rewritable
+        // classification would re-key or re-schedule a blob after the fact.
+        ("gwk", "context_blob") => History,
         ("gwk", "transition") => Seed,
         ("gwk", "workspace_node") => TreeCache,
         (
@@ -1183,7 +1189,7 @@ fn grant_class(schema: &str, relation: &str) -> Option<GrantClass> {
 /// style: a per-relation sweep over a set that lost a relation agrees with
 /// itself perfectly, and `all()` over an empty one is true. `admin_init.rs`
 /// went red on `26 != 22` once, and the count is what fired.
-const EXPECTED_RELATIONS: usize = 35;
+const EXPECTED_RELATIONS: usize = 36;
 
 /// R3 — every relation in both schemas holds exactly its declared privileges.
 ///

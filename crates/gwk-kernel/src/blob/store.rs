@@ -82,11 +82,25 @@ macro_rules! blob_columns {
 /// blob a LIVE checkpoint still names is a recovery that cannot run.
 ///
 /// Evidence is the third holder. Ordinary evidence keeps its bytes without an
-/// age limit. PTY recordings are the one bounded class: their evidence row
-/// keeps the blob for the configured full-fidelity window, while `blob_pin`
-/// remains the independent forever override. The evidence row itself is never
-/// deleted, so a swept recording remains an auditable pointer to bytes whose
-/// retention elapsed.
+/// age limit. PTY recordings are the one KIND-keyed bounded class: their
+/// evidence row keeps the blob for the configured full-fidelity window, while
+/// `blob_pin` remains the independent forever override. The evidence row
+/// itself is never deleted, so a swept recording remains an auditable pointer
+/// to bytes whose retention elapsed.
+///
+/// Context classification is the fourth holder, and it is the R20 mechanism
+/// rather than another kind-keyed branch: a blob with a `gwk.context_blob`
+/// row is protected exactly while its RETENTION CLASS says so — forever for a
+/// class with no configured window (the fail-safe direction, and what
+/// `permanent` structurally is, since no window variable exists for it), and
+/// for the configured number of days otherwise, counted from the
+/// classification claim. The windows arrive as two parallel arrays
+/// (class, days) so a new bounded class is a config entry, never a new SQL
+/// branch. A classified digest is carved OUT of the ordinary-evidence-forever
+/// rule — its evidence rows still exist as audit pointers, but the class, not
+/// the evidence kind, decides how long the bytes stay. Like the evidence row,
+/// the classification row is never deleted: after a sweep it is the record
+/// that classified content existed and what class it was.
 macro_rules! unreferenced {
     () => {
         "SELECT b.digest FROM gwk_internal.blob b \
@@ -99,7 +113,15 @@ macro_rules! unreferenced {
             AND NOT EXISTS (SELECT 1 FROM gwk.evidence e \
                             WHERE e.ref = 'sha256:' || b.digest \
                               AND (e.kind <> 'pty_recording' \
-                                   OR e.created_at >= now() - make_interval(days => $1)))"
+                                   OR e.created_at >= now() - make_interval(days => $1)) \
+                              AND NOT EXISTS (SELECT 1 FROM gwk.context_blob cbe \
+                                              WHERE cbe.digest = e.ref)) \
+            AND NOT EXISTS (SELECT 1 FROM gwk.context_blob cb \
+                            LEFT JOIN unnest($2::text[], $3::integer[]) AS w(class, days) \
+                              ON w.class = cb.retention_class \
+                            WHERE cb.digest = 'sha256:' || b.digest \
+                              AND (w.days IS NULL \
+                                   OR cb.created_at >= now() - make_interval(days => w.days)))"
     };
 }
 
@@ -299,6 +321,20 @@ impl PgBlobStore {
                 .try_get("wrapped_dek")
                 .map_err(|e| storage("column wrapped_dek", e))?,
         }))
+    }
+
+    /// The committed row's descriptor, tombstoned included — what a retention
+    /// audit and the Context `describe` read. The port's `stat` refuses a
+    /// tombstoned blob instead, because a READER must not mistake destroyed
+    /// bytes for describable ones; a descriptor consumer sees the flag.
+    pub(crate) async fn descriptor(
+        &self,
+        address: &BlobAddress,
+    ) -> Result<Option<BlobDescriptor>, BlobError> {
+        Ok(self
+            .row(address.digest_hex())
+            .await?
+            .map(|row| row.descriptor))
     }
 
     /// The row, or the reason there is nothing to read.
@@ -904,6 +940,16 @@ impl BlobStore for PgBlobStore {
 
     async fn sweep(&self) -> Result<Vec<BlobAddress>, BlobError> {
         self.expire_uploads().await?;
+        // The configured Context windows, as the two parallel arrays the
+        // class-retention arm joins. Only bounded classes the deployment
+        // opted into appear; every other class falls to the arm's NULL side
+        // and is retained.
+        let (classes, days): (Vec<String>, Vec<i32>) = self
+            .config
+            .context_retention()
+            .iter()
+            .map(|(class, days)| (class.as_str().to_owned(), *days))
+            .unzip();
         // The row goes first and the file second, so an interruption leaves a
         // file nothing can decrypt rather than a row pointing at nothing.
         let swept: Vec<String> = sqlx::query_scalar(concat!(
@@ -912,6 +958,8 @@ impl BlobStore for PgBlobStore {
             ") RETURNING digest"
         ))
         .bind(self.config.pty_recording_retention_days())
+        .bind(&classes)
+        .bind(&days)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| storage("sweep blobs", e))?;

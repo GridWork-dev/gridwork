@@ -233,7 +233,7 @@ async fn init_applies_the_contract_is_idempotent_and_refuses_a_stranger() {
         .fetch_all(&mut conn)
         .await
         .expect("query the grant matrix");
-        assert_eq!(rows.len(), 26, "the contract schema changed shape");
+        assert_eq!(rows.len(), 27, "the contract schema changed shape");
         for row in &rows {
             let table: String = row.try_get("relname").expect("relname");
             let get = |col| -> bool { row.try_get(col).expect("bool") };
@@ -251,7 +251,9 @@ async fn init_applies_the_contract_is_idempotent_and_refuses_a_stranger() {
                 // proves nothing, since the row the verifier reads is no longer
                 // the row the attempt ran against. They arrived UPDATE-able
                 // from the blanket grant, which is how this assertion found
-                // them.
+                // them. `context_blob` joins them on the same reasoning: a
+                // rewritable classification would re-key or re-schedule a blob
+                // out from under the sweep after the fact.
                 "event"
                 | "receipt"
                 | "ingested_record"
@@ -259,7 +261,8 @@ async fn init_applies_the_contract_is_idempotent_and_refuses_a_stranger() {
                 | "context_manifest"
                 | "context_release"
                 | "context_observation"
-                | "context_finalization" => {
+                | "context_finalization"
+                | "context_blob" => {
                     assert!(get("ins"), "{table}: history must be appendable");
                     assert!(!get("upd"), "{table}: history must not be rewritable");
                     assert!(!get("del"), "{table}: DELETE is granted nowhere else");

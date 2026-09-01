@@ -465,6 +465,10 @@ pub async fn driving_figures(pool: &PgPool, window: &ReceiptWindow) -> Result<Dr
 /// table in the schema by construction, so a record is mutable the moment it is
 /// created unless this line names it. That default is the right one for a
 /// schema that is mostly rebuildable projections, and it is exactly wrong here.
+/// `gwk.context_blob` joins them on the same reasoning: a blob's classification
+/// decides which class KEK opens it and when retention may reclaim it, and a
+/// classification that can be rewritten after the fact is a retention policy
+/// anyone with UPDATE can edit out from under the sweep.
 ///
 /// The blob tables are the one place DELETE is granted, and only inside
 /// `gwk_internal`: sweep reclaims unreferenced blobs, evidence pins are
@@ -560,7 +564,8 @@ pub fn privilege_statements(role: &str) -> String {
          REVOKE UPDATE ON gwk.event, gwk.receipt, gwk.ingested_record, \
            gwk.cost_entry FROM {role};\n\
          REVOKE UPDATE ON gwk.context_manifest, gwk.context_release, \
-           gwk.context_observation, gwk.context_finalization FROM {role};\n\
+           gwk.context_observation, gwk.context_finalization, \
+           gwk.context_blob FROM {role};\n\
          REVOKE INSERT, UPDATE ON gwk.transition FROM {role};\n\
          GRANT DELETE ON gwk.workspace_node TO {role};\n\
          GRANT SELECT ON gwk_internal.schema_fingerprint TO {role};\n\
@@ -753,7 +758,24 @@ mod tests {
         assert!(script.contains("GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA gwk"));
         assert!(script.contains("REVOKE UPDATE ON gwk.event, gwk.receipt"));
         assert!(script.contains("REVOKE UPDATE ON gwk.context_manifest, gwk.context_release"));
-        assert!(script.contains("gwk.context_observation, gwk.context_finalization FROM"));
+        // The whole context REVOKE statement, scoped to the statement rather
+        // than the script: a bare `contains("gwk.context_blob")` would match a
+        // future GRANT just as happily, and what this asserts is that the
+        // classification row loses UPDATE — rewriting it would re-key or
+        // re-schedule a blob out from under the sweep after the fact.
+        let context_revoke = script
+            .split(';')
+            .map(str::trim)
+            .find(|statement| statement.starts_with("REVOKE UPDATE ON gwk.context_manifest"))
+            .expect("the context REVOKE statement exists");
+        for table in [
+            "gwk.context_release",
+            "gwk.context_observation",
+            "gwk.context_finalization",
+            "gwk.context_blob",
+        ] {
+            assert!(context_revoke.contains(table), "{context_revoke}");
+        }
         assert!(script.contains("REVOKE INSERT, UPDATE ON gwk.transition"));
         assert!(script.contains("GRANT SELECT, INSERT, UPDATE ON gwk_internal.pty_delivery"));
         // Named, not covered. `gwk_internal` has no blanket grant, so the
