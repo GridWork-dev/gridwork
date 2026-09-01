@@ -877,10 +877,17 @@ jobs:
           # from the crates.io index, where an unpublished crate is not; omit
           # the version and packaging refuses the dependency for having none. A
           # crate that is never uploaded owes neither check an answer.
+          #
+          # gwk-context-compiler is the same bind one crate later: it is
+          # `publish = false` BECAUSE it depends on gwk-context by path, and it
+          # is a separate crate so the verifier's dependency graph can exclude
+          # it (R15) — an exclusion that only means something if the crate is
+          # a real workspace member, which is why it is one and not a module.
           cargo package --workspace --exclude gwk-pty \
             --exclude gwk-adapter-opencode --exclude gwk-adapter-claude \
             --exclude gwk-adapter-codex --exclude gwk-parity \
-            --exclude gwk-pty-host --exclude xtask --locked
+            --exclude gwk-pty-host --exclude xtask \
+            --exclude gwk-context-compiler --locked
 
           # Every publishable member, straight from the manifest graph:
           # `publish = false` shows up as an empty array, so xtask drops out and

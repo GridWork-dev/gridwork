@@ -1243,6 +1243,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "gwk-context-compiler"
+version = "0.0.1"
+dependencies = [
+ "gwk-context",
+ "gwk-domain",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+]
+
+[[package]]
 name = "gwk-domain"
 version = "0.0.3"
 dependencies = [

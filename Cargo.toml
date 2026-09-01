@@ -30,6 +30,7 @@ default-members = [
   "crates/gwk",
   "crates/gwk-cert",
   "crates/gwk-context",
+  "crates/gwk-context-compiler",
   "crates/gwk-domain",
   "crates/gwk-kernel",
   "crates/gwk-text",

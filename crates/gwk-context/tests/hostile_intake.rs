@@ -33,8 +33,8 @@ use gwk_context::skill::{
     SKILL_OPAQUE_FIELD_MAX_COUNT, SkillError, SkillManifest,
 };
 use gwk_context::{
-    CONTEXT_EVIDENCE_MAX_COUNT, Contribution, Digest, EvidenceRefs, Participation,
-    ParticipationReason, PrecedenceTier, ResolvedManifest, TruthRecordError, resolve,
+    CONTEXT_EVIDENCE_MAX_COUNT, Digest, EvidenceRefs, Participation, ParticipationReason,
+    ResolvedManifest, TruthRecordError,
 };
 use gwk_domain::EvidenceId;
 
@@ -605,40 +605,12 @@ fn a_bundle_path_refuses_past_its_byte_bound() {
 }
 
 // ============================================================
-// Precision goldens — precedence and evidence fail closed
+// Precision goldens — evidence and participation fail closed
 // ============================================================
-
-#[test]
-fn an_equal_tier_disagreement_fails_closed_rather_than_picking() {
-    // Two sources at the same authority saying different things is not a
-    // tie-break problem, it is a question nobody has answered. Picking either
-    // one invents an answer and records it as resolved.
-    let contributions = vec![
-        Contribution::new(PrecedenceTier::Security, "deny"),
-        Contribution::new(PrecedenceTier::Security, "allow"),
-        Contribution::new(PrecedenceTier::Annotation, "irrelevant"),
-    ];
-    let conflict = resolve(&contributions).expect_err("an equal-tier disagreement must fail");
-    assert_eq!(conflict.tier, PrecedenceTier::Security);
-    assert_eq!(conflict.distinct_values, 2);
-    assert_eq!(conflict.reason(), ParticipationReason::PrecedenceLoss);
-
-    // Agreement at the same tier is agreement, not a conflict — the other half,
-    // without which "fails closed" could just mean "always fails".
-    let agreed = vec![
-        Contribution::new(PrecedenceTier::Security, "deny"),
-        Contribution::new(PrecedenceTier::Security, "deny"),
-        Contribution::new(PrecedenceTier::RunDeclaration, "allow"),
-    ];
-    assert_eq!(resolve(&agreed).expect("agreement resolves"), Some(0));
-
-    // And nobody speaking resolves to nobody, rather than to a default.
-    let empty: Vec<Contribution<&str>> = Vec::new();
-    assert_eq!(
-        resolve(&empty).expect("an empty set is not a conflict"),
-        None
-    );
-}
+//
+// The precedence golden that sat here — an equal-tier disagreement fails closed
+// rather than picking — moved with the resolver to `gwk-context-compiler`'s
+// suite: the function it exercises no longer lives in this crate (R15).
 
 #[test]
 fn oversized_evidence_fails_closed_at_the_vocabulary_boundary() {

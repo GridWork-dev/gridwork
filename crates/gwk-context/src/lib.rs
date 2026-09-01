@@ -62,7 +62,10 @@ pub use manifest::{
 pub use participation::{
     Participation, ParticipationError, ParticipationReason, ParticipationState,
 };
-pub use precedence::{Contribution, PrecedenceConflict, PrecedenceTier, resolve};
+// The precedence TYPES are vocabulary and live here; the resolver that
+// consumes them lives in `gwk-context-compiler`, beside its first caller, so
+// the verifier's dependency graph cannot reach it under any spelling (R15).
+pub use precedence::{Contribution, PrecedenceConflict, PrecedenceTier};
 pub use stage::ContextStage;
 pub use store::ContextTruthStore;
 pub use wire::{
