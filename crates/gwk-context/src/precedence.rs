@@ -11,7 +11,7 @@
 //! crate the verifier may depend on would have sat one `use` away under
 //! whichever spelling a name-match guard did not know.
 
-use crate::participation::{ParticipationReason, closed_token_enum};
+use gwk_domain::{ParticipationReason, closed_token_enum};
 
 closed_token_enum! {
     /// The precedence tiers, highest authority first (ADR-0032 D5).

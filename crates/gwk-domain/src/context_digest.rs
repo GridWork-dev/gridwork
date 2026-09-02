@@ -1,6 +1,6 @@
 //! Content digests that are not necessarily content ADDRESSES.
 //!
-//! The distinction this module exists for: [`gwk_domain::BlobAddress`] names
+//! The distinction this module exists for: [`crate::BlobAddress`] names
 //! bytes in the encrypted CAS, and holding one is a promise you can fetch them.
 //! Most things Context hashes are not there and never will be — a file at a
 //! git commit, a skill in the private overlay, an upstream package nobody
@@ -59,7 +59,7 @@ impl Digest {
         let hex = value
             .strip_prefix(DIGEST_SCHEME)
             .ok_or(DigestError::UnknownScheme)?;
-        if !gwk_domain::is_sha256_hex(hex) {
+        if !crate::is_sha256_hex(hex) {
             return Err(DigestError::MalformedDigest);
         }
         Ok(Self(value.to_owned()))
@@ -67,7 +67,7 @@ impl Digest {
 
     /// Build a digest from a bare lowercase 64-hex hash.
     pub fn from_hex(hex: &str) -> Result<Self, DigestError> {
-        if !gwk_domain::is_sha256_hex(hex) {
+        if !crate::is_sha256_hex(hex) {
             return Err(DigestError::MalformedDigest);
         }
         Ok(Self(format!("{DIGEST_SCHEME}{hex}")))

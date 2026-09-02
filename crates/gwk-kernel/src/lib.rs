@@ -26,6 +26,7 @@ pub mod authority;
 pub mod blob;
 pub mod checkpoint;
 pub mod config;
+pub mod context;
 pub mod epoch;
 pub mod error;
 pub mod migrate;

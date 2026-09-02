@@ -16,7 +16,7 @@
 //!   analogs are `KernelErrorCode`, `AppendError`, and `BlobError` — the
 //!   existing closed refusal sets.
 
-use crate::digest::Digest;
+use crate::context_digest::Digest;
 
 // One list per closed enum, in the `context_event_names!` / `context_aggregates!`
 // shape from `wire.rs`, and for the same reason those macros exist: `ALL` as a
@@ -27,6 +27,8 @@ use crate::digest::Digest;
 // that does not depend on two places being edited together; the `.len()`
 // assertions in the tests then pin the list against the externally documented
 // count, which growth CAN fail.
+#[macro_export]
+#[doc(hidden)]
 macro_rules! closed_token_enum {
     (
         $(#[$attr:meta])*
@@ -47,7 +49,7 @@ macro_rules! closed_token_enum {
         }
     };
 }
-pub(crate) use closed_token_enum;
+pub use closed_token_enum;
 
 closed_token_enum! {
     /// Whether a candidate participated, and how far it got.

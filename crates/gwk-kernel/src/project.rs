@@ -9,14 +9,26 @@
 //! through here rather than writing its own SQL: one applier means replay
 //! cannot disagree with the write that it is replaying.
 //!
-//! It is the only projection writer for thirteen of the fifteen tables, and the
-//! exception is worth stating plainly rather than leaving to be discovered by a
-//! rebuild that will not agree. [`write_receipt`] and [`page_attention`] are
-//! called by [`crate::submit`] directly, and on the PAGED path they run for a
-//! command that is REFUSED — so those rows exist with no event behind them and
-//! no replay can produce them. `gwk.receipt` and `gwk.attention_item` are
+//! That holds for the Context lifecycle rows too, and it is the reason the four
+//! producing facts each carry their whole row: a projection that joined other
+//! events back out of the log would read state this function is documented not
+//! to read. The Context branch is the first statement below, before the command
+//! decode, and it derives its columns the same way — see [`crate::context`].
+//!
+//! It is the only projection writer for every table but two, and the exception
+//! is worth stating plainly rather than leaving to be discovered by a rebuild
+//! that will not agree. [`write_receipt`] and [`page_attention`] are called by
+//! [`crate::submit`] directly, and on the PAGED path they run for a command
+//! that is REFUSED — so those rows exist with no event behind them and no
+//! replay can produce them. `gwk.receipt` and `gwk.attention_item` are
 //! therefore excluded from the checkpoint digest; see
 //! [`crate::checkpoint::derived_records`].
+//!
+//! The four Context tables are excluded from that digest for the OPPOSITE
+//! reason, and the difference matters: those two cannot be replayed, while the
+//! Context rows are replay-produced and are merely undeclared, because the
+//! contract has no `ProjectionKind` for them yet. Nothing notices, which is
+//! exactly why it is written down here.
 
 use gwk_domain::command::KernelCommand;
 use gwk_domain::entity::DISPATCH_NODE_INITIAL_STATE;
@@ -173,6 +185,15 @@ pub(crate) async fn apply_event(
     conn: &mut PgConnection,
     event: &EventEnvelope,
 ) -> Result<(), Refusal> {
+    // Context lifecycle events ride the same log under their own aggregate
+    // families and carry a `ContextEventPayload`, not a command body. The
+    // branch is here rather than in the replay walker because one applier is
+    // what makes a replay agree with the write it replays — and it is BEFORE
+    // the decode below, not a fallback after it, so a malformed kernel command
+    // never becomes indistinguishable from a Context event.
+    if crate::context::is_context_aggregate(&event.aggregate_type) {
+        return crate::context::apply_context_event(conn, event).await;
+    }
     // Borrowed, not cloned: an inline payload runs to 64 KiB and this is the
     // hot path.
     let command = KernelCommand::deserialize(&event.payload).map_err(|e| {
