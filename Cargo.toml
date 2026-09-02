@@ -62,7 +62,7 @@ aead-stream = "0.6.0"
 # in adapter code as the negotiated protocol version, not here — the crate serves
 # several wire versions from one release.
 agent-client-protocol = "2.0.0"
-base64 = "0.23.0"
+base64 = "0.23.1"
 chacha20poly1305 = "0.11.0"
 # Already in the graph transitively (ratatui's default backend); named here for
 # ONE reason: the `osc52` feature, which is how the console copies an ID to the
