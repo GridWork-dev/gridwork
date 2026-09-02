@@ -771,7 +771,7 @@ export type ContextEventName = "context_manifest_compilation_requested" | "conte
 /**
  *  One Context lifecycle event's payload, as it lands in the kernel log.
  *
- *  Rides [`gwk_domain::EventEnvelope`]'s generic `payload`; the envelope's own
+ *  Rides [`crate::EventEnvelope`]'s generic `payload`; the envelope's own
  *  `aggregate_type` and `event_type` carry [`ContextEventName::aggregate`] and
  *  [`ContextEventName::as_str`]. `name` is repeated inside the payload on
  *  purpose: the envelope's copy is an open string a non-GridWork reader may
@@ -783,7 +783,7 @@ export type ContextEventPayload = ContextEventPayload_Serialize | ContextEventPa
 /**
  *  One Context lifecycle event's payload, as it lands in the kernel log.
  *
- *  Rides [`gwk_domain::EventEnvelope`]'s generic `payload`; the envelope's own
+ *  Rides [`crate::EventEnvelope`]'s generic `payload`; the envelope's own
  *  `aggregate_type` and `event_type` carry [`ContextEventName::aggregate`] and
  *  [`ContextEventName::as_str`]. `name` is repeated inside the payload on
  *  purpose: the envelope's copy is an open string a non-GridWork reader may
@@ -799,7 +799,7 @@ export type ContextEventPayload_Deserialize = {
 /**
  *  One Context lifecycle event's payload, as it lands in the kernel log.
  *
- *  Rides [`gwk_domain::EventEnvelope`]'s generic `payload`; the envelope's own
+ *  Rides [`crate::EventEnvelope`]'s generic `payload`; the envelope's own
  *  `aggregate_type` and `event_type` carry [`ContextEventName::aggregate`] and
  *  [`ContextEventName::as_str`]. `name` is repeated inside the payload on
  *  purpose: the envelope's copy is an open string a non-GridWork reader may

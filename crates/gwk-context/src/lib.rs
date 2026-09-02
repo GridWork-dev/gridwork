@@ -41,39 +41,35 @@
 //! protocol major, and `CONTRACT_VERSION` stays `1` — the wire major and the
 //! domain contract are separate axes, and only the first of them moved (R10).
 
-pub mod digest;
-pub mod manifest;
-pub mod participation;
 pub mod precedence;
 pub mod skill;
 pub mod stage;
 pub mod store;
 pub mod wire;
 
-pub use digest::{DIGEST_SCHEME, Digest, DigestError};
-pub use manifest::{
-    Assurance, CONTEXT_EVIDENCE_MAX_COUNT, CONTEXT_ID_MAX_BYTES,
-    CONTEXT_PARTICIPATION_DETAIL_MAX_BYTES, CONTEXT_PARTICIPATION_MAX_COUNT,
-    CONTEXT_RECORD_COUNT_MAX, EvidenceRefs, FinalizationSupplement, FinalizationSupplementId,
-    ManifestId, ObservationIndex, ObservationSupplement, ObservationSupplementId,
-    ParticipationRecords, RecordCount, ReleaseSupplement, ReleaseSupplementId, ResolvedManifest,
-    TruthRecordError,
+// The lifecycle WRITE grammar and the truth records it projects into live in
+// `gwk-domain`, re-exported here so every caller keeps its current spelling.
+// The move is a packaging consequence, not a design one: `gwk-kernel` is
+// published and this crate is not, `cargo package` refuses that dependency in
+// both directions, and the kernel is the process that deserializes these facts
+// off the log. E8 set the precedent with the Context CAS port.
+pub use gwk_domain::{
+    Assurance, AttributionPart, CONTEXT_ATTRIBUTION_MAX_BYTES, CONTEXT_CANDIDATE_ROUTE_MAX_COUNT,
+    CONTEXT_EVIDENCE_MAX_COUNT, CONTEXT_ID_MAX_BYTES, CONTEXT_PARTICIPATION_DETAIL_MAX_BYTES,
+    CONTEXT_PARTICIPATION_MAX_COUNT, CONTEXT_RECORD_COUNT_MAX, CandidateDisposition,
+    ContextAggregate, ContextAttribution, ContextEventName, ContextEventPayload, ContextFact,
+    ContextRunId, ContextWireError, DIGEST_SCHEME, Digest, DigestError, EvidenceRefs,
+    FinalizationSupplement, FinalizationSupplementId, ManifestId, ObservationIndex,
+    ObservationSupplement, ObservationSupplementId, OptimizationCandidateId, Participation,
+    ParticipationError, ParticipationReason, ParticipationRecords, ParticipationState,
+    RecordContextFact, RecordCount, ReleaseSupplement, ReleaseSupplementId, ResolvedManifest,
+    RouteCount, TruthRecordError, VerificationVerdict,
 };
-pub use participation::{
-    Participation, ParticipationError, ParticipationReason, ParticipationState,
-};
-// The precedence TYPES are vocabulary and live here; the resolver that
-// consumes them lives in `gwk-context-compiler`, beside its first caller, so
-// the verifier's dependency graph cannot reach it under any spelling (R15).
 pub use precedence::{Contribution, PrecedenceConflict, PrecedenceTier};
 pub use stage::ContextStage;
 pub use store::ContextTruthStore;
 pub use wire::{
-    AttributionPart, CONTEXT_ATTRIBUTION_MAX_BYTES, CONTEXT_CANDIDATE_ROUTE_MAX_COUNT,
     CONTEXT_COMPARE_STAGE_MAX_COUNT, CONTEXT_GRAPH_DEPTH_MAX, CONTEXT_MANDATORY_FROM,
-    CONTEXT_QUERY_LIMIT_MAX, CandidateDisposition, CompareSubject, ContextAggregate,
-    ContextAttribution, ContextEventName, ContextEventPayload, ContextFact, ContextQuery,
-    ContextRunId, ContextWireError, ExplainSubject, GraphDepth, ManifestSelector,
-    OptimizationCandidateId, QueryLimit, RecordContextFact, RouteCount, SupplementKind,
-    VerificationVerdict,
+    CONTEXT_QUERY_LIMIT_MAX, CompareSubject, ContextQuery, ExplainSubject, GraphDepth,
+    ManifestSelector, QueryLimit, SupplementKind,
 };

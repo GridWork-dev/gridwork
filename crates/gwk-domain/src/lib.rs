@@ -8,6 +8,10 @@ pub mod blob;
 pub mod checkpoint;
 pub mod command;
 pub mod context;
+pub mod context_digest;
+pub mod context_event;
+pub mod context_participation;
+pub mod context_truth;
 pub mod contract_sql;
 pub mod contract_steps;
 pub mod engine;
@@ -39,6 +43,29 @@ pub use command::{
 pub use context::{
     BlobClasses, ContentClass, ContextBlobRecord, ContextCasError, ContextCasStore, RedactionClass,
     RetentionClass,
+};
+// The Context lifecycle write grammar and the truth records it projects into.
+// Unlike `context` above, these ARE in the generated TypeScript contract; they
+// live here rather than in `gwk-context` because `gwk-kernel` is published,
+// `gwk-context` is not, and the kernel is what deserializes and projects them.
+// `gwk-context` re-exports every name so its own callers are unaffected.
+pub use context_digest::{DIGEST_SCHEME, Digest, DigestError};
+pub use context_event::{
+    AttributionPart, CONTEXT_ATTRIBUTION_MAX_BYTES, CONTEXT_CANDIDATE_ROUTE_MAX_COUNT,
+    CandidateDisposition, ContextAggregate, ContextAttribution, ContextEventName,
+    ContextEventPayload, ContextFact, ContextRunId, ContextWireError, OptimizationCandidateId,
+    RecordContextFact, RouteCount, VerificationVerdict,
+};
+pub use context_participation::{
+    Participation, ParticipationError, ParticipationReason, ParticipationState,
+};
+pub use context_truth::{
+    Assurance, CONTEXT_EVIDENCE_MAX_COUNT, CONTEXT_ID_MAX_BYTES,
+    CONTEXT_PARTICIPATION_DETAIL_MAX_BYTES, CONTEXT_PARTICIPATION_MAX_COUNT,
+    CONTEXT_RECORD_COUNT_MAX, EvidenceRefs, FinalizationSupplement, FinalizationSupplementId,
+    ManifestId, ObservationIndex, ObservationSupplement, ObservationSupplementId,
+    ParticipationRecords, RecordCount, ReleaseSupplement, ReleaseSupplementId, ResolvedManifest,
+    TruthRecordError,
 };
 // Deliberately NOT in the generated TypeScript contract: nothing in `engine`
 // derives `specta::Type` and nothing is registered in xtask's export registry.

@@ -10,9 +10,10 @@
 //! evidence references only. Reconstructable rendered or prompt bytes belong in
 //! the encrypted content-addressed store and are linked by digest later.
 
-use gwk_domain::{AttemptId, ByteCount, EvidenceId, Timestamp};
+use crate::ids::{AttemptId, ByteCount, EvidenceId, Timestamp};
 
-use crate::{Digest, Participation};
+use crate::context_digest::Digest;
+use crate::context_participation::Participation;
 
 /// Maximum UTF-8 bytes in any Context truth-record identifier.
 pub const CONTEXT_ID_MAX_BYTES: usize = 128;
@@ -90,8 +91,8 @@ macro_rules! context_id {
             // Both paths are absolute: this macro expands in `wire.rs` as well
             // as here, and an unqualified name that happens to be in scope at
             // the definition site is not in scope at every expansion site.
-            pub fn parse(value: &str) -> Result<Self, $crate::manifest::TruthRecordError> {
-                $crate::manifest::id_is_valid(value)?;
+            pub fn parse(value: &str) -> Result<Self, $crate::context_truth::TruthRecordError> {
+                $crate::context_truth::id_is_valid(value)?;
                 Ok(Self(value.to_owned()))
             }
 
@@ -287,7 +288,7 @@ impl specta::Type for ParticipationRecords {
     }
 }
 
-crate::participation::closed_token_enum! {
+crate::closed_token_enum! {
     /// The assurance level a completed Context run is eligible to claim.
     #[derive(
         Debug,
@@ -308,6 +309,22 @@ crate::participation::closed_token_enum! {
         Trace,
         /// Only pinned fixtures with controlled inputs and declared tolerances.
         Deterministic,
+    }
+}
+
+impl Assurance {
+    /// The token this variant carries in `gwk.context_finalization.assurance`.
+    ///
+    /// Written out rather than derived, because a `&'static str` cannot be
+    /// borrowed out of a `serde_json::Value`. That makes these two literals a
+    /// second spelling of the wire form the DDL CHECK is held to, so
+    /// `the_assurance_token_is_the_wire_spelling` asserts them against serde
+    /// instead of leaving the agreement to review.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Trace => "trace",
+            Self::Deterministic => "deterministic",
+        }
     }
 }
 
@@ -375,12 +392,28 @@ pub struct FinalizationSupplement {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_assurance_token_is_the_wire_spelling() {
+        // `as_str` feeds the SQL bind and serde feeds the payload. Two
+        // spellings of one value is how a CHECK constraint starts refusing
+        // rows the type system called legal.
+        assert_eq!(Assurance::ALL.len(), 2);
+        for assurance in Assurance::ALL {
+            let encoded = serde_json::to_value(assurance).expect("serializes");
+            assert_eq!(
+                encoded.as_str().expect("a string on the wire"),
+                assurance.as_str(),
+                "{assurance:?} serializes under a different name than it reports"
+            );
+        }
+    }
+
     use std::any::TypeId;
 
-    use gwk_domain::{AttemptId, ByteCount, EvidenceId, Timestamp};
+    use crate::ids::{AttemptId, ByteCount, EvidenceId, Timestamp};
 
     use super::*;
-    use crate::{Participation, ParticipationReason};
+    use crate::context_participation::{Participation, ParticipationReason};
 
     const HEX: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 

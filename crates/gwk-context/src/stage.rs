@@ -25,7 +25,7 @@
 //! level" means and the guess hardening into the wire contract. If a later
 //! reading collapses two of these, that is a contract change made on purpose.
 
-use crate::participation::closed_token_enum;
+use gwk_domain::closed_token_enum;
 
 closed_token_enum! {
     /// The five named stages a Context record can belong to.

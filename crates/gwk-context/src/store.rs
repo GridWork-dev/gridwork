@@ -17,7 +17,7 @@
 
 use gwk_domain::port::StorageError;
 
-use crate::manifest::{
+use gwk_domain::{
     FinalizationSupplement, ManifestId, ObservationSupplement, ReleaseSupplement, ResolvedManifest,
 };
 
