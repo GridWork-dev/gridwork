@@ -11,8 +11,8 @@
 use std::collections::BTreeSet;
 
 use gwk_context::{
-    Digest, EvidenceRefs, FinalizationSupplement, FinalizationSupplementId, ManifestId,
-    ObservationIndex, ObservationSupplement, ObservationSupplementId, Participation,
+    ContentClass, Digest, EvidenceRefs, FinalizationSupplement, FinalizationSupplementId,
+    ManifestId, ObservationIndex, ObservationSupplement, ObservationSupplementId, Participation,
     ParticipationReason, ParticipationRecords, RecordCount, ReleaseSupplement, ReleaseSupplementId,
     ResolvedManifest,
 };
@@ -35,9 +35,13 @@ fn evidence(name: &str) -> EvidenceId {
 /// ascend by digest, and `source_count` counts only the admitted ones.
 fn manifest() -> ResolvedManifest {
     let rows = vec![
-        Participation::active(digest('1')),
-        Participation::active(digest('2')),
-        Participation::excluded(digest('3'), ParticipationReason::BudgetCut),
+        Participation::active(digest('1'), ContentClass::Private),
+        Participation::active(digest('2'), ContentClass::Conformance),
+        Participation::excluded(
+            digest('3'),
+            ContentClass::Private,
+            ParticipationReason::BudgetCut,
+        ),
     ];
     let mut out = ResolvedManifest {
         id: ManifestId::parse("manifest-1").expect("legal id"),
@@ -96,11 +100,19 @@ fn a_well_formed_manifest_verifies() {
 /// digest still agreed with itself either way, because both sides serialize
 /// through the same derive. A pin that records only the hash would have been
 /// green on a preimage nobody had actually looked at.
-const PINNED_PREIMAGE_JSON: &str = r#"{"id":"manifest-1","attempt_id":"attempt-1","manifest_digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","route_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","authority_digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","source_count":2,"source_bytes":"4096","participations":[{"digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111","state":"active"},{"digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222","state":"active"},{"digest":"sha256:3333333333333333333333333333333333333333333333333333333333333333","state":"excluded","reason":"budget_cut"}],"evidence_ids":["ev-1","ev-2"],"resolved_at":"2026-09-02T00:00:00Z"}"#;
+const PINNED_PREIMAGE_JSON: &str = r#"{"id":"manifest-1","attempt_id":"attempt-1","manifest_digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","route_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","authority_digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","source_count":2,"source_bytes":"4096","participations":[{"digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111","class":"private","state":"active"},{"digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222","class":"conformance","state":"active"},{"digest":"sha256:3333333333333333333333333333333333333333333333333333333333333333","class":"private","state":"excluded","reason":"budget_cut"}],"evidence_ids":["ev-1","ev-2"],"resolved_at":"2026-09-02T00:00:00Z"}"#;
 
-/// SHA-256 of exactly the 774 bytes above, computed by a different language and
+/// Re-pinned at 8B task 11, when a participation began stating its content
+/// class: the class is inside the preimage, so every manifest digest changed.
+/// That is a breaking change to a value "every manifest ever written is keyed
+/// to", and it was allowed on the reachability argument recorded in
+/// `schema/steps/be73d920-d1ab71d5.sql` -- no ManifestResolved fact can have
+/// been appended, because nothing can reach the one entry point that appends
+/// it. If that argument was ever wrong, this constant is where it surfaces.
+///
+/// SHA-256 of exactly the 832 bytes above, computed by a different language and
 /// a different sha256 implementation than the one under test.
-const PINNED_DIGEST_HEX: &str = "fd4baf917ec3681718e524eaa1cfcf90a63cec14ddbd761843ab767631c18fc5";
+const PINNED_DIGEST_HEX: &str = "18c5d000175e1b40074daf64807b7b1b523d32d47114e586435b8207e9b334b0";
 
 #[test]
 fn the_digest_preimage_and_its_hash_match_vectors_computed_outside_this_crate() {
@@ -152,8 +164,8 @@ fn a_digest_computed_over_reordered_participations_is_still_refused() {
 fn a_duplicated_participation_is_refused_rather_than_merged() {
     let mut manifest = manifest();
     let rows = vec![
-        Participation::active(digest('1')),
-        Participation::active(digest('1')),
+        Participation::active(digest('1'), ContentClass::Private),
+        Participation::active(digest('1'), ContentClass::Private),
     ];
     manifest.participations = ParticipationRecords::new(rows).expect("valid rows");
     manifest.source_count = RecordCount::new(2).expect("in bounds");

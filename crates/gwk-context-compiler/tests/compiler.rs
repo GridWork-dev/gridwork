@@ -8,9 +8,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use gwk_context::{
-    CONTEXT_ID_MAX_BYTES, CONTEXT_PARTICIPATION_MAX_COUNT, Contribution, Digest, ManifestId,
-    Participation, ParticipationReason, ParticipationState, PrecedenceTier, ResolvedManifest,
-    TruthRecordError,
+    CONTEXT_ID_MAX_BYTES, CONTEXT_PARTICIPATION_MAX_COUNT, ContentClass, Contribution, Digest,
+    ManifestId, Participation, ParticipationReason, ParticipationState, PrecedenceTier,
+    ResolvedManifest, TruthRecordError,
 };
 use gwk_context_compiler::{
     Authority, COMPILER, Candidate, CompileError, CompileRequest, Compiled,
@@ -30,8 +30,12 @@ fn digest(seed: u8) -> Digest {
 }
 
 fn candidate(seed: u8, slot: &str, tier: PrecedenceTier, bytes: u64) -> Candidate {
+    // One class for the ordinary fixtures, so a test that cares about the
+    // class says so by building its own. `a_candidates_class_rides_into_its_
+    // participation_whatever_the_outcome` is that test.
     Candidate {
         digest: digest(seed),
+        class: ContentClass::Private,
         slot: slot.to_owned(),
         tier,
         bytes: ByteCount::new(bytes),
@@ -565,6 +569,7 @@ fn bounds_fail_closed_rather_than_truncating() {
     let over: Vec<Candidate> = (0..=CONTEXT_PARTICIPATION_MAX_COUNT)
         .map(|i| Candidate {
             digest: Digest::from_hex(&format!("{i:064x}")).expect("valid"),
+            class: ContentClass::Private,
             slot: format!("slot-{i}"),
             tier: PrecedenceTier::Annotation,
             bytes: ByteCount::new(1),
@@ -758,4 +763,56 @@ fn no_client_actor_string_reaches_the_attribution() {
     // was processed, not dropped on the floor before it could reach anything.
     let by_digest: BTreeMap<&Digest, &BTreeSet<String>> = compiled.tools.iter().collect();
     assert!(by_digest[&digest(0xb0)].contains(SENTINEL));
+}
+
+#[test]
+fn a_candidates_class_rides_into_its_participation_whatever_the_outcome() {
+    // The compiler classifies nothing; it carries what it was handed. The
+    // three arms are the three ways a row gets built — an upstream verdict, a
+    // precedence loss, and an admitted winner — because each constructs its
+    // `Participation` at a different site, and a class dropped at one of them
+    // would be invisible from the other two.
+    //
+    // Mixed classes on purpose. With every candidate one class, a body that
+    // hardcoded that class would pass this whole test.
+    let mut upstream = candidate(1, "slot-a", PrecedenceTier::Annotation, 1);
+    upstream.class = ContentClass::Conformance;
+    upstream.standing = Standing::Rejected;
+
+    let mut loser = candidate(2, "slot-b", PrecedenceTier::Annotation, 1);
+    loser.class = ContentClass::Private;
+    let mut winner = candidate(3, "slot-b", PrecedenceTier::Security, 1);
+    winner.class = ContentClass::Conformance;
+
+    let offered = vec![upstream.clone(), loser.clone(), winner.clone()];
+    let compiled =
+        compile(&request(None), &route(), &authority(&[]), &offered).expect("the fixture compiles");
+
+    let rows = compiled.manifest.participations.as_slice();
+    assert_eq!(rows.len(), 3, "every offered candidate is recorded");
+    for candidate in [&upstream, &loser, &winner] {
+        let row = rows
+            .iter()
+            .find(|row| row.digest == candidate.digest)
+            .expect("a row per candidate");
+        assert_eq!(
+            row.class, candidate.class,
+            "{:?} was recorded under another class than it was offered under",
+            candidate.digest
+        );
+    }
+
+    // The arms are the ones named above, so a future refactor that collapses
+    // two of them fails here rather than silently narrowing the test.
+    let state_of = |digest: &Digest| {
+        rows.iter()
+            .find(|row| &row.digest == digest)
+            .expect("present")
+            .state
+    };
+    // Standing::Rejected verdicts to Unavailable, not Excluded (compile.rs
+    // Standing::verdict) -- the arm is the upstream-verdict one either way.
+    assert_eq!(state_of(&upstream.digest), ParticipationState::Unavailable);
+    assert_eq!(state_of(&loser.digest), ParticipationState::Excluded);
+    assert_eq!(state_of(&winner.digest), ParticipationState::Active);
 }

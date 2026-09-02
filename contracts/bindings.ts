@@ -719,6 +719,30 @@ export type Command_Serialize = {
 /**  One side of a comparison. */
 export type CompareSubject = { of: "manifest"; manifest_id: string } | { of: "run"; run_id: string };
 
+/**
+ *  The KEK domain a blob is sealed under (R19).
+ *
+ *  The split is the public/private seam (F18): conformance fixtures and
+ *  real content share one physical store and never share a key, so a blob
+ *  that crosses the seam is unreadable rather than quietly exposed.
+ *
+ *  Serialized, unlike the two sibling axes below, because a
+ *  [`crate::Participation`] states the class of the candidate it records
+ *  and that record crosses the wire. Its serde spelling and its `as_str`
+ *  spelling are held equal by a contract check rather than left to agree
+ *  by eye: the CAS adapter binds `as_str` into SQL while a participation
+ *  row carries serde, so a drift between the two would split the single
+ *  boundary a scoped query filters on, in the direction that reads clean.
+ */
+export type ContentClass =
+/**  Public conformance-fixture content: synthetic, reviewable, shipped. */
+"conformance" |
+/**
+ *  Real deployment content. The class name is contract; everything the
+ *  class protects is not.
+ */
+"private";
+
 /**  The `aggregate_type` families Context writes into the one kernel log. */
 export type ContextAggregate =
 /**  Resolution and release of one immutable manifest. */
@@ -2785,6 +2809,29 @@ export type ParticipationState =
 export type Participation_Deserialize = {
 	/**  What the candidate was, by content — not by name, which can be reused. */
 	digest: string,
+	/**
+	 *  Which side of the public/private seam this candidate sits on.
+	 *
+	 *  Stated by the fact that writes the record, never inferred when the
+	 *  record is read (operator ruling, 2026-09-02). It is the same
+	 *  [`ContentClass`] the CAS seals blobs under rather than a second
+	 *  vocabulary for the same seam, and where `gwk.context_blob` holds a row
+	 *  for this digest the kernel refuses an append whose class disagrees with
+	 *  it — so the two recordings cannot quietly diverge.
+	 *
+	 *  It lives here, and not on the blob row alone, because a participation
+	 *  classifies a CANDIDATE while a blob row classifies STORED BYTES, and
+	 *  those are different populations: `Excluded` and `Unavailable`
+	 *  candidates were never sealed and have no blob row at all. Their reason
+	 *  is precisely the fact a scope boundary has to withhold, so the class
+	 *  that decides whether to withhold it cannot be read from a table that
+	 *  does not describe them.
+	 *
+	 *  Required rather than defaulted, on both constructors: a class nobody
+	 *  stated should fail to compile, not fall back to a value that reads
+	 *  like a decision.
+	 */
+	class: ContentClass,
 	state: ParticipationState,
 	/**
 	 *  Present exactly when [`ParticipationState::requires_reason`] is true.
@@ -2808,6 +2855,29 @@ export type Participation_Deserialize = {
 export type Participation_Serialize = {
 	/**  What the candidate was, by content — not by name, which can be reused. */
 	digest: string,
+	/**
+	 *  Which side of the public/private seam this candidate sits on.
+	 *
+	 *  Stated by the fact that writes the record, never inferred when the
+	 *  record is read (operator ruling, 2026-09-02). It is the same
+	 *  [`ContentClass`] the CAS seals blobs under rather than a second
+	 *  vocabulary for the same seam, and where `gwk.context_blob` holds a row
+	 *  for this digest the kernel refuses an append whose class disagrees with
+	 *  it — so the two recordings cannot quietly diverge.
+	 *
+	 *  It lives here, and not on the blob row alone, because a participation
+	 *  classifies a CANDIDATE while a blob row classifies STORED BYTES, and
+	 *  those are different populations: `Excluded` and `Unavailable`
+	 *  candidates were never sealed and have no blob row at all. Their reason
+	 *  is precisely the fact a scope boundary has to withhold, so the class
+	 *  that decides whether to withhold it cannot be read from a table that
+	 *  does not describe them.
+	 *
+	 *  Required rather than defaulted, on both constructors: a class nobody
+	 *  stated should fail to compile, not fall back to a value that reads
+	 *  like a decision.
+	 */
+	class: ContentClass,
 	state: ParticipationState,
 	/**
 	 *  Present exactly when [`ParticipationState::requires_reason`] is true.

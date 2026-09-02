@@ -64,7 +64,7 @@ pub mod wire;
 pub use gwk_domain::{
     Assurance, AttributionPart, CONTEXT_ATTRIBUTION_MAX_BYTES, CONTEXT_CANDIDATE_ROUTE_MAX_COUNT,
     CONTEXT_EVIDENCE_MAX_COUNT, CONTEXT_ID_MAX_BYTES, CONTEXT_PARTICIPATION_DETAIL_MAX_BYTES,
-    CONTEXT_PARTICIPATION_MAX_COUNT, CONTEXT_RECORD_COUNT_MAX, CandidateDisposition,
+    CONTEXT_PARTICIPATION_MAX_COUNT, CONTEXT_RECORD_COUNT_MAX, CandidateDisposition, ContentClass,
     ContextAggregate, ContextAttribution, ContextEventName, ContextEventPayload, ContextFact,
     ContextRunId, ContextWireError, DIGEST_SCHEME, Digest, DigestError, EvidenceRefs,
     FinalizationSupplement, FinalizationSupplementId, ManifestId, ObservationIndex,

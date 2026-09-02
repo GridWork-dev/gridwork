@@ -1069,12 +1069,17 @@ BEGIN
     IF EXISTS (
       SELECT 1
       FROM jsonb_object_keys(participation) AS field(name)
-      WHERE name NOT IN ('digest', 'state', 'reason', 'detail')
+      WHERE name NOT IN ('digest', 'class', 'state', 'reason', 'detail')
     ) THEN
       RETURN false;
     END IF;
     IF jsonb_typeof(participation -> 'digest') IS DISTINCT FROM 'string'
        OR participation ->> 'digest' !~ '^sha256:[0-9a-f]{64}$' THEN
+      RETURN false;
+    END IF;
+
+    IF jsonb_typeof(participation -> 'class') IS DISTINCT FROM 'string'
+       OR participation ->> 'class' NOT IN ('conformance', 'private') THEN
       RETURN false;
     END IF;
 

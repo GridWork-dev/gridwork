@@ -16,6 +16,7 @@
 //!   analogs are `KernelErrorCode`, `AppendError`, and `BlobError` — the
 //!   existing closed refusal sets.
 
+use crate::context::ContentClass;
 use crate::context_digest::Digest;
 
 // One list per closed enum, in the `context_event_names!` / `context_aggregates!`
@@ -143,6 +144,27 @@ closed_token_enum! {
 pub struct Participation {
     /// What the candidate was, by content — not by name, which can be reused.
     pub digest: Digest,
+    /// Which side of the public/private seam this candidate sits on.
+    ///
+    /// Stated by the fact that writes the record, never inferred when the
+    /// record is read (operator ruling, 2026-09-02). It is the same
+    /// [`ContentClass`] the CAS seals blobs under rather than a second
+    /// vocabulary for the same seam, and where `gwk.context_blob` holds a row
+    /// for this digest the kernel refuses an append whose class disagrees with
+    /// it — so the two recordings cannot quietly diverge.
+    ///
+    /// It lives here, and not on the blob row alone, because a participation
+    /// classifies a CANDIDATE while a blob row classifies STORED BYTES, and
+    /// those are different populations: `Excluded` and `Unavailable`
+    /// candidates were never sealed and have no blob row at all. Their reason
+    /// is precisely the fact a scope boundary has to withhold, so the class
+    /// that decides whether to withhold it cannot be read from a table that
+    /// does not describe them.
+    ///
+    /// Required rather than defaulted, on both constructors: a class nobody
+    /// stated should fail to compile, not fall back to a value that reads
+    /// like a decision.
+    pub class: ContentClass,
     pub state: ParticipationState,
     /// Present exactly when [`ParticipationState::requires_reason`] is true.
     /// Enforced by [`Participation::validate`], not by the type, so a record
@@ -182,9 +204,10 @@ impl std::error::Error for ParticipationError {}
 
 impl Participation {
     /// A candidate that took part.
-    pub fn active(digest: Digest) -> Self {
+    pub fn active(digest: Digest, class: ContentClass) -> Self {
         Self {
             digest,
+            class,
             state: ParticipationState::Active,
             reason: None,
             detail: None,
@@ -192,9 +215,10 @@ impl Participation {
     }
 
     /// A candidate that did not, with the reason it owes.
-    pub fn excluded(digest: Digest, reason: ParticipationReason) -> Self {
+    pub fn excluded(digest: Digest, class: ContentClass, reason: ParticipationReason) -> Self {
         Self {
             digest,
+            class,
             state: ParticipationState::Excluded,
             reason: Some(reason),
             detail: None,
@@ -229,6 +253,7 @@ impl Participation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::ContentClass;
 
     fn digest() -> Digest {
         Digest::from_hex("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
@@ -256,13 +281,18 @@ mod tests {
     fn an_unexplained_refusal_does_not_validate() {
         let silent = Participation {
             digest: digest(),
+            class: ContentClass::Private,
             state: ParticipationState::Excluded,
             reason: None,
             detail: None,
         };
         assert_eq!(silent.validate(), Err(ParticipationError::MissingReason));
 
-        let explained = Participation::excluded(digest(), ParticipationReason::PinDrift);
+        let explained = Participation::excluded(
+            digest(),
+            ContentClass::Private,
+            ParticipationReason::PinDrift,
+        );
         assert_eq!(explained.validate(), Ok(()));
     }
 
@@ -270,6 +300,7 @@ mod tests {
     fn a_reason_on_a_non_refusal_does_not_validate() {
         let confused = Participation {
             digest: digest(),
+            class: ContentClass::Conformance,
             state: ParticipationState::Active,
             reason: Some(ParticipationReason::BudgetCut),
             detail: None,
@@ -282,16 +313,21 @@ mod tests {
 
     #[test]
     fn detail_cannot_stand_without_a_reason() {
-        let dangling = Participation::active(digest()).with_detail("because I said so");
+        let dangling = Participation::active(digest(), ContentClass::Conformance)
+            .with_detail("because I said so");
         assert_eq!(
             dangling.validate(),
             Err(ParticipationError::DetailWithoutReason)
         );
         // But detail alongside a reason is the intended shape.
         assert_eq!(
-            Participation::excluded(digest(), ParticipationReason::BudgetCut)
-                .with_detail("over the 8k declared ceiling")
-                .validate(),
+            Participation::excluded(
+                digest(),
+                ContentClass::Private,
+                ParticipationReason::BudgetCut
+            )
+            .with_detail("over the 8k declared ceiling")
+            .validate(),
             Ok(())
         );
     }

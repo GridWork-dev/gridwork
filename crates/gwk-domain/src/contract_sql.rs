@@ -1076,12 +1076,17 @@ BEGIN
     IF EXISTS (
       SELECT 1
       FROM jsonb_object_keys(participation) AS field(name)
-      WHERE name NOT IN ('digest', 'state', 'reason', 'detail')
+      WHERE name NOT IN ('digest', 'class', 'state', 'reason', 'detail')
     ) THEN
       RETURN false;
     END IF;
     IF jsonb_typeof(participation -> 'digest') IS DISTINCT FROM 'string'
        OR participation ->> 'digest' !~ '^sha256:[0-9a-f]{64}$' THEN
+      RETURN false;
+    END IF;
+
+    IF jsonb_typeof(participation -> 'class') IS DISTINCT FROM 'string'
+       OR participation ->> 'class' NOT IN ('conformance', 'private') THEN
       RETURN false;
     END IF;
 
@@ -1299,4 +1304,4 @@ COMMIT;
 // unwrapped 64-hex line lands past 100 columns — the generator and
 // rustfmt would then fight, showing up as permanent contract drift.
 pub const CONTRACT_SQL_SHA256: &str =
-    "be73d92052d5077babc30815264825bc471b706d2b5a2d077b54e94ad6603c75";
+    "d1ab71d5019c67f05ada6229ed3231b5c5825a65ab28a912e665160ff8fb51f6";

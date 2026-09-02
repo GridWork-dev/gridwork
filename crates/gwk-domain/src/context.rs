@@ -90,6 +90,16 @@ context_class! {
     /// The split is the public/private seam (F18): conformance fixtures and
     /// real content share one physical store and never share a key, so a blob
     /// that crosses the seam is unreadable rather than quietly exposed.
+    ///
+    /// Serialized, unlike the two sibling axes below, because a
+    /// [`crate::Participation`] states the class of the candidate it records
+    /// and that record crosses the wire. Its serde spelling and its `as_str`
+    /// spelling are held equal by a contract check rather than left to agree
+    /// by eye: the CAS adapter binds `as_str` into SQL while a participation
+    /// row carries serde, so a drift between the two would split the single
+    /// boundary a scoped query filters on, in the direction that reads clean.
+    #[derive(serde::Serialize, serde::Deserialize, specta::Type)]
+    #[serde(rename_all = "snake_case")]
     pub enum ContentClass {
         /// Public conformance-fixture content: synthetic, reviewable, shipped.
         Conformance => "conformance",

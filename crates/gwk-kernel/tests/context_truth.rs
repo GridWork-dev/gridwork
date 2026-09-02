@@ -23,9 +23,10 @@ use gwk_domain::ids::{
 };
 use gwk_domain::protocol::KernelErrorCode;
 use gwk_domain::{
-    Assurance, AttributionPart, ContextAttribution, ContextFact, ContextRunId, Digest,
-    EvidenceRefs, FinalizationSupplementId, ManifestId, ObservationIndex, ObservationSupplementId,
-    ParticipationRecords, RecordContextFact, RecordCount, ReleaseSupplementId, VerificationVerdict,
+    Assurance, AttributionPart, ContentClass, ContextAttribution, ContextFact, ContextRunId,
+    Digest, EvidenceRefs, FinalizationSupplementId, ManifestId, ObservationIndex,
+    ObservationSupplementId, Participation, ParticipationReason, ParticipationRecords,
+    RecordContextFact, RecordCount, ReleaseSupplementId, VerificationVerdict,
 };
 use gwk_kernel::PgEventStore;
 use gwk_kernel::project::Refusal;
@@ -125,6 +126,52 @@ fn compilation_requested() -> ContextFact {
         authority_digest: digest(HEX_A),
         requested_at: at(0),
     }
+}
+
+/// A manifest whose participation set the caller chooses.
+///
+/// `manifest_resolved` keeps the empty set every other case wants; the class
+/// cases need rows, and rows are the only thing they vary.
+fn manifest_resolved_with(participations: ParticipationRecords) -> ContextFact {
+    match manifest_resolved() {
+        ContextFact::ManifestResolved {
+            manifest_id,
+            attempt_id,
+            manifest_digest,
+            route_digest,
+            authority_digest,
+            source_count,
+            source_bytes,
+            evidence_ids,
+            resolved_at,
+            ..
+        } => ContextFact::ManifestResolved {
+            manifest_id,
+            attempt_id,
+            manifest_digest,
+            route_digest,
+            authority_digest,
+            source_count,
+            source_bytes,
+            participations,
+            evidence_ids,
+            resolved_at,
+        },
+        other => panic!("manifest_resolved stopped being a ManifestResolved: {other:?}"),
+    }
+}
+
+/// Classify one digest in the Context CAS, the way a sealing put would.
+async fn seal(store: &PgEventStore, digest: &Digest, class: ContentClass) {
+    sqlx::query(
+        "INSERT INTO gwk.context_blob (digest, content_class, redaction_class, retention_class) \
+         VALUES ($1, $2, 'none', 'manifest')",
+    )
+    .bind(digest.as_str())
+    .bind(class.as_str())
+    .execute(store.pool())
+    .await
+    .expect("the classification row lands");
 }
 
 fn manifest_resolved() -> ContextFact {
@@ -572,5 +619,103 @@ async fn a_replay_rebuilds_the_same_context_rows() {
     );
 
     drop_database(&maintenance, &scratch_name).await;
+    drop_database(&maintenance, &name).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
+async fn a_participation_cannot_claim_a_class_the_cas_contradicts() {
+    // The invariant the operator ruled on 2026-09-02: a participation states
+    // its own class, and where the CAS already holds those bytes the two have
+    // to agree. Two recordings of one seam is the price of classifying
+    // candidates that were never sealed; this is what stops them diverging.
+    let maintenance = maintenance_pool().await;
+    let (name, store) = fresh_store(&maintenance, "ctxclass", 8).await;
+    seed_attempt(&store).await;
+    record(&store, "ctx-request", compilation_requested()).await;
+
+    let sealed = digest(HEX_A);
+    let never_sealed = digest(HEX_B);
+    seal(&store, &sealed, ContentClass::Private).await;
+
+    // The row exists and says `private` — asserted before anything is deduced
+    // from a refusal, because a guard that refused for the wrong reason would
+    // look identical from the outside.
+    let stored: String =
+        sqlx::query_scalar("SELECT content_class FROM gwk.context_blob WHERE digest = $1")
+            .bind(sealed.as_str())
+            .fetch_one(store.pool())
+            .await
+            .expect("the classification row");
+    assert_eq!(
+        stored, "private",
+        "the fixture did not classify what it meant to"
+    );
+
+    let disagreeing = ParticipationRecords::new(vec![Participation::active(
+        sealed.clone(),
+        ContentClass::Conformance,
+    )])
+    .expect("a legal record");
+    let refusal = record_result(
+        &store,
+        "ctx-class-disagree",
+        manifest_resolved_with(disagreeing),
+    )
+    .await
+    .expect_err("a class the CAS contradicts must be refused");
+    assert_eq!(refusal.code, KernelErrorCode::Validation);
+    // The message names the digest and both sides, because an operator reading
+    // it has to know WHICH candidate and which way round.
+    assert!(
+        refusal.message.contains(sealed.as_str()),
+        "the refusal does not name the candidate: {}",
+        refusal.message
+    );
+    assert!(
+        refusal.message.contains("conformance") && refusal.message.contains("private"),
+        "the refusal does not name both classes: {}",
+        refusal.message
+    );
+
+    // Nothing landed. A refusal that still wrote the row would pass every
+    // assertion above.
+    assert_eq!(count_rows(&store, "gwk.context_manifest").await, 0);
+
+    // POSITIVE CONTROL, and it carries the whole point of the design: the
+    // agreeing candidate is admitted, and so is one the CAS has never seen.
+    // Without this arm, a guard that refused every manifest with any
+    // participation at all would pass the refusal case above.
+    let agreeing = ParticipationRecords::new(vec![
+        Participation::active(sealed.clone(), ContentClass::Private),
+        Participation::excluded(
+            never_sealed.clone(),
+            ContentClass::Conformance,
+            ParticipationReason::BudgetCut,
+        ),
+    ])
+    .expect("a legal record");
+    record(&store, "ctx-class-agree", manifest_resolved_with(agreeing)).await;
+    assert_eq!(count_rows(&store, "gwk.context_manifest").await, 1);
+
+    // And the class survived into the row rather than being dropped on the
+    // way through the applier: read it back per candidate, by name.
+    let classes: Vec<(String, String)> = sqlx::query_as(
+        "SELECT p ->> 'digest', p ->> 'class' \
+         FROM gwk.context_manifest m, jsonb_array_elements(m.participations) AS p \
+         ORDER BY 1",
+    )
+    .fetch_all(store.pool())
+    .await
+    .expect("the participation rows");
+    assert_eq!(
+        classes,
+        vec![
+            (sealed.as_str().to_owned(), "private".to_owned()),
+            (never_sealed.as_str().to_owned(), "conformance".to_owned()),
+        ],
+        "the stored classes are not the ones the fact stated"
+    );
+
     drop_database(&maintenance, &name).await;
 }
