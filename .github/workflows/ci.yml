@@ -883,11 +883,17 @@ jobs:
           # is a separate crate so the verifier's dependency graph can exclude
           # it (R15) — an exclusion that only means something if the crate is
           # a real workspace member, which is why it is one and not a module.
+          #
+          # gwk-context-verifier is the third link in that same chain and joins
+          # for the identical reason, not as a new class of exemption: it path-
+          # depends on gwk-context, so packaging it hits the same closed pair of
+          # exits described above.
           cargo package --workspace --exclude gwk-pty \
             --exclude gwk-adapter-opencode --exclude gwk-adapter-claude \
             --exclude gwk-adapter-codex --exclude gwk-parity \
             --exclude gwk-pty-host --exclude xtask \
-            --exclude gwk-context-compiler --locked
+            --exclude gwk-context-compiler --exclude gwk-context-verifier \
+            --locked
 
           # Every publishable member, straight from the manifest graph:
           # `publish = false` shows up as an empty array, so xtask drops out and
@@ -2018,6 +2024,35 @@ jobs:
           cp /tmp/quickstart.mdx "$mirror"
           ./tools/check-claims.sh
           echo "check-claims: bumped current-stage mirror correctly rejected"
+      - name: prove an unlisted crate is caught (seeded violation)
+        run: |
+          set -euo pipefail
+          probe=crates/gwk-seeded-probe
+          trap 'rm -rf "$probe"' EXIT
+
+          # A crate on disk and on NEITHER hand-maintained surface. This is the
+          # case the gate used to accept: it compared the README table against
+          # the landing-page array and nothing against `crates/`, so two
+          # omissions agreeing read as a clean census. gwk-context-compiler
+          # shipped exactly this way. Seeding a crate is the only arm that
+          # distinguishes the rule from the one it replaced — every other
+          # disagreement was already caught.
+          mkdir -p "$probe"
+          printf '[package]\nname = "gwk-seeded-probe"\nversion = "0.0.0"\npublish = false\n' \
+            > "$probe/Cargo.toml"
+          out=""
+          if out="$(./tools/check-claims.sh 2>&1)"; then
+            echo 'check-claims accepted a crate listed on neither surface — the census is broken' >&2
+            exit 1
+          fi
+          grep -q 'disagrees with crates/' <<<"$out" || {
+            echo "the seeded crate was rejected, but not by the crates/ comparison:" >&2
+            printf '%s\n' "$out" >&2
+            exit 1
+          }
+          rm -rf "$probe"
+          ./tools/check-claims.sh
+          echo "check-claims: an unlisted crate correctly rejected"
       - name: prove the gate can fail (seeded violation)
         run: |
           seed=$(printf 'creds at /ho%s/example/data' 'me')

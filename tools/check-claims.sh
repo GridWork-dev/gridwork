@@ -95,14 +95,62 @@ need site/content/docs/contract/index.mdx 'Frozen at the Contract stage \(stage 
 need docs/PARITY.md 'for stage 3, defined before any adapter exists' "parity-promise stage"
 need site/content/docs/parity.mdx 'for stage 3, defined before any adapter exists' "site parity-promise stage"
 
-# C8 — the crates table names the same crate SET on both surfaces (README table,
-# landing-page array). Name-set only: wording and status drift are readable on
-# review, a crate present on one surface and absent from the other is not — that
-# is exactly how gwk-pty-host shipped in the README and never reached the site.
-readme_crates=$(grep -E '^\| \[?`' README.md | sed -E 's/^\| \[?`([^`]+)`.*/\1/' | LC_ALL=C sort || true)
-site_crates=$(sed -n '/^const crates = \[/,/^\] as const;/p' "$landing" | tr -d '\n ' | grep -oE '\["[^"]+"' | tr -d '["' | LC_ALL=C sort || true)
-if [ -z "$readme_crates" ] || [ "$readme_crates" != "$site_crates" ]; then
-  echo "check-claims: crates-table disagreement — README=[$(echo "$readme_crates" | tr '\n' ' ')] site=[$(echo "$site_crates" | tr '\n' ' ')]" >&2
+# C8 — the crates table names the same crate SET on all THREE surfaces: the
+# README table, the landing-page array, and `crates/` itself.
+#
+# The third surface is the point. This gate used to compare the two
+# hand-maintained lists to each other, and two hand-maintained lists agreeing is
+# not a census: a crate absent from BOTH satisfies the check. That is not
+# hypothetical — `gwk-context-compiler` shipped with no row on either surface and
+# this gate was green, because the two omissions agreed with each other. The
+# filesystem is the only side of the comparison nobody edits to make a check pass.
+#
+# Two exceptions, DECLARED rather than pattern-matched, so a third one has to be
+# written down instead of being absorbed by a rule that already matches:
+#   - the adapter family is deliberately one row, `gwk-adapter-*`;
+#   - `xtask` is in the table and does not live under `crates/`.
+adapter_prefix='gwk-adapter-'
+adapter_row='gwk-adapter-*'
+
+disk_manifests=0
+for manifest in crates/*/Cargo.toml; do
+  if [ -f "$manifest" ]; then
+    disk_manifests=$((disk_manifests + 1))
+  fi
+done
+
+# The count first. A glob that matched nothing collapses to an empty set, and an
+# empty set is equal to no table but satisfies every containment test ever
+# written — the exact shape of failure this rewrite exists to remove.
+if [ "$disk_manifests" -lt 10 ]; then
+  echo "check-claims: enumerated $disk_manifests crate manifests under crates/ — the enumeration is broken, not the table" >&2
+  fail=1
+fi
+
+expected_crates=$(
+  {
+    echo xtask
+    for manifest in crates/*/Cargo.toml; do
+      [ -f "$manifest" ] || continue
+      name=$(basename "$(dirname "$manifest")")
+      case "$name" in
+        "$adapter_prefix"*) echo "$adapter_row" ;;
+        *) echo "$name" ;;
+      esac
+    done
+  } | LC_ALL=C sort -u || true
+)
+readme_crates=$(grep -E '^\| \[?`' README.md | sed -E 's/^\| \[?`([^`]+)`.*/\1/' | LC_ALL=C sort -u || true)
+site_crates=$(sed -n '/^const crates = \[/,/^\] as const;/p' "$landing" | tr -d '\n ' | grep -oE '\["[^"]+"' | tr -d '["' | LC_ALL=C sort -u || true)
+
+# Compared against the derived set rather than against each other, so an omission
+# common to both surfaces is a finding instead of an agreement.
+if [ "$readme_crates" != "$expected_crates" ]; then
+  echo "check-claims: README crate table disagrees with crates/ — README=[$(echo "$readme_crates" | tr '\n' ' ')] expected=[$(echo "$expected_crates" | tr '\n' ' ')]" >&2
+  fail=1
+fi
+if [ "$site_crates" != "$expected_crates" ]; then
+  echo "check-claims: landing-page crate array disagrees with crates/ — site=[$(echo "$site_crates" | tr '\n' ' ')] expected=[$(echo "$expected_crates" | tr '\n' ' ')]" >&2
   fail=1
 fi
 

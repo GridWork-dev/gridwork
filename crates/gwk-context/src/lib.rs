@@ -7,9 +7,17 @@
 //! agrees on — stages, truth records, participation, precedence, and content
 //! digests.
 //!
-//! What is here is deliberately narrow. The compiler, verifier, and CAS layer
-//! remain later 8A/8B work. This is the vocabulary, the immutable truth-record
-//! spine, and — since E3 — the wire-v2 grammar they will be written against.
+//! What is here is deliberately narrow: the vocabulary, the immutable
+//! truth-record spine, the storage read port, and — since E3 — the wire-v2
+//! grammar the rest is written against. The compiler and the verifier are NOT
+//! here, and their absence is the design rather than a stage of it. Each is its
+//! own crate — [`gwk-context-compiler`] and [`gwk-context-verifier`] — because
+//! R15 puts the verifier's independence in the dependency graph, where it is
+//! enforced, instead of in a module boundary, where it would be remembered.
+//! That leaves this crate as the one thing both are allowed to share.
+//!
+//! [`gwk-context-compiler`]: https://github.com/GridWork-dev/gridwork/tree/main/crates/gwk-context-compiler
+//! [`gwk-context-verifier`]: https://github.com/GridWork-dev/gridwork/tree/main/crates/gwk-context-verifier
 //!
 //! The grammar being present is not the grammar being live. [`wire`] publishes
 //! shapes for a protocol major that [`gwk_domain::ProtocolVersion`] names and
