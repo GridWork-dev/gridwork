@@ -1,0 +1,38 @@
+[package]
+name = "gwk-context-compiler"
+version = "0.0.1"
+description = "GridWork Context Runtime: the deterministic compiler — precedence, narrowing, and budget cuts into one immutable resolved manifest"
+homepage = "https://gridwork.sh"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Not published, and structurally so: this crate depends on `gwk-context`, which
+# is `publish = false` until E3's reassessment, and a packaged crate cannot
+# depend on an unpublished path sibling either way (declare a version and
+# packaging resolves it from crates.io, where the crate is not; omit it and
+# packaging refuses the dependency for having none — the `package` CI job's own
+# comment records both closed exits). It joins that job's exclude list for the
+# same reason xtask did.
+#
+# The crate exists so that R15 holds by dependency graph rather than by review
+# discipline: the verifier depends on `gwk-context` and never on this crate, so
+# no spelling in the verifier can reach the resolver or the compiler.
+publish = false
+
+[dependencies]
+gwk-context.workspace = true
+# `AttemptId`, `ByteCount`, `EvidenceId`, `Timestamp` — the manifest's own
+# field types. Nothing else from the domain: the compiler binds to route and
+# authority by DIGEST, never by reading them.
+gwk-domain.workspace = true
+serde.workspace = true
+# The manifest digest is SHA-256 over the record's own serde_json bytes. The
+# serialization is of the STRUCT, never of a `serde_json::Value`, so the bytes
+# cannot depend on which serde_json features the final binary unified.
+serde_json.workspace = true
+sha2.workspace = true
+
+[lints]
+workspace = true
