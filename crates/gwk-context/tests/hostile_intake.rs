@@ -33,8 +33,8 @@ use gwk_context::skill::{
     SKILL_OPAQUE_FIELD_MAX_COUNT, SkillError, SkillManifest,
 };
 use gwk_context::{
-    CONTEXT_EVIDENCE_MAX_COUNT, Digest, EvidenceRefs, Participation, ParticipationReason,
-    ResolvedManifest, TruthRecordError,
+    CONTEXT_EVIDENCE_MAX_COUNT, ContentClass, Digest, EvidenceRefs, Participation,
+    ParticipationReason, ResolvedManifest, TruthRecordError,
 };
 use gwk_domain::EvidenceId;
 
@@ -152,6 +152,7 @@ fn no_truth_record_offers_a_field_a_client_supplied_actor_could_land_in() {
         source_bytes: gwk_domain::ByteCount::new(1),
         participations: gwk_context::ParticipationRecords::new(vec![Participation::active(
             digest(),
+            ContentClass::Private,
         )])
         .expect("valid"),
         evidence_ids: EvidenceRefs::new(Vec::new()).expect("valid"),
@@ -641,6 +642,7 @@ fn a_participation_that_claims_a_state_without_its_reason_is_refused() {
     // asserting something the state does not mean.
     let missing = Participation {
         digest: digest(),
+        class: ContentClass::Private,
         state: gwk_context::ParticipationState::Excluded,
         reason: None,
         detail: None,
@@ -652,6 +654,7 @@ fn a_participation_that_claims_a_state_without_its_reason_is_refused() {
 
     let unexpected = Participation {
         digest: digest(),
+        class: ContentClass::Conformance,
         state: gwk_context::ParticipationState::Active,
         reason: Some(ParticipationReason::BudgetCut),
         detail: None,
@@ -663,9 +666,56 @@ fn a_participation_that_claims_a_state_without_its_reason_is_refused() {
 
     // The positive control: a well-formed record of each kind validates, so the
     // two assertions above are not passing because `validate` refuses all input.
-    assert_eq!(Participation::active(digest()).validate(), Ok(()));
     assert_eq!(
-        Participation::excluded(digest(), ParticipationReason::Quarantined).validate(),
+        Participation::active(digest(), ContentClass::Conformance).validate(),
         Ok(())
+    );
+    assert_eq!(
+        Participation::excluded(
+            digest(),
+            ContentClass::Private,
+            ParticipationReason::Quarantined
+        )
+        .validate(),
+        Ok(())
+    );
+}
+
+#[test]
+fn a_participation_off_the_wire_must_state_a_class_it_is_allowed_to_state() {
+    // The class decides which side of the public/private seam a candidate is
+    // answered on, so the two ways to arrive without one are both refusals
+    // rather than defaults. Omitting the field is the dangerous one: a serde
+    // default would silently classify every legacy record as whatever the
+    // default happens to be, and one of the two choices leaks.
+    let absent = serde_json::json!({
+        "digest": digest().as_str(),
+        "state": "active"
+    });
+    assert!(
+        serde_json::from_value::<Participation>(absent).is_err(),
+        "a participation with no class decoded"
+    );
+
+    let invented = serde_json::json!({
+        "digest": digest().as_str(),
+        "class": "public",
+        "state": "active"
+    });
+    assert!(
+        serde_json::from_value::<Participation>(invented).is_err(),
+        "a participation decoded a class the seam does not define"
+    );
+
+    // The positive control, so neither assertion above can be passing because
+    // this shape never decodes at all.
+    let legal = serde_json::json!({
+        "digest": digest().as_str(),
+        "class": "conformance",
+        "state": "active"
+    });
+    assert_eq!(
+        serde_json::from_value::<Participation>(legal).expect("a legal record decodes"),
+        Participation::active(digest(), ContentClass::Conformance)
     );
 }

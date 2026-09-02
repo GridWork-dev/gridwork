@@ -9,10 +9,12 @@
   "participations": [
     {
       "digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "class": "private",
       "state": "active"
     },
     {
       "digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "class": "conformance",
       "state": "excluded",
       "reason": "budget_cut",
       "detail": "excluded after deterministic budget ordering"

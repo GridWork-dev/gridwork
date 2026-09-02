@@ -56,9 +56,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use gwk_context::{
-    AttributionPart, CONTEXT_ID_MAX_BYTES, ContextAttribution, Contribution, Digest, EvidenceRefs,
-    ManifestId, Participation, ParticipationReason, ParticipationRecords, ParticipationState,
-    PrecedenceConflict, PrecedenceTier, RecordCount, ResolvedManifest, TruthRecordError,
+    AttributionPart, CONTEXT_ID_MAX_BYTES, ContentClass, ContextAttribution, Contribution, Digest,
+    EvidenceRefs, ManifestId, Participation, ParticipationReason, ParticipationRecords,
+    ParticipationState, PrecedenceConflict, PrecedenceTier, RecordCount, ResolvedManifest,
+    TruthRecordError,
 };
 use gwk_domain::{AttemptId, ByteCount, EvidenceId, Timestamp};
 use sha2::Digest as _;
@@ -150,6 +151,15 @@ impl Standing {
 pub struct Candidate {
     /// What the candidate is, by content. Unique across one compile.
     pub digest: Digest,
+    /// Which side of the public/private seam the source came from.
+    ///
+    /// Supplied by whoever offers the candidate and carried through to its
+    /// participation record unchanged — the compiler classifies nothing. It
+    /// cannot: the class is a property of where the bytes came from, and the
+    /// compiler sees a digest and a cost. A compiler-invented class would be a
+    /// guess recorded as a fact, which is the failure mode the record exists
+    /// to prevent.
+    pub class: ContentClass,
     pub slot: String,
     pub tier: PrecedenceTier,
     /// What admitting it costs against the request's budget.
@@ -331,6 +341,7 @@ pub fn compile(
                     &candidate.digest,
                     Participation {
                         digest: candidate.digest.clone(),
+                        class: candidate.class,
                         state,
                         reason: Some(reason),
                         detail: None,
@@ -378,6 +389,7 @@ pub fn compile(
                     &candidate.digest,
                     Participation::excluded(
                         candidate.digest.clone(),
+                        candidate.class,
                         ParticipationReason::PrecedenceLoss,
                     ),
                 );
@@ -404,7 +416,11 @@ pub fn compile(
             }
             rows.insert(
                 &candidate.digest,
-                Participation::excluded(candidate.digest.clone(), ParticipationReason::BudgetCut),
+                Participation::excluded(
+                    candidate.digest.clone(),
+                    candidate.class,
+                    ParticipationReason::BudgetCut,
+                ),
             );
             continue;
         }
@@ -426,7 +442,7 @@ pub fn compile(
         tools.insert(candidate.digest.clone(), effective);
         rows.insert(
             &candidate.digest,
-            Participation::active(candidate.digest.clone()),
+            Participation::active(candidate.digest.clone(), candidate.class),
         );
     }
 

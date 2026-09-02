@@ -442,6 +442,11 @@ fn inspect_context_truth_schema(sql: &str) -> Result<(), String> {
         &enum_tokens(&ParticipationReason::ALL),
     )?;
     check_token_parity(
+        "participation class",
+        &sql_token_list(sql, "participation ->> 'class' NOT IN")?,
+        &enum_tokens(&ContentClass::ALL),
+    )?;
+    check_token_parity(
         "assurance",
         &sql_token_list(sql, "CHECK (assurance IN")?,
         &enum_tokens(&Assurance::ALL),
@@ -457,10 +462,20 @@ fn inspect_context_truth_schema(sql: &str) -> Result<(), String> {
              classification table"
         ));
     }
-    // These enums carry their tokens as `as_str` rather than serde — no wire
-    // surface serializes them yet — so the expected side is the same single
-    // source the adapter binds into SQL, and it still cannot drift into a
-    // third copy.
+    // `RedactionClass` and `RetentionClass` carry their tokens as `as_str`
+    // rather than serde — no wire surface serializes them — so the expected
+    // side is the same single source the adapter binds into SQL, and it still
+    // cannot drift into a third copy.
+    //
+    // `ContentClass` is the exception, because a participation states its
+    // class and that record serializes: it has a SQL spelling AND a wire
+    // spelling. Three edges have to hold, and each is asserted exactly once —
+    // the participation CHECK against serde above, the blob CHECK against
+    // `as_str` below, and serde against `as_str` in the type's own crate
+    // (`the_content_class_token_is_the_wire_spelling`). Together they close
+    // the triangle where every pair agrees with a different side, which is the
+    // shape that would put a blob and the participation describing it on
+    // opposite sides of the one seam a scoped query filters on.
     check_token_parity(
         "content class",
         &sql_token_list(sql, "CHECK (content_class IN")?,
@@ -618,9 +633,13 @@ fn golden_resolved_manifest() -> ResolvedManifest {
         source_count: RecordCount::new(2).expect("golden source count is bounded"),
         source_bytes: ByteCount::new(768),
         participations: ParticipationRecords::new(vec![
-            Participation::active(context_digest('4')),
-            Participation::excluded(context_digest('5'), ParticipationReason::BudgetCut)
-                .with_detail("excluded after deterministic budget ordering"),
+            Participation::active(context_digest('4'), ContentClass::Private),
+            Participation::excluded(
+                context_digest('5'),
+                ContentClass::Conformance,
+                ParticipationReason::BudgetCut,
+            )
+            .with_detail("excluded after deterministic budget ordering"),
         ])
         .expect("golden participations are valid"),
         evidence_ids: context_evidence(),
@@ -2175,13 +2194,25 @@ mod tests {
         assert!(error.contains("gwk.context_blob"), "{error}");
 
         // One seeded extra token per axis — the count arm — plus one respelling
-        // — the set arm — so each of the three parities is proven to fire on
-        // its own CHECK rather than riding a sibling's.
+        // — the set arm — so each of the four parities is proven to fire on
+        // its own CHECK rather than riding a sibling's. The two content-class
+        // axes matter most here: they carry the same token set, so a mutation
+        // that reached only one of them would leave the other's guard
+        // unproven while the loop still read as complete.
+        // Targets carry their anchor: the content-class token pair appears
+        // twice in the schema now, once on the blob CHECK and once in the
+        // participation validator, and a bare pair would silently mutate
+        // whichever came first.
         for (axis, target, seeded) in [
             (
                 "content class",
-                "'conformance', 'private'",
-                "'conformance', 'private', 'secret'",
+                "content_class IN ('conformance', 'private')",
+                "content_class IN ('conformance', 'private', 'secret')",
+            ),
+            (
+                "participation class",
+                "'class' NOT IN ('conformance', 'private')",
+                "'class' NOT IN ('conformance', 'private', 'secret')",
             ),
             (
                 "redaction class",

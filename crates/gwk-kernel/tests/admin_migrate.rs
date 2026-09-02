@@ -248,10 +248,17 @@ async fn build_base(pool: &PgPool, role: &str) {
 /// whole mechanism is exercised end to end: the generator emitted the registry,
 /// the resolver walked it, and what came back is what gets applied.
 ///
-/// Two steps, and each is NAMED so the coverage tripwire in the contract gate
-/// can hold this suite to the registry: the retroactive step (#158's chain
+/// How many steps the registry chains from the base contract to this
+/// binary's. Hand-maintained beside the names in [`resolved_chain`], which is
+/// what actually pins the chain: a count derived from the registry would agree
+/// with any registry at all, including one a step silently fell out of.
+const REGISTERED_STEPS: usize = 3;
+
+/// Three steps, and each is NAMED so the coverage tripwire in the contract
+/// gate can hold this suite to the registry: the retroactive step (#158's chain
 /// introduction), then task 7's Context CAS classification step,
-/// `7ebb2ada-be73d920.sql`.
+/// `7ebb2ada-be73d920.sql`, then task 11's participation-class step,
+/// `be73d920-d1ab71d5.sql`.
 fn resolved_chain() -> Vec<&'static Step> {
     let chain =
         gwk_kernel::migrate::resolve(CONTRACT_STEPS, BASE_CONTRACT_SHA256, CONTRACT_SQL_SHA256)
@@ -260,8 +267,12 @@ fn resolved_chain() -> Vec<&'static Step> {
             });
     assert_eq!(
         chain.iter().map(|step| step.id).collect::<Vec<_>>(),
-        ["aba2f647-7ebb2ada.sql", "7ebb2ada-be73d920.sql"],
-        "the chain from {BASE_CONTRACT_SHA256} to {CONTRACT_SQL_SHA256} is not the registered two"
+        [
+            "aba2f647-7ebb2ada.sql",
+            "7ebb2ada-be73d920.sql",
+            "be73d920-d1ab71d5.sql"
+        ],
+        "the chain from {BASE_CONTRACT_SHA256} to {CONTRACT_SQL_SHA256} is not the registered three"
     );
     chain
 }
@@ -524,7 +535,7 @@ async fn the_step_chain_reaches_this_binarys_contract() {
         // The receipt distinguishes the two halves. Crediting the step with the
         // backend migrations would make the ledger claim the contract DDL
         // created relations it never mentions.
-        assert_eq!(applied.steps.len(), 2, "{:?}", applied.steps);
+        assert_eq!(applied.steps.len(), REGISTERED_STEPS, "{:?}", applied.steps);
         assert_eq!(
             applied.backend_migrations,
             ["0005_pty_delivery", "0006_schema_migration"],
@@ -751,7 +762,7 @@ async fn a_carried_backend_migration_lands_is_recorded_and_is_reachable() {
     // row and to no other.
     let chain = resolved_chain();
     let rows = ledger_rows(&pool).await;
-    assert_eq!(rows.len(), 2, "one ledger row per applied step");
+    assert_eq!(rows.len(), 3, "one ledger row per applied step");
     let (base, result, step_id, carried, backup) = &rows[0];
     assert_eq!(base, BASE_CONTRACT_SHA256);
     assert_eq!(result, chain[0].result);
@@ -764,11 +775,20 @@ async fn a_carried_backend_migration_lands_is_recorded_and_is_reachable() {
     assert_eq!(*backup, None);
     let (base, result, step_id, carried, backup) = &rows[1];
     assert_eq!(base, chain[0].result);
-    assert_eq!(result, CONTRACT_SQL_SHA256);
+    assert_eq!(result, chain[1].result);
     assert_eq!(step_id, "7ebb2ada-be73d920.sql");
     assert!(
         carried.is_empty(),
         "task 7's step carries no backend migration"
+    );
+    assert_eq!(*backup, None);
+    let (base, result, step_id, carried, backup) = &rows[2];
+    assert_eq!(base, chain[1].result);
+    assert_eq!(result, CONTRACT_SQL_SHA256);
+    assert_eq!(step_id, "be73d920-d1ab71d5.sql");
+    assert!(
+        carried.is_empty(),
+        "task 11's step carries no backend migration"
     );
     assert_eq!(*backup, None);
 
@@ -800,7 +820,7 @@ async fn a_carried_backend_migration_lands_is_recorded_and_is_reachable() {
             .fetch_one(&mut conn)
             .await
             .expect("the runtime role reads the ledger");
-    assert_eq!(ledger_count, 2);
+    assert_eq!(ledger_count, REGISTERED_STEPS as i64);
     conn.close().await.expect("close");
 
     drop(pool);
@@ -861,10 +881,10 @@ async fn a_stated_base_is_checked_like_any_other_and_never_overrides() {
     assert_eq!(applied.result, CONTRACT_SQL_SHA256);
 
     // On every row of the chain: one backup was taken before the one
-    // transaction both steps ran in, so it is equally the restore point for
-    // each.
+    // transaction all three steps ran in, so it is equally the restore point
+    // for each.
     let rows = ledger_rows(&pool).await;
-    assert_eq!(rows.len(), 2, "one ledger row per applied step");
+    assert_eq!(rows.len(), 3, "one ledger row per applied step");
     for (_, _, step_id, _, backup) in &rows {
         assert_eq!(
             backup.as_deref(),
@@ -906,7 +926,10 @@ async fn r1_refuses_a_database_already_at_this_binarys_contract() {
         .fetch_one(&pool)
         .await
         .expect("count ledger rows");
-    assert_eq!(rows, 2, "the refused rung left an extra row behind");
+    assert_eq!(
+        rows, REGISTERED_STEPS as i64,
+        "the refused rung left an extra row behind"
+    );
 
     drop(pool);
     drop_database(&maintenance, &database).await;
@@ -1802,11 +1825,12 @@ async fn the_ledger_writes_one_row_per_step_and_a_six_step_chain_fits() {
     .expect("read the ledger");
     assert_eq!(
         rows.len(),
-        2 + chain.len(),
-        "the real migration's two rows — one per applied step — plus one per synthetic step"
+        REGISTERED_STEPS + chain.len(),
+        "the real migration's rows — one per registered step — plus one per synthetic step"
     );
 
-    for (step, row) in chain.iter().zip(rows.iter().skip(2)) {
+    // Skip the real migration's own rows, which the assertion above counted.
+    for (step, row) in chain.iter().zip(rows.iter().skip(REGISTERED_STEPS)) {
         let step_id: String = row.get("step_id");
         let base: String = row.get("base_sha256");
         let result: String = row.get("result_sha256");

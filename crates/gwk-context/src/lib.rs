@@ -49,6 +49,7 @@
 //! protocol major, and `CONTRACT_VERSION` stays `1` — the wire major and the
 //! domain contract are separate axes, and only the first of them moved (R10).
 
+pub mod explain;
 pub mod precedence;
 pub mod skill;
 pub mod stage;
@@ -64,7 +65,7 @@ pub mod wire;
 pub use gwk_domain::{
     Assurance, AttributionPart, CONTEXT_ATTRIBUTION_MAX_BYTES, CONTEXT_CANDIDATE_ROUTE_MAX_COUNT,
     CONTEXT_EVIDENCE_MAX_COUNT, CONTEXT_ID_MAX_BYTES, CONTEXT_PARTICIPATION_DETAIL_MAX_BYTES,
-    CONTEXT_PARTICIPATION_MAX_COUNT, CONTEXT_RECORD_COUNT_MAX, CandidateDisposition,
+    CONTEXT_PARTICIPATION_MAX_COUNT, CONTEXT_RECORD_COUNT_MAX, CandidateDisposition, ContentClass,
     ContextAggregate, ContextAttribution, ContextEventName, ContextEventPayload, ContextFact,
     ContextRunId, ContextWireError, DIGEST_SCHEME, Digest, DigestError, EvidenceRefs,
     FinalizationSupplement, FinalizationSupplementId, ManifestId, ObservationIndex,
@@ -78,6 +79,6 @@ pub use stage::ContextStage;
 pub use store::ContextTruthStore;
 pub use wire::{
     CONTEXT_COMPARE_STAGE_MAX_COUNT, CONTEXT_GRAPH_DEPTH_MAX, CONTEXT_MANDATORY_FROM,
-    CONTEXT_QUERY_LIMIT_MAX, CompareSubject, ContextQuery, ExplainSubject, GraphDepth,
-    ManifestSelector, QueryLimit, SupplementKind,
+    CONTEXT_QUERY_LIMIT_MAX, CompareStages, CompareSubject, ContextQuery, ExplainSubject,
+    GraphDepth, ManifestSelector, QueryLimit, SupplementKind,
 };

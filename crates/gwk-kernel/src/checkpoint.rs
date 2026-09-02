@@ -483,8 +483,8 @@ async fn records(conn: &mut PgConnection, derived_only: bool) -> Result<Vec<u8>,
 /// event lands past that sequence, because the verdict then falls to
 /// `Unverified`, which serves. `gw admin discard-checkpoints` is the direct cure.
 ///
-/// **No `_` arm, deliberately.** The other eighteen variants are spelled out, so
-/// a twenty-first stops the build until someone classifies it. A wildcard here
+/// **No `_` arm, deliberately.** The other twenty-one variants are spelled out,
+/// so a twenty-fourth stops the build until someone classifies it. A wildcard here
 /// is where this rots: a new free-form field would be hashed unsorted and
 /// silently reintroduce the whole defect, and no test that scans source text can
 /// be relied on to notice a type it was never pointed at.
@@ -507,6 +507,9 @@ fn canonical_line(record: &mut ProjectionRecord, out: &mut Vec<u8>) -> Result<()
         | ProjectionRecord::AttentionItem { .. }
         | ProjectionRecord::AuthorityGrant { .. }
         | ProjectionRecord::Command { .. }
+        | ProjectionRecord::ContextFinalization { .. }
+        | ProjectionRecord::ContextObservation { .. }
+        | ProjectionRecord::ContextRelease { .. }
         | ProjectionRecord::CostEntry { .. }
         | ProjectionRecord::DispatchNode { .. }
         | ProjectionRecord::EngineSession { .. }
@@ -994,12 +997,36 @@ mod tests {
         // `ProjectionKind` is the request's vocabulary and `PROJECTIONS` is the
         // server's; a kind with no entry is a request that parses, is accepted,
         // and can never be answered.
+        //
+        // That is still the invariant. What changed is that it is now an
+        // EQUALITY against the projection's own declared serving stance rather
+        // than a blanket assertion: `served_in_v1` is exhaustive over the enum,
+        // so a kind can only lack a read query by having been classified as
+        // unserved on purpose, and a SERVED kind missing one still reds here.
+        let mut unserved: Vec<&str> = Vec::new();
         for kind in ProjectionKind::ALL {
-            assert!(
-                read_query(*kind).is_some(),
-                "{} has no read query",
+            let has_read = read_query(*kind).is_some();
+            assert_eq!(
+                has_read,
+                kind.served_in_v1(),
+                "{} disagrees with its declared serving stance",
                 kind.as_str()
             );
+            if !has_read {
+                unserved.push(kind.as_str());
+            }
         }
+        // The unserved set by NAME, not by count. A count cannot see a
+        // substitution: dropping `attempt` out of PROJECTIONS while classifying
+        // one Context kind as served would satisfy any total you care to write.
+        assert_eq!(
+            unserved,
+            [
+                "context_release",
+                "context_observation",
+                "context_finalization"
+            ],
+            "the set of projections V1 does not serve has moved"
+        );
     }
 }

@@ -406,6 +406,7 @@ async fn precheck(
         ContextFact::ManifestResolved {
             manifest_id,
             attempt_id,
+            participations,
             ..
         } => {
             let row = sqlx::query(
@@ -429,6 +430,58 @@ async fn precheck(
                 return Err(conflict(format!(
                     "attempt {attempt_id} already resolved a context manifest"
                 )));
+            }
+
+            // Where the CAS already holds a candidate's bytes, the class this
+            // fact states about that candidate must be the class those bytes
+            // were sealed under. A participation carries its own class so a
+            // candidate that was never sealed still has one; the price of that
+            // is two recordings of a single seam, and this is what stops them
+            // diverging. Divergence is silent otherwise: both rows stay valid,
+            // both pass every CHECK, and only a scoped query notices, by
+            // answering from the wrong side.
+            //
+            // On the APPEND path and deliberately not in the applier. The
+            // applier also runs on replay, so a guard there would read a
+            // mutable side table and make a projection rebuild's outcome
+            // depend on when it was run rather than on the event log. Here the
+            // writer lock is already held, so this decides against the same
+            // instant the append lands in.
+            let stated: Vec<(&str, &'static str)> = participations
+                .as_slice()
+                .iter()
+                .map(|record| (record.digest.as_str(), record.class.as_str()))
+                .collect();
+            let sealed = sqlx::query(
+                "SELECT digest, content_class FROM gwk.context_blob WHERE digest = ANY($1)",
+            )
+            .bind(
+                stated
+                    .iter()
+                    .map(|(d, _)| (*d).to_owned())
+                    .collect::<Vec<_>>(),
+            )
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(|e| db("precheck participation classes", e))?;
+            for row in &sealed {
+                let digest: String = row.try_get("digest").map_err(|e| db("blob digest", e))?;
+                let sealed_class: String = row
+                    .try_get("content_class")
+                    .map_err(|e| db("blob content class", e))?;
+                // ponytail: linear scan over both sides. Participations are
+                // capped at 4096 and a manifest carries a handful; a map would
+                // buy nothing here and hide the duplicate-digest case, which
+                // this catches because it compares every stated record rather
+                // than the first one matching.
+                for (candidate, class) in &stated {
+                    if *candidate == digest && *class != sealed_class {
+                        return Err(Refusal::validation(format!(
+                            "participation {digest} is stated {class} but the CAS \
+                             sealed those bytes {sealed_class}"
+                        )));
+                    }
+                }
             }
         }
 

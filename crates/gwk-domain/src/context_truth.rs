@@ -392,6 +392,27 @@ pub struct FinalizationSupplement {
 
 #[cfg(test)]
 mod tests {
+    use crate::context::ContentClass;
+
+    #[test]
+    fn the_content_class_token_is_the_wire_spelling() {
+        // The same claim as the Assurance test below, and load-bearing for a
+        // different reason: a participation states its class on the wire while
+        // the CAS adapter binds `as_str` into SQL for the same seam. Two
+        // spellings would put a blob and the participation describing it on
+        // opposite sides of the boundary a scoped query filters on, with every
+        // CHECK still passing.
+        assert_eq!(ContentClass::ALL.len(), 2);
+        for class in ContentClass::ALL {
+            let encoded = serde_json::to_value(class).expect("serializes");
+            assert_eq!(
+                encoded.as_str().expect("a string on the wire"),
+                class.as_str(),
+                "{class:?} serializes under a different name than it reports"
+            );
+        }
+    }
+
     #[test]
     fn the_assurance_token_is_the_wire_spelling() {
         // `as_str` feeds the SQL bind and serde feeds the payload. Two
@@ -432,6 +453,7 @@ mod tests {
     fn participations() -> ParticipationRecords {
         ParticipationRecords::new(vec![Participation::excluded(
             digest(),
+            ContentClass::Private,
             ParticipationReason::BudgetCut,
         )])
         .expect("valid participation")
@@ -565,8 +587,12 @@ mod tests {
         );
         assert_eq!(
             ParticipationRecords::new(vec![
-                Participation::excluded(digest(), ParticipationReason::BudgetCut,)
-                    .with_detail("x".repeat(CONTEXT_PARTICIPATION_DETAIL_MAX_BYTES + 1))
+                Participation::excluded(
+                    digest(),
+                    ContentClass::Private,
+                    ParticipationReason::BudgetCut
+                )
+                .with_detail("x".repeat(CONTEXT_PARTICIPATION_DETAIL_MAX_BYTES + 1))
             ]),
             Err(TruthRecordError::ParticipationDetailTooLong)
         );
@@ -615,7 +641,7 @@ mod tests {
         // refuses, the bound itself is legal, and deleting the check in
         // `ParticipationRecords::new` reds exactly here.
         let over: Vec<Participation> = (0..=CONTEXT_PARTICIPATION_MAX_COUNT)
-            .map(|_| Participation::active(digest()))
+            .map(|_| Participation::active(digest(), ContentClass::Private))
             .collect();
         assert_eq!(over.len(), CONTEXT_PARTICIPATION_MAX_COUNT + 1);
         assert_eq!(
@@ -624,7 +650,7 @@ mod tests {
         );
 
         let at_bound: Vec<Participation> = (0..CONTEXT_PARTICIPATION_MAX_COUNT)
-            .map(|_| Participation::active(digest()))
+            .map(|_| Participation::active(digest(), ContentClass::Private))
             .collect();
         assert!(ParticipationRecords::new(at_bound).is_ok());
     }
