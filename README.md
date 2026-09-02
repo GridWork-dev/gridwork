@@ -163,12 +163,19 @@ code.
 | [`gridwork`](https://docs.rs/gridwork) | Ships the `gw` binary — the CLI that speaks the kernel's protocol | 0.0.3 |
 | [`gwk`](https://docs.rs/gwk) | Namespace root for the `gwk-*` crates. **No API** | 0.0.3, name only |
 | `xtask` | Codegen and release glue. Not published | in-tree |
-| `gwk-pty` | PTY engine: server-side VT, render-state deltas, reattach | in tree, unpublished |
-| `gwk-pty-host` | Resident PTY engine host: session registry, spawn, detach/reattach routing | in tree, unpublished — not part of `cargo install gridwork` until its own release |
-| `gwk-adapter-*` | Per-engine ACP + hooks adapters | in tree, unpublished |
-| `gwk-parity` | The engine parity matrix harness — runs locally against logged-in engines, never in CI | in tree, unpublished |
-| `gwk-text` | Pure column arithmetic and extended grapheme boundaries | in tree, unpublished |
-| `gwk-context` | Context Runtime vocabulary: truth stages, participation, precedence, and content digests | in tree, unpublished |
+| `gwk-pty` | PTY engine: server-side VT, render-state deltas, reattach | unpublished — needs Zig and a pinned ghostty checkout to build, so publishing would ship a crate that fails to build for almost everyone |
+| `gwk-pty-host` | Resident PTY engine host: session registry, spawn, detach/reattach routing | unpublished — matches `gwk-pty`; not part of `cargo install gridwork` until its own release |
+| `gwk-adapter-*` | Per-engine ACP + hooks adapters | unpublished — inherit `gwk-pty`'s Zig requirement, and are meaningless without a logged-in engine CLI |
+| `gwk-parity` | The engine parity matrix harness — runs locally against logged-in engines, never in CI | unpublished — inherits the same Zig requirement through the adapter crates |
+| `gwk-text` | Pure column arithmetic and extended grapheme boundaries | unpublished — **no recorded reason**; the flag is set with no rationale in its manifest, unlike every other row here |
+| `gwk-context` | Context Runtime vocabulary: truth stages, participation, precedence, content digests, and the storage read port | unpublished — the wire-v2 grammar it carries is frozen but not live; reassess after E3 |
+| `gwk-context-compiler` | The deterministic Context compiler: precedence, narrowing, and budget cuts into one immutable resolved manifest | unpublished — path-depends on `gwk-context`, and a packaged crate cannot depend on an unpublished sibling |
+| `gwk-context-verifier` | The independent Context verifier: re-derives a finished manifest's own claims, and depends on the compiler nowhere | unpublished — same path-dependency bind as `gwk-context-compiler` |
+
+Every `publish = false` above is a decision cargo enforces, not a publication gap: a census
+that compares crates.io against the workspace member list without reading the `publish` key
+will report all of them as missing, and has. One row is honest about lacking a reason —
+`gwk-text` — rather than being given a plausible one after the fact.
 
 `gwk` is published deliberately as a **name reservation with no API** — a module doc
 block pointing at the crates that do the work. It is not a library and is not padded

@@ -109,7 +109,19 @@ const crates = [
   [
     "gwk-context",
     null,
-    "Context Runtime vocabulary: truth stages, participation, precedence, and content digests",
+    "Context Runtime vocabulary: truth stages, participation, precedence, content digests, and the storage read port",
+    "in tree, unpublished",
+  ],
+  [
+    "gwk-context-compiler",
+    null,
+    "The deterministic Context compiler: precedence, narrowing, and budget cuts into one immutable resolved manifest",
+    "in tree, unpublished",
+  ],
+  [
+    "gwk-context-verifier",
+    null,
+    "The independent Context verifier: re-derives a finished manifest's own claims, and depends on the compiler nowhere",
     "in tree, unpublished",
   ],
 ] as const;
