@@ -103,8 +103,12 @@ const _batchShape: Pick<Extract<B.ServerControl_Serialize, { type: "event_batch"
 const _gateActorShape: Pick<B.Gate_Serialize, "decided_by"> = {
   decided_by: { kind: "operator" },
 };
+// The class field is REQUIRED, not optional: a participation states which side of
+// the public/private seam its candidate sits on, and a decode that could omit
+// it would be a record whose scope nobody stated.
 const _activeParticipationDecode: B.Participation_Deserialize = {
   digest: "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+  class: "private",
   state: "active",
 };
 const _openPtyShape: Extract<B.KernelCommand_Serialize, { type: "open_pty_session" }> = {
