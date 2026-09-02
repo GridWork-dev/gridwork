@@ -883,11 +883,17 @@ jobs:
           # is a separate crate so the verifier's dependency graph can exclude
           # it (R15) — an exclusion that only means something if the crate is
           # a real workspace member, which is why it is one and not a module.
+          #
+          # gwk-context-verifier is the third link in that same chain and joins
+          # for the identical reason, not as a new class of exemption: it path-
+          # depends on gwk-context, so packaging it hits the same closed pair of
+          # exits described above.
           cargo package --workspace --exclude gwk-pty \
             --exclude gwk-adapter-opencode --exclude gwk-adapter-claude \
             --exclude gwk-adapter-codex --exclude gwk-parity \
             --exclude gwk-pty-host --exclude xtask \
-            --exclude gwk-context-compiler --locked
+            --exclude gwk-context-compiler --exclude gwk-context-verifier \
+            --locked
 
           # Every publishable member, straight from the manifest graph:
           # `publish = false` shows up as an empty array, so xtask drops out and

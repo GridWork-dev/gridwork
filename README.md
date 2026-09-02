@@ -168,7 +168,9 @@ code.
 | `gwk-adapter-*` | Per-engine ACP + hooks adapters | in tree, unpublished |
 | `gwk-parity` | The engine parity matrix harness — runs locally against logged-in engines, never in CI | in tree, unpublished |
 | `gwk-text` | Pure column arithmetic and extended grapheme boundaries | in tree, unpublished |
-| `gwk-context` | Context Runtime vocabulary: truth stages, participation, precedence, and content digests | in tree, unpublished |
+| `gwk-context` | Context Runtime vocabulary: truth stages, participation, precedence, content digests, and the storage read port | in tree, unpublished |
+| `gwk-context-compiler` | The deterministic Context compiler: precedence, narrowing, and budget cuts into one immutable resolved manifest | in tree, unpublished |
+| `gwk-context-verifier` | The independent Context verifier: re-derives a finished manifest's own claims, and depends on the compiler nowhere | in tree, unpublished |
 
 `gwk` is published deliberately as a **name reservation with no API** — a module doc
 block pointing at the crates that do the work. It is not a library and is not padded

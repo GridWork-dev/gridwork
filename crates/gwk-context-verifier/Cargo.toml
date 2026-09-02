@@ -1,0 +1,53 @@
+[package]
+name = "gwk-context-verifier"
+version = "0.0.1"
+description = "GridWork Context Runtime: the independent verifier — recomputes a resolved manifest's claims without the code that made them"
+homepage = "https://gridwork.sh"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Not published, and structurally so, for the same reason `gwk-context-compiler`
+# is not: this crate depends on `gwk-context`, which is `publish = false` until
+# E3's reassessment, and a packaged crate cannot depend on an unpublished path
+# sibling either way. It joins the `package` CI job's exclude list on that
+# ground, not as an exemption from packaging discipline.
+publish = false
+
+# THE DEPENDENCY LIST IS THE ENFORCEMENT (R15).
+#
+# D7 requires the verifier be implemented separately from the compiler, and R15
+# sets that bar at a separate crate because a crate boundary is the only version
+# of "separate" a dependency graph enforces rather than review discipline
+# remembering. What is absent below is therefore load-bearing, and absence is
+# hard to review — so `tests/dependency_seam.rs` asserts this exact set rather
+# than leaving it to a reader noticing a line that is not here.
+#
+# Not a source-text scanner, deliberately: a guard matching `compile::` or
+# `precedence::resolve` in this crate's source is defeated by the ordinary
+# spelling of a re-export, which is the failure mode the seam guard already
+# recorded once. The graph cannot be spelled around.
+[dependencies]
+# The shared vocabulary and nothing more: the truth-record types, the `Digest`
+# newtype, and the precedence TYPES. `gwk-context` does not carry the resolver
+# — that lives beside its caller in `gwk-context-compiler` — so depending on it
+# cannot reach the decision this crate exists to re-derive.
+gwk-context.workspace = true
+# `AttemptId`, `ByteCount`, `EvidenceId`, `Timestamp` — the manifest's own field
+# types, needed to name them in signatures and errors.
+gwk-domain.workspace = true
+# The digest preimage is the record's own serde_json bytes. Serializing the
+# STRUCT rather than a `Value` is what keeps those bytes independent of which
+# serde_json features the final binary unified.
+serde_json.workspace = true
+# The one declared crypto primitive R15 permits sharing.
+sha2.workspace = true
+
+[dev-dependencies]
+# Parses this crate's own manifest for the dependency-direction guard. Real TOML
+# rather than a line scanner: see that test's own notes.
+toml.workspace = true
+
+[lints]
+workspace = true
