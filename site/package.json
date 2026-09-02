@@ -31,7 +31,7 @@
     "knip": "6.32.2",
     "oxfmt": "0.63.0",
     "oxlint": "1.78.0",
-    "postcss": "8.5.25",
+    "postcss": "8.5.26",
     "tailwindcss": "4.3.3",
     "typescript": "7.0.2",
     "vite": "8.2.1"
