@@ -148,16 +148,42 @@ async fn every_projection_a_client_can_name_comes_back_through_the_wire() {
     populate(&store).await;
     let mut served = Served::open(store, "projections").await;
 
+    // Two outcomes now, and the test asserts WHICH one each kind gets rather
+    // than accepting either. A kind V1 does not serve is refused by policy; a
+    // kind it does serve answers with rows. Collapsing these into "did not
+    // panic" would let a served projection silently become unserved.
+    let mut refused: Vec<&str> = Vec::new();
     for kind in ProjectionKind::ALL {
         let tag = kind.as_str();
-        match served
+        let answer = served
             .client
             .ask(
                 &format!("r-{tag}"),
                 &format!(r#"{{"type":"list_projection","projection":"{tag}"}}"#),
             )
-            .await
-        {
+            .await;
+        if !kind.served_in_v1() {
+            // Refused by POLICY, and the code is asserted: falling through to
+            // `projection_page` would also fail here, as a Storage/Config error
+            // claiming the table is missing, and the two must not read alike.
+            match answer {
+                KernelResult::Error { code, message, .. } => {
+                    assert_eq!(
+                        code,
+                        KernelErrorCode::UnsupportedVersion,
+                        "{tag} was refused with the wrong code"
+                    );
+                    assert!(
+                        message.contains(tag),
+                        "{tag} refusal does not name the projection: {message}"
+                    );
+                }
+                other => panic!("{tag} should be refused by policy, got {other:?}"),
+            }
+            refused.push(tag);
+            continue;
+        }
+        match answer {
             KernelResult::ProjectionPage { records, .. } => {
                 assert!(!records.is_empty(), "{tag} came back empty");
                 for record in &records {
@@ -171,6 +197,16 @@ async fn every_projection_a_client_can_name_comes_back_through_the_wire() {
             other => panic!("{tag}: {other:?}"),
         }
     }
+    // By name, not by count — see the checkpoint invariant this mirrors.
+    assert_eq!(
+        refused,
+        [
+            "context_release",
+            "context_observation",
+            "context_finalization"
+        ],
+        "the set of projections the wire refuses has moved"
+    );
 
     served.close().await;
     drop_database(&maintenance, &name).await;

@@ -594,6 +594,11 @@ pub enum ProjectionKind {
     WorkflowRun,
     PtySession,
     PtySessionTemplate,
+    /// The three Context supplements (R3). Nameable in V1 and deliberately
+    /// NOT served by it — see the refusal arm in `wire::serve`.
+    ContextRelease,
+    ContextObservation,
+    ContextFinalization,
 }
 
 impl ProjectionKind {
@@ -619,7 +624,49 @@ impl ProjectionKind {
         Self::WorkflowRun,
         Self::PtySession,
         Self::PtySessionTemplate,
+        Self::ContextRelease,
+        Self::ContextObservation,
+        Self::ContextFinalization,
     ];
+
+    /// Whether protocol major 1 answers this projection from a table.
+    ///
+    /// Exhaustive with no `_` arm, for the reason `canonical_line` gives in the
+    /// kernel's checkpoint module: a new variant must be CLASSIFIED, and a
+    /// wildcard would classify it silently. Two callers share this one answer —
+    /// the serving path, which refuses what V1 does not serve, and the test that
+    /// pins every served kind to a read query — so the policy cannot be stated
+    /// twice and drift.
+    ///
+    /// The three Context supplements (R3) are nameable here and deliberately
+    /// unserved: ADR-0032 makes Context mandatory from
+    /// [`ProtocolVersion::V2`], which this kernel refuses. Their tables exist;
+    /// what is missing is a major that may read them.
+    pub const fn served_in_v1(self) -> bool {
+        match self {
+            Self::Task
+            | Self::Attempt
+            | Self::EngineSession
+            | Self::Message
+            | Self::Command
+            | Self::Gate
+            | Self::AuthorityGrant
+            | Self::Receipt
+            | Self::Evidence
+            | Self::AttentionItem
+            | Self::Worktree
+            | Self::Lease
+            | Self::DispatchNode
+            | Self::OrchestratorCheckpoint
+            | Self::IngestedRecord
+            | Self::CostEntry
+            | Self::WorkspaceNode
+            | Self::WorkflowRun
+            | Self::PtySession
+            | Self::PtySessionTemplate => true,
+            Self::ContextRelease | Self::ContextObservation | Self::ContextFinalization => false,
+        }
+    }
 
     /// The wire name — the same string `serde` writes, and the same one that
     /// tags the matching [`ProjectionRecord`]. Held as one method so a server
@@ -648,6 +695,9 @@ impl ProjectionKind {
             Self::WorkflowRun => "workflow_run",
             Self::PtySession => "pty_session",
             Self::PtySessionTemplate => "pty_session_template",
+            Self::ContextRelease => "context_release",
+            Self::ContextObservation => "context_observation",
+            Self::ContextFinalization => "context_finalization",
         }
     }
 }
@@ -728,6 +778,15 @@ pub enum ProjectionRecord {
     PtySessionTemplate {
         pty_session_template: PtySessionTemplate,
     },
+    ContextRelease {
+        context_release: crate::context_truth::ReleaseSupplement,
+    },
+    ContextObservation {
+        context_observation: crate::context_truth::ObservationSupplement,
+    },
+    ContextFinalization {
+        context_finalization: crate::context_truth::FinalizationSupplement,
+    },
 }
 
 impl ProjectionRecord {
@@ -755,6 +814,9 @@ impl ProjectionRecord {
             Self::WorkflowRun { .. } => ProjectionKind::WorkflowRun,
             Self::PtySession { .. } => ProjectionKind::PtySession,
             Self::PtySessionTemplate { .. } => ProjectionKind::PtySessionTemplate,
+            Self::ContextRelease { .. } => ProjectionKind::ContextRelease,
+            Self::ContextObservation { .. } => ProjectionKind::ContextObservation,
+            Self::ContextFinalization { .. } => ProjectionKind::ContextFinalization,
         }
     }
 }
@@ -1705,6 +1767,34 @@ mod tests {
     }
 
     #[test]
+    fn v1_serves_every_projection_but_the_three_context_supplements() {
+        // The serving path and the kernel read-query invariant both branch on
+        // `served_in_v1`, so this is the one place the policy is stated as data.
+        // Asserted as a SET of names: a count would be satisfied by any three,
+        // including three that were served yesterday.
+        let unserved: Vec<&str> = ProjectionKind::ALL
+            .iter()
+            .filter(|kind| !kind.served_in_v1())
+            .map(|kind| kind.as_str())
+            .collect();
+        assert_eq!(
+            unserved,
+            [
+                "context_release",
+                "context_observation",
+                "context_finalization"
+            ]
+        );
+        // And the complement is asserted too, so a `served_in_v1` answering
+        // `false` for everything could not satisfy the line above by vacuity.
+        assert_eq!(
+            ProjectionKind::ALL.len() - unserved.len(),
+            20,
+            "the served set is what actually shrank"
+        );
+    }
+
+    #[test]
     fn every_projection_kind_has_exactly_one_record_variant() {
         // The get/list request names a ProjectionKind and the answer carries a
         // ProjectionRecord; a kind with no record is a request that can never
@@ -2127,6 +2217,67 @@ mod tests {
                     retired_at: None,
                 },
             },
+            ProjectionRecord::ContextRelease {
+                context_release: crate::context_truth::ReleaseSupplement {
+                    id: crate::context_truth::ReleaseSupplementId::parse("release-1")
+                        .expect("valid id"),
+                    manifest_id: ctx_manifest_id(),
+                    rendered_digest: ctx_digest('a'),
+                    tool_schema_digest: ctx_digest('b'),
+                    rendered_bytes: ByteCount::new(2048),
+                    tool_schema_count: ctx_count(3),
+                    evidence_ids: ctx_evidence(),
+                    released_at: ts(),
+                },
+            },
+            ProjectionRecord::ContextObservation {
+                context_observation: crate::context_truth::ObservationSupplement {
+                    id: crate::context_truth::ObservationSupplementId::parse("observation-1")
+                        .expect("valid id"),
+                    manifest_id: ctx_manifest_id(),
+                    observation_index: crate::context_truth::ObservationIndex::new(1)
+                        .expect("valid index"),
+                    fact_digest: ctx_digest('c'),
+                    observed_bytes: ByteCount::new(512),
+                    visible_source_count: ctx_count(2),
+                    truncated: false,
+                    evidence_ids: ctx_evidence(),
+                    observed_at: ts(),
+                },
+            },
+            ProjectionRecord::ContextFinalization {
+                context_finalization: crate::context_truth::FinalizationSupplement {
+                    id: crate::context_truth::FinalizationSupplementId::parse("finalization-1")
+                        .expect("valid id"),
+                    manifest_id: ctx_manifest_id(),
+                    output_digest: ctx_digest('d'),
+                    verification_digest: ctx_digest('e'),
+                    approval_count: ctx_count(1),
+                    observation_count: ctx_count(1),
+                    final_event_root: ctx_digest('f'),
+                    lifecycle_complete: true,
+                    assurance: crate::context_truth::Assurance::Trace,
+                    evidence_ids: ctx_evidence(),
+                    finalized_at: ts(),
+                },
+            },
         ]
+    }
+
+    fn ctx_manifest_id() -> crate::context_truth::ManifestId {
+        crate::context_truth::ManifestId::parse("manifest-1").expect("valid id")
+    }
+
+    fn ctx_digest(fill: char) -> crate::Digest {
+        crate::Digest::from_hex(&fill.to_string().repeat(64)).expect("a valid digest")
+    }
+
+    fn ctx_count(value: u32) -> crate::context_truth::RecordCount {
+        crate::context_truth::RecordCount::new(value).expect("a bounded count")
+    }
+
+    fn ctx_evidence() -> crate::context_truth::EvidenceRefs {
+        crate::context_truth::EvidenceRefs::new(vec![crate::ids::EvidenceId::new("evidence-1")])
+            .expect("bounded evidence")
     }
 }

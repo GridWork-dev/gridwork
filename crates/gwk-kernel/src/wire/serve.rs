@@ -468,6 +468,9 @@ impl Daemon {
             }
 
             KernelRequest::GetProjection { projection, id } => {
+                if let Some(refused) = unserved_projection(*projection) {
+                    return Ok(refused);
+                }
                 // One row is a one-row page: the same query, asked for an exact
                 // key instead of a cursor.
                 let (mut records, _, _) =
@@ -489,6 +492,9 @@ impl Daemon {
                 cursor,
                 limit,
             } => {
+                if let Some(refused) = unserved_projection(*projection) {
+                    return Ok(refused);
+                }
                 // Resolved BEFORE the page query: a watermark read after it
                 // could land the other side of an append and report the page
                 // as fresher than it is.
@@ -2479,6 +2485,46 @@ pub async fn serve_stream(
 ) -> std::result::Result<(), WireError> {
     let (mut reader, mut writer) = tokio::io::split(stream);
     serve_connection(daemon, &mut reader, &mut writer).await
+}
+
+/// V1's answer for a projection it can name and does not serve.
+///
+/// A decodable request refused by POLICY — not a decode failure, and not a
+/// missing table. Without this arm the three Context kinds would still be
+/// refused, but by `projection_page`'s `read_query` miss, which reports
+/// `Config("projection ... has no table")`: an operator-facing claim that the
+/// server is misconfigured, about tables that exist and are correct.
+///
+/// The code is `UnsupportedVersion` because that is what this is. ADR-0032 makes
+/// Context mandatory from protocol major 2 rather than optional at any major, so
+/// a V1 connection naming a Context projection is asking for a major it did not
+/// negotiate — the same refusal the handshake would have given it, arriving one
+/// request later. The message names the projection and the major so a client can
+/// tell this from a handshake rejection.
+///
+/// The major is spelled `ProtocolVersion::V2` rather than read from
+/// `gwk_context::CONTEXT_MANDATORY_FROM`, which is the constant that DEFINES it.
+/// This crate cannot reach that one: `gwk-kernel` is published and `gwk-context`
+/// carries `publish = false`, so the dependency is refused by packaging in both
+/// directions — the same bind that moved the Context write grammar down into
+/// `gwk-domain`. The two are held equal by
+/// `context_becomes_mandatory_at_v2_and_the_contract_number_does_not_move` in
+/// `gwk-context`, which pins that constant to V2 from the other side.
+///
+/// Task 32 wires the consumers, and this function goes with it.
+fn unserved_projection(kind: ProjectionKind) -> Option<KernelResult> {
+    if kind.served_in_v1() {
+        return None;
+    }
+    Some(KernelResult::Error {
+        code: KernelErrorCode::UnsupportedVersion,
+        message: format!(
+            "projection {} is Context material and is not served before protocol major {}",
+            kind.as_str(),
+            gwk_domain::ProtocolVersion::V2.as_u32()
+        ),
+        detail: None,
+    })
 }
 
 #[cfg(test)]
