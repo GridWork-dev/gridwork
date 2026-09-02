@@ -55,9 +55,16 @@
       "addLabels": ["major-bump"]
     },
     {
-      "description": "Rust dependency and MSRV changes stay human. The workspace pins its dependencies centrally and six crates sit outside default-members with their own CI jobs, so a cargo bump's blast radius is not visible from the diff.",
+      "description": "Rust dependency changes stay human. The workspace pins its dependencies centrally and six crates sit outside default-members with their own CI jobs, so a cargo bump's blast radius is not visible from the diff. This rule does NOT cover the MSRV, though it claimed to until now, and that sentence is how the gap below stayed invisible: the MSRV pin is a `uses-with` input under the github-actions manager, not a cargo dependency, so this matcher never reached it.",
       "matchManagers": ["cargo"],
       "automerge": false
+    },
+    {
+      "description": "The MSRV is declared once, in Cargo.toml rust-version, and restated on four other surfaces that tools/check-claims.sh C1 holds equal to it. Renovate can only ever move ONE of them — the `toolchain:` input this rule disables — so every such update is wrong by construction. It proposed 1.94 to 1.98 on #177, where the github-actions group above would have automerged it on green and left the msrv job compiling on a version the crates do not advertise; C1 going red is the only reason that did not happen. Raising the MSRV is a deliberate edit to all five surfaces at once, not a dependency bump.",
+      "matchManagers": ["github-actions"],
+      "matchDepTypes": ["uses-with"],
+      "matchPackageNames": ["rust"],
+      "enabled": false
     }
   ]
 }

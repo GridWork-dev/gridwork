@@ -37,6 +37,31 @@ else
   need "$landing" "msrv ${msrv//./\\.}" "MSRV $msrv"
 fi
 
+# C1b — bun: one number, every CI input and the Renovate constraint
+# Same shape as C1 and found the same way. Renovate proposed bun 1.3.14 -> 1.4.0 on
+# #177 as a `uses-with` update: that moves the ci.yml inputs while `constraints.bun`
+# in renovate.json stays put, and nothing tied the two together — so that drift would
+# have landed silently, where the MSRV rewrite in the same PR was loud only because
+# C1 already existed. The constraint is the source because it is what Renovate itself
+# resolves against. Counted rather than `need`ed: ci.yml states the version three
+# times and a bare grep passes on one surviving match, so a partial rewrite — the
+# likely shape of a hand-edit — would read clean.
+bun=$(grep -oE '"bun": "[0-9.]+"' renovate.json | grep -oE '[0-9.]+' || true)
+if [ -z "$bun" ]; then
+  echo "check-claims: no bun constraint in renovate.json — cannot pin bun" >&2
+  fail=1
+else
+  bun_seen=$(grep -cE 'bun-version:' .github/workflows/ci.yml || true)
+  bun_pinned=$(grep -cE "bun-version: \"${bun//./\\.}\"" .github/workflows/ci.yml || true)
+  if [ "$bun_seen" -eq 0 ]; then
+    echo "check-claims: no bun-version input in ci.yml — the bun pin has no subject" >&2
+    fail=1
+  elif [ "$bun_seen" -ne "$bun_pinned" ]; then
+    echo "check-claims: bun $bun pinned in $bun_pinned of $bun_seen ci.yml bun-version inputs" >&2
+    fail=1
+  fi
+fi
+
 # C2 — the install command, future-tensed everywhere until the crate publishes
 need README.md 'cargo install gridwork' "install command"
 need ROADMAP.md 'cargo install gridwork' "install command"
