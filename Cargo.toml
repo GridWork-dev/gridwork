@@ -134,7 +134,7 @@ tachyonfx = { version = "=0.25.1", features = ["std-duration"] }
 rustix = { version = "1.1.4", default-features = false, features = ["process", "std"] }
 secrecy = "0.10.3"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = "1.0.151"
 sha2 = "0.11.0"
 specta = { version = "=2.0.0-rc.25", features = ["derive"] }
 sqlx = { version = "0.9.0", default-features = false, features = [
