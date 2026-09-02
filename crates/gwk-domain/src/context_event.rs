@@ -433,6 +433,28 @@ pub enum CandidateDisposition {
 ///
 /// Every variant is a terminal fact. Nothing here transitions a state machine,
 /// which is why the command wrapper is `Record*` and not `Transition*`.
+///
+/// # Four of the ten write a row, and each carries the whole of it
+///
+/// [`Self::ManifestResolved`], [`Self::ReleaseRecorded`],
+/// [`Self::ObservationAppended`] and [`Self::AssuranceCertified`] project into
+/// `gwk.context_manifest`, `_release`, `_observation` and `_finalization`
+/// respectively. Each of those four carries every column of its row, including
+/// values another fact already stated.
+///
+/// The alternative was a projection that joins four other event types back out
+/// of the log, and it fails in two directions at once. Columns that no fact
+/// carried at all — `tool_schema_count`, `observed_bytes`,
+/// `visible_source_count`, `approval_count`, and `evidence_ids` on every one of
+/// the four — would have to be written as zeros and empty arrays that pass
+/// their CHECKs and record nothing true, permanently, on tables that admit no
+/// UPDATE. And the joins themselves need selection rules nothing declares: two
+/// `CompilationRequested` events for one attempt after a route change is
+/// ordinary, and no rule says which one the manifest row means.
+///
+/// So the rule is: the fact that writes a row states the row. The remaining six
+/// facts write nothing and are read as history — which is a claim the applier
+/// makes structurally, by matching all ten with six empty arms.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
 #[serde(tag = "fact", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ContextFact {
@@ -444,13 +466,22 @@ pub enum ContextFact {
         requested_at: Timestamp,
     },
     /// The compiler emitted one immutable manifest.
+    ///
+    /// Carries `route_digest` and `authority_digest` even though
+    /// [`Self::CompilationRequested`] already stated them for the same attempt.
+    /// The duplication is deliberate: `gwk.context_manifest` declares both
+    /// `NOT NULL`, and sourcing them from a prior event would make the row
+    /// depend on a second fact that a partial log may not hold.
     ManifestResolved {
         manifest_id: ManifestId,
         attempt_id: AttemptId,
         manifest_digest: Digest,
+        route_digest: Digest,
+        authority_digest: Digest,
         source_count: RecordCount,
         source_bytes: ByteCount,
         participations: ParticipationRecords,
+        evidence_ids: EvidenceRefs,
         resolved_at: Timestamp,
     },
     /// The independent verifier answered for one exact digest.
@@ -469,6 +500,8 @@ pub enum ContextFact {
         rendered_digest: Digest,
         tool_schema_digest: Digest,
         rendered_bytes: ByteCount,
+        tool_schema_count: RecordCount,
+        evidence_ids: EvidenceRefs,
         released_at: Timestamp,
     },
     /// A Context run opened around a released manifest.
@@ -479,15 +512,30 @@ pub enum ContextFact {
         opened_at: Timestamp,
     },
     /// One ordered post-boundary observation was appended.
+    ///
+    /// `visible_source_count` is the visibility limit `truncated` is a flag
+    /// about, so the two travel together: a row saying `truncated` with nothing
+    /// beside it records that something was cut and refuses to say from what.
     ObservationAppended {
         run_id: ContextRunId,
+        manifest_id: ManifestId,
         observation_id: ObservationSupplementId,
         observation_index: ObservationIndex,
         fact_digest: Digest,
+        observed_bytes: ByteCount,
+        visible_source_count: RecordCount,
         truncated: bool,
+        evidence_ids: EvidenceRefs,
         observed_at: Timestamp,
     },
     /// The run closed. Assurance is a separate later fact.
+    ///
+    /// Writes no row. `gwk.context_finalization` is written once, by
+    /// [`Self::AssuranceCertified`], which restates what it certifies; a run
+    /// that closes and is never certified therefore has no finalization row.
+    /// That is the honest reading of an append-only table, and it means
+    /// `lifecycle_complete` is only ever persisted for runs that reached
+    /// certification.
     RunClosed {
         run_id: ContextRunId,
         finalization_id: FinalizationSupplementId,
@@ -497,11 +545,34 @@ pub enum ContextFact {
         closed_at: Timestamp,
     },
     /// A closed run was certified at an assurance level.
+    ///
+    /// This is the sole writer of `gwk.context_finalization`, so it carries the
+    /// whole row. That is forced, not chosen: `final_event_root` and `assurance`
+    /// exist only here, `output_digest` carries a `sha256:` CHECK so a
+    /// close-time insert would have to fabricate one, and the table admits no
+    /// UPDATE at three layers — an `ENABLE ALWAYS` BEFORE UPDATE OR DELETE
+    /// trigger, `GrantClass::History`, and an explicit REVOKE. A row cannot be
+    /// opened at close and completed at certification.
+    ///
+    /// `closed_at` is restated from [`Self::RunClosed`] because
+    /// `finalized_at` takes the close time rather than the attestation time:
+    /// every other field of the row that means a time-of-fact is a run-close
+    /// field, and `certified_at` dates a later statement about an already
+    /// settled run. The two are not the same instant and the column can hold
+    /// only one.
     AssuranceCertified {
         run_id: ContextRunId,
+        manifest_id: ManifestId,
         finalization_id: FinalizationSupplementId,
-        assurance: Assurance,
+        output_digest: Digest,
+        verification_digest: Digest,
+        approval_count: RecordCount,
+        observation_count: RecordCount,
         final_event_root: Digest,
+        lifecycle_complete: bool,
+        assurance: Assurance,
+        evidence_ids: EvidenceRefs,
+        closed_at: Timestamp,
         certified_at: Timestamp,
     },
     /// Optimization proposed an immutable candidate. It writes no truth.
@@ -615,7 +686,17 @@ pub struct ContextEventPayload {
 
 #[cfg(test)]
 mod tests {
+    use crate::ids::EvidenceId;
+
     use super::*;
+
+    fn count(value: u32) -> RecordCount {
+        RecordCount::new(value).expect("bounded count")
+    }
+
+    fn evidence() -> EvidenceRefs {
+        EvidenceRefs::new(vec![EvidenceId::new("evidence-1")]).expect("bounded evidence")
+    }
 
     fn digest() -> Digest {
         Digest::parse(&format!("sha256:{}", "a".repeat(64))).expect("valid digest")
@@ -645,9 +726,12 @@ mod tests {
                 manifest_id: manifest_id(),
                 attempt_id: AttemptId::new("attempt-1"),
                 manifest_digest: digest(),
-                source_count: RecordCount::new(1).expect("valid count"),
+                route_digest: digest(),
+                authority_digest: digest(),
+                source_count: count(1),
                 source_bytes: ByteCount::new(1),
                 participations: ParticipationRecords::new(Vec::new()).expect("empty is valid"),
+                evidence_ids: evidence(),
                 resolved_at: timestamp(),
             },
             ContextFact::ManifestVerificationRecorded {
@@ -664,6 +748,8 @@ mod tests {
                 rendered_digest: digest(),
                 tool_schema_digest: digest(),
                 rendered_bytes: ByteCount::new(1),
+                tool_schema_count: count(1),
+                evidence_ids: evidence(),
                 released_at: timestamp(),
             },
             ContextFact::RunOpened {
@@ -674,25 +760,37 @@ mod tests {
             },
             ContextFact::ObservationAppended {
                 run_id: run_id(),
+                manifest_id: manifest_id(),
                 observation_id: ObservationSupplementId::parse("observation-1").expect("valid id"),
                 observation_index: ObservationIndex::new(1).expect("valid index"),
                 fact_digest: digest(),
+                observed_bytes: ByteCount::new(1),
+                visible_source_count: count(1),
                 truncated: false,
+                evidence_ids: evidence(),
                 observed_at: timestamp(),
             },
             ContextFact::RunClosed {
                 run_id: run_id(),
                 finalization_id: FinalizationSupplementId::parse("final-1").expect("valid id"),
                 output_digest: digest(),
-                observation_count: RecordCount::new(1).expect("valid count"),
+                observation_count: count(1),
                 lifecycle_complete: true,
                 closed_at: timestamp(),
             },
             ContextFact::AssuranceCertified {
                 run_id: run_id(),
+                manifest_id: manifest_id(),
                 finalization_id: FinalizationSupplementId::parse("final-1").expect("valid id"),
-                assurance: Assurance::Trace,
+                output_digest: digest(),
+                verification_digest: digest(),
+                approval_count: count(0),
+                observation_count: count(1),
                 final_event_root: digest(),
+                lifecycle_complete: true,
+                assurance: Assurance::Trace,
+                evidence_ids: evidence(),
+                closed_at: timestamp(),
                 certified_at: timestamp(),
             },
             ContextFact::OptimizationCandidateProposed {
