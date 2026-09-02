@@ -7,7 +7,6 @@
   ],
   "extends": ["config:recommended", ":semanticCommits", "helpers:pinGitHubActionDigests"],
   "minimumReleaseAge": "7 days",
-  "schedule": ["before 6am on monday"],
   "timezone": "America/New_York",
   "constraints": {
     "bun": "1.3.14"
