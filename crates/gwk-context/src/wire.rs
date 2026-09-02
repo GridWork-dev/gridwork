@@ -172,6 +172,59 @@ impl specta::Type for GraphDepth {
     }
 }
 
+/// The stages one comparison asks for.
+///
+/// A newtype rather than a bare `Vec<ContextStage>` so the count bound and the
+/// no-duplicates rule are enforced where the value is BUILT — on the way in
+/// from the wire, and in [`CompareStages::new`] — instead of in a `validate()`
+/// a caller is free not to call. `left != right` stays in
+/// [`ContextQuery::validate`] because it is genuinely cross-field: neither
+/// subject can see the other from inside its own type.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(transparent)]
+pub struct CompareStages(Vec<ContextStage>);
+
+impl CompareStages {
+    pub fn new(stages: Vec<ContextStage>) -> Result<Self, ContextWireError> {
+        if stages.is_empty() || stages.len() > CONTEXT_COMPARE_STAGE_MAX_COUNT {
+            return Err(ContextWireError::CompareStagesOutOfRange);
+        }
+        // Duplicates are their own refusal rather than folded into the bound.
+        // Five copies of one stage is inside the count and still asks the same
+        // question five times, which a projection would answer five times.
+        let mut seen = Vec::with_capacity(stages.len());
+        for stage in &stages {
+            if seen.contains(&stage) {
+                return Err(ContextWireError::CompareStagesRepeated);
+            }
+            seen.push(stage);
+        }
+        Ok(Self(stages))
+    }
+
+    pub fn get(&self) -> &[ContextStage] {
+        &self.0
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for CompareStages {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Self::new(Vec::<ContextStage>::deserialize(d)?).map_err(serde::de::Error::custom)
+    }
+}
+
+// A validated stage set on the wire. The bound and the uniqueness rule are
+// enforced at construction, so the CONTRACT shape stays the underlying array —
+// `ContextStage[]`, exactly as before. That is why this type needs no registry
+// entry of its own while `ContextStage` still does: `ContextStage` is carried
+// into the bindings solely by this field, which is what the registry line in
+// `xtask` exists to survive.
+impl specta::Type for CompareStages {
+    fn definition(types: &mut specta::Types) -> specta::datatype::DataType {
+        <Vec<ContextStage> as specta::Type>::definition(types)
+    }
+}
+
 // ============================================================
 // Reads
 // ============================================================
@@ -274,7 +327,7 @@ pub enum ContextQuery {
     Compare {
         left: CompareSubject,
         right: CompareSubject,
-        stages: Vec<ContextStage>,
+        stages: CompareStages,
     },
 }
 
@@ -284,30 +337,17 @@ impl ContextQuery {
     /// Not a deserialization-time check: both sides are individually legal, and
     /// the rule is about their relationship. A self-comparison is always an
     /// empty diff, so answering it costs a projection read to learn nothing.
+    ///
+    /// The stage bound and the no-duplicates rule are deliberately NOT re-checked
+    /// here. [`CompareStages`] refuses both at construction, so a copy of them in
+    /// this method would be a branch no mutation could turn red — the shape this
+    /// repository treats as an untested guard rather than a second layer.
     pub fn validate(&self) -> Result<(), ContextWireError> {
-        let Self::Compare {
-            left,
-            right,
-            stages,
-        } = self
-        else {
+        let Self::Compare { left, right, .. } = self else {
             return Ok(());
         };
         if left == right {
             return Err(ContextWireError::CompareSubjectsIdentical);
-        }
-        if stages.is_empty() || stages.len() > CONTEXT_COMPARE_STAGE_MAX_COUNT {
-            return Err(ContextWireError::CompareStagesOutOfRange);
-        }
-        // Duplicates are their own refusal rather than folded into the bound.
-        // Five copies of one stage is inside the count and still asks the same
-        // question five times, which a projection would answer five times.
-        let mut seen = Vec::with_capacity(stages.len());
-        for stage in stages {
-            if seen.contains(&stage) {
-                return Err(ContextWireError::CompareStagesRepeated);
-            }
-            seen.push(stage);
         }
         Ok(())
     }
@@ -325,6 +365,10 @@ mod tests {
 
     fn run_id() -> ContextRunId {
         ContextRunId::parse("run-1").expect("valid id")
+    }
+
+    fn all_stages() -> CompareStages {
+        CompareStages::new(ContextStage::ALL.to_vec()).expect("all five stages are a legal set")
     }
 
     #[test]
@@ -414,7 +458,7 @@ mod tests {
             right: CompareSubject::Manifest {
                 manifest_id: manifest_id(),
             },
-            stages: ContextStage::ALL.to_vec(),
+            stages: all_stages(),
         };
         assert_eq!(
             same.validate(),
@@ -426,7 +470,7 @@ mod tests {
                 manifest_id: manifest_id(),
             },
             right: CompareSubject::Run { run_id: run_id() },
-            stages: ContextStage::ALL.to_vec(),
+            stages: all_stages(),
         };
         assert_eq!(distinct.validate(), Ok(()));
     }
@@ -485,42 +529,61 @@ mod tests {
 
     #[test]
     fn a_comparison_must_name_stages_and_must_not_repeat_them() {
-        let subjects = || {
-            (
-                CompareSubject::Manifest {
-                    manifest_id: manifest_id(),
-                },
-                CompareSubject::Run { run_id: run_id() },
-            )
-        };
-        let compare = |stages: Vec<ContextStage>| {
-            let (left, right) = subjects();
-            ContextQuery::Compare {
-                left,
-                right,
-                stages,
-            }
-        };
-
+        // The bound and the uniqueness rule live in the type now, so they are
+        // asserted where the value is BUILT rather than through a `validate()`
+        // nothing forces a caller to reach.
         assert_eq!(
-            compare(Vec::new()).validate(),
+            CompareStages::new(Vec::new()),
             Err(ContextWireError::CompareStagesOutOfRange)
         );
         assert_eq!(
-            compare(vec![
+            CompareStages::new(vec![
                 ContextStage::Resolved;
                 CONTEXT_COMPARE_STAGE_MAX_COUNT + 1
-            ])
-            .validate(),
+            ]),
             Err(ContextWireError::CompareStagesOutOfRange)
         );
         assert_eq!(
-            compare(vec![ContextStage::Resolved, ContextStage::Resolved]).validate(),
+            CompareStages::new(vec![ContextStage::Resolved, ContextStage::Resolved]),
             Err(ContextWireError::CompareStagesRepeated)
         );
         // The positive control, and the bound's own edge: all five distinct
         // stages is the largest legal comparison.
-        assert_eq!(compare(ContextStage::ALL.to_vec()).validate(), Ok(()));
+        assert_eq!(all_stages().get(), ContextStage::ALL.as_slice());
+        // Not a tautology: `ALL.len()` is five by its own type, and this pins the
+        // separately-declared bound to it. Otherwise the two drift in silence.
         assert_eq!(ContextStage::ALL.len(), CONTEXT_COMPARE_STAGE_MAX_COUNT);
+    }
+
+    #[test]
+    fn an_illegal_stage_set_is_refused_at_decode_not_after_it() {
+        // Reverting `stages` to a bare `Vec` with post-decode validation reds
+        // exactly here, and nowhere else: the value would decode cleanly and only
+        // a `validate()` call nothing compels would catch it. The case this covers
+        // is a caller that decodes and acts.
+        let compare = |stages: &str| {
+            format!(
+                r#"{{"query":"compare","left":{{"of":"manifest","manifest_id":"m"}},"right":{{"of":"run","run_id":"r"}},"stages":{stages}}}"#
+            )
+        };
+        assert!(
+            serde_json::from_str::<ContextQuery>(&compare("[]")).is_err(),
+            "an empty stage set must not decode"
+        );
+        assert!(
+            serde_json::from_str::<ContextQuery>(&compare(
+                r#"["declared","resolved","released","observed","finalized","declared"]"#
+            ))
+            .is_err(),
+            "an oversized stage set must not decode"
+        );
+        assert!(
+            serde_json::from_str::<ContextQuery>(&compare(r#"["resolved","resolved"]"#)).is_err(),
+            "a repeated stage must not decode"
+        );
+        // Positive control: the same shape with a legal set decodes, so none of
+        // the three refusals above can be passing for an unrelated reason.
+        serde_json::from_str::<ContextQuery>(&compare(r#"["resolved","released"]"#))
+            .expect("a legal stage set must decode");
     }
 }

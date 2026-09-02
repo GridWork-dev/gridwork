@@ -78,6 +78,6 @@ pub use stage::ContextStage;
 pub use store::ContextTruthStore;
 pub use wire::{
     CONTEXT_COMPARE_STAGE_MAX_COUNT, CONTEXT_GRAPH_DEPTH_MAX, CONTEXT_MANDATORY_FROM,
-    CONTEXT_QUERY_LIMIT_MAX, CompareSubject, ContextQuery, ExplainSubject, GraphDepth,
-    ManifestSelector, QueryLimit, SupplementKind,
+    CONTEXT_QUERY_LIMIT_MAX, CompareStages, CompareSubject, ContextQuery, ExplainSubject,
+    GraphDepth, ManifestSelector, QueryLimit, SupplementKind,
 };
