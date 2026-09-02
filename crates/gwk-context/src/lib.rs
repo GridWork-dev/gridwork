@@ -49,6 +49,7 @@
 //! protocol major, and `CONTRACT_VERSION` stays `1` — the wire major and the
 //! domain contract are separate axes, and only the first of them moved (R10).
 
+pub mod explain;
 pub mod precedence;
 pub mod skill;
 pub mod stage;
