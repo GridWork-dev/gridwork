@@ -9,7 +9,7 @@
   "minimumReleaseAge": "7 days",
   "timezone": "America/New_York",
   "constraints": {
-    "bun": "1.4.0"
+    "bun": "1.3.14"
   },
   "prConcurrentLimit": 5,
   "prHourlyLimit": 0,
@@ -21,9 +21,9 @@
   },
   "packageRules": [
     {
-      "description": "Patch and minor bumps ride in automatically once CI is green. Here that means the single required context, verify, which aggregates 18 jobs. That number is pinned by tools/check-claims.sh C9 and derived from ci.yml, because it sat at 17 here while the workflow had already grown past it — a description nothing reads is a description nothing corrects.",
+      "description": "Automerge is OFF. It was on for patch and minor bumps, and on 2026-09-02 three of them merged themselves in one evening with nobody watching: #193 at 20:25:33Z, which split the bun version across managers, and #195 at 02:51:24Z, which merged while the repository's Allow auto-merge setting was already switched off. That second one is the fallback the third paragraph above predicts — with the platform gate unavailable Renovate merges through its own API, so switching the repository setting off changes who merges without changing whether merging happens. This key is the one that stops it. automergeType and platformAutomerge stay here and inert, because automerge defaults to false and both only take effect when it is true; leaving them makes re-enabling one boolean rather than a reconstruction. Renovate still opens, groups and rebases PRs — only the merge is withheld. When it was on, green meant the single required context, verify, which aggregates 18 jobs. That number is pinned by tools/check-claims.sh C9 and derived from ci.yml, because it sat at 17 here while the workflow had already grown past it — a description nothing reads is a description nothing corrects.",
       "matchUpdateTypes": ["patch", "minor"],
-      "automerge": true,
+      "automerge": false,
       "automergeType": "pr",
       "platformAutomerge": true
     },
@@ -64,6 +64,11 @@
       "matchManagers": ["github-actions"],
       "matchDepTypes": ["uses-with"],
       "matchPackageNames": ["rust"],
+      "enabled": false
+    },
+    {
+      "description": "The bun version is one claim restated on eight surfaces, and Renovate reaches them through four different managers, so no single bot PR can move all of them. Its own tool-constraint updater owns constraints.bun above; npm owns @types/bun in contracts/ and site/ and the packageManager field in site/package.json; the github-actions manager owns the three bun-version uses-with inputs in ci.yml; the dockerfile manager owns the two oven/bun image pins in site/Dockerfile. Each package name here is copied from Renovate's own PR tables — #193 listed bun as tool-constraint and as packageManager, and @types/bun as devDependencies; #177 listed bun as uses-with; and #197, which merged while this PR was open, listed node as final for this very Dockerfile, so the dockerfile manager is demonstrably active on that file and names a FROM by its image name — oven/bun is that same shape two stages up. An earlier revision of this caption called oven/bun inferred, on the grounds that Renovate had never proposed a change to site/Dockerfile. That was wrong twice over: it was checked against local refs rather than the forge, and #197 was already open when it was checked. #193 moved four of the eight to 1.4.0 and automerged unattended on green, leaving ci.yml and the Dockerfile at 1.3.14. Nothing went red, because a partial move of a claim that spans managers is invisible to any gate scoped to one of them. This rule therefore matches by package name rather than by manager, since the manager is the axis that splits the claim. Raising bun is a deliberate edit to all eight surfaces at once, including a fresh digest for the oven/bun image on the deployed site path, and it is not a dependency bump.",
+      "matchPackageNames": ["bun", "@types/bun", "oven/bun"],
       "enabled": false
     }
   ]
