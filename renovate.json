@@ -21,9 +21,9 @@
   },
   "packageRules": [
     {
-      "description": "Patch and minor bumps ride in automatically once CI is green. Here that means the single required context, verify, which aggregates 18 jobs. That number is pinned by tools/check-claims.sh C9 and derived from ci.yml, because it sat at 17 here while the workflow had already grown past it — a description nothing reads is a description nothing corrects.",
+      "description": "Automerge is OFF. It was on for patch and minor bumps, and on 2026-09-02 three of them merged themselves in one evening with nobody watching: #193 at 20:25:33Z, which split the bun version across managers, and #195 at 02:51:24Z, which merged while the repository's Allow auto-merge setting was already switched off. That second one is the fallback the third paragraph above predicts — with the platform gate unavailable Renovate merges through its own API, so switching the repository setting off changes who merges without changing whether merging happens. This key is the one that stops it. automergeType and platformAutomerge stay here and inert, because automerge defaults to false and both only take effect when it is true; leaving them makes re-enabling one boolean rather than a reconstruction. Renovate still opens, groups and rebases PRs — only the merge is withheld. When it was on, green meant the single required context, verify, which aggregates 18 jobs. That number is pinned by tools/check-claims.sh C9 and derived from ci.yml, because it sat at 17 here while the workflow had already grown past it — a description nothing reads is a description nothing corrects.",
       "matchUpdateTypes": ["patch", "minor"],
-      "automerge": true,
+      "automerge": false,
       "automergeType": "pr",
       "platformAutomerge": true
     },
