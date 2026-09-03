@@ -44,6 +44,11 @@
       "matchPackageNames": ["next", "@next/**", "eslint-config-next"]
     },
     {
+      "description": "The three fumadocs packages in site/package.json are one upgrade wearing three PR numbers. fumadocs-core and fumadocs-ui are a lockstep pair, published together and pinned here at the same version, while fumadocs-mdx tracks its own major line — so this group means the three move in one pull request, not that they carry one version number. Without it Renovate opened core alone and mdx alone while ui's identical bump sat behind prConcurrentLimit, and merging any one of those leaves the pair split with nothing red, because no gate in this repository compares two npm versions inside one package.json. Unlike the version-claim rules below this is a group and not a disable: a docs dependency has every reason to keep moving, it only has to move all at once. The three names are a census of what site/package.json requires today. A fourth fumadocs package added later falls outside this list and gets its own PR, which is the behaviour that already exists rather than a silent one — that is the difference between missing a name in a group and missing one in a disable rule, where the update it fails to suppress lands unreviewed.",
+      "groupName": "fumadocs",
+      "matchPackageNames": ["fumadocs-core", "fumadocs-ui", "fumadocs-mdx"]
+    },
+    {
       "description": "Action digest bumps are noisy individually and identical in risk.",
       "groupName": "github actions",
       "matchManagers": ["github-actions"]
