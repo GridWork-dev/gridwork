@@ -58,6 +58,11 @@
       "description": "Rust dependency and MSRV changes stay human. The workspace pins its dependencies centrally and six crates sit outside default-members with their own CI jobs, so a cargo bump's blast radius is not visible from the diff.",
       "matchManagers": ["cargo"],
       "automerge": false
+    },
+    {
+      "description": "The bun version is one claim restated on eight surfaces, and Renovate reaches them through four different managers, so no single bot PR can move all of them. Its own tool-constraint updater owns constraints.bun above; npm owns @types/bun in contracts/ and site/ and the packageManager field in site/package.json; the github-actions manager owns the three bun-version uses-with inputs in ci.yml; the dockerfile manager owns the two oven/bun image pins in site/Dockerfile. Each package name here is copied from Renovate's own PR tables — #193 listed bun as tool-constraint and as packageManager, and @types/bun as devDependencies; #177 listed bun as uses-with — with one exception: oven/bun is inferred, because Renovate has never proposed a change to site/Dockerfile, so that name has never been observed. #193 moved four of the eight to 1.4.0 and automerged unattended on green, leaving ci.yml and the Dockerfile at 1.3.14. Nothing went red, because a partial move of a claim that spans managers is invisible to any gate scoped to one of them. This rule therefore matches by package name rather than by manager, since the manager is the axis that splits the claim. Raising bun is a deliberate edit to all eight surfaces at once, including a fresh digest for the oven/bun image on the deployed site path, and it is not a dependency bump.",
+      "matchPackageNames": ["bun", "@types/bun", "oven/bun"],
+      "enabled": false
     }
   ]
 }
