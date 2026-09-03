@@ -111,6 +111,15 @@ const _activeParticipationDecode: B.Participation_Deserialize = {
   class: "private",
   state: "active",
 };
+// The positive literal above is assignable whether class is required or optional,
+// so on its own it cannot hold the claim in the comment. This arm can: omitting
+// class must be a type error, and @ts-expect-error fails the build if it stops
+// being one.
+// @ts-expect-error class is required, so a participation that omits it must not typecheck.
+const _participationWithoutClass: B.Participation_Deserialize = {
+  digest: "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+  state: "active",
+};
 const _openPtyShape: Extract<B.KernelCommand_Serialize, { type: "open_pty_session" }> = {
   type: "open_pty_session",
   pty_session_id: "pty-1",

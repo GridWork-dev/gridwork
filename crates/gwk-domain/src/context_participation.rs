@@ -334,12 +334,28 @@ mod tests {
 
     #[test]
     fn unknown_fields_are_refused_rather_than_dropped() {
+        // Every field this record requires is stated, so the unknown key is the
+        // only remaining reason to refuse. Task 11 made `class` required without
+        // adding it here, and a document missing a required field fails on its
+        // own — which left this assertion holding whether or not
+        // `deny_unknown_fields` was still on the struct.
         let json = r#"{
             "digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "class": "private",
             "state": "active",
             "invented_by_a_caller": true
         }"#;
         assert!(serde_json::from_str::<Participation>(json).is_err());
+
+        // The control, so the refusal above is attributable. The same document
+        // without the unknown key decodes; if a later required field is added and
+        // not stated here, this arm reds instead of the guard going quietly dead.
+        let known_fields_only = r#"{
+            "digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "class": "private",
+            "state": "active"
+        }"#;
+        assert!(serde_json::from_str::<Participation>(known_fields_only).is_ok());
     }
 
     #[test]
