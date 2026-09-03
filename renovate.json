@@ -55,9 +55,16 @@
       "addLabels": ["major-bump"]
     },
     {
-      "description": "Rust dependency and MSRV changes stay human. The workspace pins its dependencies centrally and six crates sit outside default-members with their own CI jobs, so a cargo bump's blast radius is not visible from the diff.",
+      "description": "Rust dependency changes stay human. The workspace pins its dependencies centrally and six crates sit outside default-members with their own CI jobs, so a cargo bump's blast radius is not visible from the diff. This rule does NOT cover the MSRV, though it claimed to until now, and that sentence is how the gap below stayed invisible: the MSRV pin is a `uses-with` input under the github-actions manager, not a cargo dependency, so this matcher never reached it.",
       "matchManagers": ["cargo"],
       "automerge": false
+    },
+    {
+      "description": "The MSRV is declared once, in Cargo.toml rust-version, and restated on four other surfaces that tools/check-claims.sh C1 holds equal to it. Renovate can only ever move ONE of them — the `toolchain:` input this rule disables — so every such update is wrong by construction. It proposed 1.94 to 1.98 on #177, where the github-actions group above would have automerged it on green and left the msrv job compiling on a version the crates do not advertise; C1 going red is the only reason that did not happen. Raising the MSRV is a deliberate edit to all five surfaces at once, not a dependency bump.",
+      "matchManagers": ["github-actions"],
+      "matchDepTypes": ["uses-with"],
+      "matchPackageNames": ["rust"],
+      "enabled": false
     },
     {
       "description": "The bun version is one claim restated on eight surfaces, and Renovate reaches them through four different managers, so no single bot PR can move all of them. Its own tool-constraint updater owns constraints.bun above; npm owns @types/bun in contracts/ and site/ and the packageManager field in site/package.json; the github-actions manager owns the three bun-version uses-with inputs in ci.yml; the dockerfile manager owns the two oven/bun image pins in site/Dockerfile. Each package name here is copied from Renovate's own PR tables — #193 listed bun as tool-constraint and as packageManager, and @types/bun as devDependencies; #177 listed bun as uses-with; and #197, which merged while this PR was open, listed node as final for this very Dockerfile, so the dockerfile manager is demonstrably active on that file and names a FROM by its image name — oven/bun is that same shape two stages up. An earlier revision of this caption called oven/bun inferred, on the grounds that Renovate had never proposed a change to site/Dockerfile. That was wrong twice over: it was checked against local refs rather than the forge, and #197 was already open when it was checked. #193 moved four of the eight to 1.4.0 and automerged unattended on green, leaving ci.yml and the Dockerfile at 1.3.14. Nothing went red, because a partial move of a claim that spans managers is invisible to any gate scoped to one of them. This rule therefore matches by package name rather than by manager, since the manager is the axis that splits the claim. Raising bun is a deliberate edit to all eight surfaces at once, including a fresh digest for the oven/bun image on the deployed site path, and it is not a dependency bump.",
