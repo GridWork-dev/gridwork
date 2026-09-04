@@ -767,52 +767,102 @@ fn no_client_actor_string_reaches_the_attribution() {
 
 #[test]
 fn a_candidates_class_rides_into_its_participation_whatever_the_outcome() {
-    // The compiler classifies nothing; it carries what it was handed. The
-    // three arms are the three ways a row gets built — an upstream verdict, a
-    // precedence loss, and an admitted winner — because each constructs its
-    // `Participation` at a different site, and a class dropped at one of them
-    // would be invisible from the other two.
+    // The compiler classifies nothing; it carries what it was handed. The four
+    // arms are the four ways a row gets built — an upstream verdict, a
+    // precedence loss, a budget cut, and an admitted winner — because each
+    // constructs its `Participation` at a different site, and a class dropped
+    // at one of them would be invisible from the other three.
     //
-    // Mixed classes on purpose. With every candidate one class, a body that
-    // hardcoded that class would pass this whole test.
-    let mut upstream = candidate(1, "slot-a", PrecedenceTier::Annotation, 1);
-    upstream.class = ContentClass::Conformance;
-    upstream.standing = Standing::Rejected;
+    // Mixed classes are not enough on their own, and an earlier revision of
+    // this test stopped there while naming that exact hazard. `ContentClass`
+    // has two variants, so one pass pins at most one direction per site:
+    // replacing a site's `candidate.class` with the constant that site's own
+    // fixture already carries is invisible, whatever the other candidates are
+    // set to. So the whole fixture runs twice with every class flipped, and a
+    // constant at any of the four sites disagrees with one of the two passes.
+    let mut passes = 0usize;
+    for flip in [false, true] {
+        // Exhaustive over the two variants with no wildcard arm: a third
+        // content class stops this compiling rather than silently halving the
+        // coverage this loop exists to provide.
+        let pick = |class: ContentClass| match (flip, class) {
+            (false, class) => class,
+            (true, ContentClass::Conformance) => ContentClass::Private,
+            (true, ContentClass::Private) => ContentClass::Conformance,
+        };
 
-    let mut loser = candidate(2, "slot-b", PrecedenceTier::Annotation, 1);
-    loser.class = ContentClass::Private;
-    let mut winner = candidate(3, "slot-b", PrecedenceTier::Security, 1);
-    winner.class = ContentClass::Conformance;
+        let mut upstream = candidate(1, "slot-a", PrecedenceTier::Annotation, 1);
+        upstream.class = pick(ContentClass::Conformance);
+        upstream.standing = Standing::Rejected;
 
-    let offered = vec![upstream.clone(), loser.clone(), winner.clone()];
-    let compiled =
-        compile(&request(None), &route(), &authority(&[]), &offered).expect("the fixture compiles");
+        let mut loser = candidate(2, "slot-b", PrecedenceTier::Annotation, 1);
+        loser.class = pick(ContentClass::Conformance);
+        let mut winner = candidate(3, "slot-b", PrecedenceTier::Security, 1);
+        winner.class = pick(ContentClass::Private);
 
-    let rows = compiled.manifest.participations.as_slice();
-    assert_eq!(rows.len(), 3, "every offered candidate is recorded");
-    for candidate in [&upstream, &loser, &winner] {
-        let row = rows
-            .iter()
-            .find(|row| row.digest == candidate.digest)
-            .expect("a row per candidate");
+        // Wins its own slot, so it survives precedence and reaches the budget
+        // step, then costs more than the admitted winner leaves. Annotation
+        // tier deliberately: a Security-tier candidate over budget is a hard
+        // error rather than a row, which would exercise a different site.
+        let mut cut = candidate(4, "slot-c", PrecedenceTier::Annotation, 1_000);
+        cut.class = pick(ContentClass::Private);
+
+        let offered = vec![upstream.clone(), loser.clone(), winner.clone(), cut.clone()];
+        let compiled = compile(&request(Some(10)), &route(), &authority(&[]), &offered)
+            .expect("the fixture compiles");
+
+        let rows = compiled.manifest.participations.as_slice();
+        assert_eq!(rows.len(), 4, "every offered candidate is recorded");
+        let mut compared = 0usize;
+        for candidate in [&upstream, &loser, &winner, &cut] {
+            let row = rows
+                .iter()
+                .find(|row| row.digest == candidate.digest)
+                .expect("a row per candidate");
+            assert_eq!(
+                row.class, candidate.class,
+                "{:?} was recorded under another class than it was offered under (flip={flip})",
+                candidate.digest
+            );
+            compared += 1;
+        }
         assert_eq!(
-            row.class, candidate.class,
-            "{:?} was recorded under another class than it was offered under",
-            candidate.digest
+            compared, 4,
+            "every candidate was compared, not merely found"
         );
-    }
 
-    // The arms are the ones named above, so a future refactor that collapses
-    // two of them fails here rather than silently narrowing the test.
-    let state_of = |digest: &Digest| {
-        rows.iter()
-            .find(|row| &row.digest == digest)
-            .expect("present")
-            .state
-    };
-    // Standing::Rejected verdicts to Unavailable, not Excluded (compile.rs
-    // Standing::verdict) -- the arm is the upstream-verdict one either way.
-    assert_eq!(state_of(&upstream.digest), ParticipationState::Unavailable);
-    assert_eq!(state_of(&loser.digest), ParticipationState::Excluded);
-    assert_eq!(state_of(&winner.digest), ParticipationState::Active);
+        // The arms are the ones named above, so a future refactor that
+        // collapses two of them fails here rather than silently narrowing the
+        // test. The reasons are what pin WHICH site built each row: a
+        // budget-cut row and a precedence-loss row are both `Excluded`, so
+        // without them the fourth arm could go unbuilt with the count still
+        // reading four.
+        let row_of = |digest: &Digest| {
+            rows.iter()
+                .find(|row| &row.digest == digest)
+                .expect("present")
+        };
+        // Standing::Rejected verdicts to Unavailable, not Excluded (compile.rs
+        // Standing::verdict) -- the arm is the upstream-verdict one either way.
+        assert_eq!(
+            row_of(&upstream.digest).state,
+            ParticipationState::Unavailable
+        );
+        assert_eq!(row_of(&loser.digest).state, ParticipationState::Excluded);
+        assert_eq!(
+            row_of(&loser.digest).reason,
+            Some(ParticipationReason::PrecedenceLoss)
+        );
+        assert_eq!(row_of(&winner.digest).state, ParticipationState::Active);
+        assert_eq!(row_of(&cut.digest).state, ParticipationState::Excluded);
+        assert_eq!(
+            row_of(&cut.digest).reason,
+            Some(ParticipationReason::BudgetCut),
+            "the budget-cut site is the one this arm exists for; a \
+             precedence-loss row here would leave it unbuilt"
+        );
+
+        passes += 1;
+    }
+    assert_eq!(passes, 2, "both class directions ran");
 }
