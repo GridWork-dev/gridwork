@@ -94,31 +94,60 @@ fn inspect_dependency_sources(manifest: &str) -> Result<usize, String> {
     Ok(declared.len())
 }
 
-/// Every dependency this crate names, from its own `[dependencies]` table.
-fn own_dependency_names(manifest: &str) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
-    let mut inside = false;
-    for raw in manifest.lines() {
-        let line = raw.trim();
-        if line.starts_with('[') {
-            inside = line == "[dependencies]";
-            continue;
+/// The table kinds a dependency can be declared in. A walk that reads only
+/// `[dependencies]` is blind to the other three, and the same declaration
+/// moved one table down is invisible to it.
+const DEPENDENCY_KINDS: &[&str] = &["dependencies", "dev-dependencies", "build-dependencies"];
+
+/// Every dependency this crate names, from all four kinds of dependency table.
+///
+/// Parsed rather than line-scanned, for the reason the workspace reader above
+/// was: a section header is not a reliable delimiter. The earlier revision set
+/// its flag from `line == "[dependencies]"`, so every other table header turned
+/// it off and the declarations under it were never seen at all.
+///
+/// Returns the count of tables walked alongside the names, so the caller can
+/// tell a crate that declares little from a walk that read almost nothing.
+fn own_dependency_names(manifest: &str) -> Result<(BTreeSet<String>, usize), String> {
+    let parsed: toml::Table = manifest
+        .parse()
+        .map_err(|e| format!("crate manifest is not TOML: {e}"))?;
+    let mut out: BTreeSet<String> = BTreeSet::new();
+    let mut tables = 0usize;
+
+    // The sub-table spelling (`[dependencies.foo]`) needs no special case: the
+    // parser folds it into the same table, which is the point of parsing.
+    let mut take = |table: &toml::Value| {
+        if let Some(entries) = table.as_table() {
+            tables += 1;
+            for name in entries.keys() {
+                out.insert(name.clone());
+            }
         }
-        if !inside || line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let Some((key, _)) = line.split_once('=') else {
-            continue;
-        };
-        // `serde.workspace = true` and `specta = { workspace = true, ... }`
-        // are both declarations; the name is whatever precedes the first dot
-        // or the equals sign.
-        let name = key.trim().split('.').next().unwrap_or_default().trim();
-        if !name.is_empty() {
-            out.insert(name.to_owned());
+    };
+
+    for kind in DEPENDENCY_KINDS {
+        if let Some(table) = parsed.get(*kind) {
+            take(table);
         }
     }
-    out
+
+    // `[target.'cfg(...)'.dependencies]` and its dev and build siblings. A walk
+    // that stops at the top level is defeated by one cfg expression.
+    if let Some(targets) = parsed.get("target").and_then(toml::Value::as_table) {
+        for entry in targets.values() {
+            let Some(entry) = entry.as_table() else {
+                continue;
+            };
+            for kind in DEPENDENCY_KINDS {
+                if let Some(table) = entry.get(*kind) {
+                    take(table);
+                }
+            }
+        }
+    }
+
+    Ok((out, tables))
 }
 
 #[test]
@@ -137,15 +166,33 @@ fn every_dependency_this_crate_takes_comes_from_the_public_root() {
 
     let own = std::fs::read_to_string(Path::new(CRATE_DIR).join("Cargo.toml"))
         .expect("crate manifest is readable");
-    let names = own_dependency_names(&own);
+    let (names, tables) =
+        own_dependency_names(&own).unwrap_or_else(|e| panic!("crate dependency seam: {e}"));
+
+    // Both counts first, and they catch different regressions. An empty name
+    // set is a broken parse. A table count of one is a walk that found
+    // `[dependencies]` and stopped — the exact shape this reader used to have,
+    // which reads clean because the names it did find are all legitimate.
     assert!(
         !names.is_empty(),
         "this crate declares no dependencies — the parse is broken, not the manifest"
     );
+    assert!(
+        tables >= 2,
+        "expected at least 2 dependency tables in this crate's manifest, walked {tables}"
+    );
 
     // And every one of them resolves to a declaration the guard above checked,
-    // so a dependency added directly to this crate with its own git source
-    // cannot slip past a guard that only reads the workspace table.
+    // so a dependency added directly to this crate with its own git or path
+    // source cannot slip past a guard that only reads the workspace table.
+    //
+    // That sentence is only true because the walk above reads all four table
+    // kinds. While it read `[dependencies]` alone it was false in the other
+    // three: the same declaration in `[dev-dependencies]`,
+    // `[build-dependencies]`, or under a `[target.'cfg(..)']` block was never
+    // inspected, so it could carry any source at all. This crate has a real
+    // `[dev-dependencies]` table, so the claim was false about its own
+    // manifest and not merely in principle.
     let declared: BTreeSet<String> = declared_dependencies(&workspace)
         .expect("workspace manifest parses")
         .into_iter()
@@ -157,6 +204,54 @@ fn every_dependency_this_crate_takes_comes_from_the_public_root() {
             "{name} is not declared in the workspace table; its source is unchecked"
         );
     }
+}
+
+#[test]
+fn the_crate_manifest_walk_reads_every_kind_of_dependency_table() {
+    // One declaration per table kind, each carrying a source the workspace
+    // table does not declare. Against the earlier line-based reader only `a`
+    // was ever seen: `[dev-dependencies]`, `[build-dependencies]` and the
+    // `[target.'cfg(..)']` block each turned its section flag off, so `b`,
+    // `c` and `d` were not merely unchecked, they were invisible. Their names
+    // never reached the cross-check, which is why nothing downstream could
+    // notice — a name that is never extracted cannot fail a containment test.
+    let seeded = "[package]\n\
+                  name = \"x\"\n\n\
+                  [dependencies]\n\
+                  a = \"1\"\n\n\
+                  [dev-dependencies]\n\
+                  b = { path = \"../../elsewhere\" }\n\n\
+                  [build-dependencies]\n\
+                  c = { path = \"../../elsewhere\" }\n\n\
+                  [target.'cfg(unix)'.dependencies]\n\
+                  d = { git = \"https://example.invalid/d\" }\n";
+
+    let (names, tables) = own_dependency_names(seeded).expect("the seeded manifest parses");
+    assert_eq!(tables, 4, "every dependency table kind was walked");
+    let expected: BTreeSet<String> = ["a", "b", "c", "d"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        names, expected,
+        "a name declared in any table kind is a name the cross-check must see"
+    );
+
+    // The sub-table spelling folds into the same table rather than adding one,
+    // so the count above stays honest when a dependency is written long-form.
+    let sub = "[dependencies]\n\
+               a = \"1\"\n\n\
+               [dependencies.b]\n\
+               path = \"../../elsewhere\"\n";
+    let (sub_names, sub_tables) = own_dependency_names(sub).expect("the sub-table fixture parses");
+    assert_eq!(sub_tables, 1);
+    assert_eq!(
+        sub_names,
+        ["a", "b"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>()
+    );
 }
 
 #[test]
