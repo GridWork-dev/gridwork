@@ -866,3 +866,38 @@ fn a_candidates_class_rides_into_its_participation_whatever_the_outcome() {
     }
     assert_eq!(passes, 2, "both class directions ran");
 }
+
+#[test]
+fn the_participation_construction_sites_are_still_the_four_this_suite_covers() {
+    // `a_candidates_class_rides_into_its_participation_whatever_the_outcome`
+    // covers four construction sites in both class directions. Nothing said
+    // there are four. A fifth site added later leaves that test green over its
+    // own fixture, with no arm naming what stopped being covered — a guard that
+    // narrows silently, which is the one direction a per-fixture assertion
+    // cannot see for itself.
+    //
+    // What this pins is the number of construction EXPRESSIONS in the source
+    // text, which is a proxy and is stated as one: it would still count a site
+    // that had been commented out, and it cannot see a Participation built in
+    // another module. Its job is the direction that actually bites here — a
+    // site added without coverage — and naming that limit is cheaper than
+    // implying it pins more than it does.
+    let source = include_str!("../src/compile.rs");
+    assert!(
+        source.len() > 1_000,
+        "the compiler source did not load, so the count below would fold over nothing"
+    );
+
+    // Three constructor spellings, because the sites do not agree on one: a
+    // struct literal, two `excluded` calls, and one `active` call. Counting a
+    // single spelling would have found one site and called it the whole set.
+    let sites = source.matches("Participation {").count()
+        + source.matches("Participation::active(").count()
+        + source.matches("Participation::excluded(").count();
+    assert_eq!(
+        sites, 4,
+        "compile.rs builds a Participation at a number of sites this suite does not \
+         cover; add the new site to the class-carry fixture and move this count in \
+         the same commit, so the two cannot drift apart quietly"
+    );
+}
