@@ -738,6 +738,10 @@ fn right_finalization(store: &mut Records) -> &mut FinalizationSupplement {
         .expect("seeded above")
 }
 
+fn right_manifest(store: &mut Records) -> &mut ResolvedManifest {
+    store.manifests.get_mut("m-right").expect("seeded above")
+}
+
 #[test]
 fn every_field_a_stage_comparator_reads_moves_that_stage_verdict() {
     // The per-stage test above builds its fixture so the four served stages
@@ -771,7 +775,12 @@ fn every_field_a_stage_comparator_reads_moves_that_stage_verdict() {
 
     // The control. Without it every arm below could pass because the
     // comparison says `Differs` to everything.
+    //
+    // `Resolved` belongs in this loop and was missing from it until 8B round 4.
+    // Its comparator was the one stage this test never reached, which is how it
+    // came to read two of the manifest's fields and not the other two.
     for stage in [
+        ContextStage::Resolved,
         ContextStage::Released,
         ContextStage::Observed,
         ContextStage::Finalized,
@@ -783,6 +792,21 @@ fn every_field_a_stage_comparator_reads_moves_that_stage_verdict() {
         );
         arms += 1;
     }
+
+    // Resolved. The participation rows are covered by the scope tests above;
+    // these are the two fields the comparator reads besides them. A manifest
+    // resolved under a different route, or under a different authority, is a
+    // different resolution even where it admitted exactly the same sources.
+    differs!(
+        ContextStage::Resolved,
+        |s: &mut Records| right_manifest(s).route_digest = digest('e'),
+        "resolved: route_digest"
+    );
+    differs!(
+        ContextStage::Resolved,
+        |s: &mut Records| right_manifest(s).authority_digest = digest('e'),
+        "resolved: authority_digest"
+    );
 
     differs!(
         ContextStage::Released,
@@ -857,8 +881,8 @@ fn every_field_a_stage_comparator_reads_moves_that_stage_verdict() {
     );
 
     assert_eq!(
-        arms, 16,
-        "three controls and thirteen field arms; a field dropped from this list \
+        arms, 19,
+        "four controls and fifteen field arms; a field dropped from this list \
          is a field nothing pins, and the count is what says so"
     );
 }

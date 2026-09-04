@@ -364,6 +364,15 @@ async fn compare(
 /// content changed, from a comparison that was supposed to be blind to it.
 /// Comparing the admitted rows answers the question the scope actually allows,
 /// and `withheld` says how much it could not look at.
+///
+/// `route_digest` and `authority_digest` are compared alongside those rows, and
+/// they are not a way back to the channel this function avoids: both are copied
+/// from the route and the authority the compiler was handed, neither is derived
+/// from any candidate's content, and a private participation cannot move
+/// either. What they do carry is the question a row comparison cannot answer —
+/// two manifests that admitted the same sources under a DIFFERENT authority are
+/// not the same resolution, and reporting them `Same` says the governing
+/// decision does not matter to what was resolved.
 fn resolved_difference(
     left: &ResolvedManifest,
     right: &ResolvedManifest,
@@ -388,7 +397,11 @@ fn resolved_difference(
     };
     StageDifference {
         stage: ContextStage::Resolved,
-        verdict: verdict_of(visible(left) == visible(right)),
+        verdict: verdict_of(
+            visible(left) == visible(right)
+                && left.route_digest == right.route_digest
+                && left.authority_digest == right.authority_digest,
+        ),
         withheld: hidden(left) + hidden(right),
     }
 }
