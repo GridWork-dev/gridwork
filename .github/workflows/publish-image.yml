@@ -422,7 +422,7 @@ jobs:
       # CVE list it could not show — studio's report measured exactly that shape.
       - name: sbom
         if: always() && steps.image.outputs.digest != ''
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           image: ${{ vars.GCP_REGISTRY }}/${{ matrix.service }}@${{ steps.image.outputs.digest }}
           artifact-name: sbom-${{ matrix.service }}.spdx.json
