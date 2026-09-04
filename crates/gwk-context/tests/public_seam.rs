@@ -13,7 +13,7 @@
 //! inspected and each caller asserts that count is non-zero before believing a
 //! verdict. Zero inspected is a broken guard, never a clean subject.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 const CRATE_DIR: &str = env!("CARGO_MANIFEST_DIR");
@@ -99,20 +99,29 @@ fn inspect_dependency_sources(manifest: &str) -> Result<usize, String> {
 /// moved one table down is invisible to it.
 const DEPENDENCY_KINDS: &[&str] = &["dependencies", "dev-dependencies", "build-dependencies"];
 
-/// Every dependency this crate names, from all four kinds of dependency table.
+/// Every dependency this crate names, from all four kinds of dependency table,
+/// each paired with whether it is inherited from the workspace table.
 ///
 /// Parsed rather than line-scanned, for the reason the workspace reader above
 /// was: a section header is not a reliable delimiter. The earlier revision set
 /// its flag from `line == "[dependencies]"`, so every other table header turned
 /// it off and the declarations under it were never seen at all.
 ///
+/// The inherited flag is a second and independent dimension. A name on its own
+/// says only that the workspace happens to declare something by that name; it
+/// does not say this crate takes it from there. `foo.workspace = true` and
+/// `foo = { workspace = true, features = [..] }` both parse to a table carrying
+/// `workspace = true`. A bare version string, or any table naming its own
+/// `path`, `git` or `version`, does not — that declaration is a source of its
+/// own, and it is what cargo builds from.
+///
 /// Returns the count of tables walked alongside the names, so the caller can
 /// tell a crate that declares little from a walk that read almost nothing.
-fn own_dependency_names(manifest: &str) -> Result<(BTreeSet<String>, usize), String> {
+fn own_dependencies(manifest: &str) -> Result<(BTreeMap<String, bool>, usize), String> {
     let parsed: toml::Table = manifest
         .parse()
         .map_err(|e| format!("crate manifest is not TOML: {e}"))?;
-    let mut out: BTreeSet<String> = BTreeSet::new();
+    let mut out: BTreeMap<String, bool> = BTreeMap::new();
     let mut tables = 0usize;
 
     // The sub-table spelling (`[dependencies.foo]`) needs no special case: the
@@ -120,8 +129,18 @@ fn own_dependency_names(manifest: &str) -> Result<(BTreeSet<String>, usize), Str
     let mut take = |table: &toml::Value| {
         if let Some(entries) = table.as_table() {
             tables += 1;
-            for name in entries.keys() {
-                out.insert(name.clone());
+            for (name, spec) in entries {
+                let inherited = spec
+                    .as_table()
+                    .and_then(|spec| spec.get("workspace"))
+                    .and_then(toml::Value::as_bool)
+                    .unwrap_or(false);
+                // A name declared under more than one kind counts as inherited
+                // only if every one of its declarations is. The loosest
+                // declaration is the one that would carry a foreign source.
+                out.entry(name.clone())
+                    .and_modify(|seen| *seen &= inherited)
+                    .or_insert(inherited);
             }
         }
     };
@@ -166,15 +185,15 @@ fn every_dependency_this_crate_takes_comes_from_the_public_root() {
 
     let own = std::fs::read_to_string(Path::new(CRATE_DIR).join("Cargo.toml"))
         .expect("crate manifest is readable");
-    let (names, tables) =
-        own_dependency_names(&own).unwrap_or_else(|e| panic!("crate dependency seam: {e}"));
+    let (deps, tables) =
+        own_dependencies(&own).unwrap_or_else(|e| panic!("crate dependency seam: {e}"));
 
     // Both counts first, and they catch different regressions. An empty name
     // set is a broken parse. A table count of one is a walk that found
     // `[dependencies]` and stopped — the exact shape this reader used to have,
     // which reads clean because the names it did find are all legitimate.
     assert!(
-        !names.is_empty(),
+        !deps.is_empty(),
         "this crate declares no dependencies — the parse is broken, not the manifest"
     );
     assert!(
@@ -182,23 +201,48 @@ fn every_dependency_this_crate_takes_comes_from_the_public_root() {
         "expected at least 2 dependency tables in this crate's manifest, walked {tables}"
     );
 
-    // And every one of them resolves to a declaration the guard above checked,
-    // so a dependency added directly to this crate with its own git or path
-    // source cannot slip past a guard that only reads the workspace table.
+    // The claim this guard exists to make is that a dependency added directly
+    // to this crate with its own git or path source cannot slip past a reader
+    // that only consults the workspace table. That claim has two independent
+    // conjuncts, and reading all four table kinds settles only the first.
     //
-    // That sentence is only true because the walk above reads all four table
-    // kinds. While it read `[dependencies]` alone it was false in the other
-    // three: the same declaration in `[dev-dependencies]`,
+    // WHICH tables are read. While this walk saw `[dependencies]` alone the
+    // claim was false in the other three: a declaration in `[dev-dependencies]`,
     // `[build-dependencies]`, or under a `[target.'cfg(..)']` block was never
     // inspected, so it could carry any source at all. This crate has a real
-    // `[dev-dependencies]` table, so the claim was false about its own
-    // manifest and not merely in principle.
+    // `[dev-dependencies]` table, so that was false about this very manifest.
+    //
+    // WHAT each declaration says. Extracting the name and testing it for
+    // membership answers a different question than the one asked: it proves the
+    // workspace knows that name, never that this crate takes it from there.
+    // `gwk-domain` is declared in the workspace table, so a crate-level
+    // `gwk-domain = { path = "/somewhere/else" }` passed containment unchanged
+    // while building from outside the repository entirely — the "it builds
+    // here, on this machine, and nowhere else" failure this file names.
+    //
+    // Both are checked below, in that order, because a foreign source is the
+    // stronger statement and its message should be the one a reader sees.
+    for (name, inherited) in &deps {
+        assert!(
+            inherited,
+            "{name} is declared in this crate with a source of its own rather \
+             than inherited from the workspace table, so it builds from wherever \
+             that declaration points, which need not be this repository"
+        );
+    }
+
+    // A backstop, and named as one. Since the loop above refuses anything not
+    // inherited, the only declaration that can reach here claims
+    // `workspace = true`, and a name claiming that while absent from the root
+    // table fails in cargo before any test runs. So no buildable mutation reds
+    // this loop any more: it is kept because it costs nothing and would catch a
+    // reader regression above it, not because it is separately exercised.
     let declared: BTreeSet<String> = declared_dependencies(&workspace)
         .expect("workspace manifest parses")
         .into_iter()
         .map(|(name, _)| name)
         .collect();
-    for name in &names {
+    for name in deps.keys() {
         assert!(
             declared.contains(name),
             "{name} is not declared in the workspace table; its source is unchecked"
@@ -226,15 +270,25 @@ fn the_crate_manifest_walk_reads_every_kind_of_dependency_table() {
                   [target.'cfg(unix)'.dependencies]\n\
                   d = { git = \"https://example.invalid/d\" }\n";
 
-    let (names, tables) = own_dependency_names(seeded).expect("the seeded manifest parses");
+    let (deps, tables) = own_dependencies(seeded).expect("the seeded manifest parses");
     assert_eq!(tables, 4, "every dependency table kind was walked");
     let expected: BTreeSet<String> = ["a", "b", "c", "d"]
         .into_iter()
         .map(str::to_owned)
         .collect();
     assert_eq!(
-        names, expected,
+        deps.keys().cloned().collect::<BTreeSet<String>>(),
+        expected,
         "a name declared in any table kind is a name the cross-check must see"
+    );
+
+    // Not one of the four is inherited: `a` is a bare version, the rest name
+    // their own path or git source. The walk must report that, because the
+    // caller's refusal is built on this flag and a reader that returned every
+    // name paired with `true` would extract exactly the same set.
+    assert!(
+        deps.values().all(|inherited| !inherited),
+        "every seeded declaration carries a source of its own, so none is inherited"
     );
 
     // The sub-table spelling folds into the same table rather than adding one,
@@ -243,14 +297,18 @@ fn the_crate_manifest_walk_reads_every_kind_of_dependency_table() {
                a = \"1\"\n\n\
                [dependencies.b]\n\
                path = \"../../elsewhere\"\n";
-    let (sub_names, sub_tables) = own_dependency_names(sub).expect("the sub-table fixture parses");
+    let (sub_deps, sub_tables) = own_dependencies(sub).expect("the sub-table fixture parses");
     assert_eq!(sub_tables, 1);
     assert_eq!(
-        sub_names,
+        sub_deps.keys().cloned().collect::<BTreeSet<String>>(),
         ["a", "b"]
             .into_iter()
             .map(str::to_owned)
             .collect::<BTreeSet<_>>()
+    );
+    assert!(
+        sub_deps.values().all(|inherited| !inherited),
+        "the long-form spelling names its own path, so it is not inherited either"
     );
 }
 
