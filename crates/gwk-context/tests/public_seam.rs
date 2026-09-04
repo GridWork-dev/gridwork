@@ -422,6 +422,64 @@ fn the_dependency_guard_refuses_a_path_that_escapes_the_public_root_by_traversal
 }
 
 #[test]
+fn a_name_declared_in_two_kinds_is_inherited_only_if_both_declarations_are() {
+    // The merge rule in `own_dependencies`, which is reached only by a name
+    // appearing under more than one dependency kind. No manifest in this
+    // repository does that, so the rule had never run: round 4 rewrote `&=` as
+    // `|=` and nothing red.
+    //
+    // The rule matters because the caller refuses on this flag. A name taken
+    // from the workspace in one table and from its own path in another IS a
+    // foreign source, and the loosest declaration is the one that would carry
+    // it. Reporting such a name as inherited hides exactly the case the guard
+    // is looking for.
+    let both_ways = "[package]\n\
+                     name = \"x\"\n\n\
+                     [dependencies]\n\
+                     serde = { path = \"../../elsewhere\" }\n\n\
+                     [dev-dependencies]\n\
+                     serde = { workspace = true }\n";
+
+    let (deps, tables) = own_dependencies(both_ways).expect("the seeded manifest parses");
+    assert_eq!(tables, 2, "both tables were walked");
+    assert_eq!(deps.len(), 1, "one name, declared twice");
+    assert_eq!(
+        deps.get("serde"),
+        Some(&false),
+        "a name with one foreign declaration is not inherited, whichever table it is in"
+    );
+
+    // The other order, because the merge is `and_modify` over whichever
+    // declaration arrived first: `|=` reds on one ordering and a plain
+    // assignment reds on the other, and a single fixture would leave one of
+    // those two rewrites indistinguishable from the correct rule.
+    let reversed = "[package]\n\
+                    name = \"x\"\n\n\
+                    [dependencies]\n\
+                    serde = { workspace = true }\n\n\
+                    [dev-dependencies]\n\
+                    serde = { path = \"../../elsewhere\" }\n";
+    let (reversed_deps, _) = own_dependencies(reversed).expect("the reversed fixture parses");
+    assert_eq!(
+        reversed_deps.get("serde"),
+        Some(&false),
+        "the answer must not depend on which table cargo happens to list first"
+    );
+
+    // The control: a name inherited in BOTH tables really is inherited. Without
+    // it every assertion above is satisfied by a rule that always answers false.
+    let twice_inherited = "[package]\n\
+                           name = \"x\"\n\n\
+                           [dependencies]\n\
+                           serde = { workspace = true }\n\n\
+                           [dev-dependencies]\n\
+                           serde = { workspace = true }\n";
+    let (inherited_deps, _) =
+        own_dependencies(twice_inherited).expect("the inherited fixture parses");
+    assert_eq!(inherited_deps.get("serde"), Some(&true));
+}
+
+#[test]
 fn the_dependency_guard_refuses_an_empty_table_rather_than_passing_it() {
     // The failure this whole file exists for. An empty inspection set is a
     // broken guard, and treating it as a clean subject is how a check goes
