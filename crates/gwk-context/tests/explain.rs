@@ -22,7 +22,7 @@ use gwk_context::{
     ResolvedManifest,
 };
 use gwk_domain::port::StorageError;
-use gwk_domain::{Assurance, AttemptId, ByteCount, EvidenceId, Timestamp};
+use gwk_domain::{Assurance, AttemptId, ByteCount, ContextWireError, EvidenceId, Timestamp};
 
 // ============================================================
 // The executor
@@ -860,5 +860,88 @@ fn every_field_a_stage_comparator_reads_moves_that_stage_verdict() {
         arms, 16,
         "three controls and thirteen field arms; a field dropped from this list \
          is a field nothing pins, and the count is what says so"
+    );
+}
+
+// ============================================================
+// The relational rules, on the path that actually serves queries
+// ============================================================
+
+/// `ContextQuery::validate` refuses a comparison of something with itself. Until
+/// 8B round 4 the only thing that ever called it was its own unit test, so the
+/// rule held everywhere except where queries are answered.
+///
+/// This asserts it through `evaluate`, which is the reachability claim — a test
+/// calling `validate` directly cannot tell a wired rule from an unwired one.
+#[test]
+fn a_self_comparison_is_refused_by_the_evaluator_not_merely_by_the_wire_type() {
+    let store = store_with(vec![manifest("m-1", mixed_rows(), 'c')]);
+    let same = ContextQuery::Compare {
+        left: CompareSubject::Manifest {
+            manifest_id: id("m-1"),
+        },
+        right: CompareSubject::Manifest {
+            manifest_id: id("m-1"),
+        },
+        stages: CompareStages::new(vec![ContextStage::Resolved]).expect("one stage"),
+    };
+
+    assert_eq!(
+        block_on(evaluate(&same, ContentClass::Private, &store)),
+        Err(Refusal::Malformed(
+            ContextWireError::CompareSubjectsIdentical
+        )),
+        "a self-comparison reached the evaluator and was answered"
+    );
+
+    // The control. The refusal must come from the relationship between the two
+    // subjects, not from anything about this fixture — otherwise the assertion
+    // above would also hold in a build where the rule refused every comparison.
+    let store = store_with(vec![
+        manifest("m-1", mixed_rows(), 'c'),
+        manifest("m-2", mixed_rows(), 'd'),
+    ]);
+    let distinct = ContextQuery::Compare {
+        left: CompareSubject::Manifest {
+            manifest_id: id("m-1"),
+        },
+        right: CompareSubject::Manifest {
+            manifest_id: id("m-2"),
+        },
+        stages: CompareStages::new(vec![ContextStage::Resolved]).expect("one stage"),
+    };
+    assert!(
+        block_on(evaluate(&distinct, ContentClass::Private, &store)).is_ok(),
+        "two distinct subjects must still compare"
+    );
+}
+
+/// The rule is checked before any port is read.
+///
+/// Stated separately because it is a separate property: a `validate()` call
+/// placed after the loads would refuse the same queries while still paying for
+/// the reads the refusal exists to avoid, and the test above cannot see the
+/// difference.
+#[test]
+fn a_self_comparison_is_refused_without_reading_the_store() {
+    let empty = store_with(vec![]);
+    let same = ContextQuery::Compare {
+        left: CompareSubject::Manifest {
+            manifest_id: id("absent"),
+        },
+        right: CompareSubject::Manifest {
+            manifest_id: id("absent"),
+        },
+        stages: CompareStages::new(vec![ContextStage::Resolved]).expect("one stage"),
+    };
+
+    // No manifest under that id exists. If the loads ran first the answer would
+    // be `NoSuchManifest`, so the variant here is what says the order held.
+    assert_eq!(
+        block_on(evaluate(&same, ContentClass::Private, &empty)),
+        Err(Refusal::Malformed(
+            ContextWireError::CompareSubjectsIdentical
+        )),
+        "the store was read before the query was checked"
     );
 }

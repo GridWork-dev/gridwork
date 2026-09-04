@@ -38,8 +38,9 @@
 
 use gwk_domain::port::StorageError;
 use gwk_domain::{
-    ContentClass, Digest, FinalizationSupplement, ManifestId, ObservationSupplement, Participation,
-    ParticipationReason, ParticipationState, ReleaseSupplement, ResolvedManifest,
+    ContentClass, ContextWireError, Digest, FinalizationSupplement, ManifestId,
+    ObservationSupplement, Participation, ParticipationReason, ParticipationState,
+    ReleaseSupplement, ResolvedManifest,
 };
 
 use crate::stage::ContextStage;
@@ -159,6 +160,13 @@ pub enum Refusal {
     /// found": a read that errored and a record that does not exist are
     /// different facts, and only one of them is an answer.
     Storage(StorageError),
+    /// The query is individually well-typed but breaks a rule about how its
+    /// parts relate — see [`ContextQuery::validate`]. Carried as the wire error
+    /// rather than collapsed to one opaque variant, so the caller is told which
+    /// rule it broke.
+    ///
+    /// [`ContextQuery::validate`]: crate::wire::ContextQuery::validate
+    Malformed(ContextWireError),
 }
 
 impl From<StorageError> for Refusal {
@@ -167,15 +175,27 @@ impl From<StorageError> for Refusal {
     }
 }
 
+impl From<ContextWireError> for Refusal {
+    fn from(error: ContextWireError) -> Self {
+        Self::Malformed(error)
+    }
+}
+
 /// Evaluate one Explain or Compare query under a class scope.
 ///
 /// `scope` comes from the process — see the module docs. `ports` is the only
 /// way this function learns anything.
+///
+/// The relational rules run first, before any port is touched. They were
+/// written as [`ContextQuery::validate`] and, until 8B round 4, called from
+/// nowhere but that method's own unit test — so a query the wire layer
+/// documented as refused was answered here in full.
 pub async fn evaluate(
     query: &ContextQuery,
     scope: ContentClass,
     ports: &impl ContextTruthStore,
 ) -> Result<Answer, Refusal> {
+    query.validate()?;
     match query {
         ContextQuery::Explain {
             manifest_id,
