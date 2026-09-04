@@ -63,6 +63,17 @@ fn declared_dependencies(manifest: &str) -> Result<toml::Table, String> {
 /// and the failure surfaces as a broken publish long after the commit that
 /// caused it.
 ///
+/// The path rule is containment, not a prefix match, and the difference is not
+/// academic: `crates/../xtask` starts with `crates/` and resolves outside it.
+/// Round 4 seeded exactly that and this guard accepted it. So the prefix is
+/// checked AND every segment is required not to be `..`, which is the cheap
+/// containment test for a path that is never touched on disk — this function
+/// reads text and must not start resolving anything to answer.
+///
+/// Both separators are considered. Cargo accepts a backslash-spelled path on
+/// Windows, and a rule that split on `/` alone would refuse `crates/../xtask`
+/// while accepting the same escape written `crates\..\xtask`.
+///
 /// Returns the number of declarations inspected, so the caller can tell a clean
 /// manifest from a manifest this function failed to read.
 fn inspect_dependency_sources(manifest: &str) -> Result<usize, String> {
@@ -84,7 +95,8 @@ fn inspect_dependency_sources(manifest: &str) -> Result<usize, String> {
         }
         if let Some(path) = table.get("path") {
             let path = path.as_str().unwrap_or_default();
-            if !path.starts_with("crates/") {
+            let escapes = path.split(['/', '\\']).any(|segment| segment == "..");
+            if !path.starts_with("crates/") || escapes {
                 return Err(format!(
                     "{name} declares a path source outside the public root: {path}"
                 ));
@@ -372,6 +384,99 @@ fn the_dependency_guard_refuses_a_path_outside_the_public_root() {
                   local = { path = \"../../elsewhere/local\" }\n";
     let error = inspect_dependency_sources(seeded).expect_err("an outside path must be refused");
     assert!(error.contains("outside the public root"), "{error}");
+}
+
+#[test]
+fn the_dependency_guard_refuses_a_path_that_escapes_the_public_root_by_traversal() {
+    // Round 4's arm, and the reason the rule is containment rather than a
+    // prefix match. `crates/../xtask` satisfies `starts_with("crates/")` and
+    // resolves to a sibling of it — a real crate in this repository, outside
+    // the public root, which is precisely the dependency this guard exists to
+    // refuse. The guard accepted it.
+    let seeded = "[workspace.dependencies]\n\
+                  serde = \"1\"\n\
+                  escapee = { path = \"crates/../xtask\" }\n";
+    let error = inspect_dependency_sources(seeded).expect_err("a traversal escape must be refused");
+    assert!(error.contains("outside the public root"), "{error}");
+    assert!(error.contains("escapee"), "{error}");
+
+    // The Windows spelling of the same escape. Split on one separator and this
+    // passes while the line above fails, which is the shape of a guard that
+    // refuses the example someone wrote down and not the class it named.
+    let backslash = "[workspace.dependencies]\n\
+                     serde = \"1\"\n\
+                     escapee = { path = \"crates\\\\..\\\\xtask\" }\n";
+    inspect_dependency_sources(backslash)
+        .expect_err("a backslash-spelled traversal escape must be refused");
+
+    // The control, and it is doing real work rather than balancing the test: a
+    // rule spelled as "no `..` anywhere in the string" would refuse this too,
+    // and a rule that rejected every path would satisfy both assertions above.
+    let inside = "[workspace.dependencies]\n\
+                  serde = \"1\"\n\
+                  gwk-domain = { path = \"crates/gwk-domain\" }\n";
+    assert_eq!(
+        inspect_dependency_sources(inside).expect("a path inside the public root is accepted"),
+        2
+    );
+}
+
+#[test]
+fn a_name_declared_in_two_kinds_is_inherited_only_if_both_declarations_are() {
+    // The merge rule in `own_dependencies`, which is reached only by a name
+    // appearing under more than one dependency kind. No manifest in this
+    // repository does that, so the rule had never run: round 4 rewrote `&=` as
+    // `|=` and nothing red.
+    //
+    // The rule matters because the caller refuses on this flag. A name taken
+    // from the workspace in one table and from its own path in another IS a
+    // foreign source, and the loosest declaration is the one that would carry
+    // it. Reporting such a name as inherited hides exactly the case the guard
+    // is looking for.
+    let both_ways = "[package]\n\
+                     name = \"x\"\n\n\
+                     [dependencies]\n\
+                     serde = { path = \"../../elsewhere\" }\n\n\
+                     [dev-dependencies]\n\
+                     serde = { workspace = true }\n";
+
+    let (deps, tables) = own_dependencies(both_ways).expect("the seeded manifest parses");
+    assert_eq!(tables, 2, "both tables were walked");
+    assert_eq!(deps.len(), 1, "one name, declared twice");
+    assert_eq!(
+        deps.get("serde"),
+        Some(&false),
+        "a name with one foreign declaration is not inherited, whichever table it is in"
+    );
+
+    // The other order, because the merge is `and_modify` over whichever
+    // declaration arrived first: `|=` reds on one ordering and a plain
+    // assignment reds on the other, and a single fixture would leave one of
+    // those two rewrites indistinguishable from the correct rule.
+    let reversed = "[package]\n\
+                    name = \"x\"\n\n\
+                    [dependencies]\n\
+                    serde = { workspace = true }\n\n\
+                    [dev-dependencies]\n\
+                    serde = { path = \"../../elsewhere\" }\n";
+    let (reversed_deps, _) = own_dependencies(reversed).expect("the reversed fixture parses");
+    assert_eq!(
+        reversed_deps.get("serde"),
+        Some(&false),
+        "the answer must not depend on which table cargo happens to list first"
+    );
+
+    // The control: a name inherited in BOTH tables really is inherited. Without
+    // it every assertion above is satisfied by a rule that always answers false.
+    let twice_inherited = "[package]\n\
+                           name = \"x\"\n\n\
+                           [dependencies]\n\
+                           serde = { workspace = true }\n\n\
+                           [dev-dependencies]\n\
+                           serde = { workspace = true }\n";
+    let (inherited_deps, _) =
+        own_dependencies(twice_inherited).expect("the inherited fixture parses");
+    assert_eq!(inherited_deps.get("serde"), Some(&true));
 }
 
 #[test]

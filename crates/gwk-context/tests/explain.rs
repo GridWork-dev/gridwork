@@ -22,7 +22,7 @@ use gwk_context::{
     ResolvedManifest,
 };
 use gwk_domain::port::StorageError;
-use gwk_domain::{Assurance, AttemptId, ByteCount, EvidenceId, Timestamp};
+use gwk_domain::{Assurance, AttemptId, ByteCount, ContextWireError, EvidenceId, Timestamp};
 
 // ============================================================
 // The executor
@@ -245,6 +245,14 @@ fn a_source_probe_cannot_tell_a_withheld_row_from_an_absent_one() {
     );
     assert_eq!(withheld.withheld, 0, "the probe disclosed a count");
     assert!(withheld.rows.is_empty());
+    // The label. Pinned here because the precedence test pins it only on the
+    // two listing subjects, which left the Source arm free to claim precedence
+    // decided a probe — a mislabelled answer that moves no row and so is
+    // invisible to every other assertion in this file.
+    assert!(
+        !withheld.subject_is_precedence,
+        "a source probe is not a precedence listing"
+    );
 
     // The control, again on the same digest: the row does exist, and a scope
     // entitled to it gets it. Otherwise the two answers above could match
@@ -571,6 +579,15 @@ fn the_precedence_subject_narrows_to_what_precedence_decided_and_says_which_it_i
     // the discriminator, because it belongs to one listing and not the other.
     // Without such a row in the fixture the two subjects return the same set,
     // and a filter that ignored the subject entirely would be invisible.
+    //
+    // TWO such rows, and the second one is not redundant. The rule is written
+    // as an allowlist — active, or excluded for precedence loss — and over a
+    // fixture carrying exactly one non-precedence exclusion it is
+    // indistinguishable from the denylist that merely drops THAT reason. Round
+    // 4 measured this: rewriting the condition to `reason != BudgetCut` passed
+    // every assertion here. The two spellings can only disagree on a reason
+    // named by neither, so a second excluded row supplies one. The allowlist
+    // drops it; the denylist would list it.
     let rows = vec![
         Participation::active(digest('1'), ContentClass::Conformance),
         Participation::excluded(
@@ -582,6 +599,11 @@ fn the_precedence_subject_narrows_to_what_precedence_decided_and_says_which_it_i
             digest('3'),
             ContentClass::Conformance,
             ParticipationReason::BudgetCut,
+        ),
+        Participation::excluded(
+            digest('4'),
+            ContentClass::Conformance,
+            ParticipationReason::PermissionDenied,
         ),
     ];
     let store = store_with(vec![manifest("m", rows, 'c')]);
@@ -611,28 +633,24 @@ fn the_precedence_subject_narrows_to_what_precedence_decided_and_says_which_it_i
         "a participation listing must not claim precedence decided it"
     );
 
-    // The narrowing.
-    assert_eq!(
-        participation.rows.len(),
-        3,
-        "participation is every row, so the fixture must reach the fold carrying all three"
-    );
-    assert_eq!(
-        precedence.rows.len(),
-        2,
-        "precedence is the admitted rows plus the precedence losses, and nothing else"
-    );
-    let budget_cut = digest('3');
-    assert!(
-        participation
+    // The narrowing, asserted as a set rather than a count. A filter returning
+    // the right NUMBER of the wrong rows satisfies a length check.
+    let digests = |explanation: &Explanation| -> Vec<Digest> {
+        explanation
             .rows
             .iter()
-            .any(|row| row.digest == budget_cut),
-        "the budget-cut row is the discriminator, so participation must carry it"
+            .map(|row| row.digest.clone())
+            .collect()
+    };
+    assert_eq!(
+        digests(&participation),
+        vec![digest('1'), digest('2'), digest('3'), digest('4')],
+        "participation is every row, so the fixture must reach the fold carrying all four"
     );
-    assert!(
-        !precedence.rows.iter().any(|row| row.digest == budget_cut),
-        "a budget cut is not a precedence decision, so precedence must not list it"
+    assert_eq!(
+        digests(&precedence),
+        vec![digest('1'), digest('2')],
+        "precedence is the admitted rows plus the precedence losses, and nothing else"
     );
 }
 
@@ -738,6 +756,10 @@ fn right_finalization(store: &mut Records) -> &mut FinalizationSupplement {
         .expect("seeded above")
 }
 
+fn right_manifest(store: &mut Records) -> &mut ResolvedManifest {
+    store.manifests.get_mut("m-right").expect("seeded above")
+}
+
 #[test]
 fn every_field_a_stage_comparator_reads_moves_that_stage_verdict() {
     // The per-stage test above builds its fixture so the four served stages
@@ -771,7 +793,12 @@ fn every_field_a_stage_comparator_reads_moves_that_stage_verdict() {
 
     // The control. Without it every arm below could pass because the
     // comparison says `Differs` to everything.
+    //
+    // `Resolved` belongs in this loop and was missing from it until 8B round 4.
+    // Its comparator was the one stage this test never reached, which is how it
+    // came to read two of the manifest's fields and not the other two.
     for stage in [
+        ContextStage::Resolved,
         ContextStage::Released,
         ContextStage::Observed,
         ContextStage::Finalized,
@@ -783,6 +810,21 @@ fn every_field_a_stage_comparator_reads_moves_that_stage_verdict() {
         );
         arms += 1;
     }
+
+    // Resolved. The participation rows are covered by the scope tests above;
+    // these are the two fields the comparator reads besides them. A manifest
+    // resolved under a different route, or under a different authority, is a
+    // different resolution even where it admitted exactly the same sources.
+    differs!(
+        ContextStage::Resolved,
+        |s: &mut Records| right_manifest(s).route_digest = digest('e'),
+        "resolved: route_digest"
+    );
+    differs!(
+        ContextStage::Resolved,
+        |s: &mut Records| right_manifest(s).authority_digest = digest('e'),
+        "resolved: authority_digest"
+    );
 
     differs!(
         ContextStage::Released,
@@ -857,8 +899,91 @@ fn every_field_a_stage_comparator_reads_moves_that_stage_verdict() {
     );
 
     assert_eq!(
-        arms, 16,
-        "three controls and thirteen field arms; a field dropped from this list \
+        arms, 19,
+        "four controls and fifteen field arms; a field dropped from this list \
          is a field nothing pins, and the count is what says so"
+    );
+}
+
+// ============================================================
+// The relational rules, on the path that actually serves queries
+// ============================================================
+
+/// `ContextQuery::validate` refuses a comparison of something with itself. Until
+/// 8B round 4 the only thing that ever called it was its own unit test, so the
+/// rule held everywhere except where queries are answered.
+///
+/// This asserts it through `evaluate`, which is the reachability claim — a test
+/// calling `validate` directly cannot tell a wired rule from an unwired one.
+#[test]
+fn a_self_comparison_is_refused_by_the_evaluator_not_merely_by_the_wire_type() {
+    let store = store_with(vec![manifest("m-1", mixed_rows(), 'c')]);
+    let same = ContextQuery::Compare {
+        left: CompareSubject::Manifest {
+            manifest_id: id("m-1"),
+        },
+        right: CompareSubject::Manifest {
+            manifest_id: id("m-1"),
+        },
+        stages: CompareStages::new(vec![ContextStage::Resolved]).expect("one stage"),
+    };
+
+    assert_eq!(
+        block_on(evaluate(&same, ContentClass::Private, &store)),
+        Err(Refusal::Malformed(
+            ContextWireError::CompareSubjectsIdentical
+        )),
+        "a self-comparison reached the evaluator and was answered"
+    );
+
+    // The control. The refusal must come from the relationship between the two
+    // subjects, not from anything about this fixture — otherwise the assertion
+    // above would also hold in a build where the rule refused every comparison.
+    let store = store_with(vec![
+        manifest("m-1", mixed_rows(), 'c'),
+        manifest("m-2", mixed_rows(), 'd'),
+    ]);
+    let distinct = ContextQuery::Compare {
+        left: CompareSubject::Manifest {
+            manifest_id: id("m-1"),
+        },
+        right: CompareSubject::Manifest {
+            manifest_id: id("m-2"),
+        },
+        stages: CompareStages::new(vec![ContextStage::Resolved]).expect("one stage"),
+    };
+    assert!(
+        block_on(evaluate(&distinct, ContentClass::Private, &store)).is_ok(),
+        "two distinct subjects must still compare"
+    );
+}
+
+/// The rule is checked before any port is read.
+///
+/// Stated separately because it is a separate property: a `validate()` call
+/// placed after the loads would refuse the same queries while still paying for
+/// the reads the refusal exists to avoid, and the test above cannot see the
+/// difference.
+#[test]
+fn a_self_comparison_is_refused_without_reading_the_store() {
+    let empty = store_with(vec![]);
+    let same = ContextQuery::Compare {
+        left: CompareSubject::Manifest {
+            manifest_id: id("absent"),
+        },
+        right: CompareSubject::Manifest {
+            manifest_id: id("absent"),
+        },
+        stages: CompareStages::new(vec![ContextStage::Resolved]).expect("one stage"),
+    };
+
+    // No manifest under that id exists. If the loads ran first the answer would
+    // be `NoSuchManifest`, so the variant here is what says the order held.
+    assert_eq!(
+        block_on(evaluate(&same, ContentClass::Private, &empty)),
+        Err(Refusal::Malformed(
+            ContextWireError::CompareSubjectsIdentical
+        )),
+        "the store was read before the query was checked"
     );
 }

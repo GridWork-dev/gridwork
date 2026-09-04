@@ -28,9 +28,10 @@ use gwk_context::skill::{
     BundleEntry, BundleRefusal, RawEntryKind, SKILL_ALLOWED_TOOL_MAX_BYTES,
     SKILL_ALLOWED_TOOLS_MAX_COUNT, SKILL_BUNDLE_MAX_ENTRIES, SKILL_BUNDLE_PATH_MAX_BYTES,
     SKILL_COMPATIBILITY_MAX_BYTES, SKILL_DESCRIPTION_MAX_BYTES, SKILL_FRONTMATTER_MAX_BYTES,
-    SKILL_INPUT_MAX_BYTES, SKILL_LICENSE_MAX_BYTES, SKILL_METADATA_KEY_MAX_BYTES,
-    SKILL_METADATA_MAX_ENTRIES, SKILL_METADATA_VALUE_MAX_BYTES, SKILL_NAME_MAX_BYTES,
-    SKILL_OPAQUE_FIELD_MAX_COUNT, SkillError, SkillManifest,
+    SKILL_INPUT_MAX_BYTES, SKILL_LICENSE_MAX_BYTES, SKILL_MAX_NESTING_DEPTH,
+    SKILL_METADATA_KEY_MAX_BYTES, SKILL_METADATA_MAX_ENTRIES, SKILL_METADATA_VALUE_MAX_BYTES,
+    SKILL_NAME_MAX_BYTES, SKILL_OPAQUE_FIELD_MAX_COUNT, SKILL_OPAQUE_VALUE_MAX_BYTES, SkillError,
+    SkillManifest,
 };
 use gwk_context::{
     CONTEXT_EVIDENCE_MAX_COUNT, ContentClass, Digest, EvidenceRefs, Participation,
@@ -450,6 +451,104 @@ fn the_whole_document_bounds_refuse_before_parsing() {
     );
     assert_eq!(at_edge.len(), SKILL_FRONTMATTER_MAX_BYTES);
     manifest_with(&at_edge).expect("a frontmatter of exactly the bound is accepted");
+}
+
+/// The bounds, pinned to numbers.
+///
+/// Every other test of these constants derives its fixture from the constant —
+/// `"x".repeat(SKILL_INPUT_MAX_BYTES + 1)` is the shape, and it is the right
+/// shape for asking whether the refusal fires at the edge. What it cannot ask is
+/// how big the edge is. Both sides of the comparison move together, so widening
+/// a bound by a factor of a thousand leaves every one of those tests green.
+/// Round 4 measured exactly that.
+///
+/// So the magnitudes are pinned to literals here, which is the same device the
+/// verifier's digest anchor uses: a value the mutation cannot move.
+///
+/// The list is a census, not a sample. It counts the `pub const SKILL_`
+/// declarations in the source and requires the count to equal the number pinned
+/// below, so a bound added to the parser and not to this table reds rather than
+/// silently joining the set of things nobody pinned.
+#[test]
+fn every_declared_bound_is_pinned_to_a_magnitude() {
+    let pinned: &[(&str, usize, usize)] = &[
+        ("SKILL_INPUT_MAX_BYTES", SKILL_INPUT_MAX_BYTES, 65_536),
+        (
+            "SKILL_FRONTMATTER_MAX_BYTES",
+            SKILL_FRONTMATTER_MAX_BYTES,
+            8_192,
+        ),
+        ("SKILL_NAME_MAX_BYTES", SKILL_NAME_MAX_BYTES, 64),
+        (
+            "SKILL_DESCRIPTION_MAX_BYTES",
+            SKILL_DESCRIPTION_MAX_BYTES,
+            1_024,
+        ),
+        ("SKILL_LICENSE_MAX_BYTES", SKILL_LICENSE_MAX_BYTES, 128),
+        (
+            "SKILL_COMPATIBILITY_MAX_BYTES",
+            SKILL_COMPATIBILITY_MAX_BYTES,
+            128,
+        ),
+        ("SKILL_METADATA_MAX_ENTRIES", SKILL_METADATA_MAX_ENTRIES, 32),
+        (
+            "SKILL_METADATA_KEY_MAX_BYTES",
+            SKILL_METADATA_KEY_MAX_BYTES,
+            64,
+        ),
+        (
+            "SKILL_METADATA_VALUE_MAX_BYTES",
+            SKILL_METADATA_VALUE_MAX_BYTES,
+            4_096,
+        ),
+        (
+            "SKILL_ALLOWED_TOOLS_MAX_COUNT",
+            SKILL_ALLOWED_TOOLS_MAX_COUNT,
+            64,
+        ),
+        (
+            "SKILL_ALLOWED_TOOL_MAX_BYTES",
+            SKILL_ALLOWED_TOOL_MAX_BYTES,
+            128,
+        ),
+        (
+            "SKILL_OPAQUE_FIELD_MAX_COUNT",
+            SKILL_OPAQUE_FIELD_MAX_COUNT,
+            32,
+        ),
+        (
+            "SKILL_OPAQUE_VALUE_MAX_BYTES",
+            SKILL_OPAQUE_VALUE_MAX_BYTES,
+            1_024,
+        ),
+        ("SKILL_MAX_NESTING_DEPTH", SKILL_MAX_NESTING_DEPTH, 2),
+        ("SKILL_BUNDLE_MAX_ENTRIES", SKILL_BUNDLE_MAX_ENTRIES, 256),
+        (
+            "SKILL_BUNDLE_PATH_MAX_BYTES",
+            SKILL_BUNDLE_PATH_MAX_BYTES,
+            256,
+        ),
+    ];
+
+    // The census. Read from the source rather than from the import list above,
+    // because an import list is written by whoever wrote this test and agrees
+    // with it by construction.
+    const SOURCE: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/skill.rs"));
+    let declared = SOURCE
+        .lines()
+        .filter(|line| line.starts_with("pub const SKILL_"))
+        .count();
+    assert_eq!(
+        declared,
+        pinned.len(),
+        "the parser declares {declared} bounds and {} are pinned; a bound with no \
+         magnitude here can be widened without reding anything",
+        pinned.len()
+    );
+
+    for (name, actual, expected) in pinned {
+        assert_eq!(actual, expected, "{name} moved");
+    }
 }
 
 // ============================================================

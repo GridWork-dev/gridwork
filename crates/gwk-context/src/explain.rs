@@ -38,8 +38,9 @@
 
 use gwk_domain::port::StorageError;
 use gwk_domain::{
-    ContentClass, Digest, FinalizationSupplement, ManifestId, ObservationSupplement, Participation,
-    ParticipationReason, ParticipationState, ReleaseSupplement, ResolvedManifest,
+    ContentClass, ContextWireError, Digest, FinalizationSupplement, ManifestId,
+    ObservationSupplement, Participation, ParticipationReason, ParticipationState,
+    ReleaseSupplement, ResolvedManifest,
 };
 
 use crate::stage::ContextStage;
@@ -159,6 +160,13 @@ pub enum Refusal {
     /// found": a read that errored and a record that does not exist are
     /// different facts, and only one of them is an answer.
     Storage(StorageError),
+    /// The query is individually well-typed but breaks a rule about how its
+    /// parts relate — see [`ContextQuery::validate`]. Carried as the wire error
+    /// rather than collapsed to one opaque variant, so the caller is told which
+    /// rule it broke.
+    ///
+    /// [`ContextQuery::validate`]: crate::wire::ContextQuery::validate
+    Malformed(ContextWireError),
 }
 
 impl From<StorageError> for Refusal {
@@ -167,15 +175,27 @@ impl From<StorageError> for Refusal {
     }
 }
 
+impl From<ContextWireError> for Refusal {
+    fn from(error: ContextWireError) -> Self {
+        Self::Malformed(error)
+    }
+}
+
 /// Evaluate one Explain or Compare query under a class scope.
 ///
 /// `scope` comes from the process — see the module docs. `ports` is the only
 /// way this function learns anything.
+///
+/// The relational rules run first, before any port is touched. They were
+/// written as [`ContextQuery::validate`] and, until 8B round 4, called from
+/// nowhere but that method's own unit test — so a query the wire layer
+/// documented as refused was answered here in full.
 pub async fn evaluate(
     query: &ContextQuery,
     scope: ContentClass,
     ports: &impl ContextTruthStore,
 ) -> Result<Answer, Refusal> {
+    query.validate()?;
     match query {
         ContextQuery::Explain {
             manifest_id,
@@ -344,6 +364,15 @@ async fn compare(
 /// content changed, from a comparison that was supposed to be blind to it.
 /// Comparing the admitted rows answers the question the scope actually allows,
 /// and `withheld` says how much it could not look at.
+///
+/// `route_digest` and `authority_digest` are compared alongside those rows, and
+/// they are not a way back to the channel this function avoids: both are copied
+/// from the route and the authority the compiler was handed, neither is derived
+/// from any candidate's content, and a private participation cannot move
+/// either. What they do carry is the question a row comparison cannot answer —
+/// two manifests that admitted the same sources under a DIFFERENT authority are
+/// not the same resolution, and reporting them `Same` says the governing
+/// decision does not matter to what was resolved.
 fn resolved_difference(
     left: &ResolvedManifest,
     right: &ResolvedManifest,
@@ -368,7 +397,11 @@ fn resolved_difference(
     };
     StageDifference {
         stage: ContextStage::Resolved,
-        verdict: verdict_of(visible(left) == visible(right)),
+        verdict: verdict_of(
+            visible(left) == visible(right)
+                && left.route_digest == right.route_digest
+                && left.authority_digest == right.authority_digest,
+        ),
         withheld: hidden(left) + hidden(right),
     }
 }
