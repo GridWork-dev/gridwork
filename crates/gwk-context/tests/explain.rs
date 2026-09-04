@@ -245,6 +245,14 @@ fn a_source_probe_cannot_tell_a_withheld_row_from_an_absent_one() {
     );
     assert_eq!(withheld.withheld, 0, "the probe disclosed a count");
     assert!(withheld.rows.is_empty());
+    // The label. Pinned here because the precedence test pins it only on the
+    // two listing subjects, which left the Source arm free to claim precedence
+    // decided a probe — a mislabelled answer that moves no row and so is
+    // invisible to every other assertion in this file.
+    assert!(
+        !withheld.subject_is_precedence,
+        "a source probe is not a precedence listing"
+    );
 
     // The control, again on the same digest: the row does exist, and a scope
     // entitled to it gets it. Otherwise the two answers above could match
@@ -571,6 +579,15 @@ fn the_precedence_subject_narrows_to_what_precedence_decided_and_says_which_it_i
     // the discriminator, because it belongs to one listing and not the other.
     // Without such a row in the fixture the two subjects return the same set,
     // and a filter that ignored the subject entirely would be invisible.
+    //
+    // TWO such rows, and the second one is not redundant. The rule is written
+    // as an allowlist — active, or excluded for precedence loss — and over a
+    // fixture carrying exactly one non-precedence exclusion it is
+    // indistinguishable from the denylist that merely drops THAT reason. Round
+    // 4 measured this: rewriting the condition to `reason != BudgetCut` passed
+    // every assertion here. The two spellings can only disagree on a reason
+    // named by neither, so a second excluded row supplies one. The allowlist
+    // drops it; the denylist would list it.
     let rows = vec![
         Participation::active(digest('1'), ContentClass::Conformance),
         Participation::excluded(
@@ -582,6 +599,11 @@ fn the_precedence_subject_narrows_to_what_precedence_decided_and_says_which_it_i
             digest('3'),
             ContentClass::Conformance,
             ParticipationReason::BudgetCut,
+        ),
+        Participation::excluded(
+            digest('4'),
+            ContentClass::Conformance,
+            ParticipationReason::PermissionDenied,
         ),
     ];
     let store = store_with(vec![manifest("m", rows, 'c')]);
@@ -611,28 +633,24 @@ fn the_precedence_subject_narrows_to_what_precedence_decided_and_says_which_it_i
         "a participation listing must not claim precedence decided it"
     );
 
-    // The narrowing.
-    assert_eq!(
-        participation.rows.len(),
-        3,
-        "participation is every row, so the fixture must reach the fold carrying all three"
-    );
-    assert_eq!(
-        precedence.rows.len(),
-        2,
-        "precedence is the admitted rows plus the precedence losses, and nothing else"
-    );
-    let budget_cut = digest('3');
-    assert!(
-        participation
+    // The narrowing, asserted as a set rather than a count. A filter returning
+    // the right NUMBER of the wrong rows satisfies a length check.
+    let digests = |explanation: &Explanation| -> Vec<Digest> {
+        explanation
             .rows
             .iter()
-            .any(|row| row.digest == budget_cut),
-        "the budget-cut row is the discriminator, so participation must carry it"
+            .map(|row| row.digest.clone())
+            .collect()
+    };
+    assert_eq!(
+        digests(&participation),
+        vec![digest('1'), digest('2'), digest('3'), digest('4')],
+        "participation is every row, so the fixture must reach the fold carrying all four"
     );
-    assert!(
-        !precedence.rows.iter().any(|row| row.digest == budget_cut),
-        "a budget cut is not a precedence decision, so precedence must not list it"
+    assert_eq!(
+        digests(&precedence),
+        vec![digest('1'), digest('2')],
+        "precedence is the admitted rows plus the precedence losses, and nothing else"
     );
 }
 
