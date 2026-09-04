@@ -63,6 +63,17 @@ fn declared_dependencies(manifest: &str) -> Result<toml::Table, String> {
 /// and the failure surfaces as a broken publish long after the commit that
 /// caused it.
 ///
+/// The path rule is containment, not a prefix match, and the difference is not
+/// academic: `crates/../xtask` starts with `crates/` and resolves outside it.
+/// Round 4 seeded exactly that and this guard accepted it. So the prefix is
+/// checked AND every segment is required not to be `..`, which is the cheap
+/// containment test for a path that is never touched on disk — this function
+/// reads text and must not start resolving anything to answer.
+///
+/// Both separators are considered. Cargo accepts a backslash-spelled path on
+/// Windows, and a rule that split on `/` alone would refuse `crates/../xtask`
+/// while accepting the same escape written `crates\..\xtask`.
+///
 /// Returns the number of declarations inspected, so the caller can tell a clean
 /// manifest from a manifest this function failed to read.
 fn inspect_dependency_sources(manifest: &str) -> Result<usize, String> {
@@ -84,7 +95,8 @@ fn inspect_dependency_sources(manifest: &str) -> Result<usize, String> {
         }
         if let Some(path) = table.get("path") {
             let path = path.as_str().unwrap_or_default();
-            if !path.starts_with("crates/") {
+            let escapes = path.split(['/', '\\']).any(|segment| segment == "..");
+            if !path.starts_with("crates/") || escapes {
                 return Err(format!(
                     "{name} declares a path source outside the public root: {path}"
                 ));
@@ -372,6 +384,41 @@ fn the_dependency_guard_refuses_a_path_outside_the_public_root() {
                   local = { path = \"../../elsewhere/local\" }\n";
     let error = inspect_dependency_sources(seeded).expect_err("an outside path must be refused");
     assert!(error.contains("outside the public root"), "{error}");
+}
+
+#[test]
+fn the_dependency_guard_refuses_a_path_that_escapes_the_public_root_by_traversal() {
+    // Round 4's arm, and the reason the rule is containment rather than a
+    // prefix match. `crates/../xtask` satisfies `starts_with("crates/")` and
+    // resolves to a sibling of it — a real crate in this repository, outside
+    // the public root, which is precisely the dependency this guard exists to
+    // refuse. The guard accepted it.
+    let seeded = "[workspace.dependencies]\n\
+                  serde = \"1\"\n\
+                  escapee = { path = \"crates/../xtask\" }\n";
+    let error = inspect_dependency_sources(seeded).expect_err("a traversal escape must be refused");
+    assert!(error.contains("outside the public root"), "{error}");
+    assert!(error.contains("escapee"), "{error}");
+
+    // The Windows spelling of the same escape. Split on one separator and this
+    // passes while the line above fails, which is the shape of a guard that
+    // refuses the example someone wrote down and not the class it named.
+    let backslash = "[workspace.dependencies]\n\
+                     serde = \"1\"\n\
+                     escapee = { path = \"crates\\\\..\\\\xtask\" }\n";
+    inspect_dependency_sources(backslash)
+        .expect_err("a backslash-spelled traversal escape must be refused");
+
+    // The control, and it is doing real work rather than balancing the test: a
+    // rule spelled as "no `..` anywhere in the string" would refuse this too,
+    // and a rule that rejected every path would satisfy both assertions above.
+    let inside = "[workspace.dependencies]\n\
+                  serde = \"1\"\n\
+                  gwk-domain = { path = \"crates/gwk-domain\" }\n";
+    assert_eq!(
+        inspect_dependency_sources(inside).expect("a path inside the public root is accepted"),
+        2
+    );
 }
 
 #[test]
