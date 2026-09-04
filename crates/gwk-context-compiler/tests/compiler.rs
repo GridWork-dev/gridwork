@@ -156,6 +156,27 @@ fn identical_inputs_under_candidate_permutation_compile_to_byte_identical_manife
     // ordering would make every comparison below a comparison with itself.
     assert_eq!(orders.len(), 720);
 
+    // And the count is not enough, which round 4 measured by deleting both of
+    // Heap's swaps: the walk still pushes 720 vectors, every one of them the
+    // input order untouched, and every comparison below then compares the
+    // reference with itself 720 times. The suite stayed green.
+    //
+    // Distinctness is what the count was standing in for. Keyed on the digest
+    // sequence because that is what "a different input order" means to the
+    // compiler, and 720 DISTINCT orderings of six items is all of them — so
+    // this closes the claim the test's name makes rather than sampling it.
+    let distinct: BTreeSet<Vec<String>> = orders
+        .iter()
+        .map(|order| order.iter().map(|c| c.digest.to_string()).collect())
+        .collect();
+    assert_eq!(
+        distinct.len(),
+        720,
+        "the generator yielded {} orderings but only {} of them differ",
+        orders.len(),
+        distinct.len()
+    );
+
     let reference = compile(
         &request(Some(200)),
         &route(),
