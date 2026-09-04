@@ -1346,6 +1346,104 @@ mod tests {
         SkillManifest::parse(&format!("---\n{front}\n---\nBody.\n"))
     }
 
+    // ========================================================
+    // CRLF
+    // ========================================================
+    //
+    // Three places in this file handle a carriage return: the opening fence, the
+    // closing fence, and the per-line strip in the subset scan. Not one of them
+    // had ever run. Round 4 deleted all three and the crate stayed green at 100,
+    // for the plainest possible reason — there was not a single carriage return
+    // in any fixture the crate owns.
+    //
+    // A skill document authored on Windows, or fetched over a transport that
+    // normalizes to CRLF, is the ordinary case these branches exist for. Every
+    // one of them would have been a refusal of a well-formed document.
+    //
+    // The fixtures below mix line endings between the two fences, which no real
+    // author would write. That is deliberate and it is the only thing that
+    // separates the branches: a document that is CRLF throughout reds two of
+    // these three sites at once, so it cannot say which one is load-bearing.
+
+    /// The realistic case: a whole document in CRLF is the same manifest as its
+    /// LF twin. `SkillManifest` carries no body, so equality is the right
+    /// assertion — the two differ only in the bytes this parser is meant to
+    /// absorb.
+    #[test]
+    fn a_crlf_document_is_the_same_manifest_as_its_lf_twin() {
+        let crlf = MINIMAL.replace('\n', "\r\n");
+        assert!(
+            crlf.contains('\r'),
+            "the fixture carries no carriage return, so it tests nothing"
+        );
+        assert_eq!(
+            SkillManifest::parse(&crlf).expect("a CRLF document parses"),
+            SkillManifest::parse(MINIMAL).expect("the LF twin parses"),
+        );
+    }
+
+    /// The opening fence alone. Closing fence stays LF, so only the
+    /// `strip_prefix("---\r\n")` branch can answer.
+    #[test]
+    fn a_crlf_opening_fence_is_recognized() {
+        let input = "---\r\nname: review-diff\ndescription: Review a diff.\n---\nBody.\n";
+        assert_eq!(
+            SkillManifest::parse(input).expect("a CRLF opening fence parses"),
+            SkillManifest::parse(MINIMAL).expect("the LF twin parses"),
+        );
+    }
+
+    /// The closing fence alone. Opening fence stays LF, and the document has a
+    /// body, so the `strip_suffix("\n---")` fallback cannot cover for a missing
+    /// `split_once("\n---\r\n")`.
+    #[test]
+    fn a_crlf_closing_fence_is_recognized() {
+        let input = "---\nname: review-diff\ndescription: Review a diff.\n---\r\nBody.\n";
+        assert_eq!(
+            SkillManifest::parse(input).expect("a CRLF closing fence parses"),
+            SkillManifest::parse(MINIMAL).expect("the LF twin parses"),
+        );
+    }
+
+    /// The per-line strip alone, and the fixture has to be precise about WHICH
+    /// line, for a reason that is easy to get wrong.
+    ///
+    /// `str::lines()` already strips a `\r` that precedes a `\n`. A carriage
+    /// return in the middle of the frontmatter therefore never reaches this
+    /// branch — the iterator removed it. The one place a `\r` survives into a
+    /// line is at the very end of the block, where the closing fence follows it
+    /// instead of a newline of its own and `lines()` has no `\n` to pair it
+    /// with.
+    ///
+    /// The first draft of this test put the carriage return on the first line.
+    /// It passed with the branch deleted. The mutation arm is what said so.
+    #[test]
+    fn a_crlf_line_inside_the_frontmatter_is_not_a_control_character() {
+        let input = "---\nname: review-diff\ndescription: Review a diff.\r\n---\nBody.\n";
+        assert_eq!(
+            SkillManifest::parse(input).expect("a CRLF frontmatter line parses"),
+            SkillManifest::parse(MINIMAL).expect("the LF twin parses"),
+        );
+
+        // The sibling `lines()` handles for us, kept so the asymmetry is
+        // recorded rather than rediscovered: a carriage return on a line that is
+        // not the last one is stripped by the iterator, and parses either way.
+        let interior = "---\nname: review-diff\r\ndescription: Review a diff.\n---\nBody.\n";
+        assert_eq!(
+            SkillManifest::parse(interior).expect("an interior CRLF line parses"),
+            SkillManifest::parse(MINIMAL).expect("the LF twin parses"),
+        );
+
+        // The control. A carriage return is stripped only where it TERMINATES a
+        // line; one in the middle of a value is still a control character, and
+        // an unconditional strip-anywhere would pass the assertion above while
+        // letting that through.
+        assert_eq!(
+            SkillManifest::parse("---\nname: review\rdiff\ndescription: d\n---\nBody.\n"),
+            Err(SkillError::ControlCharacter)
+        );
+    }
+
     #[test]
     fn yaml11_ambiguous_plain_keys_are_refused_per_family() {
         // F-8B-YAML ruled (a): one arm per derived family, so deleting a
