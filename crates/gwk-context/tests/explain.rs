@@ -17,8 +17,9 @@ use gwk_context::store::ContextTruthStore;
 use gwk_context::wire::{CompareStages, CompareSubject, ContextQuery, ExplainSubject};
 use gwk_context::{
     ContentClass, Digest, EvidenceRefs, FinalizationSupplement, FinalizationSupplementId,
-    ManifestId, ObservationSupplement, Participation, ParticipationReason, ParticipationRecords,
-    RecordCount, ReleaseSupplement, ReleaseSupplementId, ResolvedManifest,
+    ManifestId, ObservationIndex, ObservationSupplement, ObservationSupplementId, Participation,
+    ParticipationReason, ParticipationRecords, RecordCount, ReleaseSupplement, ReleaseSupplementId,
+    ResolvedManifest,
 };
 use gwk_domain::port::StorageError;
 use gwk_domain::{Assurance, AttemptId, ByteCount, EvidenceId, Timestamp};
@@ -284,6 +285,15 @@ fn resolved_is_compared_over_admitted_rows_and_not_over_the_manifest_digest() {
     left_rows.push(Participation::active(digest('2'), ContentClass::Private));
     let mut right_rows = shared.clone();
     right_rows.push(Participation::active(digest('4'), ContentClass::Private));
+    // Deliberately asymmetric: two private rows on the right against one on
+    // the left. With one per side, the sum of both sides and a body that
+    // doubled either side alone are the same number, so the assertion below
+    // could not tell a two-sided count from a one-sided one.
+    right_rows.push(Participation::excluded(
+        digest('5'),
+        ContentClass::Private,
+        ParticipationReason::PermissionDenied,
+    ));
 
     let left = manifest("m-left", left_rows, 'c');
     let right = manifest("m-right", right_rows, 'd');
@@ -314,8 +324,8 @@ fn resolved_is_compared_over_admitted_rows_and_not_over_the_manifest_digest() {
         "the private difference leaked into a conformance-scoped comparison"
     );
     assert_eq!(
-        public.stages[0].withheld, 2,
-        "one withheld row per side, and the answer must say so"
+        public.stages[0].withheld, 3,
+        "one withheld row on the left and two on the right, and the answer must say so"
     );
 
     // The control: the difference is real, and a scope entitled to see it does.
@@ -547,4 +557,308 @@ fn the_scope_predicate_is_exhaustive_and_asymmetric() {
     // And the count, so a third class cannot arrive without this test noticing
     // that the four cases above no longer cover the space.
     assert_eq!(ContentClass::ALL.len(), 2);
+}
+
+// ============================================================
+// The precedence listing
+// ============================================================
+
+#[test]
+fn the_precedence_subject_narrows_to_what_precedence_decided_and_says_which_it_is() {
+    // Participation lists every row. Precedence lists only the rows precedence
+    // itself decided: the sources it admitted, plus the ones it turned down. A
+    // row excluded for a reason precedence never weighed — a budget cut — is
+    // the discriminator, because it belongs to one listing and not the other.
+    // Without such a row in the fixture the two subjects return the same set,
+    // and a filter that ignored the subject entirely would be invisible.
+    let rows = vec![
+        Participation::active(digest('1'), ContentClass::Conformance),
+        Participation::excluded(
+            digest('2'),
+            ContentClass::Conformance,
+            ParticipationReason::PrecedenceLoss,
+        ),
+        Participation::excluded(
+            digest('3'),
+            ContentClass::Conformance,
+            ParticipationReason::BudgetCut,
+        ),
+    ];
+    let store = store_with(vec![manifest("m", rows, 'c')]);
+    let ask = |subject| {
+        explanation(
+            block_on(evaluate(
+                &explain_query("m", subject),
+                ContentClass::Private,
+                &store,
+            ))
+            .expect("the fixture explains"),
+        )
+    };
+
+    let precedence = ask(ExplainSubject::Precedence);
+    let participation = ask(ExplainSubject::Participation);
+
+    // The label, which a consumer branches on to title the answer. Pinned in
+    // both directions: a constant here mislabels every answer without moving a
+    // single row, so one direction alone cannot see it.
+    assert!(
+        precedence.subject_is_precedence,
+        "a precedence answer that does not say so is a participation listing under another name"
+    );
+    assert!(
+        !participation.subject_is_precedence,
+        "a participation listing must not claim precedence decided it"
+    );
+
+    // The narrowing.
+    assert_eq!(
+        participation.rows.len(),
+        3,
+        "participation is every row, so the fixture must reach the fold carrying all three"
+    );
+    assert_eq!(
+        precedence.rows.len(),
+        2,
+        "precedence is the admitted rows plus the precedence losses, and nothing else"
+    );
+    let budget_cut = digest('3');
+    assert!(
+        participation
+            .rows
+            .iter()
+            .any(|row| row.digest == budget_cut),
+        "the budget-cut row is the discriminator, so participation must carry it"
+    );
+    assert!(
+        !precedence.rows.iter().any(|row| row.digest == budget_cut),
+        "a budget cut is not a precedence decision, so precedence must not list it"
+    );
+}
+
+// ============================================================
+// Every field each stage comparator reads
+// ============================================================
+
+fn release_for(name: &str) -> ReleaseSupplement {
+    ReleaseSupplement {
+        id: ReleaseSupplementId::parse(&format!("r-{name}")).expect("legal"),
+        manifest_id: id(name),
+        rendered_digest: digest('5'),
+        tool_schema_digest: digest('6'),
+        rendered_bytes: ByteCount::new(1),
+        tool_schema_count: RecordCount::new(1).expect("bounded"),
+        evidence_ids: EvidenceRefs::new(Vec::new()).expect("bounded"),
+        released_at: Timestamp::new("2026-09-02T00:00:00Z"),
+    }
+}
+
+fn observation_for(name: &str, index: u32) -> ObservationSupplement {
+    ObservationSupplement {
+        id: ObservationSupplementId::parse(&format!("o-{name}-{index}")).expect("legal"),
+        manifest_id: id(name),
+        observation_index: ObservationIndex::new(index).expect("bounded"),
+        fact_digest: digest('7'),
+        observed_bytes: ByteCount::new(2),
+        visible_source_count: RecordCount::new(1).expect("bounded"),
+        truncated: false,
+        evidence_ids: EvidenceRefs::new(Vec::new()).expect("bounded"),
+        observed_at: Timestamp::new("2026-09-02T00:00:00Z"),
+    }
+}
+
+fn finalization_for(name: &str) -> FinalizationSupplement {
+    FinalizationSupplement {
+        id: FinalizationSupplementId::parse(&format!("f-{name}")).expect("legal"),
+        manifest_id: id(name),
+        output_digest: digest('8'),
+        verification_digest: digest('9'),
+        approval_count: RecordCount::new(1).expect("bounded"),
+        observation_count: RecordCount::new(2).expect("bounded"),
+        final_event_root: digest('a'),
+        lifecycle_complete: true,
+        assurance: Assurance::Trace,
+        evidence_ids: EvidenceRefs::new(Vec::new()).expect("bounded"),
+        finalized_at: Timestamp::new("2026-09-02T00:00:00Z"),
+    }
+}
+
+/// Two manifests identical at every stage until `tweak` changes one thing on
+/// the right, compared at one stage under a scope that admits everything.
+fn verdict_after(stage: ContextStage, tweak: impl FnOnce(&mut Records)) -> StageVerdict {
+    let mut store = store_with(vec![
+        manifest("m-left", mixed_rows(), 'c'),
+        manifest("m-right", mixed_rows(), 'c'),
+    ]);
+    for name in ["m-left", "m-right"] {
+        store.releases.insert(name.to_owned(), release_for(name));
+        store.observations.insert(
+            name.to_owned(),
+            vec![observation_for(name, 1), observation_for(name, 2)],
+        );
+        store
+            .finalizations
+            .insert(name.to_owned(), finalization_for(name));
+    }
+    tweak(&mut store);
+
+    let query = ContextQuery::Compare {
+        left: CompareSubject::Manifest {
+            manifest_id: id("m-left"),
+        },
+        right: CompareSubject::Manifest {
+            manifest_id: id("m-right"),
+        },
+        stages: CompareStages::new(vec![stage]).expect("one stage"),
+    };
+    let comparison = match block_on(evaluate(&query, ContentClass::Private, &store)) {
+        Ok(Answer::Comparison(comparison)) => comparison,
+        other => panic!("expected a comparison, got {other:?}"),
+    };
+    assert_eq!(
+        comparison.stages.len(),
+        1,
+        "one stage asked for, one stage answered"
+    );
+    comparison.stages[0].verdict.clone()
+}
+
+fn right_release(store: &mut Records) -> &mut ReleaseSupplement {
+    store.releases.get_mut("m-right").expect("seeded above")
+}
+
+fn right_observations(store: &mut Records) -> &mut Vec<ObservationSupplement> {
+    store.observations.get_mut("m-right").expect("seeded above")
+}
+
+fn right_finalization(store: &mut Records) -> &mut FinalizationSupplement {
+    store
+        .finalizations
+        .get_mut("m-right")
+        .expect("seeded above")
+}
+
+#[test]
+fn every_field_a_stage_comparator_reads_moves_that_stage_verdict() {
+    // The per-stage test above builds its fixture so the four served stages
+    // take four DIFFERENT verdicts in one answer, which is what makes a stage
+    // copying its neighbour's result visible. The price of that design is that
+    // two comparators are never CALLED: only the left side is released and
+    // neither side is observed, so `pairwise` answers from its presence arms
+    // (`OnlyLeft`, `NeitherReached`) and `released_same` / `observed_same` do
+    // not run. Seven field comparisons had therefore never executed, including
+    // the length rule whose own comment says it exists so that a prefix match
+    // is not read as agreement.
+    //
+    // Here both sides are present and identical at every stage, so each
+    // comparator is reached, and every arm moves exactly one field. A
+    // comparator that stopped reading a field disagrees with exactly one arm,
+    // rather than passing over a fixture in which nothing it dropped ever
+    // differed.
+    //
+    // Deliberately absent: `observed_bytes` and `visible_source_count` on an
+    // observation, and `approval_count` / `observation_count` on a
+    // finalization. Those are carried but not compared, and an arm for them
+    // would assert a semantic this slice did not choose.
+    let mut arms = 0usize;
+
+    macro_rules! differs {
+        ($stage:expr, $tweak:expr, $why:literal) => {{
+            assert_eq!(verdict_after($stage, $tweak), StageVerdict::Differs, $why);
+            arms += 1;
+        }};
+    }
+
+    // The control. Without it every arm below could pass because the
+    // comparison says `Differs` to everything.
+    for stage in [
+        ContextStage::Released,
+        ContextStage::Observed,
+        ContextStage::Finalized,
+    ] {
+        assert_eq!(
+            verdict_after(stage, |_| {}),
+            StageVerdict::Same,
+            "two identical sides must compare Same, or every arm below passes for the wrong reason"
+        );
+        arms += 1;
+    }
+
+    differs!(
+        ContextStage::Released,
+        |s: &mut Records| right_release(s).rendered_digest = digest('e'),
+        "released: rendered_digest"
+    );
+    differs!(
+        ContextStage::Released,
+        |s: &mut Records| right_release(s).tool_schema_digest = digest('e'),
+        "released: tool_schema_digest"
+    );
+    differs!(
+        ContextStage::Released,
+        |s: &mut Records| right_release(s).rendered_bytes = ByteCount::new(99),
+        "released: rendered_bytes"
+    );
+    differs!(
+        ContextStage::Released,
+        |s: &mut Records| right_release(s).tool_schema_count =
+            RecordCount::new(9).expect("bounded"),
+        "released: tool_schema_count"
+    );
+
+    differs!(
+        ContextStage::Observed,
+        |s: &mut Records| {
+            right_observations(s).pop();
+        },
+        "observed: length, so a prefix match is not read as agreement"
+    );
+    differs!(
+        ContextStage::Observed,
+        |s: &mut Records| right_observations(s)[1].observation_index =
+            ObservationIndex::new(9).expect("bounded"),
+        "observed: observation_index"
+    );
+    differs!(
+        ContextStage::Observed,
+        |s: &mut Records| right_observations(s)[0].fact_digest = digest('e'),
+        "observed: fact_digest"
+    );
+    differs!(
+        ContextStage::Observed,
+        |s: &mut Records| right_observations(s)[0].truncated = true,
+        "observed: truncated"
+    );
+
+    differs!(
+        ContextStage::Finalized,
+        |s: &mut Records| right_finalization(s).output_digest = digest('e'),
+        "finalized: output_digest"
+    );
+    differs!(
+        ContextStage::Finalized,
+        |s: &mut Records| right_finalization(s).verification_digest = digest('e'),
+        "finalized: verification_digest"
+    );
+    differs!(
+        ContextStage::Finalized,
+        |s: &mut Records| right_finalization(s).final_event_root = digest('e'),
+        "finalized: final_event_root"
+    );
+    differs!(
+        ContextStage::Finalized,
+        |s: &mut Records| right_finalization(s).lifecycle_complete = false,
+        "finalized: lifecycle_complete"
+    );
+    differs!(
+        ContextStage::Finalized,
+        |s: &mut Records| right_finalization(s).assurance = Assurance::Deterministic,
+        "finalized: assurance"
+    );
+
+    assert_eq!(
+        arms, 16,
+        "three controls and thirteen field arms; a field dropped from this list \
+         is a field nothing pins, and the count is what says so"
+    );
 }
