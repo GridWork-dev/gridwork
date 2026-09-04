@@ -224,3 +224,73 @@ fn the_vocabulary_crate_cannot_reach_the_compiler_either() {
          own manifest"
     );
 }
+
+/// The walker, against a manifest that uses every table it claims to read.
+///
+/// Both tests above run `declared` over a real manifest, and neither real
+/// manifest has a `[target.*]` section. So the second half of the walk — the one
+/// whose own comment says a guard stopping at the top level is defeated by one
+/// cfg expression — had never executed. Round 4 deleted the whole block and the
+/// crate stayed green at 18.
+///
+/// The consequence is the one that comment predicts. `gwk-context-compiler`
+/// declared under `[target.'cfg(unix)'.dependencies]` is a dependency cargo
+/// builds on every Unix host, and with the block gone it never reaches the set
+/// the R15 assertions are made over. The forbidden-name check would pass, the
+/// set-equality check would pass, and the verifier would depend on the compiler.
+///
+/// A synthetic manifest rather than a fixture on disk: the real manifests must
+/// NOT grow a target section just so this walk has something to find.
+#[test]
+fn the_walk_reads_target_scoped_tables_and_not_only_the_top_level() {
+    let manifest: toml::Table = "[package]\n\
+                                 name = \"synthetic\"\n\n\
+                                 [dependencies]\n\
+                                 top-level = \"1\"\n\n\
+                                 [target.'cfg(unix)'.dependencies]\n\
+                                 unix-only = \"1\"\n\n\
+                                 [target.'cfg(windows)'.dev-dependencies]\n\
+                                 windows-dev = \"1\"\n\n\
+                                 [target.'cfg(unix)'.build-dependencies]\n\
+                                 unix-build = \"1\"\n"
+        .parse()
+        .expect("the synthetic manifest is TOML");
+
+    let (found, tables) = declared(&manifest);
+    assert_eq!(
+        tables, 4,
+        "one top-level table and three target-scoped ones must all be walked"
+    );
+
+    // Per kind, not as one union. A walk that found every name but filed the
+    // target-scoped ones under the wrong kind would satisfy a union check, and
+    // the caller reads runtime and dev as separate sets with different rules.
+    assert_eq!(
+        union(&found, &["dependencies"]),
+        expected(&["top-level", "unix-only"])
+    );
+    assert_eq!(
+        union(&found, &["dev-dependencies"]),
+        expected(&["windows-dev"])
+    );
+    assert_eq!(
+        union(&found, &["build-dependencies"]),
+        expected(&["unix-build"])
+    );
+
+    // The case this guard exists for, stated as itself rather than left implicit
+    // in the counts above.
+    let hidden: toml::Table = "[package]\n\
+                               name = \"synthetic\"\n\n\
+                               [dependencies]\n\
+                               gwk-context = \"1\"\n\n\
+                               [target.'cfg(unix)'.dependencies]\n\
+                               gwk-context-compiler = \"1\"\n"
+        .parse()
+        .expect("the synthetic manifest is TOML");
+    let (hidden, _) = declared(&hidden);
+    assert!(
+        union(&hidden, KINDS).contains("gwk-context-compiler"),
+        "a forbidden dependency hidden behind a cfg expression is invisible to R15"
+    );
+}
