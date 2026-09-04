@@ -405,6 +405,169 @@ fn evidence_ids_must_be_sorted_and_unique() {
     );
 }
 
+// ============================================================
+// The supplement-side refusals
+// ============================================================
+//
+// `verify` makes six calls into the two supplement checks: `binds_to` and
+// `evidence_is_ordered_and_unique`, once each for a release, an observation and
+// a finalization. Five of the six had never refused anything.
+//
+// The cause was one property shared by every fixture above: each supplement
+// cites exactly ONE evidence id. `evidence_is_ordered_and_unique` folds over
+// `windows(2)`, and a one-element slice yields no pairs, so all three of its
+// call sites ran over nothing and returned Ok. The binding check was unexercised
+// for a plainer reason — only the release ever had a fixture naming the wrong
+// manifest.
+//
+// Round 4 measured it by deleting all five lines at once: the crate stayed green
+// at 18 tests. Each one below observes exactly one of them.
+
+/// The evidence-order rule needs a supplement citing TWO ids to have any pair to
+/// compare. Both ids resolve, so the refusal can only come from their order.
+fn two_ids_out_of_order() -> EvidenceRefs {
+    EvidenceRefs::new(vec![evidence("ev-2"), evidence("ev-1")]).expect("valid refs")
+}
+
+#[test]
+fn a_release_citing_its_evidence_out_of_order_is_refused() {
+    let manifest = manifest();
+    let mut release = ReleaseSupplement {
+        id: ReleaseSupplementId::parse("release-1").expect("legal id"),
+        manifest_id: manifest.id.clone(),
+        rendered_digest: digest('d'),
+        tool_schema_digest: digest('e'),
+        rendered_bytes: ByteCount::new(512),
+        tool_schema_count: RecordCount::new(1).expect("in bounds"),
+        evidence_ids: two_ids_out_of_order(),
+        released_at: Timestamp::new("2026-09-02T00:01:00Z"),
+    };
+    let package = Package {
+        manifest: &manifest,
+        release: Some(&release),
+        observations: &[],
+        finalization: None,
+    };
+    assert_eq!(
+        verify(&package, &known()),
+        Err(VerifyError::EvidenceOrder { position: 1 })
+    );
+
+    // The control: the same two ids, sorted, verify. Without it this test also
+    // passes in a build that refuses every release citing two of anything.
+    release.evidence_ids =
+        EvidenceRefs::new(vec![evidence("ev-1"), evidence("ev-2")]).expect("valid refs");
+    let package = Package {
+        manifest: &manifest,
+        release: Some(&release),
+        observations: &[],
+        finalization: None,
+    };
+    assert_eq!(verify(&package, &known()), Ok(()));
+}
+
+#[test]
+fn an_observation_bound_to_another_manifest_is_refused() {
+    let manifest = manifest();
+    let mut wrong = observation(&manifest, 1);
+    wrong.manifest_id = ManifestId::parse("manifest-other").expect("legal id");
+    let observations = [wrong];
+    let package = Package {
+        manifest: &manifest,
+        release: None,
+        observations: &observations,
+        finalization: None,
+    };
+    assert_eq!(
+        verify(&package, &known()),
+        Err(VerifyError::SupplementBinding {
+            named: ManifestId::parse("manifest-other").expect("legal id"),
+            expected: manifest.id.clone(),
+        })
+    );
+}
+
+#[test]
+fn an_observation_citing_its_evidence_out_of_order_is_refused() {
+    let manifest = manifest();
+    let mut unsorted = observation(&manifest, 1);
+    unsorted.evidence_ids = two_ids_out_of_order();
+    let observations = [unsorted];
+    let package = Package {
+        manifest: &manifest,
+        release: None,
+        observations: &observations,
+        finalization: None,
+    };
+    assert_eq!(
+        verify(&package, &known()),
+        Err(VerifyError::EvidenceOrder { position: 1 })
+    );
+}
+
+#[test]
+fn a_finalization_bound_to_another_manifest_is_refused() {
+    let manifest = manifest();
+    let mut wrong = finalization(&manifest, 0, false);
+    wrong.manifest_id = ManifestId::parse("manifest-other").expect("legal id");
+    let package = Package {
+        manifest: &manifest,
+        release: None,
+        observations: &[],
+        finalization: Some(&wrong),
+    };
+    assert_eq!(
+        verify(&package, &known()),
+        Err(VerifyError::SupplementBinding {
+            named: ManifestId::parse("manifest-other").expect("legal id"),
+            expected: manifest.id.clone(),
+        })
+    );
+}
+
+#[test]
+fn a_finalization_citing_its_evidence_out_of_order_is_refused() {
+    let manifest = manifest();
+    let mut unsorted = finalization(&manifest, 0, false);
+    unsorted.evidence_ids = two_ids_out_of_order();
+    let package = Package {
+        manifest: &manifest,
+        release: None,
+        observations: &[],
+        finalization: Some(&unsorted),
+    };
+    assert_eq!(
+        verify(&package, &known()),
+        Err(VerifyError::EvidenceOrder { position: 1 })
+    );
+}
+
+/// The duplicate arm, on a supplement rather than on the manifest.
+///
+/// `evidence_is_ordered_and_unique` has two refusals inside it. Every test above
+/// exercises the ordering one, and a rule that had dropped its equality branch
+/// would satisfy all of them.
+#[test]
+fn a_supplement_citing_one_id_twice_is_refused() {
+    let manifest = manifest();
+    let mut duplicated = observation(&manifest, 1);
+    duplicated.evidence_ids =
+        EvidenceRefs::new(vec![evidence("ev-1"), evidence("ev-1")]).expect("valid refs");
+    let observations = [duplicated];
+    let package = Package {
+        manifest: &manifest,
+        release: None,
+        observations: &observations,
+        finalization: None,
+    };
+    assert_eq!(
+        verify(&package, &known()),
+        Err(VerifyError::EvidenceDuplicate {
+            id: evidence("ev-1")
+        })
+    );
+}
+
 /// A whole, well-formed lifecycle: manifest, release, two observations, and a
 /// finalization that agrees with all of it.
 #[test]
