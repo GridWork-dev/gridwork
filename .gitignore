@@ -12,6 +12,10 @@
 # packages, neither of which is ours.
 /.ghostty/
 /.zig-packages/
+
+# Local codebase-memory index artifacts.
+.codebase-memory/
+.codebase-memory.json
 /site/node_modules/
 /site/.next/
 /site/.source/
