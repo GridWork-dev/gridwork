@@ -1116,6 +1116,11 @@ jobs:
         run: |
           set -euo pipefail
           bun run knip
+      - name: check design tokens
+        working-directory: site
+        run: |
+          set -euo pipefail
+          bun run check:tokens
       - name: prove the freshness gate can fail (seeded violations)
         working-directory: site
         run: |
