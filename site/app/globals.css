@@ -303,12 +303,6 @@
 }
 
 @theme inline {
-  --color-background: var(--gws-bg);
-  --color-foreground: var(--gws-fg);
-  --color-surface: var(--gws-surface);
-  --color-surface-2: var(--gws-surface-2);
-  --color-accent: var(--gws-hue);
-  --color-muted: var(--gws-muted);
   --font-mono: var(--gws-mono);
 }
 
