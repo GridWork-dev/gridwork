@@ -5,9 +5,10 @@
 //! make cases order-dependent — which for an ordering-critical store is exactly
 //! the bug the suite is supposed to catch.
 //!
+//! Start PostgreSQL with `crates/gwk-kernel/tests/docker-compose.yml`; see the
+//! adjacent tests README for startup, the loopback boundary, and cleanup.
+//!
 //! ```text
-//! docker run --rm -d -p 127.0.0.1:55432:5432 -e POSTGRES_HOST_AUTH_METHOD=trust \
-//!   --name gwk-pg postgres:16
 //! GWK_TEST_ADMIN_DATABASE_URL=postgres://postgres@localhost:55432/postgres \
 //!   cargo test -p gwk-kernel -- --ignored
 //! ```
