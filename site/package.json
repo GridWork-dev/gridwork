@@ -6,6 +6,7 @@
     "dev": "bun run assets:sync && GRIDWORK_ORIGIN_SECRET_MODE=disabled next dev",
     "build": "bun test && bun run assets:sync && bun run check:docs && next build",
     "check:docs": "bun scripts/check-doc-freshness.ts",
+    "check:tokens": "bun run tools/design-tokens/index.ts tokens.config.json",
     "knip": "knip",
     "start": "node .next/standalone/server.js",
     "test": "bun test",
