@@ -115,8 +115,9 @@ branch_prefix = "feature/"
 #
 # `expires` is QUOTED on purpose. A bare TOML date parses in Python's tomllib
 # but fails Bun's parser on the whole document, which reds `gw verify system`
-# while leaving the merge gate green. The cap is 90 days; this is 89.
+# while leaving the merge gate green. The cap is 90 days; this is 76 as of 2026-09-04
+# (re-staggered so the fleet's declarations no longer share one expiry).
 [merge_hold]
 posture = "self"
 governed_by = "infra-gcp-topology (T20-T28), operator-held"
-expires = "2026-11-23"
+expires = "2026-11-19"

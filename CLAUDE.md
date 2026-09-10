@@ -70,6 +70,8 @@ other three jobs are `continue-on-error` by design and cannot fail anything;
 
 ## Commits
 
+This repository's local skill surface is validated by `gw verify skills` with this repository as root.
+
 [Conventional Commits](https://www.conventionalcommits.org), one logical change each,
 and a formatting-only reflow is always its own commit.
 

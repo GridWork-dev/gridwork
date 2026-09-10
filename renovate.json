@@ -3,55 +3,66 @@
   "description": [
     "Vendored copy of the house Renovate policy. The sibling repositories consume it as a shared preset; this one cannot — the preset lives in a private repository, and a public repo can neither name it (the leak scanner rejects private repo names, correctly) nor resolve it at Renovate runtime without credentials it will never have. Vendoring is the same call SPEC D3 already makes for the shared lint configs. Keep it in step by hand; the drift test belongs on the private side, which can name both repositories.",
     "minimumReleaseAge holds every update for seven days after it is published. The window it closes is the one where a compromised version goes up and is yanked days later: a bot that upgrades within the hour installs it, and a bot that waits a week never sees it. The cost is seven days of latency on a patch that fixes something real, and that cost is accepted deliberately — a security advisory routes through vulnerabilityAlerts, which is exempt from this delay.",
-    "automerge below is only half a decision. platformAutomerge hands the merge to GitHub, where branch protection is the gate; with Allow auto-merge switched off in repository settings, Renovate falls back to merging through the API itself and the gate is whatever Renovate checked. The config and the repository setting have to agree, and only one of them is in this file."
+    "Ordinary updates share one Tuesday dependency batch. Renovate uses branch automerge with platformAutomerge disabled; the required verify context must run on the Renovate branch before it can merge. A major, compiler pin, or Cargo dependency holds the whole batch for review. Standalone lock maintenance is disabled: dependency updates refresh their locks, but quiet weeks do not. Automatic replacements are disabled because their separate branches bypass ordinary grouping; package renames require deliberate changes."
   ],
   "extends": ["config:recommended", ":semanticCommits", "helpers:pinGitHubActionDigests"],
   "minimumReleaseAge": "7 days",
   "timezone": "America/New_York",
+  "schedule": ["on tuesday"],
+  "updateNotScheduled": false,
+  "dependencyDashboard": true,
+  "separateMajorMinor": false,
   "constraints": {
     "bun": "1.3.14"
   },
-  "prConcurrentLimit": 5,
+  "prConcurrentLimit": 0,
   "prHourlyLimit": 0,
   "rangeStrategy": "bump",
   "labels": ["dependencies"],
+  "ignorePaths": ["**/node_modules/**", "**/bower_components/**", "**/vendor/**"],
   "lockFileMaintenance": {
-    "enabled": true,
-    "schedule": ["before 6am on the first day of the month"]
+    "enabled": false
   },
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "schedule": ["at any time"],
+    "groupName": null,
+    "addLabels": ["security"],
+    "automerge": false
+  },
+  "osvVulnerabilityAlerts": false,
   "packageRules": [
     {
-      "description": "Automerge is OFF. It was on for patch and minor bumps, and on 2026-09-02 three of them merged themselves in one evening with nobody watching: #193 at 20:25:33Z, which split the bun version across managers, and #195 at 02:51:24Z, which merged while the repository's Allow auto-merge setting was already switched off. That second one is the fallback the third paragraph above predicts — with the platform gate unavailable Renovate merges through its own API, so switching the repository setting off changes who merges without changing whether merging happens. This key is the one that stops it. automergeType and platformAutomerge stay here and inert, because automerge defaults to false and both only take effect when it is true; leaving them makes re-enabling one boolean rather than a reconstruction. Renovate still opens, groups and rebases PRs — only the merge is withheld. When it was on, green meant the single required context, verify, which aggregates 18 jobs. That number is pinned by tools/check-claims.sh C9 and derived from ci.yml, because it sat at 17 here while the workflow had already grown past it — a description nothing reads is a description nothing corrects.",
-      "matchUpdateTypes": ["patch", "minor"],
-      "automerge": false,
-      "automergeType": "pr",
-      "platformAutomerge": true
+      "description": "Branch automerge is enabled for the Tuesday dependency batch, gated by the required verify context running on renovate/** pushes. It uses branch mode with platformAutomerge disabled; a major or a repository-local review rule holds the whole batch for review. This reverses the 2026-09-02 automerge-off response with an explicit branch-check gate. Incident history: three patch/minor updates merged unattended that evening, including #193 at 20:25:33Z, which split the Bun version across managers, and #195 at 02:51:24Z, which merged while the repository's Allow auto-merge setting was already switched off. Disabling that setting alone changed the merger rather than preventing a merge. When it was on, green meant the single required context, verify, which aggregates 18 jobs. That number is pinned by tools/check-claims.sh C9 and derived from ci.yml, because it sat at 17 here while the workflow had already grown past it — a description nothing reads is a description nothing corrects.",
+      "matchPackageNames": ["*"],
+      "groupName": "weekly dependency batch",
+      "groupSlug": "weekly-batch",
+      "schedule": ["on tuesday"],
+      "updateNotScheduled": false,
+      "automerge": true,
+      "automergeType": "branch",
+      "platformAutomerge": false
     },
     {
-      "description": "Majors are always a human decision.",
+      "description": "A major stays in the weekly batch and holds the whole group for review.",
       "matchUpdateTypes": ["major"],
       "automerge": false,
       "addLabels": ["major-bump"]
     },
     {
-      "description": "React and its types move together or the JSX types desync.",
-      "groupName": "react",
-      "matchPackageNames": ["react", "react-dom", "@types/react", "@types/react-dom"]
+      "description": "Pipeline updates share the weekly batch; path-based merge review remains required.",
+      "matchManagers": ["github-actions", "dockerfile", "docker-compose", "terraform"],
+      "addLabels": ["pipeline-path"]
     },
     {
-      "description": "Next and its first-party plugins.",
-      "groupName": "next",
-      "matchPackageNames": ["next", "@next/**", "eslint-config-next"]
+      "description": "Replacements bypass engine grouping, so handle package renames deliberately to preserve the one-PR ceiling.",
+      "matchUpdateTypes": ["replacement"],
+      "enabled": false
     },
     {
-      "description": "The three fumadocs packages in site/package.json are one upgrade wearing three PR numbers. fumadocs-core and fumadocs-ui are a lockstep pair, published together and pinned here at the same version, while fumadocs-mdx tracks its own major line — so this group means the three move in one pull request, not that they carry one version number. Without it Renovate opened core alone and mdx alone while ui's identical bump sat behind prConcurrentLimit, and merging any one of those leaves the pair split with nothing red, because no gate in this repository compares two npm versions inside one package.json. Unlike the version-claim rules below this is a group and not a disable: a docs dependency has every reason to keep moving, it only has to move all at once. The three names are a census of what site/package.json requires today. A fourth fumadocs package added later falls outside this list and gets its own PR, which is the behaviour that already exists rather than a silent one — that is the difference between missing a name in a group and missing one in a disable rule, where the update it fails to suppress lands unreviewed.",
-      "groupName": "fumadocs",
-      "matchPackageNames": ["fumadocs-core", "fumadocs-ui", "fumadocs-mdx"]
-    },
-    {
-      "description": "Action digest bumps are noisy individually and identical in risk.",
-      "groupName": "github actions",
-      "matchManagers": ["github-actions"]
+      "description": "Preserve the spike and its Cargo.lock as the upstream measurement receipt.",
+      "matchFileNames": ["spikes/s3-ghostty/**"],
+      "enabled": false
     },
     {
       "description": "The compiler pin is never automerged. site/ is scheduled to move to TypeScript 7, where installing a package named typescript at 7.x silently retargets JS-API consumers — a change that can pass every gate while checking nothing.",
@@ -65,7 +76,7 @@
       "automerge": false
     },
     {
-      "description": "The MSRV is declared once, in Cargo.toml rust-version, and restated on four other surfaces that tools/check-claims.sh C1 holds equal to it. Renovate can only ever move ONE of them — the `toolchain:` input this rule disables — so every such update is wrong by construction. It proposed 1.94 to 1.98 on #177, where the github-actions group above would have automerged it on green and left the msrv job compiling on a version the crates do not advertise; C1 going red is the only reason that did not happen. Raising the MSRV is a deliberate edit to all five surfaces at once, not a dependency bump.",
+      "description": "The MSRV is declared once, in Cargo.toml rust-version, and restated on four other surfaces that tools/check-claims.sh C1 holds equal to it. Renovate can only ever move ONE of them — the `toolchain:` input this rule disables — so every such update is wrong by construction. It proposed 1.94 to 1.98 on #177, where the former github-actions group would have automerged it on green and left the msrv job compiling on a version the crates do not advertise; C1 going red is the only reason that did not happen. Raising the MSRV is a deliberate edit to all five surfaces at once, not a dependency bump.",
       "matchManagers": ["github-actions"],
       "matchDepTypes": ["uses-with"],
       "matchPackageNames": ["rust"],

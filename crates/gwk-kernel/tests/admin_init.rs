@@ -4,9 +4,10 @@
 //! whether the DDL applies, whether the grants land, or whether the refusals
 //! fire against a server. This does, and it is `#[ignore]` because it needs one:
 //!
+//! Start PostgreSQL with `crates/gwk-kernel/tests/docker-compose.yml`; see the
+//! adjacent tests README for startup and cleanup.
+//!
 //! ```text
-//! docker run --rm -d -p 127.0.0.1:55432:5432 -e POSTGRES_HOST_AUTH_METHOD=trust \
-//!   --name gwk-pg postgres:16
 //! GWK_TEST_ADMIN_DATABASE_URL=postgres://postgres@localhost:55432/postgres \
 //!   cargo test -p gwk-kernel --test admin_init -- --ignored
 //! ```

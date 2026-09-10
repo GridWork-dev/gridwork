@@ -9,9 +9,10 @@
 //! CHECK that arrives with it, and whether the result is the same schema a
 //! fresh initialization produces are all questions only PostgreSQL can answer.
 //!
+//! Start PostgreSQL with `crates/gwk-kernel/tests/docker-compose.yml`; see the
+//! adjacent tests README for startup and cleanup.
+//!
 //! ```text
-//! docker run --rm -d -p 127.0.0.1:55432:5432 -e POSTGRES_HOST_AUTH_METHOD=trust \
-//!   --name gwk-pg postgres:16
 //! GWK_TEST_ADMIN_DATABASE_URL=postgres://postgres@localhost:55432/postgres \
 //!   cargo test -p gwk-kernel --test admin_migrate -- --ignored
 //! ```
