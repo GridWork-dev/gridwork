@@ -14,13 +14,13 @@
     "postinstall": "fumadocs-mdx"
   },
   "dependencies": {
-    "fumadocs-core": "16.15.4",
+    "fumadocs-core": "16.15.8",
     "fumadocs-mdx": "15.4.0",
-    "fumadocs-ui": "16.15.4",
-    "next": "16.3.3",
+    "fumadocs-ui": "16.15.8",
+    "next": "16.3.4",
     "react": "19.2.8",
     "react-dom": "19.2.8",
-    "zod": "4.4.3"
+    "zod": "4.5.4"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "4.3.3",
@@ -28,11 +28,11 @@
     "@types/mdx": "2.0.14",
     "@types/node": "22.20.1",
     "@types/react": "19.2.18",
-    "@types/react-dom": "19.2.5",
-    "knip": "6.32.3",
-    "oxfmt": "0.65.0",
-    "oxlint": "1.80.0",
-    "postcss": "8.5.26",
+    "@types/react-dom": "19.2.7",
+    "knip": "6.35.0",
+    "oxfmt": "0.67.0",
+    "oxlint": "1.82.0",
+    "postcss": "8.5.28",
     "tailwindcss": "4.3.3",
     "typescript": "7.0.2",
     "vite": "8.2.2"
