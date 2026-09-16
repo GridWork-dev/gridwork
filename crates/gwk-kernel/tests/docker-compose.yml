@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:16
+    image: postgres:18
     container_name: gwk-test-pg
     ports:
       - "127.0.0.1:55432:5432"

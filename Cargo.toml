@@ -61,7 +61,7 @@ aead-stream = "0.6.0"
 # gwk's own, `gwk_domain::engine::EngineAdapter`. The WIRE version pin (v1) lives
 # in adapter code as the negotiated protocol version, not here — the crate serves
 # several wire versions from one release.
-agent-client-protocol = "2.0.0"
+agent-client-protocol = "2.1.0"
 base64 = "0.23.1"
 chacha20poly1305 = "0.11.0"
 # Already in the graph transitively (ratatui's default backend); named here for
@@ -127,7 +127,7 @@ ratatui = { version = "0.30.2", features = ["underline-color"] }
 # Every Hall motion verb runs through this one effects engine. Exact-pinned to
 # the ratatui-core-compatible release measured by the motion spike; std-duration
 # lets the frame consume the console's existing std::time::Duration cadence.
-tachyonfx = { version = "=0.25.1", features = ["std-duration"] }
+tachyonfx = { version = "=0.25.2", features = ["std-duration"] }
 # One call: `geteuid`, for the UDS peer check. Chosen over `libc` because its
 # wrapper is SAFE — the workspace forbids `unsafe_code`, so a raw extern call
 # would not compile here — and over `nix` because it was already in the tree.
@@ -145,7 +145,7 @@ sqlx = { version = "0.9.0", default-features = false, features = [
 thiserror = "2.0.20"
 tempfile = "3.27.0"
 tokio = { version = "1.53.1", default-features = false }
-toml = "0.9.12"
+toml = "1.1.5"
 # Already resolved: `sqlx`/`tokio-util` pull it transitively, so naming it
 # here adds no crate to the graph, only a new edge to one cargo-deny already
 # cleared — the same reasoning as the two unicode crates below. Named for
