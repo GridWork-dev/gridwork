@@ -4,7 +4,7 @@
 //! for a format somebody else versions. Two pressures point in opposite
 //! directions: a field this parser does not recognize might be legitimate
 //! upstream drift, and it might be a caller inventing contract inside a
-//! namespace we own. Ruling R13 resolves that by refusing to answer both with
+//! namespace we own. The split-handling rule resolves that by refusing to answer both with
 //! one policy.
 //!
 //! - **Portable core** — unknown fields are captured as bounded opaque
@@ -14,7 +14,7 @@
 //!   new field is not an attack.
 //! - **The GridWork namespace** — [`GridworkExt`] is `deny_unknown_fields`. A
 //!   key we do not know inside a namespace we own is a version skew or an
-//!   invention, and both should be loud (R35).
+//!   invention, and both should be loud (the loud-on-unknown-key rule).
 //!
 //! The extension rides as a bounded JSON string at `metadata.gridwork`, which
 //! is closer to forced than chosen: upstream `metadata` is `dict[str, str]`, so
@@ -36,7 +36,7 @@
 //! compilation and context may narrow it, never widen it.
 //!
 //! A manifest's own claim of first-party authorship is ignored here. Origin is
-//! a caller-owned input; R29 enforces it in 8C.
+//! a caller-owned input; the caller-owned-origin rule enforces it in 8C.
 //!
 //! ## What sits underneath, and why the subset gate is first
 //!
@@ -250,7 +250,7 @@ impl std::error::Error for SkillError {}
 /// this field as a permission list; here it is one third party's claim about
 /// itself, recorded so Explain can show it and a reviewer can read it. Anything
 /// that turned it into a grant would let a manifest widen its own authority by
-/// asserting it, which inverts the direction D3 fixes: context narrows
+/// asserting it, which inverts the direction the context-narrows-never-widens rule fixes: context narrows
 /// authority, never widens it. There is deliberately no `into_grants`, no
 /// `Deref`, and no `IntoIterator` yielding a capability type.
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -2534,7 +2534,7 @@ mod tests {
     fn effective_tools<'a>(granted: &[&'a str], claimed: &'a [String]) -> BTreeSet<&'a str> {
         let granted: BTreeSet<&str> = granted.iter().copied().collect();
         let claimed: BTreeSet<&str> = claimed.iter().map(String::as_str).collect();
-        // INTERSECTION, not union. D3: context narrows authority, never widens
+        // INTERSECTION, not union. The context-narrows-never-widens rule: context narrows authority, never widens
         // it. Swapping this one operator is the whole attack — a manifest would
         // then grant itself whatever it asked for by asking.
         claimed.intersection(&granted).copied().collect()

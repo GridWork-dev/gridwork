@@ -225,20 +225,20 @@ replica session — the session a restore runs in. The sweep now filters `tgenab
 one predicate refuses a drop, a disable, and an `ALWAYS`-to-`ORIGIN` downgrade.
 
 **`--dry-run` could not complete against a real database, and the rehearsal claims less than
-it did.** The dry-run arm ran R3, whose relation count belongs to the *migrated* schema (35);
+it did.** The dry-run arm ran the privilege-parity check, whose relation count belongs to the *migrated* schema (35);
 a dry run holds the database at its base, where the count is 27. Every rehearsal against a
 real database therefore refused, with a message that read like schema corruption, after the
-operator had already stopped the kernel to take the writer lock. R3 has moved inside the
+operator had already stopped the kernel to take the writer lock. The privilege-parity check has moved inside the
 applier's transaction where the count is correct, and the dry-run envelope now says
 `"rungs_checked": ["base"]` and `"rehearsal": "not implemented"` rather than
 `"grant_matrix": "checked"`. **A dry run is a preflight, not a proof** — it resolves the
 chain and asserts the base.
 
-**R3 and R4 ran after the commit.** Both are questions about the schema the step produced,
+**The privilege-parity check and the superuser-refusal check ran after the commit.** Both are questions about the schema the step produced,
 and the catalogue changes are visible inside the transaction, so running them afterwards
 bought nothing and cost the ability to roll back: a step that widened the grant matrix or
 broke an append-only guard committed first and was reported second. Both now run before
-`tx.commit()`. R5 stays after it, because it exists to catch a writer that was never fenced
+`tx.commit()`. The post-commit fingerprint recheck stays after it, because it exists to catch a writer that was never fenced
 and a measurement taken inside the transaction cannot see outside it.
 
 **Every rung failure exited 5, which this repository's own table defines as "retrying later
@@ -256,7 +256,7 @@ The receipt is now emitted either way, carrying `verified` and `verification_err
 `migrate` replayed the same grant matrix and checked neither. `GWK_RUNTIME_ROLE` is read from
 whatever environment the operator is in and nothing in the database records which role was
 granted, so a stale export silently widens the matrix to a second role — invisibly, because
-R3 and `verify` both re-read the same variable and find their own answer satisfied. Sharpest
+the privilege-parity check and `verify` both re-read the same variable and find their own answer satisfied. Sharpest
 corner: `public` matched the identifier pattern, and `GRANT … TO public` grants to every role
 in the cluster. `migrate` now performs `init`'s check, and `validate_role` refuses `public`,
 `current_user`, `session_user` and `current_role` as the `RoleSpec` keywords they are.
@@ -316,7 +316,7 @@ and aborts the transaction on its last statement, after all the DDL has run. Six
 test, and five would not have been one: five fitted.
 
 **`--dry-run` is exercised against a database.** The rehearsal arm had no behavioural test at
-all, which is how the R3 count mismatch recorded above survived every gate — the receipt it
+all, which is how the privilege-parity count mismatch recorded above survived every gate — the receipt it
 printed was on the path that never ran. A case now builds a base database, runs the built
 binary, and asserts both halves: the plan comes back, and the fingerprint, the relation count
 and the ledger table are where they were left. Only the second half catches a dry run that
@@ -459,7 +459,7 @@ retroactive for the migration that needs it. A run whose output was not captured
 asked afterwards how much evidence it dropped.
 
 **`gw admin discard-checkpoints [--dry-run]` is the escape hatch, and it belongs in this
-change.** The applier's discard cannot reach a database that is already stranded: R1 refuses
+change.** The applier's discard cannot reach a database that is already stranded: the chain-start check refuses
 to migrate a database already at this binary's contract, so there is no run left to clear the
 rows. The same is true of a checkpoint written by a build whose payload hashing has since
 been corrected. Both present identically — `Diverged` at the same sequence, a kernel that

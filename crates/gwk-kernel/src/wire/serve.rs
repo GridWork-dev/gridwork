@@ -2495,7 +2495,7 @@ pub async fn serve_stream(
 /// `Config("projection ... has no table")`: an operator-facing claim that the
 /// server is misconfigured, about tables that exist and are correct.
 ///
-/// The code is `UnsupportedVersion` because that is what this is. ADR-0032 makes
+/// The code is `UnsupportedVersion` because that is what this is. The design makes
 /// Context mandatory from protocol major 2 rather than optional at any major, so
 /// a V1 connection naming a Context projection is asking for a major it did not
 /// negotiate — the same refusal the handshake would have given it, arriving one

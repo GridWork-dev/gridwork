@@ -3,15 +3,15 @@
 //! Two closed enums and a record. Both enums are closed on purpose and for
 //! different reasons:
 //!
-//! - [`ParticipationState`] is a plain enum with no transition table (ruling
-//!   R5 / fork F6). The resolved manifest is immutable, so participation is
+//! - [`ParticipationState`] is a plain enum with no transition table (the
+//!   plain-enum participation-state decision). The resolved manifest is immutable, so participation is
 //!   one compile-time classification, never a state walked across writes.
 //!   `StateMachine`, EDGES, and ESCAPE exist for `TaskState` and
 //!   `AttemptState`, which mutate; bolting that machinery onto a write-once
 //!   value would describe transitions that cannot occur.
 //! - [`ParticipationReason`] is closed because Explain/Compare's entire job is
 //!   grouping, filtering, and branching on reason across thousands of
-//!   manifests (ruling R6 / fork F3). The `Gate.kind` open-string idiom works
+//!   manifests (the closed-reason-enum decision). The `Gate.kind` open-string idiom works
 //!   only because nothing branches on `Gate.kind` programmatically. The true
 //!   analogs are `KernelErrorCode`, `AppendError`, and `BlobError` — the
 //!   existing closed refusal sets.
@@ -55,7 +55,7 @@ pub use closed_token_enum;
 closed_token_enum! {
     /// Whether a candidate participated, and how far it got.
     ///
-    /// Per ADR-0032 D5. Not a state machine: see the module docs.
+    /// Per the precedence-tier rule. Not a state machine: see the module docs.
     #[derive(
         Debug,
         Clone,
@@ -114,19 +114,19 @@ closed_token_enum! {
     )]
     #[serde(rename_all = "snake_case")]
     pub enum ParticipationReason {
-        /// A higher precedence tier supplied a conflicting value (D5).
+        /// A higher precedence tier supplied a conflicting value (the precedence-tier rule).
         PrecedenceLoss,
         /// Authority resolution excluded it. Upstream of context compilation and
-        /// never overridable by it — context may narrow, never widen (D3).
+        /// never overridable by it — context may narrow, never widen (the context-narrows-never-widens rule).
         PermissionDenied,
         /// Dropped to stay inside a declared budget.
         BudgetCut,
-        /// Third-party material still in its initial quarantined trust state (D5).
+        /// Third-party material still in its initial quarantined trust state (the quarantine-lifecycle rule).
         Quarantined,
         /// Reviewed and rejected for this exact digest.
         Rejected,
         /// The verified pin does not match the digest actually found — an upstream
-        /// change mints a new quarantined candidate, never a silent update (D5).
+        /// change mints a new quarantined candidate, never a silent update (the quarantine-lifecycle rule).
         PinDrift,
         /// The route, role, or capability does not admit it.
         NotEligible,
@@ -365,7 +365,7 @@ mod tests {
             "\"precedence_loss\""
         );
         // These counts pin the enums against their externally documented sets
-        // (the D5 exclusion vocabulary and the five-state participation model).
+        // (the precedence-tier exclusion vocabulary and the five-state participation model).
         // They used to be tautologies — `ALL.len()` on a hand-typed `[Self; N]`
         // is `N` by type — but `ALL` is now macro-derived from the enum's own
         // declaration, so a ninth reason or a sixth state moves the left side

@@ -4,7 +4,7 @@
 //!
 //! ## Inputs are values, not reads
 //!
-//! ADR-0032 D3 fixes the dispatch order: route resolution, then authority
+//! The fixed-dispatch-order rule fixes the dispatch order: route resolution, then authority
 //! resolution, then context compilation. Both upstream outputs reach this
 //! crate as immutable typed values — a [`Route`] and an [`Authority`] — never
 //! as live kernel reads, and the candidates the compiler chooses among arrive
@@ -20,7 +20,7 @@
 //!    from the record, not reconstructed (SPEC clause 3). The equality
 //!    candidates-in equals rows-out is asserted, counted before compared.
 //! 2. Ready candidates speaking to the same [`Candidate::slot`] are resolved
-//!    by the D5 precedence order through [`resolve`]. A higher tier wins; the
+//!    by the precedence-tier order through [`resolve`]. A higher tier wins; the
 //!    losers are `PrecedenceLoss`; an equal-tier disagreement fails the whole
 //!    compile closed with [`CompileError::PrecedenceConflict`].
 //! 3. Winners are admitted against the byte budget in one fixed order —
@@ -29,15 +29,15 @@
 //!    fails the compile instead: dropping a security constraint to make room
 //!    is widening authority by another name.
 //! 4. Each active candidate's claimed tools are intersected with the
-//!    authority's grant (D3: context narrows, never widens). The result is
+//!    authority's grant (the context-narrows-never-widens rule). The result is
 //!    per candidate, and asserted a subset of the input on every path.
 //! 5. The manifest digest is computed over the finished record, and source
-//!    attribution is re-derived from that record alone (R12).
+//!    attribution is re-derived from that record alone (the record-derived-attribution rule).
 //!
 //! ## The canonical form
 //!
 //! Two rules make the output byte-identical under input permutation. The
-//! verifier — a separate crate by R15 — recomputes both without this code, so
+//! verifier — a separate crate by the verifier-independence rule — recomputes both without this code, so
 //! they are stated here as the contract rather than left to be read off the
 //! implementation:
 //!
@@ -79,7 +79,7 @@ pub const MANIFEST_DIGEST_PLACEHOLDER_HEX: &str =
 
 /// The route the manifest is bound to — by digest only.
 ///
-/// Route resolution's output is upstream and immutable (D3); the compiler
+/// Route resolution's output is upstream and immutable (the fixed-dispatch-order rule); the compiler
 /// records which route it compiled against and changes nothing about it —
 /// engine, role, lane, isolation, and permission profile are the route's, and
 /// context may never silently change them.
@@ -100,7 +100,7 @@ pub struct Authority {
 
 /// What upstream already decided about a candidate before compilation.
 ///
-/// Trust state (D5: quarantined, then verified or rejected for one digest),
+/// Trust state (the quarantine-lifecycle rule: quarantined, then verified or rejected for one digest),
 /// route eligibility (8C's decision), and authority's verdict all arrive
 /// settled. The compiler does not re-decide any of them; it records them, so
 /// the participation record is complete rather than only covering the
@@ -196,7 +196,7 @@ pub enum CompileError {
     /// standing or tier for the same bytes is a caller error, not a merge.
     DuplicateCandidate { digest: Digest },
     /// Two or more Ready candidates at the same top tier disagreed on one
-    /// slot. Nothing was decided (D5).
+    /// slot. Nothing was decided (the precedence-tier rule).
     PrecedenceConflict {
         slot: String,
         conflict: PrecedenceConflict,
@@ -218,7 +218,7 @@ pub enum CompileError {
     /// Unreachable by construction; reachable by mutation.
     Incomplete { offered: usize, recorded: usize },
     /// Internal invariant: an emitted tool set exceeds the authority. The
-    /// D3 assertion on every path.
+    /// context-narrows-never-widens assertion on every path.
     Widened { digest: Digest, tool: String },
 }
 
@@ -430,7 +430,7 @@ pub fn compile(
         source_bytes = source_bytes
             .checked_add(cost)
             .ok_or(CompileError::SourceBytesOverflow)?;
-        // INTERSECTION, not union. D3: context narrows authority, never
+        // INTERSECTION, not union. The context-narrows-never-widens rule: context narrows authority, never
         // widens it. Swapping this one operation is the whole attack — a
         // candidate would then grant itself whatever it claimed by claiming.
         let effective: BTreeSet<String> = candidate
@@ -452,7 +452,7 @@ pub fn compile(
         return Err(CompileError::Incomplete { offered, recorded });
     }
 
-    // 6. D3, asserted on every path rather than trusted to step 4.
+    // 6. The context-narrows-never-widens rule, asserted on every path rather than trusted to step 4.
     for (digest, set) in &tools {
         if let Some(tool) = set.iter().find(|t| !authority.tools.contains(t.as_str())) {
             return Err(CompileError::Widened {
@@ -520,7 +520,7 @@ pub fn manifest_digest(manifest: &ResolvedManifest) -> Result<Digest, CompileErr
 
 /// Source attribution, re-derived from the resolved manifest and nothing else.
 ///
-/// R12 / CTX-12: the provenance graph never trusts a client-supplied actor
+/// The record-derived-attribution rule / the attribution-is-provenance-not-authorization rule: the provenance graph never trusts a client-supplied actor
 /// string. This function's one input is the record the compiler produced;
 /// every field is copied from it or names this build. There is no parameter
 /// an input string could arrive through, which is the whole of the control.

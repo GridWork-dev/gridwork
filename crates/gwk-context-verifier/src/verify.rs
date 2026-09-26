@@ -34,7 +34,7 @@ pub const MANIFEST_DIGEST_PLACEHOLDER_HEX: &str =
 /// One failed property, naming what disagreed rather than that something did.
 ///
 /// A verifier that answers only "rejected" moves the work of finding out to
-/// whoever reads the answer, and CTX-11's whole concern is a package whose
+/// whoever reads the answer, and this crate's whole concern is a package whose
 /// parts are individually plausible.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerifyError {

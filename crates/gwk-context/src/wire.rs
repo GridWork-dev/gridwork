@@ -17,18 +17,18 @@
 //!
 //! `ProtocolVersion` is the WIRE grammar. `gwk_domain::CONTRACT_VERSION` is the
 //! DOMAIN contract — entity, event, and command shapes. They are separate axes
-//! and this change moves exactly one of them (ruling R10 / fork F9). Adding a
+//! and this change moves exactly one of them (the single-axis-change decision). Adding a
 //! known major is not an entity/event/command shape change, so
 //! `CONTRACT_VERSION` stays `1` through the eventual cutover and bumps on its
 //! own merits when a shape actually changes. A reflexive lockstep bump would
 //! teach every future reader that the two always move together, which is the
-//! belief R10 exists to prevent.
+//! belief the single-axis-change decision exists to prevent.
 //!
 //! ## Nothing Context-specific rides the hello
 //!
-//! Ruling R9 / fork F8. The handshake shape stays major/minor/capabilities/
+//! The fixed-handshake-shape decision. The handshake shape stays major/minor/capabilities/
 //! client, and only the major flips. There is deliberately no `context_capable`
-//! field and no `context` capability name, because ADR-0032 treats *mandatory*
+//! field and no `context` capability name, because the design treats *mandatory*
 //! and *capability* as opposites: a v2 major makes Context mandatory, full
 //! stop. There is no optional v1 Context mode, no translator, no proxy, and no
 //! dual stack — a peer either speaks a major that includes Context or it does
@@ -38,7 +38,7 @@
 //! connection-scoped flag would be answering a question at the wrong lifetime
 //! even if the grammar wanted one.
 //!
-//! ## CTX-12 — attribution is provenance, not authorization
+//! ## The attribution-is-provenance-not-authorization rule
 //!
 //! Re-disclosed here because 8A is the phase required to state it, and because
 //! this module is where it becomes structural rather than a promise.
@@ -68,7 +68,7 @@
 //! There is no closed `KernelEvent` sum type in this system and this module
 //! does not invent one. [`gwk_domain::EventEnvelope`] carries open bounded
 //! `aggregate_type` / `event_type` strings over a generic JSON payload, so the
-//! ten D4 lifecycle events are ten new `event_type` values under three new
+//! ten lifecycle events the design names are ten new `event_type` values under three new
 //! `aggregate_type` values. [`ContextEventName`] and [`ContextAggregate`] are
 //! closed enums over exactly those strings — closed on this side, open on the
 //! envelope's, which is what lets the log accept them without a contract
@@ -87,7 +87,7 @@ use crate::ContextStage;
 /// Not "the major that supports Context" — there is no supported/unsupported
 /// axis here. Below this major Context does not exist on the wire at all; at
 /// and above it, every participant speaks it. That is the whole negotiation,
-/// and it is why the hello has no Context field to negotiate with (R9).
+/// and it is why the hello has no Context field to negotiate with (the fixed-handshake-shape decision).
 pub const CONTEXT_MANDATORY_FROM: ProtocolVersion = ProtocolVersion::V2;
 
 // ============================================================
@@ -280,7 +280,7 @@ pub enum CompareSubject {
 
 /// The v2 Context read grammar.
 ///
-/// Eight reads, matching ADR-0032's three projections plus the four record
+/// Eight reads, matching the design's three projections plus the four record
 /// reads and Compare. These are published shapes, not live handlers: 8A
 /// publishes the grammar, and the projections behind it are later work.
 ///
@@ -477,7 +477,7 @@ mod tests {
 
     #[test]
     fn context_becomes_mandatory_at_v2_and_the_contract_number_does_not_move() {
-        // R9: the flip is on the version axis alone. R10: the contract axis
+        // The fixed-handshake-shape decision: the flip is on the version axis alone. The single-axis-change decision: the contract axis
         // stays where it is. Both in one assertion, because the failure mode is
         // someone moving them together.
         assert_eq!(CONTEXT_MANDATORY_FROM, ProtocolVersion::V2);

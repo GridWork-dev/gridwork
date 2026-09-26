@@ -128,7 +128,7 @@ const CONTEXT_ATTRIBUTION_FIELDS: [&str; 10] = [
     "requested_by",
     "submitted_by",
     "on_behalf_of",
-    // The two names CTX-12 itself uses (carryover row 4): `attribution` is the
+    // The two names the attribution-is-provenance-not-authorization rule itself uses (carryover row 4): `attribution` is the
     // kernel-side field a client must never supply, and `compiler` is its most
     // identifying component. The unit-level sweep in `wire.rs` always named
     // them; this generated-surface guard did not.
@@ -144,7 +144,7 @@ const CONTEXT_CLIENT_SUBMITTABLE: [&str; 4] = [
     "ContextFact_Deserialize",
 ];
 
-/// CTX-12, enforced against the GENERATED surface rather than against a list.
+/// The attribution-is-provenance-not-authorization rule, enforced against the GENERATED surface rather than against a list.
 ///
 /// The Rust-side test that preceded this swept a hand-written `vec![]` holding
 /// one fact per variant. An eleventh variant carrying an `actor: String`, mapped
@@ -160,7 +160,7 @@ const CONTEXT_CLIENT_SUBMITTABLE: [&str; 4] = [
 fn inspect_context_attribution(exported: &str) -> Result<usize, String> {
     assert!(
         !CONTEXT_CLIENT_SUBMITTABLE.is_empty() && !CONTEXT_ATTRIBUTION_FIELDS.is_empty(),
-        "the CTX-12 expectation sets must not be empty"
+        "the attribution-is-provenance-not-authorization expectation sets must not be empty"
     );
     // The declaration text of one exported type, scoped to the next `export`,
     // with `/** ... */` doc blocks removed. Docs are prose: a type NAMED in one
@@ -223,7 +223,7 @@ fn inspect_context_attribution(exported: &str) -> Result<usize, String> {
             if declared {
                 return Err(format!(
                     "{name}, reachable from a client-submittable type, declares `{field}`: \
-                     a client could assert its own provenance (CTX-12)"
+                     a client could assert its own provenance (the attribution-is-provenance-not-authorization rule)"
                 ));
             }
         }
@@ -2009,7 +2009,10 @@ mod tests {
         let error = inspect_context_attribution(&mutated)
             .expect_err("an actor on a client-submittable type must be refused");
         assert!(error.contains("actor"), "{error}");
-        assert!(error.contains("CTX-12"), "{error}");
+        assert!(
+            error.contains("attribution-is-provenance-not-authorization"),
+            "{error}"
+        );
 
         // And a missing subject is a broken guard, never a clean grammar.
         let error = inspect_context_attribution("export type Unrelated = number;")

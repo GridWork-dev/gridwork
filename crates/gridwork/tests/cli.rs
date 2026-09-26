@@ -1808,7 +1808,7 @@ async fn a_migrated_database_verifies_clean() {
     assert_eq!(receipt["scratch_database_requested"], scratch);
     assert_eq!(receipt["base_sha256"], BASE_CONTRACT_SHA256);
     // The two disclaimers ride on a real run, not only in the unit fixture:
-    // nothing rehearsed, and R5 was asked and answered.
+    // nothing rehearsed, and the post-commit fingerprint recheck was asked and answered.
     assert_eq!(receipt["rehearsal"], "not implemented");
     assert_eq!(
         receipt["verified"], true,
@@ -1932,7 +1932,7 @@ async fn checkpoint_count(pool: &sqlx::PgPool) -> i64 {
 /// `--dry-run` plans the migration and leaves the database exactly as it was.
 ///
 /// The rehearsal arm had no test that ran it against a database at all, and that
-/// gap hid a refusal rather than a cosmetic one. The dry run used to ask R3 —
+/// gap hid a refusal rather than a cosmetic one. The dry run used to ask the privilege-parity check —
 /// the grant matrix rung — which counts the relations of the MIGRATED schema,
 /// 35 of them, against a database a dry run by definition holds at its base,
 /// where there are 27. Every rehearsal against a real database therefore failed,

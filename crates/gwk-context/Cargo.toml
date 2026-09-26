@@ -16,14 +16,14 @@ publish = false
 
 [dependencies]
 # For `is_sha256_hex` and nothing else so far. `Digest` deliberately does NOT
-# reuse `BlobAddress` (kickoff ruling R2 / fork F2) — same validation, different
+# reuse `BlobAddress` (the digest-type-distinction decision) — same validation, different
 # meaning — but re-implementing the hex check would be two places for one rule.
 gwk-domain.workspace = true
 serde.workspace = true
 # Not a dev-dependency any more: `metadata.gridwork` is decoded with
 # `serde_json::from_str` at parse time, because upstream metadata is
 # `dict[str, str]` and a bounded JSON string is the only place structured
-# extension data can live inside one (R35).
+# extension data can live inside one (the loud-on-unknown-key rule).
 serde_json.workspace = true
 specta = { workspace = true, features = ["serde_json"] }
 # Skill manifests are YAML frontmatter. The accepted subset is enforced by

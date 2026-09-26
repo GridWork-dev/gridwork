@@ -594,7 +594,7 @@ pub enum ProjectionKind {
     WorkflowRun,
     PtySession,
     PtySessionTemplate,
-    /// The three Context supplements (R3). Nameable in V1 and deliberately
+    /// The three Context supplements (the three-supplements rule). Nameable in V1 and deliberately
     /// NOT served by it — see the refusal arm in `wire::serve`.
     ContextRelease,
     ContextObservation,
@@ -638,8 +638,8 @@ impl ProjectionKind {
     /// pins every served kind to a read query — so the policy cannot be stated
     /// twice and drift.
     ///
-    /// The three Context supplements (R3) are nameable here and deliberately
-    /// unserved: ADR-0032 makes Context mandatory from
+    /// The three Context supplements (the three-supplements rule) are nameable here and deliberately
+    /// unserved: the design makes Context mandatory from
     /// [`ProtocolVersion::V2`], which this kernel refuses. Their tables exist;
     /// what is missing is a major that may read them.
     pub const fn served_in_v1(self) -> bool {

@@ -99,7 +99,7 @@ pub const CSS_PREFIX: &str = "gws";
 
 /// The SIGNAL palette.
 ///
-/// Twelve ratified tokens plus the three minted by ADR-0028 for the console's
+/// Twelve ratified tokens plus the three minted by the console-role decision for the console's
 /// structural roles. `gws_focus` carries `gws_hue`'s value on purpose — it is
 /// minted as a distinct ROLE, not a distinct hex, and stays pinned there until
 /// a rendered console proves it must diverge. Names are unique; values are not
@@ -273,7 +273,7 @@ mod tests {
     fn light_focus_shares_light_hues_value_too() {
         // The ratification is about the ROLE sharing a hex, not about one
         // specific hex. A light palette that split them would have quietly
-        // un-ratified ADR-0028 residual 1 for half the product.
+        // un-ratified the shared-hex focus-role decision for half the product.
         let value = |name: &str| {
             SIGNAL_LIGHT
                 .iter()
@@ -420,7 +420,7 @@ mod tests {
 
     #[test]
     fn focus_shares_hues_value_on_purpose() {
-        // ADR-0028 residual 1, made mechanical: `focus` is a distinct role on a
+        // The shared-hex focus-role decision, made mechanical: `focus` is a distinct role on a
         // shared hex, and the shared hex is the decision rather than an
         // oversight. Anyone "fixing" the duplicate has to delete this test and
         // say why — every candidate fourth cyan measured 7-9 dE from an

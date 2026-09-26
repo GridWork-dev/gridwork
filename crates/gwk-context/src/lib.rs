@@ -1,6 +1,6 @@
 //! The GridWork Context Runtime's contract vocabulary.
 //!
-//! ADR-0032 makes Context a third public plane beside Authored and Execution:
+//! The design makes Context a third public plane beside Authored and Execution:
 //! the compiler resolves one immutable manifest per spawn attempt, an
 //! independent verifier checks it, and Explain/Compare reconstruct what
 //! happened from immutable projections. This crate holds the words all of that
@@ -12,7 +12,7 @@
 //! grammar the rest is written against. The compiler and the verifier are NOT
 //! here, and their absence is the design rather than a stage of it. Each is its
 //! own crate — [`gwk-context-compiler`] and [`gwk-context-verifier`] — because
-//! R15 puts the verifier's independence in the dependency graph, where it is
+//! the verifier-independence rule puts that independence in the dependency graph, where it is
 //! enforced, instead of in a module boundary, where it would be remembered.
 //! That leaves this crate as the one thing both are allowed to share.
 //!
@@ -29,25 +29,25 @@
 //! The design forks behind these shapes are ruled in the phase's kickoff
 //! record. Summarized where a reader would otherwise wonder:
 //!
-//! - **[`Digest`] is not [`gwk_domain::BlobAddress`]** (R2/F2). Same
+//! - **[`Digest`] is not [`gwk_domain::BlobAddress`]** (the digest-type-distinction decision). Same
 //!   validation, different meaning: one names content, the other locates bytes
 //!   in the encrypted CAS.
-//! - **Truth stage is implicit, and there are five of them** (R4/F4). No
+//! - **Truth stage is implicit, and there are five of them** (the five-stage truth model decision). No
 //!   record carries a stage field; [`ContextStage`] exists so surfaces agree
-//!   on the words. ADR-0032 names three levels in one place and five stages
+//!   on the words. The design names three levels in one place and five stages
 //!   across two others — the ruling settles it at five rather than letting
 //!   each consumer guess.
-//! - **[`ParticipationState`] is a plain enum, not a state machine** (R5/F6).
+//! - **[`ParticipationState`] is a plain enum, not a state machine** (the plain-enum participation-state decision).
 //!   A resolved manifest is immutable, so participation is classified once and
 //!   never transitioned.
-//! - **[`ParticipationReason`] is closed** (R6/F3). Explain/Compare branches on
+//! - **[`ParticipationReason`] is closed** (the closed-reason-enum decision). Explain/Compare branches on
 //!   it across thousands of manifests; open strings work for `Gate.kind` only
 //!   because nothing branches on that.
 //!
 //! The four truth records and the wire-v2 grammar are generated public contract
 //! roots. Publishing those data shapes does not change the kernel's accepted
 //! protocol major, and `CONTRACT_VERSION` stays `1` — the wire major and the
-//! domain contract are separate axes, and only the first of them moved (R10).
+//! domain contract are separate axes, and only the first of them moved (the single-axis-change decision).
 
 pub mod explain;
 pub mod precedence;

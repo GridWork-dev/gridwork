@@ -16,7 +16,7 @@ repository.workspace = true
 # comment records both closed exits). It joins that job's exclude list for the
 # same reason xtask did.
 #
-# The crate exists so that R15 holds by dependency graph rather than by review
+# The crate exists so that the verifier-independence rule holds by dependency graph rather than by review
 # discipline: the verifier depends on `gwk-context` and never on this crate, so
 # no spelling in the verifier can reach the resolver or the compiler.
 publish = false

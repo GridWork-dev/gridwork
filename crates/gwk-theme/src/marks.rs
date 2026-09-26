@@ -51,7 +51,7 @@ pub enum MarkKind {
     /// HOW MUCH — the magnitude ladder a chart cell is drawn with (the FLEET
     /// cost axis). Four static levels of one Braille cell, ink-ordered so a
     /// taller reading is always a heavier one: weight survives the squint
-    /// that position or size alone does not (the ADR-0030 lesson).
+    /// that position or size alone does not (the weight-survives-the-squint lesson).
     Chart,
 }
 
@@ -119,14 +119,14 @@ pub const MARKS: &[Mark] = &[
     // non-moving state, and a state deciding not to move at all is exactly what
     // the motion rules leave to it.
     //
-    // U+2809 is dots 1+4 — the whole TOP ROW. ADR-0029 first picked U+2808
+    // U+2809 is dots 1+4 — the whole TOP ROW. An earlier design first picked U+2808
     // (dot 4 alone) for being the diagonal opposite of `idle`'s lower-left dot,
     // and the rendered probe showed why position alone was the wrong axis: two
     // single dots at the lightest available ink read as the same speck at a
     // glance, opposite corners or not. Two dots carry double the ink of `idle`,
     // so the pair now separates by WEIGHT as well as position — and a weight
     // difference survives the squint that a position difference does not.
-    // ADR-0030 amends ADR-0029 on this one property; everything else it ruled
+    // A later design amends that earlier one on this one property; everything else it ruled
     // (braille, static, `hue_dim`) stands.
     Mark { name: "starting",         glyphs: &['⠉'],      ascii: '^', kind: MarkKind::Expression },
     Mark { name: "spinner",          glyphs: SPINNER,          ascii: '-', kind: MarkKind::Expression },
@@ -145,7 +145,7 @@ pub const MARKS: &[Mark] = &[
     // pool after the proto's stand-ins failed admission (taste-gate item 17).
     // Box = a work item, ringed dot = one execution of it, small ring = a
     // spawn under that, diamond = a packet between parties. The two rings
-    // separate by WEIGHT as well as size — the ADR-0030 lesson that position
+    // separate by WEIGHT as well as size — the weight-survives-the-squint lesson that position
     // or size alone does not survive a squint.
     Mark { name: "task",     glyphs: &['⊞'], ascii: 'T', kind: MarkKind::GraphTier },
     Mark { name: "attempt",  glyphs: &['⊚'], ascii: 'A', kind: MarkKind::GraphTier },

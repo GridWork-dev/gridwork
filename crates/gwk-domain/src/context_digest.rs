@@ -15,7 +15,7 @@
 //! `blob.rs` rather than re-implemented, because "lowercase 64-hex sha-256" is
 //! one rule and two copies of it drift.
 //!
-//! Ruling R2 / fork F2.
+//! The digest-type-distinction decision.
 
 /// The one digest scheme v1 mints.
 ///

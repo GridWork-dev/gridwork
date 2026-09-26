@@ -251,7 +251,7 @@ pub async fn init(pretty: bool) -> Result<(), Failure> {
 ///    candidates is a sentence an operator cannot act on.
 ///
 /// `--from` states the base the operator believes the database is at, and the
-/// verb checks it like any other. **It does not relax R1 and never did.** The
+/// verb checks it like any other. **It does not relax the chain-start check and never did.** The
 /// resolver takes it as the chain's start, and `assert_base` then compares the
 /// recorded fingerprint against that same value and refuses on a mismatch — so
 /// `--from` naming anything other than what the database records is refused,
@@ -349,7 +349,7 @@ pub async fn migrate(
         .flat_map(|step| step.backend_migrations.iter().copied())
         .collect();
 
-    // R1, before any statement executes and before the dry run reports a plan
+    // The chain-start check, before any statement executes and before the dry run reports a plan
     // it could not carry out. A chain resolved from a base the database is not
     // at describes a shape that is not there.
     gwk_kernel::migrate::assert_base(&pool, base)
@@ -362,7 +362,7 @@ pub async fn migrate(
     // `GWK_RUNTIME_ROLE` is read from whatever environment the operator happens
     // to be in and nothing in the database records which role was granted last,
     // so a stale export silently widens the trust boundary to a second role —
-    // and every guard in this phase is blind to it, because R3 and `admin
+    // and every guard in this phase is blind to it, because the privilege-parity check and `admin
     // verify` both re-read the same variable and would find their own answer
     // perfectly satisfied.
     let attributes = admin::role_attributes(&pool, config.runtime_role())
@@ -405,7 +405,7 @@ pub async fn migrate(
             .await
             .map_err(refusal)?;
 
-        // No R3 here, and its absence is the fix rather than an omission. The
+        // No privilege-parity check here, and its absence is the fix rather than an omission. The
         // grant matrix rung asserts a relation count that belongs to the
         // MIGRATED schema — `EXPECTED_RELATIONS`, 35 — and a dry run by
         // definition holds the database at its base, where the count is 27.
@@ -415,7 +415,7 @@ pub async fn migrate(
         // it was being asked of the wrong schema, and it now runs inside the
         // applier's transaction where the step has produced the shape it counts.
         //
-        // What is left is honest and worth having: R1 has already run above,
+        // What is left is honest and worth having: the chain-start check has already run above,
         // the chain resolved, and the plan below says exactly which steps and
         // which backend migrations a real run would carry. That is a preflight,
         // not a proof, and the envelope no longer claims otherwise.
@@ -456,9 +456,9 @@ pub async fn migrate(
     .await
     .map_err(kernel_failure)?;
 
-    // R3 and R4 have already run, inside `apply`'s transaction, where a failure
+    // The privilege-parity check and the superuser-refusal check have already run, inside `apply`'s transaction, where a failure
     // is a rollback rather than a report. What is left is the one rung that can
-    // only be asked afterwards: R5 re-reads the fingerprint and the log to catch
+    // only be asked afterwards: the post-commit fingerprint recheck re-reads the fingerprint and the log to catch
     // a writer that was never fenced, and a measurement that has to notice
     // something outside the transaction cannot be taken inside it.
     let verified = gwk_kernel::migrate::assert_result(&pool, &applied).await;
@@ -505,7 +505,7 @@ pub async fn migrate(
 /// fingerprint said BEFORE the run, and what the run did NOT do.
 ///
 /// `verified` and `verification_error` are added by the caller rather than
-/// here, because whether R5 passed is not known until after this document's
+/// here, because whether the post-commit fingerprint recheck passed is not known until after this document's
 /// other fields are.
 fn migrated_receipt(
     scratch: &str,

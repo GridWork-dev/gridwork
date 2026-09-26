@@ -9,7 +9,7 @@
 //! contract's closed set dies at INSERT; that the retention sweep reclaims
 //! exactly what an expired class window stops protecting and nothing a pin or
 //! a missing window still protects; and that the v1 container's own integrity
-//! behaviour arrives through the adapter unchanged (R17 — a regression canary,
+//! behaviour arrives through the adapter unchanged (the container-bytes-unchanged rule — a regression canary,
 //! not new behaviour).
 //!
 //! `#[ignore]` because it needs a server — see `tests/common/mod.rs`.
@@ -620,7 +620,7 @@ async fn bytes_already_sealed_under_a_foreign_key_domain_are_refused() {
 #[tokio::test]
 #[ignore = "needs a PostgreSQL; see tests/common/mod.rs"]
 async fn the_container_integrity_canary_holds_through_the_adapter() {
-    // R17: the container bytes and their AEAD are untouched, so tampering a
+    // The container-bytes-unchanged rule: the container bytes and their AEAD are untouched, so tampering a
     // byte on disk fails authentication through the adapter exactly as it does
     // through the plain store. A canary for shipped behaviour, not this task's
     // RED — a fresh arm here could not fail for the intended missing

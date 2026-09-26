@@ -361,7 +361,7 @@ fn an_equal_tier_disagreement_fails_closed_rather_than_picking() {
 }
 
 // ============================================================
-// Authority — context narrows, never widens (D3)
+// Authority — context narrows, never widens (the context-narrows-never-widens rule)
 // ============================================================
 
 #[test]
@@ -698,7 +698,7 @@ fn the_manifest_id_is_the_only_request_value_attribution_carries() {
 }
 
 // ============================================================
-// Attribution — derived from the record, never from an input (R12)
+// Attribution — derived from the record, never from an input (the record-derived-attribution rule)
 // ============================================================
 
 #[test]
@@ -710,9 +710,9 @@ fn no_client_actor_string_reaches_the_attribution() {
     // THE ONE CARVE-OUT, stated because this fixture's silence would else
     // imply a stronger claim than holds. `derived_from` IS a request value —
     // it is `CompileRequest.manifest_id` — so seeding the sentinel there does
-    // put it in the attribution. That is the design and not an R12 breach:
+    // put it in the attribution. That is the design and not a record-derived-attribution breach:
     // attribution names the RECORD it was derived from, and a manifest id is
-    // a record identity, not a claim about who acted. R12 forbids trusting a
+    // a record identity, not a claim about who acted. The rule forbids trusting a
     // client-supplied ACTOR string; it does not forbid naming the record.
     // `the_manifest_id_is_the_only_request_value_attribution_carries` pins
     // the carve-out to that one field, which is why this test's name says

@@ -4,7 +4,7 @@
 //!
 //! [`evaluate`] takes the caller's class scope as an argument supplied by the
 //! process, and [`ContextQuery`] has no scope field for a client to set
-//! (operator ruling, 2026-09-02). That is CTX-12 a third time: a client cannot
+//! (operator ruling, 2026-09-02). That is the attribution-is-provenance-not-authorization rule a third time: a client cannot
 //! assert its own privilege because the wire has nowhere to say it. Task 10
 //! made the same choice for attribution, and the reasoning transfers exactly —
 //! a field a caller can fill is a field a caller can lie in, and no amount of

@@ -881,7 +881,7 @@ jobs:
           # gwk-context-compiler is the same bind one crate later: it is
           # `publish = false` BECAUSE it depends on gwk-context by path, and it
           # is a separate crate so the verifier's dependency graph can exclude
-          # it (R15) — an exclusion that only means something if the crate is
+          # it (the verifier-independence rule) — an exclusion that only means something if the crate is
           # a real workspace member, which is why it is one and not a module.
           #
           # gwk-context-verifier is the third link in that same chain and joins
@@ -1299,7 +1299,7 @@ jobs:
             exit 1
           }
 
-  # The house lint and format floor (SPEC house-standards D2b/D2c/D3). Wired here
+  # The house lint, format, and config-vendoring floor. Wired here
   # rather than left as scripts someone runs by hand, which is the state `typecheck`
   # sat in until #120 — configured, documented, and never once invoked by CI.
   lint:
@@ -2063,6 +2063,29 @@ jobs:
             echo 'leak-scan accepted a seeded violation — the gate is broken' >&2
             exit 1
           fi
+      # The internal-id tier reads the tracked tree only, so its seed has to be a tracked
+      # file: intent-to-add makes it visible to `git ls-files` without a commit. The
+      # failure must also name the seeded file, because any other hit would fail the scan
+      # without proving that this tier caught anything.
+      - name: prove the internal-id tier can fail (seeded tracked file)
+        shell: bash
+        run: |
+          set -euo pipefail
+          seed_file=tools/.leak-seed-id.txt
+          trap 'git rm -q --cached -f "$seed_file" 2>/dev/null || true; rm -f "$seed_file"' EXIT
+          printf 'see ruling R%s\n' 15 > "$seed_file"
+          git add -N "$seed_file"
+          out=""
+          if out="$(./tools/leak-scan.sh 2>&1)"; then
+            echo 'leak-scan accepted a seeded internal id in a tracked file: the id tier is broken' >&2
+            exit 1
+          fi
+          grep -qF "$seed_file" <<<"$out" || {
+            echo 'the scan failed, but not on the seeded file:' >&2
+            printf '%s\n' "$out" >&2
+            exit 1
+          }
+          echo 'leak-scan: seeded internal id correctly rejected'
 
   # Commit messages and every line added or deleted inside the PR range publish
   # too — the final tracked tree is not the whole exposure. Same seeded proof.

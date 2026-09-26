@@ -1,6 +1,6 @@
-// Vendored-config drift gate (house-standards SPEC D3, Lane C).
+// Vendored-config drift gate (the vendor-by-copy rule, Lane C).
 //
-// D3 says COPY the shared configs, do not depend on them. Two independent reasons: bun
+// The vendor-by-copy rule says COPY the shared configs, do not depend on them. Two independent reasons: bun
 // cannot reliably install them from GitHub Packages, and — SPEC acceptance 15 — a config
 // that extends by URL fails outright in a public repo, which this one is. Copying is the
 // reversible choice. What makes a copy safe rather than a fork is this test: it hashes
@@ -8,7 +8,7 @@
 //
 // So the vendored files are NOT editable here. A change goes into the canonical copy and
 // is re-vendored; editing the local one turns a shared floor into several private ones,
-// silently, which is the exact failure D3 exists to prevent.
+// silently, which is the exact failure the vendor-by-copy rule exists to prevent.
 //
 // WHY THE CANONICAL LOCATION IS DISCOVERED RATHER THAN WRITTEN DOWN. This repo is public
 // and tools/leak-scan.sh rejects any tracked file naming a private-estate repo or carrying
@@ -72,7 +72,7 @@ const VENDORED: readonly (readonly [string, string])[] = [
   // for plugin.js. It carries a private-estate repo name in a comment, so leak-scan.sh
   // refuses it in this public repo and it cannot be vendored until that is reworded
   // upstream — the same defect already fixed once in react.oxlintrc.json and missed in its
-  // sibling. Editing the copy here is not the workaround; that IS the fork D3 forbids.
+  // sibling. Editing the copy here is not the workaround; that IS the fork the vendor-by-copy rule forbids.
   // What covers the gap meanwhile is tools/oxlint-plugin-load.test.ts, which proves the
   // plugin loads and both security rules fire against THIS repo's oxlint build.
   //
@@ -85,7 +85,7 @@ const VENDORED: readonly (readonly [string, string])[] = [
   // These two are why the site declares all 24 roles literally in all three theme scopes
   // instead of generating them: keeping the validator byte-identical is what makes this a
   // plain equality check. A local relaxation would have made it a fork with a diff to
-  // maintain, which is the thing D3 exists to prevent.
+  // maintain, which is the thing the vendor-by-copy rule exists to prevent.
   ["site/tools/design-tokens/contract.ts", "tools/design-tokens/contract.ts"],
   ["site/tools/design-tokens/index.ts", "tools/design-tokens/index.ts"],
 ] as const;
@@ -95,7 +95,7 @@ const VENDORED: readonly (readonly [string, string])[] = [
  *
  *  These exist because the comparison below cannot run on a CI runner — there is no
  *  canonical checkout to compare against — and CI is the only place a merge is actually
- *  gated. Without them the whole of D3 is a local courtesy: a vendored config edited on a
+ *  gated. Without them the whole of the vendor-by-copy rule is a local courtesy: a vendored config edited on a
  *  branch reaches main with every check green.
  *
  *  The two halves catch different things and neither subsumes the other. A digest catches
@@ -127,7 +127,7 @@ function sha256(path: string): string {
 // Runs everywhere, including CI. Deliberately a separate describe from the canonical
 // comparison below, which skips when there is nothing to compare against: one of these two
 // blocks always executes, so "all green" can never mean "nothing ran".
-describe("vendored house configs match their recorded bytes (SPEC D3)", () => {
+describe("vendored house configs match their recorded bytes (the vendor-by-copy rule)", () => {
   // Asserted against VENDORED rather than a literal, so a file added to one list and
   // forgotten in the other fails here instead of going unwatched by the half that runs in
   // CI. `expect(...).toHaveLength` on an empty VENDORED would pass a `for` loop silently.
@@ -151,7 +151,7 @@ describe("vendored house configs match their recorded bytes (SPEC D3)", () => {
 
 const CANONICAL_ROOT = findCanonical();
 
-describe("vendored house configs match canonical (SPEC D3)", () => {
+describe("vendored house configs match canonical (the vendor-by-copy rule)", () => {
   // CI runners have no canonical checkout, so cross-repo drift is only verifiable locally.
   // Skipping LOUDLY beats a gate that silently passes because its input was absent — an
   // absent canonical is "not checked", never "checked and identical".

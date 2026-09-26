@@ -1,7 +1,7 @@
 //! The Context CAS metadata contract: classification classes and the storage
 //! port over them.
 //!
-//! Context blobs ride the same encrypted CAS as every other blob (R17: the v1
+//! Context blobs ride the same encrypted CAS as every other blob (the container-bytes-unchanged rule: the v1
 //! container bytes are untouched — these are metadata-layer concerns BESIDE the
 //! blob, exactly how evidence pinning was added without touching the container
 //! format). What Context adds is classification, and each class axis is a
@@ -10,7 +10,7 @@
 //!
 //! The three axes are orthogonal and none is derivable from another:
 //!
-//! * [`ContentClass`] is the KEK domain (R19): one key-encryption key per
+//! * [`ContentClass`] is the KEK domain (the one-key-per-class rule): one key-encryption key per
 //!   content class, so a public/private seam false-negative becomes a contained
 //!   compromise rather than a full private-content one. The class decides which
 //!   KEK seals a blob's DEK; a blob sealed under one class's KEK fails
@@ -19,14 +19,14 @@
 //!   was sealed. The classification travels beside the blob so an audit can ask
 //!   it without opening anything; the redaction BEHAVIOUR itself belongs to the
 //!   runtimes that produce the bytes, not to storage.
-//! * [`RetentionClass`] is D4's "retention by content class" given a mechanism
-//!   (R20): a first-class column the sweep keys on, not another hardcoded
+//! * [`RetentionClass`] is the design's "retention by content class" given a mechanism
+//!   (the retention-is-data rule): a first-class column the sweep keys on, not another hardcoded
 //!   branch in backend SQL. The class set is contract; the per-class windows
 //!   are deployment policy and live in backend configuration — a class with no
 //!   configured window is retained, so an unconfigured deployment fails safe
 //!   toward keeping bytes.
 //!
-//! Evidence pinning is reused as-is (R21): Context blobs are pinned through the
+//! Evidence pinning is reused as-is (the reuse-the-existing-pin-mechanism rule): Context blobs are pinned through the
 //! same (digest, evidence id) set as every other blob, and a pin overrides
 //! retention expiry unconditionally.
 //!
@@ -85,9 +85,9 @@ macro_rules! context_class {
 }
 
 context_class! {
-    /// The KEK domain a blob is sealed under (R19).
+    /// The KEK domain a blob is sealed under (the one-key-per-class rule).
     ///
-    /// The split is the public/private seam (F18): conformance fixtures and
+    /// The split is the public/private seam (the public-private-seam split): conformance fixtures and
     /// real content share one physical store and never share a key, so a blob
     /// that crosses the seam is unreadable rather than quietly exposed.
     ///
@@ -121,7 +121,7 @@ context_class! {
 }
 
 context_class! {
-    /// The retention family the sweep keys on (R20).
+    /// The retention family the sweep keys on (the retention-is-data rule).
     ///
     /// Bounded families beyond these arrive additively (each is a contract
     /// change with its step); 8D's memory pages join when their writer exists.
@@ -295,7 +295,7 @@ pub trait ContextCasStore {
         digest: &BlobAddress,
     ) -> impl Future<Output = Result<Option<ContextBlobRecord>, ContextCasError>>;
 
-    /// Pin as evidence (R21: the same pin set every blob answers to), blocking
+    /// Pin as evidence (the reuse-the-existing-pin-mechanism rule: the same pin set every blob answers to), blocking
     /// sweep — retention expiry included — until every pin is released.
     fn pin(
         &self,

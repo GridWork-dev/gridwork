@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lint.sh — the one invocation home for oxlint in this repo (SPEC house-standards D2b).
+# lint.sh — the one invocation home for oxlint in this repo (the house lint floor).
 #
 # Same cwd constraint as tools/format.sh: the root `.oxlintrc.json` and the nested
 # `site/.oxlintrc.json` are discovered relative to where oxlint starts, so root is the only

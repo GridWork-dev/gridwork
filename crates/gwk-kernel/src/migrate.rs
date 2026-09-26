@@ -458,7 +458,7 @@ pub async fn apply(
     // promised they can do with it.
     //
     // The base of the first row is asserted against what the database recorded,
-    // not taken from the step alone. R1 compared those before any statement ran;
+    // not taken from the step alone. The chain-start check compared those before any statement ran;
     // asking again here is what keeps the ledger from recording a start this
     // database was never at if that rung is ever moved or weakened.
     if chain[0].base != recorded_base {
@@ -517,7 +517,7 @@ pub async fn apply(
         .await?;
     let watermark_after = watermark(&mut tx).await?;
 
-    // R3 and R4, INSIDE the transaction, which is the only place they can
+    // The privilege-parity check and the superuser-refusal check, INSIDE the transaction, which is the only place they can
     // refuse rather than merely report. Both are questions about the schema the
     // step just produced, and the catalogue changes are visible here — so asking
     // them after the commit, as an earlier draft did, bought nothing and cost
@@ -525,7 +525,7 @@ pub async fn apply(
     // append-only guard broken now aborts this transaction; before, it committed
     // and was told about afterwards, with no exit but the operator's own dump.
     //
-    // R5 stays after the commit deliberately. It re-reads the log to catch a
+    // The post-commit fingerprint recheck stays after the commit deliberately. It re-reads the log to catch a
     // writer that was never fenced, and a measurement taken inside the
     // transaction that would have to detect it cannot see anything outside.
     assert_grant_matrix(&mut *tx, role).await?;
@@ -547,7 +547,7 @@ pub async fn apply(
     })
 }
 
-/// R1 — the database records the digest the chain starts from.
+/// The chain-start check — the database records the digest the chain starts from.
 ///
 /// Before any statement executes. A chain resolved from a base the database is
 /// not at would apply DDL to a shape it does not describe, and the first
@@ -609,7 +609,7 @@ fn is_guard_refusal(error: &sqlx::Error, relation: &str) -> bool {
         && database.message().contains(&format!("{relation} "))
 }
 
-/// R4 — the protections refuse a superuser, not merely an ungranted role.
+/// The superuser-refusal check — the protections refuse a superuser, not merely an ungranted role.
 ///
 /// As superuser deliberately: a grant binds the runtime role and nothing else,
 /// and the credential applying a migration is the admin one. A battery that
@@ -993,7 +993,7 @@ const EXPECTED_TRUNCATE_GUARDS: usize = 19;
 /// would leave them proven by nothing at all.
 const EXPECTED_DELETE_GUARDS: usize = 20;
 
-/// R5 — the database ends where the chain said it would, measured rather than
+/// The post-commit fingerprint recheck — the database ends where the chain said it would, measured rather than
 /// inferred.
 ///
 /// The event count AND the watermark are read again and compared to what was
@@ -1191,7 +1191,7 @@ fn grant_class(schema: &str, relation: &str) -> Option<GrantClass> {
 /// went red on `26 != 22` once, and the count is what fired.
 const EXPECTED_RELATIONS: usize = 36;
 
-/// R3 — every relation in both schemas holds exactly its declared privileges.
+/// The privilege-parity check — every relation in both schemas holds exactly its declared privileges.
 ///
 /// Takes the role by name rather than assuming the caller has assumed it:
 /// `has_table_privilege(role, ..)` answers for a role the connection is not,

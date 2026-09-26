@@ -22,7 +22,7 @@
 //! engine adapter's report about a spawned process. This is the Context
 //! plane's own truth vocabulary; the two never meet.
 //!
-//! ## CTX-12 — attribution is provenance, not authorization
+//! ## The attribution-is-provenance-not-authorization rule
 //!
 //! Re-disclosed here because 8A is the phase required to state it, and because
 //! this module is where it becomes structural rather than a promise.
@@ -52,7 +52,7 @@
 //! There is no closed `KernelEvent` sum type in this system and this module
 //! does not invent one. [`crate::EventEnvelope`] carries open bounded
 //! `aggregate_type` / `event_type` strings over a generic JSON payload, so the
-//! ten D4 lifecycle events are ten new `event_type` values under three new
+//! ten lifecycle events the design names are ten new `event_type` values under three new
 //! `aggregate_type` values. [`ContextEventName`] and [`ContextAggregate`] are
 //! closed enums over exactly those strings — closed on this side, open on the
 //! envelope's, which is what lets the log accept them without a contract
@@ -114,7 +114,7 @@ context_id!(
     /// One Context run: the span from opening a rendered manifest to closing it.
     ///
     /// Distinct from `AttemptId` on purpose. An attempt is one spawn; a run is
-    /// the Context-plane lifetime around it, and ADR-0032 lists run and attempt
+    /// the Context-plane lifetime around it, and the design lists run and attempt
     /// as separate stable IDs precisely so a projection can join them rather
     /// than assume they are the same thing.
     ContextRunId
@@ -124,7 +124,7 @@ context_id!(
     OptimizationCandidateId
 );
 
-/// A compiler-DERIVED attribution component. Never client-supplied (CTX-12).
+/// A compiler-DERIVED attribution component. Never client-supplied (the attribution-is-provenance-not-authorization rule).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
 #[serde(transparent)]
 pub struct AttributionPart(String);
@@ -293,10 +293,10 @@ impl std::fmt::Display for ContextAggregate {
 
 macro_rules! context_event_names {
     ($($(#[$doc:meta])* $variant:ident => $wire:literal @ $aggregate:ident),* $(,)?) => {
-        /// The ten D4 lifecycle `event_type` values.
+        /// The ten lifecycle `event_type` values the design names.
         ///
-        /// Ten because ADR-0032 decision 4 names ten. Verification and rejection
-        /// are ONE name carrying a verdict, which is how the ADR names them too —
+        /// Ten because the Context lifecycle has exactly ten. Verification and rejection
+        /// are ONE name carrying a verdict, which is how the design names them too —
         /// the alternative spends a name on a field and makes "was it verified?"
         /// a question about which of two event types arrived.
         ///
@@ -422,7 +422,7 @@ pub enum CandidateDisposition {
 // The ten lifecycle facts
 // ============================================================
 
-/// One Context lifecycle fact, in the ten shapes D4 names.
+/// One Context lifecycle fact, in the ten shapes the design names.
 ///
 /// This single enum is the vocabulary for BOTH directions: it is what a client
 /// asks the kernel to record ([`RecordContextFact`]) and what the log holds
@@ -630,10 +630,10 @@ impl ContextFact {
 /// One shape, one field. Recording a fact is the ONLY Context write, because
 /// Context may compile, verify, attest, project, explain, compare and suggest —
 /// and may not independently authorize work or write execution truth outside
-/// kernel commands (ADR-0032). A grammar with a second verb would be a second
+/// kernel commands (the design). A grammar with a second verb would be a second
 /// write authority wearing a smaller name.
 ///
-/// **There is no actor field here and there must never be one.** See CTX-12 in
+/// **There is no actor field here and there must never be one.** See the attribution-is-provenance-not-authorization rule in
 /// the module docs; the omission is asserted by test, not left to review.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
 #[serde(deny_unknown_fields)]
@@ -649,7 +649,7 @@ pub struct RecordContextFact {
 ///
 /// Compiler-DERIVED. Every field is re-read from the resolved manifest the
 /// compiler itself produced; none is copied from a request. That is the whole
-/// of the CTX-12 control, and it is why this type appears on the event payload
+/// of the attribution-is-provenance-not-authorization control, and it is why this type appears on the event payload
 /// and nowhere in [`RecordContextFact`].
 ///
 /// This is provenance, not authorization. It answers "which compiler run
@@ -814,7 +814,11 @@ mod tests {
     fn there_are_exactly_ten_lifecycle_events_and_every_one_has_a_fact() {
         // The count first. Everything below folds over a collection, and a fold
         // over a short collection agrees with itself just as happily.
-        assert_eq!(ContextEventName::ALL.len(), 10, "ADR-0032 D4 names ten");
+        assert_eq!(
+            ContextEventName::ALL.len(),
+            10,
+            "the Context lifecycle has exactly ten event names"
+        );
 
         let facts = every_fact();
         assert_eq!(facts.len(), 10, "one fact per lifecycle event");
@@ -859,7 +863,7 @@ mod tests {
 
     #[test]
     fn no_context_command_can_carry_attribution() {
-        // CTX-12, mechanically. A client must not be able to assert who it is
+        // The attribution-is-provenance-not-authorization rule, mechanically. A client must not be able to assert who it is
         // on a fact that becomes provenance. This walks the SERIALIZED form
         // rather than the type, because a field added with a serde rename is
         // still a field on the wire.
