@@ -1,0 +1,53 @@
+# Deploys gridwork.sh: the static export of site/ to Workers static assets (script
+# `gridwork-site`, site/wrangler.jsonc). Runs on main pushes that can change the export, or by
+# hand. The build stamps the pushed commit into /health; the CI site job has already smoked the
+# same export under the same asset handler before anything reaches main.
+name: site
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - ".github/workflows/site.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: site-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3.14"
+      # wrangler runs on Node; the runner image's default Node is older than wrangler 4 needs.
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 22
+      - name: install
+        working-directory: site
+        run: bun install --frozen-lockfile
+      - name: build the static export
+        working-directory: site
+        env:
+          GRIDWORK_GIT_SHA: ${{ github.sha }}
+        run: bun run build
+      # The token is scoped to Workers scripts for this one script; the account id is a
+      # repository variable, not a secret.
+      - name: deploy
+        working-directory: site
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          WRANGLER_SEND_METRICS: "false"
+        run: bunx wrangler@4.141.0 deploy

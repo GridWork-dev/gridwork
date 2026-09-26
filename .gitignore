@@ -18,6 +18,8 @@
 .codebase-memory.json
 /site/node_modules/
 /site/.next/
+/site/out/
+/site/.wrangler/
 /site/.source/
 /site/next-env.d.ts
 /site/*.tsbuildinfo

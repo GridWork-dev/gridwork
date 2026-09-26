@@ -1,41 +1,17 @@
 // @ts-check
 import { createMDX } from "fumadocs-mdx/next";
 
-const isDev = process.env.NODE_ENV === "development";
-// Plausible is the one third-party origin this site talks to: the script host
-// for script-src, and the same host again for connect-src because the script
-// POSTs its events back to /api/event. Naming the host is the mechanism here —
-// the policy carries no nonce, so there is nothing narrower to hang it on.
-const plausible = "https://plausible.io";
-const contentSecurityPolicy = [
-  "default-src 'self'",
-  `script-src 'self' 'unsafe-inline' ${plausible}${isDev ? " 'unsafe-eval'" : ""}`,
-  "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data:",
-  "font-src 'self'",
-  `connect-src 'self' ${plausible}`,
-  "object-src 'none'",
-  "base-uri 'none'",
-  "form-action 'none'",
-  "frame-ancestors 'none'",
-  ...(isDev ? [] : ["upgrade-insecure-requests"]),
-].join("; ");
-
-const securityHeaders = [
-  {
-    key: "Strict-Transport-Security",
-    value: "max-age=31536000; includeSubDomains",
-  },
-  { key: "X-Content-Type-Options", value: "nosniff" },
-  { key: "X-Frame-Options", value: "DENY" },
-  { key: "Referrer-Policy", value: "no-referrer" },
-  { key: "Content-Security-Policy", value: contentSecurityPolicy },
-];
-
+// A static export, served by Workers static assets (site/wrangler.jsonc). There is no
+// server at request time, so the response headers live in public/_headers, which the
+// asset handler applies to every response, and /health is rendered at build time.
 /** @type {import('next').NextConfig} */
 const config = {
-  output: "standalone",
-  poweredByHeader: false,
+  output: "export",
+  // The live site answers /docs and 308s /docs/ to it; the export keeps that shape.
+  trailingSlash: false,
+  // No image optimizer runs at request time. The site uses no next/image today; this keeps
+  // one added later from failing the build.
+  images: { unoptimized: true },
   reactStrictMode: true,
   experimental: {
     // TypeScript 7 is the Go port. It ships no JavaScript compiler API, so every
@@ -50,9 +26,6 @@ const config = {
     // trusting the exit code. `tsc --noEmit` itself is unaffected — the CLI is
     // exactly what the Go port still provides.
     useTypeScriptCli: true,
-  },
-  async headers() {
-    return [{ source: "/:path*", headers: securityHeaders }];
   },
 };
 

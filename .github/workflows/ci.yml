@@ -1064,9 +1064,9 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: "1.3.14"
-      # The docker build below runs the same gate inside `bun run build`; this
-      # leg exists so the SEEDED violations can run against a live checkout,
-      # which an image build cannot host.
+      # The export build below runs the same gate inside `bun run build`; this
+      # leg runs it first so a stale mirror fails before the build, and so the
+      # SEEDED violations further down have a clean baseline to start from.
       - name: docs mirror freshness gate
         working-directory: site
         run: |
@@ -1075,7 +1075,7 @@ jobs:
           bun run check:docs
       # `site/package.json` has defined this script and `site/README.md` has
       # told contributors to run it since the project landed, and no workflow
-      # invoked it. The docker leg below runs `next build`, which does NOT
+      # invoked it. The export build below runs `next build`, which does NOT
       # type-check — so nothing here ever read a type error.
       #
       # `next typegen` first is not optional: it writes the generated route
@@ -1183,121 +1183,70 @@ jobs:
           # with the checker replaced by `exit 1`.
           bun run check:docs
           echo "docs-freshness: the live tree is fresh"
-      # Built WITH the SHA, the same way a deploy does it. The value has to survive
-      # a build ARG, an ENV in a different stage, and a runtime read — three places
-      # it can be dropped without anything going red. The smoke step below asserts
-      # the route echoes this exact value back, which is the only way to know the
-      # chain is intact.
-      - name: Build standalone site image
-        run: docker build -f site/Dockerfile --build-arg "GIT_SHA=${GIT_SHA}" -t gridwork-site:ci .
+      # Built WITH the SHA, the same way .github/workflows/site.yml builds a deploy. The
+      # value is baked into the exported /health file at `next build`; a build that dropped
+      # it still exports a /health that answers 200 with a cheerful "unknown", which is how
+      # a six-commit-stale build once sat in production unnoticed. So the smoke below reads
+      # it back and compares.
+      - name: build the static export
+        working-directory: site
+        env:
+          GRIDWORK_GIT_SHA: ${{ github.sha }}
+        run: bun run build
+      # wrangler runs on Node; the runner image's default Node is older than wrangler 4 needs.
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 22
+      # out/ served the way production serves it: through the Workers asset handler, in
+      # wrangler's local mode (no account, no network beyond the package download). Every
+      # route in the built sitemap, the full security-header set, the not-found page and the
+      # /health SHA are checked by scripts/smoke.sh — the same script run by hand against a
+      # deployed URL.
+      - name: smoke the export under the Workers asset handler
+        working-directory: site
         env:
           GIT_SHA: ${{ github.sha }}
-      - name: Smoke routes and security headers
-        env:
-          GIT_SHA: ${{ github.sha }}
+          WRANGLER_SEND_METRICS: "false"
         run: |
           set -euo pipefail
-          # T27: the image runs NODE_ENV=production, where the origin gate is unconditional —
-          # site/lib/origin-verification.ts honors mode=disabled ONLY under development/test. So
-          # the smoke arms the gate with a throwaway secret and presents it, rather than trying to
-          # switch it off. 32 random bytes as base64url: 43 chars whose final character always
-          # falls in the [AEIMQUYcgkosw048] class the decoder requires.
-          synthetic_secret="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
-          if [[ ! "$synthetic_secret" =~ ^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$ ]]; then
-            echo "site smoke: generated secret is not a canonical 32-byte base64url value" >&2
-            exit 1
-          fi
-          container_id="$(docker run -d -p 127.0.0.1:8080:3000 -e PORT=3000 \
-            -e "GRIDWORK_ORIGIN_SECRET_CURRENT=${synthetic_secret}" gridwork-site:ci)"
-          if [[ ! "$container_id" =~ ^[a-f0-9]{64}$ ]]; then
-            echo "site smoke: invalid container id" >&2
-            exit 1
-          fi
-          cleanup() { docker rm -f "$container_id" >/dev/null 2>&1 || true; }
-          trap cleanup EXIT
-
-          ready=0
-          for _ in $(seq 1 30); do
-            if curl -fsS -o /dev/null -H "X-Gridwork-Origin-Secret: ${synthetic_secret}" \
-              http://127.0.0.1:8080/; then
-              ready=1
-              break
-            fi
-            sleep 1
-          done
-          if [[ "$ready" -ne 1 ]]; then
-            echo "site smoke: server did not become ready" >&2
-            docker logs "$container_id" >&2
-            exit 1
-          fi
-
-          # The gate must actually REJECT, not merely tolerate a valid header. Without this arm
-          # the whole smoke below passes identically whether the gate enforces or was deleted,
-          # because every other request here carries a good secret. Cover an asset and a metadata
-          # path too: proxy.ts deliberately declares no matcher, and that is the claim being made.
-          for path in / /health /docs /robots.txt /_next/static/chunks/main.js; do
-            status="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:8080${path}")"
-            if [ "$status" != "403" ]; then
-              echo "site smoke: ${path} answered ${status} without the origin secret, expected 403" >&2
-              echo "site smoke: the origin gate is not covering every route" >&2
-              exit 1
-            fi
-          done
-          wrong_secret="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
-          status="$(curl -sS -o /dev/null -w '%{http_code}' \
-            -H "X-Gridwork-Origin-Secret: ${wrong_secret}" http://127.0.0.1:8080/health)"
-          if [ "$status" != "403" ]; then
-            echo "site smoke: /health answered ${status} for a WRONG secret, expected 403" >&2
-            exit 1
-          fi
-          echo "site smoke: the origin gate rejects missing and wrong secrets on every route"
-
-          check_response() {
-            local path="$1"
-            local expected_status="$2"
-            local response
-            response="$(curl -sS -D - -o /dev/null \
-              -H "X-Gridwork-Origin-Secret: ${synthetic_secret}" "http://127.0.0.1:8080${path}")"
-            echo "$response" | grep -qE "^HTTP/[0-9.]+ ${expected_status} "
-            for header in Strict-Transport-Security X-Content-Type-Options X-Frame-Options Referrer-Policy Content-Security-Policy; do
-              echo "$response" | grep -qi "^${header}:"
+          pids=()
+          trap 'for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; done' EXIT
+          serve() {
+            local port="$1"
+            bunx wrangler@4.141.0 dev --ip 127.0.0.1 --port "$port" > "$RUNNER_TEMP/wrangler-$port.log" 2>&1 &
+            pids+=("$!")
+            for _ in $(seq 1 90); do
+              curl -fsS -o /dev/null "http://127.0.0.1:$port/" 2>/dev/null && return 0
+              sleep 1
             done
-            if echo "$response" | grep -qi '^X-Powered-By:'; then
-              echo "site smoke: X-Powered-By leaked on ${path}" >&2
-              exit 1
-            fi
+            echo "site smoke: wrangler dev on $port did not come up" >&2
+            tail -40 "$RUNNER_TEMP/wrangler-$port.log" >&2
+            return 1
           }
 
-          check_response / 200
-          check_response /docs 200
-          check_response /health 200
-          check_response /this-path-does-not-exist 404
+          serve 8787
+          bash scripts/smoke.sh http://127.0.0.1:8787 "$GIT_SHA"
 
-          # railway.json points healthcheckPath at /health, so a 200 there is now the
-          # difference between a failed deploy and a broken container being served.
-          # A 200 is not the whole claim, though: the route exists to report which
-          # commit is running, and that value crosses a build ARG, an ENV in a
-          # different stage, and a runtime read. Any of the three can be dropped
-          # while the route still answers 200 with a cheerful "unknown" — which is
-          # exactly how the sibling repo carrying this same stamp let a
-          # six-commit-stale build sit in production unnoticed. So compare it.
-          reported="$(curl -sS -H "X-Gridwork-Origin-Secret: ${synthetic_secret}" \
-            "http://127.0.0.1:8080/health" | jq -r '.sha')"
-          if [ "$reported" != "${GIT_SHA}" ]; then
-            echo "site smoke: /health reports '${reported}', expected '${GIT_SHA}'" >&2
-            echo "site smoke: the ARG -> ENV -> route chain is broken" >&2
+          # The smoke must be able to fail. A wrong expected SHA must be refused, or the
+          # comparison above is decoration.
+          if bash scripts/smoke.sh http://127.0.0.1:8787 0000000000000000000000000000000000000000 2>/dev/null; then
+            echo "site smoke: accepted a /health SHA that is not the built commit — the check is broken" >&2
             exit 1
           fi
-          echo "site smoke: /health reports the built commit"
-
-          # And it must not be cached. A cached health check answers for whichever
-          # container served it last, which is the one question it may never answer.
-          curl -sS -D - -o /dev/null -H "X-Gridwork-Origin-Secret: ${synthetic_secret}" \
-            "http://127.0.0.1:8080/health" |
-            grep -qi '^cache-control:.*no-store' || {
-            echo "site smoke: /health is missing cache-control: no-store" >&2
+          # And a missing security header must be refused: serve a copy of the export with one
+          # _headers line removed and require the same script to go red on it.
+          cp -r out "$RUNNER_TEMP/out-seeded"
+          sed -i '/^  Referrer-Policy:/d' "$RUNNER_TEMP/out-seeded/_headers"
+          mv out "$RUNNER_TEMP/out-good"
+          mv "$RUNNER_TEMP/out-seeded" out
+          serve 8788
+          if bash scripts/smoke.sh http://127.0.0.1:8788 "$GIT_SHA" 2>/dev/null; then
+            echo "site smoke: accepted an export missing Referrer-Policy — the header check is broken" >&2
             exit 1
-          }
+          fi
+          rm -rf out
+          mv "$RUNNER_TEMP/out-good" out
+          echo "site smoke: a wrong SHA and a dropped security header are both refused"
 
   # The house lint, format, and config-vendoring floor. Wired here
   # rather than left as scripts someone runs by hand, which is the state `typecheck`

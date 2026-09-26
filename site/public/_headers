@@ -1,0 +1,28 @@
+# Response headers for the static export, applied by the Workers asset handler to every
+# response. These are the values the server set through next.config.mjs `headers()` before
+# the site became a static export, byte for byte, so gridwork.sh answers with the same
+# policy after the move. The CI smoke and scripts/parity.ts both read them back.
+#
+# Plausible is the one third-party origin this site talks to: the script host for
+# script-src, and the same host again for connect-src because the script POSTs its events
+# back to it. Naming the host is the mechanism here — the policy carries no nonce, so there
+# is nothing narrower to hang it on.
+
+/*
+  Strict-Transport-Security: max-age=31536000; includeSubDomains
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: no-referrer
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline' https://plausible.io; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://plausible.io; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; upgrade-insecure-requests
+
+# The health route exports as an extensionless file. The asset handler infers Content-Type
+# from the extension, and nosniff above forbids the browser from guessing, so name it. A
+# cached health check answers for whichever deploy served it last, so it is never cached.
+/health
+  Content-Type: application/json
+  Cache-Control: no-store
+
+# Content-hashed build output: a changed file gets a new name, so browsers may keep these
+# for a year without revalidating. The asset handler's default is max-age=0.
+/_next/static/*
+  Cache-Control: public, max-age=31536000, immutable
