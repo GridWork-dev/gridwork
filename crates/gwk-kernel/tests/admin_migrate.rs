@@ -904,7 +904,7 @@ async fn a_stated_base_is_checked_like_any_other_and_never_overrides() {
 async fn r1_refuses_a_database_already_at_this_binarys_contract() {
     // Criterion 3's mutation, shipped as the test. A fresh `admin init` is
     // already at the target; the resolver answers an equal pair with an empty
-    // chain, so without R1 the refusal is "refusing to apply an empty chain" —
+    // chain, so without the chain-start check the refusal is "refusing to apply an empty chain" —
     // a true sentence about the wrong subject, arriving after the writer lock.
     let maintenance = maintenance_pool().await;
     let role = role_for("r1already");
@@ -1349,7 +1349,7 @@ async fn r4_goes_red_when_the_closed_iff_constraint_comes_back_one_directional()
 #[tokio::test]
 #[ignore = "needs a PostgreSQL; see the module docs"]
 async fn dispatch_node_is_truncate_protected_only_by_a_neighbour() {
-    // Found by R4 while it was being written, and pinned here because it is
+    // Found by the superuser-refusal check while it was being written, and pinned here because it is
     // true and surprising rather than because it is wrong.
     //
     // `gwk.dispatch_node` carries a row-level DELETE guard and NO
@@ -1697,7 +1697,7 @@ async fn r5_catches_a_step_that_holds_the_event_count_and_moves_the_watermark() 
 
     let refusal = gwk_kernel::migrate::assert_result(&pool, &applied)
         .await
-        .expect_err("an event removed and replaced must red R5");
+        .expect_err("an event removed and replaced must red the post-commit fingerprint recheck");
     let message = refusal.to_string();
     assert!(
         message.contains("highest sequence move from 2 to 3"),
@@ -1742,7 +1742,7 @@ async fn r3_and_r5_hold_over_a_migrated_database() {
 /// statement before the commit, after every ALTER had already run.
 ///
 /// The SQL moves the fingerprint and adds no relation, which is what lets this
-/// run on top of a real migration: R3 counts the relations of the migrated
+/// run on top of a real migration: the privilege-parity check counts the relations of the migrated
 /// schema, and a chain that changed the count would fail that rung for a reason
 /// this test is not about.
 fn synthetic_chain(base: &str, count: usize) -> Vec<Step> {

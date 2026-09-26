@@ -11,6 +11,33 @@ set -euo pipefail
 
 base_patterns='/home/[a-z0-9_-]+/|/Users/[a-z0-9_-]+/|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]+|_(TOKEN|SECRET|API_KEY|PASSWORD)=[^[:space:]]|BEGIN [A-Z ]*PRIVATE KEY|claude\.ai/code/session_'
 
+# Internal planning ids. Each of these shapes points into a private planning ledger that
+# a reader of this repo cannot open:
+#   - ruling ids (R1 to R999)
+#   - CORE-n and CTX-n control ids
+#   - "fork Fn" design forks
+#   - the private house-standards SPEC
+# A comment states the rule itself instead. This tier holds the TRACKED TREE only, and
+# history keeps its old ids (no rewrite), so --stdin and --history do not use it.
+# Exempt from this tier:
+#   - the vendored configs, which stay byte-identical to their canonical source (see
+#     tools/vendored-config-drift.test.ts), so their comments change only upstream;
+#   - the project manifest;
+#   - the reviewed share-card PNG.
+id_patterns='\bR[0-9]{1,3}\b|CORE-[0-9]+|CTX-[0-9]+|fork F[0-9]+|house-standards'
+id_exempt=(
+  ':!.gridwork/project.toml'
+  ':!.oxfmtrc.json'
+  ':!.oxlintrc.json'
+  ':!renovate.json'
+  ':!site/og.png'
+  ':!site/tools/design-tokens/contract.ts'
+  ':!site/tools/design-tokens/index.ts'
+  ':!tools/oxlint-config/base.oxlintrc.json'
+  ':!tools/oxlint-config/plugin.js'
+  ':!tools/oxlint-config/react.oxlintrc.json'
+)
+
 here="$(cd "$(dirname "$0")" && pwd)"
 overlay_file="$here/leak-scan.local"
 if [[ ! -f "$overlay_file" ]]; then
@@ -177,6 +204,10 @@ if [[ -n "$overlay_patterns" ]]; then
   if [[ -n "$scan_out" ]]; then
     matches="${matches:+$matches$'\n'}$scan_out"
   fi
+fi
+run_scan 'internal-id scan' "$id_patterns" "${id_exempt[@]}"
+if [[ -n "$scan_out" ]]; then
+  matches="${matches:+$matches$'\n'}$scan_out"
 fi
 if [[ -n "$matches" ]]; then
   echo "$matches"

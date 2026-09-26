@@ -3,10 +3,10 @@
 //!
 //! Nothing here is a second storage engine. Each content class fronts the SAME
 //! pool, root, and container format through its own [`PgBlobStore`] carrying
-//! that class's KEK (R19) — so sealing, dedup, pins, tombstones, and the
+//! that class's KEK (the one-key-per-class rule) — so sealing, dedup, pins, tombstones, and the
 //! sweep's bookkeeping are the shipped code paths, and the container's own
 //! AEAD and truncation detection arrive here as a regression canary rather
-//! than as new behaviour (R17: the container bytes are untouched).
+//! than as new behaviour (the container-bytes-unchanged rule: the container bytes are untouched).
 //!
 //! What IS new is the classification row in `gwk.context_blob`, and its write
 //! ordering is the design:

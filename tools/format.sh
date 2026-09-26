@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# format.sh — the one invocation home for oxfmt in this repo (SPEC house-standards D2c).
+# format.sh — the one invocation home for oxfmt in this repo (the house formatter floor).
 #
 # WHY A SCRIPT AND NOT A package.json SCRIPT. oxfmt reads its config and its ignore files
 # from the CURRENT DIRECTORY ONLY; it does not walk up (`--disable-nested-config` only

@@ -72,9 +72,9 @@ plausible grid (120×40 = 4,800 cells).
 
 ## 2. Fork list
 
-Genuine forks put to the operator as pickers (F-numbers continue the input-path SPEC's
-F1–F5; that SPEC ruled F1 raw-passthrough, F2 operator+orchestrator grants, F3
-one-receipt-per-send, F5 receipt-row-plus-echo):
+Genuine forks put to the operator as pickers (continuing the input-path SPEC's own
+fork list; that SPEC ruled raw-passthrough, operator+orchestrator grants,
+one-receipt-per-send, receipt-row-plus-echo):
 
 - **G1 — Lens taxonomy.** Flat `:name` namespace (Board dissolves) vs two-level
   (Board survives with sub-views) vs a curated five-lens grouping.
@@ -84,7 +84,7 @@ one-receipt-per-send, F5 receipt-row-plus-echo):
   full typed verbs (`:stop attempt-42`), vs no command mode at all.
 - **G4 — CLI human output.** Auto-table on TTY / JSON when piped, vs flag-gated
   tables, vs JSON-only forever.
-- **F4 — Send-mode UX** (owed to the input-path SPEC): modal INPUT with a mode badge,
+- **Send-mode UX** (owed to the input-path SPEC): modal INPUT with a mode badge,
   vs a `:send` one-shot verb, vs both from day one.
 - **G5 — Hall at-rest direction.** Enriched ambient field vs composite home with
   fixed regions (attention digest + vitals) vs status quo minimalism.
@@ -103,7 +103,7 @@ one-receipt-per-send, F5 receipt-row-plus-echo):
   every mutation is a single keybar-taught context key with a confirm step.
 - **G4 — Auto-table on TTY.** Human table when stdout is a tty, identical JSON when
   piped; `--json` forces the wire shape anywhere.
-- **F4 — Both send surfaces from day one.** Modal INPUT (persistent badge; leader
+- **Send-mode UX — Both send surfaces from day one.** Modal INPUT (persistent badge; leader
   `ctrl-]` leaves, since Esc is a byte the agent owns) AND a `:send <term> <bytes>`
   one-shot verb from any lens; shared receipt pipeline. This closes the input-path
   SPEC's last open fork.
@@ -212,7 +212,7 @@ that raised it.
   passthrough or quantize-to-tier?
 - In INPUT mode under ruled raw passthrough, Esc is a byte the agent needs. What is
   the leave-INPUT key (leader, F-key, double-Esc), and how does the keybar teach it?
-- What does a send receipt look like in-lens (F5 "both" default): a transient row, a
+- What does a send receipt look like in-lens (the dual-receipt fork's "both" default): a transient row, a
   gutter mark on the echoed line, a counter in the bar?
 - What renders when a send is REFUSED (stale generation, authority) — the refusal
   paths are first-class in the SPEC and invisible today?
@@ -394,9 +394,9 @@ The seeded day is 10 priced / 2 unpriced / 0 unattributed, stated in the chart c
   than it reads — Hall's districts are a separate hand-built set rather than a projection
   of the same attempts.
 
-### Round 3 — TERM/attach + the F4 send surfaces · RULED (picker, 2026-08-11)
+### Round 3 — TERM/attach + the send-mode surfaces · RULED (picker, 2026-08-11)
 
-F4 was already ruled BOTH, so this round designs both surfaces rather than choosing
+Send-mode was already ruled BOTH, so this round designs both surfaces rather than choosing
 between them. Four scenarios, with the hosted-session region painted by the REAL
 `drilldown::render` over the harness's attached fixture so the pty content is genuine:
 

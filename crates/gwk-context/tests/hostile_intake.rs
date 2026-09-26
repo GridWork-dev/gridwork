@@ -1,6 +1,6 @@
 //! Hostile intake: what this crate must refuse, proved twice over.
 //!
-//! R25 asks for a mixed corpus and this file is both halves of it, kept
+//! The mixed-corpus test rule asks for a mixed corpus and this file is both halves of it, kept
 //! deliberately distinct because they fail differently.
 //!
 //! **Precision goldens** are hand-authored and reviewed. Each one is a specific
@@ -58,7 +58,7 @@ fn digest() -> Digest {
 
 #[test]
 fn an_unknown_portable_field_is_kept_as_evidence_and_an_unknown_gridwork_field_is_fatal() {
-    // The asymmetry R13 asks for, as one comparison rather than two tests that
+    // The asymmetry the split-handling rule asks for, as one comparison rather than two tests that
     // could drift apart. Upstream shipping a field this parser predates is not
     // an attack; a caller inventing GridWork contract is.
     let portable =
@@ -136,7 +136,7 @@ fn allowed_tools_is_evidence_and_intersecting_is_the_whole_mitigation() {
 
 #[test]
 fn no_truth_record_offers_a_field_a_client_supplied_actor_could_land_in() {
-    // CTX-12's manifest-side half. The wire-side control is that the command
+    // The attribution-is-provenance-not-authorization rule's manifest-side half. The wire-side control is that the command
     // shape carries no actor; this is the reason that control is sufficient —
     // there is no field on the record for one to reach even if it did.
     //
@@ -710,7 +710,7 @@ fn a_bundle_path_refuses_past_its_byte_bound() {
 //
 // The precedence golden that sat here — an equal-tier disagreement fails closed
 // rather than picking — moved with the resolver to `gwk-context-compiler`'s
-// suite: the function it exercises no longer lives in this crate (R15).
+// suite: the function it exercises no longer lives in this crate (the verifier-independence rule).
 
 #[test]
 fn oversized_evidence_fails_closed_at_the_vocabulary_boundary() {

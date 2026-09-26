@@ -1,11 +1,11 @@
 //! The precedence vocabulary: tiers, contributions, and the conflict a
 //! resolver reports when the top tier does not agree with itself.
 //!
-//! ADR-0032 D5 fixes the tier order and one rule about ties: **equal-authority
+//! The design fixes the tier order and one rule about ties: **equal-authority
 //! conflicts fail closed.** The types here are what both halves of that rule
 //! are spoken in. The resolver that applies them — the function that answers
 //! "nothing spoke", "one tier won", or a [`PrecedenceConflict`] — lives in
-//! `gwk-context-compiler`, not here. That is deliberate (R15): the verifier is
+//! `gwk-context-compiler`, not here. That is deliberate (the verifier-independence rule): the verifier is
 //! a separate crate precisely so its dependency graph cannot reach the
 //! compiler's precedence implementation, and a resolver exported from the one
 //! crate the verifier may depend on would have sat one `use` away under
@@ -14,19 +14,19 @@
 use gwk_domain::{ParticipationReason, closed_token_enum};
 
 closed_token_enum! {
-    /// The precedence tiers, highest authority first (ADR-0032 D5).
+    /// The precedence tiers, highest authority first (the precedence-tier rule).
     ///
     /// `Ord` runs highest-authority-first: `Security < RunDeclaration` means
     /// security **wins**. That inversion is deliberate and load-bearing — the
     /// derived ordering follows declaration order, so the enum reads top-down in
-    /// the same order D5 states it, and `min()` selects the winner.
+    /// the same order the precedence-tier rule states it, and `min()` selects the winner.
     #[derive(
         Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
     )]
     #[serde(rename_all = "snake_case")]
     pub enum PrecedenceTier {
         /// Security and authority resolution. Never overridable: context may
-        /// narrow what authority granted, never widen it (D3).
+        /// narrow what authority granted, never widen it (the context-narrows-never-widens rule).
         Security,
         /// Explicit declarations on the run itself.
         RunDeclaration,
@@ -117,7 +117,7 @@ mod tests {
     #[test]
     fn tier_order_is_d5_order_and_outranks_reads_forward() {
         // ALL is macro-derived from the enum's declaration, so this count is a
-        // real growth guard against D5's six documented tiers, not the
+        // real growth guard against the precedence-tier rule's six documented tiers, not the
         // `[Self; 6].len() == 6` tautology it used to be.
         assert_eq!(PrecedenceTier::ALL.len(), 6);
         for pair in PrecedenceTier::ALL.windows(2) {

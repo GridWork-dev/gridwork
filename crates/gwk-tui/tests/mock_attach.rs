@@ -1,5 +1,5 @@
-//! Round 3 — TERM/attach and the send-mode surfaces (grill G2: estate rail
-//! + pty main; F4: BOTH a modal INPUT mode and a `:send` one-shot).
+//! Round 3 — TERM/attach and the send-mode surfaces (estate rail + pty main;
+//! both send surfaces: a modal INPUT mode and a `:send` one-shot).
 //!
 //! MOCKUP PAINTER ONLY. The hosted-session region is painted by the REAL
 //! `gwk_tui::drilldown::render` over the harness's attached fixture, so the
@@ -15,7 +15,7 @@
 //! - `refused` — a send refused for a stale generation, the loud path the
 //!   input SPEC requires (`#99`'s `opened()` stale refusal posture).
 //! - `send` — the `:send` one-shot verb composed from the TERM list with no
-//!   attach at all, the second F4 surface.
+//!   attach at all, the second send surface.
 //!
 //! ## What this round fixes about attach
 //!
@@ -33,8 +33,8 @@
 //!
 //! ## The receipt contract shown here
 //!
-//! F1 ruled raw byte passthrough, F3 one receipt per flushed batch, F5 both
-//! an in-lens receipt row and the pty's own echo. A receipt row therefore
+//! The design settled on raw byte passthrough, one receipt per flushed batch,
+//! and both an in-lens receipt row and the pty's own echo. A receipt row therefore
 //! reads `sent <bytes>B  rcpt <id>  <actor>  <clock>` — byte count, not
 //! content: the bytes are raw and may be a password or a control sequence,
 //! so the receipt proves delivery without transcribing what was sent.
@@ -177,8 +177,8 @@ fn paint_divider(buf: &mut Buffer, area: Rect, tier: ColorTier, top: u16, bottom
     }
 }
 
-/// The answer to "did my keystrokes land" (F5 ruled this AND the pty's own
-/// echo, because a frame can lag or suppress echo entirely).
+/// The answer to "did my keystrokes land" (the design keeps this AND the pty's own echo,
+/// because a frame can lag or suppress echo entirely).
 ///
 /// It is painted OVER the right end of the session's own status row, after
 /// `drilldown::render` has drawn it, rather than onto a row of its own. A
@@ -326,7 +326,7 @@ fn paint_attach(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet,
     paint_mode_bar(buf, area, area.height - 1, tier, mode);
 }
 
-/// The second F4 surface: `:send` composed from the TERM list, no attach.
+/// The second send surface: `:send` composed from the TERM list, no attach.
 /// The command line names its target explicitly, so a one-shot can never
 /// land in whichever session happened to be focused.
 fn paint_send(area: Rect, buf: &mut Buffer, tier: ColorTier, glyphs: GlyphSet) {

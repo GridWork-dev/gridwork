@@ -46,7 +46,7 @@ pub const BLOB_KEK_NEXT_ENV: &str = "GWK_BLOB_KEK_NEXT";
 pub const DEFAULT_PTY_RECORDING_RETENTION_DAYS: i32 = 30;
 
 /// The variables carrying one Context content class's KEK and its nonsecret
-/// label (R19: one key-encryption key per content class).
+/// label (the one-key-per-class rule: one key-encryption key per content class).
 ///
 /// An explicit arm per class and no wildcard, so a new content class fails
 /// this match at compile time and names its variables here before anything
@@ -307,13 +307,13 @@ impl BlobConfig {
     }
 }
 
-/// The per-class Context KEK material (R19), read from the environment.
+/// The per-class Context KEK material (the one-key-per-class rule), read from the environment.
 ///
-/// R18's custody answer, formalized: every key is supplied through the
+/// The key-custody rule, formalized: every key is supplied through the
 /// process environment — in deployment, a root-owned environment file the
 /// service manager loads — and only the nonsecret labels are ever persisted
 /// (each travels in the clear inside the container headers of the blobs its
-/// key wraps). No key touches the database, which is D4's one MUST; key and
+/// key wraps). No key touches the database, which is the design's one MUST; key and
 /// ciphertext sharing a host remains the disclosed residual the 8B
 /// certification review re-asks with evidence.
 ///

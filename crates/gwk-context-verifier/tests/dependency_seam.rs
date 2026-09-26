@@ -1,4 +1,4 @@
-//! R15, enforced rather than remembered.
+//! The verifier-independence rule, enforced rather than remembered.
 //!
 //! The verifier's independence from the compiler is a property of the crate
 //! graph. This test is what makes that property fail loudly instead of decaying
@@ -18,7 +18,7 @@
 //!
 //! That matters here more than it did there. A dev-dependency is not a lesser
 //! dependency for this purpose — a test target promotes it into the graph, and
-//! a test that could call the compiler is exactly the collusion R15 forbids.
+//! a test that could call the compiler is exactly the collusion the verifier-independence rule forbids.
 //! So this guard reads every dependency table there is, through a real parser,
 //! and the mutation that has to red is one that ADDS an edge in its least
 //! obvious spelling rather than one that removes an obvious one.
@@ -28,7 +28,7 @@
 //! A denylist fails at the same step that already failed: it catches the edge
 //! someone thought to forbid and waves through the next one. Asserting the
 //! whole set means a new dependency of any name stops this test until someone
-//! writes down why it is allowed — which is the decision R15 wants made out
+//! writes down why it is allowed — which is the decision the verifier-independence rule wants made out
 //! loud, not a review remembering to look.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -41,7 +41,7 @@ const ALLOWED_RUNTIME: &[&str] = &["gwk-context", "gwk-domain", "serde_json", "s
 const ALLOWED_DEV: &[&str] = &["toml"];
 
 /// Named for the failure message, not for the check: set equality above already
-/// refuses these. Naming them is how the failure says *R15* rather than "the
+/// refuses these. Naming them is how the failure says *the verifier-independence rule* rather than "the
 /// dependency set moved".
 const FORBIDDEN: &[&str] = &["gwk-context-compiler", "gwk-kernel"];
 
@@ -162,7 +162,7 @@ fn the_verifier_depends_on_the_vocabulary_and_never_on_the_compiler() {
     assert_eq!(
         runtime,
         expected(ALLOWED_RUNTIME),
-        "the verifier's runtime dependency set moved. R15 fixes it at gwk-context's \
+        "the verifier's runtime dependency set moved. The verifier-independence rule fixes it at gwk-context's \
          public types plus declared crypto primitives; a change here is a change to \
          what the verifier is allowed to know"
     );
@@ -182,7 +182,7 @@ fn the_verifier_depends_on_the_vocabulary_and_never_on_the_compiler() {
     for forbidden in FORBIDDEN {
         assert!(
             !every.contains(*forbidden),
-            "R15: the verifier declares a dependency on {forbidden}. Verifying a \
+            "the verifier-independence rule: the verifier declares a dependency on {forbidden}. Verifying a \
              result with the code that produced it verifies nothing"
         );
     }
@@ -220,7 +220,7 @@ fn the_vocabulary_crate_cannot_reach_the_compiler_either() {
     assert!(
         !every.contains("gwk-context-compiler"),
         "gwk-context depends on gwk-context-compiler, which puts the compiler two \
-         hops from the verifier and defeats R15 without touching the verifier's \
+         hops from the verifier and defeats the verifier-independence rule without touching the verifier's \
          own manifest"
     );
 }
@@ -236,7 +236,7 @@ fn the_vocabulary_crate_cannot_reach_the_compiler_either() {
 /// The consequence is the one that comment predicts. `gwk-context-compiler`
 /// declared under `[target.'cfg(unix)'.dependencies]` is a dependency cargo
 /// builds on every Unix host, and with the block gone it never reaches the set
-/// the R15 assertions are made over. The forbidden-name check would pass, the
+/// the verifier-independence assertions are made over. The forbidden-name check would pass, the
 /// set-equality check would pass, and the verifier would depend on the compiler.
 ///
 /// A synthetic manifest rather than a fixture on disk: the real manifests must
@@ -291,6 +291,6 @@ fn the_walk_reads_target_scoped_tables_and_not_only_the_top_level() {
     let (hidden, _) = declared(&hidden);
     assert!(
         union(&hidden, KINDS).contains("gwk-context-compiler"),
-        "a forbidden dependency hidden behind a cfg expression is invisible to R15"
+        "a forbidden dependency hidden behind a cfg expression is invisible to the verifier-independence check"
     );
 }

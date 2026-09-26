@@ -15,9 +15,9 @@ repository.workspace = true
 # ground, not as an exemption from packaging discipline.
 publish = false
 
-# THE DEPENDENCY LIST IS THE ENFORCEMENT (R15).
+# THE DEPENDENCY LIST IS THE ENFORCEMENT (the verifier-independence rule).
 #
-# D7 requires the verifier be implemented separately from the compiler, and R15
+# The design requires the verifier be implemented separately from the compiler, and that rule
 # sets that bar at a separate crate because a crate boundary is the only version
 # of "separate" a dependency graph enforces rather than review discipline
 # remembering. What is absent below is therefore load-bearing, and absence is
@@ -41,7 +41,7 @@ gwk-domain.workspace = true
 # STRUCT rather than a `Value` is what keeps those bytes independent of which
 # serde_json features the final binary unified.
 serde_json.workspace = true
-# The one declared crypto primitive R15 permits sharing.
+# The one declared crypto primitive the verifier-independence rule permits sharing.
 sha2.workspace = true
 
 [dev-dependencies]

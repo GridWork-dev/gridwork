@@ -88,7 +88,7 @@ macro_rules! blob_columns {
 /// itself is never deleted, so a swept recording remains an auditable pointer
 /// to bytes whose retention elapsed.
 ///
-/// Context classification is the fourth holder, and it is the R20 mechanism
+/// Context classification is the fourth holder, and it is the retention-is-data mechanism
 /// rather than another kind-keyed branch: a blob with a `gwk.context_blob`
 /// row is protected exactly while its RETENTION CLASS says so — forever for a
 /// class with no configured window (the fail-safe direction, and what

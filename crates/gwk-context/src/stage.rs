@@ -2,7 +2,7 @@
 //!
 //! **This enum is for naming, not for tagging.** No record carries a stage
 //! field. Which stage a record belongs to is which table it is in and which
-//! endpoint produced it — that is ruling R4 (fork F4), and it follows the
+//! endpoint produced it — that is the five-stage truth model decision, and it follows the
 //! codebase, where no entity carries a cross-cutting "which axis" tag and
 //! adding the first one here would be a change of kind, not of degree.
 //!
@@ -16,11 +16,11 @@
 //!
 //! ## Why five and not three
 //!
-//! ADR-0032 D4 names three truth levels (declared / resolved / observed). D3's
-//! dispatch pipeline and D4's own supplement list separately name a *release*
-//! at render and a *finalization* at the end. The ADR never reconciles this.
+//! The three-truth-levels design names three truth levels (declared / resolved / observed). The fixed-dispatch-order
+//! pipeline and that same design's own supplement list separately name a *release*
+//! at render and a *finalization* at the end. The design never reconciles this.
 //!
-//! R4 settles it at five rather than inheriting the ambiguity, because the
+//! The five-stage truth model decision settles it at five rather than inheriting the ambiguity, because the
 //! alternative is Explain/Compare and the 8F lens each guessing what "truth
 //! level" means and the guess hardening into the wire contract. If a later
 //! reading collapses two of these, that is a contract change made on purpose.
@@ -99,7 +99,7 @@ mod tests {
         // ALL is macro-derived from the enum's own declaration, so it cannot
         // fall behind it; what this match guards is `as_str` — a sixth stage
         // fails to compile here until it gets a spelling, and the count pins
-        // the list against R4's externally documented five.
+        // the list against the five-stage truth model decision's externally documented five.
         for stage in ContextStage::ALL {
             let named = match stage {
                 ContextStage::Declared => "declared",

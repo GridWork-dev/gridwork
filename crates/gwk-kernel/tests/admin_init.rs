@@ -338,7 +338,7 @@ async fn init_applies_the_contract_is_idempotent_and_refuses_a_stranger() {
 #[tokio::test]
 #[ignore = "needs a PostgreSQL; see the module docs"]
 async fn the_grant_matrix_over_both_schemas_is_declared_per_relation() {
-    // The SAME assertion the migrate verb runs as R3, not a second copy of it.
+    // The SAME assertion the migrate verb runs as the privilege-parity check, not a second copy of it.
     // Two folds is two places for a relation to be classified — or one place
     // for it to be classified and another where nobody noticed it was missing.
     // A fresh initialization and a migrated database now answer to one table.

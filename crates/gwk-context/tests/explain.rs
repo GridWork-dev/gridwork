@@ -153,7 +153,7 @@ fn explanation(answer: Answer) -> Explanation {
 }
 
 // ============================================================
-// R22 — the scope boundary
+// The scope-boundary rule
 // ============================================================
 
 #[test]

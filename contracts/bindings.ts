@@ -720,9 +720,9 @@ export type Command_Serialize = {
 export type CompareSubject = { of: "manifest"; manifest_id: string } | { of: "run"; run_id: string };
 
 /**
- *  The KEK domain a blob is sealed under (R19).
+ *  The KEK domain a blob is sealed under (the one-key-per-class rule).
  *
- *  The split is the public/private seam (F18): conformance fixtures and
+ *  The split is the public/private seam (the public-private-seam split): conformance fixtures and
  *  real content share one physical store and never share a key, so a blob
  *  that crosses the seam is unreadable rather than quietly exposed.
  *
@@ -757,7 +757,7 @@ export type ContextAggregate =
  *
  *  Compiler-DERIVED. Every field is re-read from the resolved manifest the
  *  compiler itself produced; none is copied from a request. That is the whole
- *  of the CTX-12 control, and it is why this type appears on the event payload
+ *  of the attribution-is-provenance-not-authorization control, and it is why this type appears on the event payload
  *  and nowhere in [`RecordContextFact`].
  *
  *  This is provenance, not authorization. It answers "which compiler run
@@ -776,10 +776,10 @@ export type ContextAttribution = {
 };
 
 /**
- *  The ten D4 lifecycle `event_type` values.
+ *  The ten lifecycle `event_type` values the design names.
  *
- *  Ten because ADR-0032 decision 4 names ten. Verification and rejection
- *  are ONE name carrying a verdict, which is how the ADR names them too —
+ *  Ten because the Context lifecycle has exactly ten. Verification and rejection
+ *  are ONE name carrying a verdict, which is how the design names them too —
  *  the alternative spends a name on a field and makes "was it verified?"
  *  a question about which of two event types arrived.
  *
@@ -837,7 +837,7 @@ export type ContextEventPayload_Serialize = {
 };
 
 /**
- *  One Context lifecycle fact, in the ten shapes D4 names.
+ *  One Context lifecycle fact, in the ten shapes the design names.
  *
  *  This single enum is the vocabulary for BOTH directions: it is what a client
  *  asks the kernel to record ([`RecordContextFact`]) and what the log holds
@@ -874,7 +874,7 @@ export type ContextEventPayload_Serialize = {
 export type ContextFact = ContextFact_Serialize | ContextFact_Deserialize;
 
 /**
- *  One Context lifecycle fact, in the ten shapes D4 names.
+ *  One Context lifecycle fact, in the ten shapes the design names.
  *
  *  This single enum is the vocabulary for BOTH directions: it is what a client
  *  asks the kernel to record ([`RecordContextFact`]) and what the log holds
@@ -971,7 +971,7 @@ export type ContextFact_Deserialize =
 ({ fact: "optimization_candidate_dispositioned"; candidate_id: string; disposition: CandidateDisposition; review_digest: string; dispositioned_at: Timestamp }) & { affected_route_count?: never; approval_count?: never; assurance?: never; attempt_id?: never; authority_digest?: never; certified_at?: never; closed_at?: never; evidence_ids?: never; expected_effect_digest?: never; fact_digest?: never; final_event_root?: never; finalization_id?: never; lifecycle_complete?: never; manifest_digest?: never; manifest_id?: never; observation_count?: never; observation_id?: never; observation_index?: never; observed_at?: never; observed_bytes?: never; opened_at?: never; output_digest?: never; participations?: never; patch_digest?: never; proposed_at?: never; release_id?: never; released_at?: never; rendered_bytes?: never; rendered_digest?: never; requested_at?: never; resolved_at?: never; route_digest?: never; run_id?: never; source_bytes?: never; source_count?: never; tool_schema_count?: never; tool_schema_digest?: never; truncated?: never; verdict?: never; verification_digest?: never; verified_at?: never; visible_source_count?: never };
 
 /**
- *  One Context lifecycle fact, in the ten shapes D4 names.
+ *  One Context lifecycle fact, in the ten shapes the design names.
  *
  *  This single enum is the vocabulary for BOTH directions: it is what a client
  *  asks the kernel to record ([`RecordContextFact`]) and what the log holds
@@ -1070,7 +1070,7 @@ export type ContextFact_Serialize =
 /**
  *  The v2 Context read grammar.
  *
- *  Eight reads, matching ADR-0032's three projections plus the four record
+ *  Eight reads, matching the design's three projections plus the four record
  *  reads and Compare. These are published shapes, not live handlers: 8A
  *  publishes the grammar, and the projections behind it are later work.
  *
@@ -2760,22 +2760,22 @@ export type Participation = Participation_Serialize | Participation_Deserialize;
  *  caller invents — the same rule `KernelCommand` states for itself.
  */
 export type ParticipationReason =
-/**  A higher precedence tier supplied a conflicting value (D5). */
+/**  A higher precedence tier supplied a conflicting value (the precedence-tier rule). */
 "precedence_loss" |
 /**
  *  Authority resolution excluded it. Upstream of context compilation and
- *  never overridable by it — context may narrow, never widen (D3).
+ *  never overridable by it — context may narrow, never widen (the context-narrows-never-widens rule).
  */
 "permission_denied" |
 /**  Dropped to stay inside a declared budget. */
 "budget_cut" |
-/**  Third-party material still in its initial quarantined trust state (D5). */
+/**  Third-party material still in its initial quarantined trust state (the quarantine-lifecycle rule). */
 "quarantined" |
 /**  Reviewed and rejected for this exact digest. */
 "rejected" |
 /**
  *  The verified pin does not match the digest actually found — an upstream
- *  change mints a new quarantined candidate, never a silent update (D5).
+ *  change mints a new quarantined candidate, never a silent update (the quarantine-lifecycle rule).
  */
 "pin_drift" |
 /**  The route, role, or capability does not admit it. */
@@ -2786,7 +2786,7 @@ export type ParticipationReason =
 /**
  *  Whether a candidate participated, and how far it got.
  *
- *  Per ADR-0032 D5. Not a state machine: see the module docs.
+ *  Per the precedence-tier rule. Not a state machine: see the module docs.
  */
 export type ParticipationState =
 /**  Known to the catalog and admissible, but not eligible for this route. */
@@ -2953,7 +2953,7 @@ export type ProjectId = string;
  */
 export type ProjectionKind = "task" | "attempt" | "engine_session" | "message" | "command" | "gate" | "authority_grant" | "receipt" | "evidence" | "attention_item" | "worktree" | "lease" | "dispatch_node" | "orchestrator_checkpoint" | "ingested_record" | "cost_entry" | "workspace_node" | "workflow_run" | "pty_session" | "pty_session_template" |
 /**
- *  The three Context supplements (R3). Nameable in V1 and deliberately
+ *  The three Context supplements (the three-supplements rule). Nameable in V1 and deliberately
  *  NOT served by it — see the refusal arm in `wire::serve`.
  */
 "context_release" | "context_observation" | "context_finalization";
@@ -3402,10 +3402,10 @@ export type Receipt_Serialize = {
  *  One shape, one field. Recording a fact is the ONLY Context write, because
  *  Context may compile, verify, attest, project, explain, compare and suggest —
  *  and may not independently authorize work or write execution truth outside
- *  kernel commands (ADR-0032). A grammar with a second verb would be a second
+ *  kernel commands (the design). A grammar with a second verb would be a second
  *  write authority wearing a smaller name.
  *
- *  **There is no actor field here and there must never be one.** See CTX-12 in
+ *  **There is no actor field here and there must never be one.** See the attribution-is-provenance-not-authorization rule in
  *  the module docs; the omission is asserted by test, not left to review.
  */
 export type RecordContextFact = RecordContextFact_Serialize | RecordContextFact_Deserialize;
@@ -3416,10 +3416,10 @@ export type RecordContextFact = RecordContextFact_Serialize | RecordContextFact_
  *  One shape, one field. Recording a fact is the ONLY Context write, because
  *  Context may compile, verify, attest, project, explain, compare and suggest —
  *  and may not independently authorize work or write execution truth outside
- *  kernel commands (ADR-0032). A grammar with a second verb would be a second
+ *  kernel commands (the design). A grammar with a second verb would be a second
  *  write authority wearing a smaller name.
  *
- *  **There is no actor field here and there must never be one.** See CTX-12 in
+ *  **There is no actor field here and there must never be one.** See the attribution-is-provenance-not-authorization rule in
  *  the module docs; the omission is asserted by test, not left to review.
  */
 export type RecordContextFact_Deserialize = {
@@ -3432,10 +3432,10 @@ export type RecordContextFact_Deserialize = {
  *  One shape, one field. Recording a fact is the ONLY Context write, because
  *  Context may compile, verify, attest, project, explain, compare and suggest —
  *  and may not independently authorize work or write execution truth outside
- *  kernel commands (ADR-0032). A grammar with a second verb would be a second
+ *  kernel commands (the design). A grammar with a second verb would be a second
  *  write authority wearing a smaller name.
  *
- *  **There is no actor field here and there must never be one.** See CTX-12 in
+ *  **There is no actor field here and there must never be one.** See the attribution-is-provenance-not-authorization rule in
  *  the module docs; the omission is asserted by test, not left to review.
  */
 export type RecordContextFact_Serialize = {

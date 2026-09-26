@@ -1,6 +1,6 @@
-//! The D5 resolver, and what happens when it does not decide.
+//! The precedence-tier resolver, and what happens when it does not decide.
 //!
-//! ADR-0032 D5 fixes the tier order and one rule about ties: **equal-authority
+//! The design fixes the tier order and one rule about ties: **equal-authority
 //! conflicts fail closed.** Both halves matter, and the second is the one that
 //! is easy to get quietly wrong — a resolver that picks "the first one" when
 //! two equal sources disagree still returns a manifest, still renders, and is
@@ -157,7 +157,7 @@ mod tests {
         // to the top tier. Unfiltered, the Annotation at index 1 carries the
         // later Security value, the scan reports "allow" as already seen,
         // `distinct` never leaves 1, and two Security sources that disagree
-        // are elected as though they had agreed — a D5 fail-OPEN.
+        // are elected as though they had agreed — a precedence-tier fail-OPEN.
         //
         // Unreachable through `compile`, which sorts into canonical order and
         // so makes the top tier a contiguous prefix. It is reachable here

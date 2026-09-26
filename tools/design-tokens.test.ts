@@ -1,5 +1,5 @@
-// The house design-token contract, applied to site/. Lane E item 2, house-standards
-// acceptance 7: every required role defined in both themes, no unregistered role name,
+// The house design-token contract, applied to site/. Lane E item 2, the house
+// design-token contract's acceptance 7: every required role defined in both themes, no unregistered role name,
 // no bare `var()` that a third-party stylesheet could collide with.
 //
 // The validator itself is VENDORED and not editable here — tools/vendored-config-drift.test.ts

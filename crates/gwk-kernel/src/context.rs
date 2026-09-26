@@ -29,7 +29,7 @@
 //! on. A kernel-invented attribution would be a fabricated provenance record,
 //! which is worse than no record — so it is a parameter.
 //!
-//! That does not reopen CTX-12. What CTX-12 states is that a CLIENT cannot
+//! That does not reopen the attribution-is-provenance-not-authorization rule. What that rule states is that a CLIENT cannot
 //! assert attribution, and that stays structural: [`RecordContextFact`] carries
 //! exactly one field, the wire cannot reach this function, and the only caller
 //! that can is the party the attribution is about.

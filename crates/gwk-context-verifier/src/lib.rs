@@ -7,7 +7,7 @@
 //!
 //! # Why a crate and not a module
 //!
-//! D7 requires the verifier be implemented separately from the compiler. R15
+//! The design requires the verifier be implemented separately from the compiler. The verifier-independence rule
 //! sets that bar at a separate crate, because a crate boundary is the only
 //! version of "separate" a dependency graph *enforces* — a module boundary
 //! asks review discipline to remember, every time, forever.
@@ -24,7 +24,7 @@
 //! What that leaves shared is `gwk-context`'s public types — the truth records,
 //! the [`gwk_context::Digest`] newtype, the precedence *vocabulary* — plus one
 //! declared crypto primitive. The precedence types are shared and the resolver
-//! is not, which is the line R15 draws: this crate can name a conflict, and
+//! is not, which is the line the verifier-independence rule draws: this crate can name a conflict, and
 //! cannot ask the compiler what the answer was.
 //!
 //! # What is genuinely independent here, and what is not
