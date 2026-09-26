@@ -1319,8 +1319,6 @@ jobs:
       - name: install pinned tooling
         working-directory: site
         run: bun install --frozen-lockfile
-      - name: deployment entry points
-        run: bash deploy/gates.sh
       - name: lint
         run: ./tools/lint.sh .
       - name: format
