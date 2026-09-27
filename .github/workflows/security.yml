@@ -1,13 +1,12 @@
 name: security
 
-# The supply-chain, leak and clean-room gates, split out of ci.yml. Same triggers as ci.yml
-# (Renovate's branch automerge waits on renovate/** pushes), its own concurrency group so the
-# two workflows never cancel each other, and one aggregate, `security`, which branch protection
-# requires next to ci.yml's `verify`.
+# The supply-chain, leak and clean-room gates, split out of ci.yml. Same triggers as ci.yml,
+# its own concurrency group so the two workflows never cancel each other, and one aggregate,
+# `security`, which the main ruleset requires next to ci.yml's `verify`.
 
 on:
   push:
-    branches: [main, 'renovate/**']
+    branches: [main]
   pull_request:
   merge_group:
 

@@ -3,7 +3,7 @@
   "description": [
     "Vendored copy of the house Renovate policy. The sibling repositories consume it as a shared preset; this one cannot — the preset lives in a private repository, and a public repo can neither name it (the leak scanner rejects private repo names, correctly) nor resolve it at Renovate runtime without credentials it will never have. Vendoring is the same call SPEC D3 already makes for the shared lint configs. Keep it in step by hand; the drift test belongs on the private side, which can name both repositories.",
     "minimumReleaseAge holds every update for seven days after it is published. The window it closes is the one where a compromised version goes up and is yanked days later: a bot that upgrades within the hour installs it, and a bot that waits a week never sees it. The cost is seven days of latency on a patch that fixes something real, and that cost is accepted deliberately — a security advisory routes through vulnerabilityAlerts, which is exempt from this delay.",
-    "Ordinary updates share one Tuesday dependency batch. Renovate uses branch automerge with platformAutomerge disabled; the required verify context must run on the Renovate branch before it can merge. A major, compiler pin, or Cargo dependency holds the whole batch for review. Standalone lock maintenance is disabled: dependency updates refresh their locks, but quiet weeks do not. Automatic replacements are disabled because their separate branches bypass ordinary grouping; package renames require deliberate changes."
+    "Ordinary updates share one Tuesday dependency batch. Renovate opens the batch as a pull request and merges it itself, with platformAutomerge disabled, once the required verify and security contexts are green on it; the ruleset on main requires a pull request for every change. A major, compiler pin, or Cargo dependency holds the whole batch for review. Standalone lock maintenance is disabled: dependency updates refresh their locks, but quiet weeks do not. Automatic replacements are disabled because their separate branches bypass ordinary grouping; package renames require deliberate changes."
   ],
   "extends": ["config:recommended", ":semanticCommits", "helpers:pinGitHubActionDigests"],
   "minimumReleaseAge": "7 days",
@@ -33,14 +33,14 @@
   "osvVulnerabilityAlerts": false,
   "packageRules": [
     {
-      "description": "Branch automerge is enabled for the Tuesday dependency batch, gated by the required verify and security contexts, both running on renovate/** pushes. It uses branch mode with platformAutomerge disabled; a major or a repository-local review rule holds the whole batch for review. This reverses the 2026-09-02 automerge-off response with an explicit branch-check gate. Incident history: three patch/minor updates merged unattended that evening, including #193 at 20:25:33Z, which split the Bun version across managers, and #195 at 02:51:24Z, which merged while the repository's Allow auto-merge setting was already switched off. Disabling that setting alone changed the merger rather than preventing a merge. Green means both required contexts: verify, which aggregates 14 jobs, and security, which aggregates 4. The verify number is pinned by tools/check-claims.sh C9 and derived from ci.yml, because it sat at 17 here while the workflow had already grown past it — a description nothing reads is a description nothing corrects.",
+      "description": "PR automerge is enabled for the Tuesday dependency batch: Renovate opens the batch pull request and merges it itself, with platformAutomerge disabled, once the required verify and security contexts are green on it. It used branch mode until 2026-09-27, when a ruleset on main began requiring a pull request for every change; the repository is owned by a user account, so the Renovate app cannot be granted a bypass and a branch push to main is refused. A major or a repository-local review rule holds the whole batch for review. This reverses the 2026-09-02 automerge-off response with an explicit check gate. Incident history: three patch/minor updates merged unattended that evening, including #193 at 20:25:33Z, which split the Bun version across managers, and #195 at 02:51:24Z, which merged while the repository's Allow auto-merge setting was already switched off. Disabling that setting alone changed the merger rather than preventing a merge. Green means both required contexts: verify, which aggregates 14 jobs, and security, which aggregates 4. The verify number is pinned by tools/check-claims.sh C9 and derived from ci.yml, because it sat at 17 here while the workflow had already grown past it — a description nothing reads is a description nothing corrects.",
       "matchPackageNames": ["*"],
       "groupName": "weekly dependency batch",
       "groupSlug": "weekly-batch",
       "schedule": ["on tuesday"],
       "updateNotScheduled": false,
       "automerge": true,
-      "automergeType": "branch",
+      "automergeType": "pr",
       "platformAutomerge": false
     },
     {
