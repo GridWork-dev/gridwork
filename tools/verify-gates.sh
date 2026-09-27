@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# verify-gates.sh — the assertion behind ci.yml's `verify` aggregator.
+# verify-gates.sh — the assertion behind ci.yml's `verify` and security.yml's
+# `security` aggregators (the latter passes its own EXPECTED_GATES).
 #
 # Reads GitHub's `toJSON(needs)` on stdin and exits non-zero unless every
 # dependency finished `success`. It lives here rather than inline in the
@@ -11,15 +12,16 @@
 # 20 jobs, and the two it missed were `pty-host` — a crate also outside
 # `default-members`, so nothing else covered it either — and `perf`, the rollup
 # the whole attempt/retry machinery feeds. A hand-curated list in a settings
-# page drifts silently because nothing compares it to the workflow. One
-# required context, computed from `needs:`, cannot.
+# page drifts silently because nothing compares it to the workflow. A required
+# context computed from `needs:` cannot; there are two, one per workflow, since
+# a job's `needs:` cannot reach across workflow files.
 set -euo pipefail
 
 # Bump deliberately when a gate joins or leaves `verify`'s `needs:` list. This
 # is the guard against the failure this whole gate exists to prevent, one level
 # up: deleting a `needs:` entry would otherwise shrink coverage silently, and
-# with only one required context there is no second place that would notice.
-EXPECTED_GATES="${EXPECTED_GATES:-18}"
+# nothing else compares the list to the workflow.
+EXPECTED_GATES="${EXPECTED_GATES:-14}"
 
 payload="$(cat)"
 

@@ -1,0 +1,827 @@
+name: security
+
+# The supply-chain, leak and clean-room gates, split out of ci.yml. Same triggers as ci.yml
+# (Renovate's branch automerge waits on renovate/** pushes), its own concurrency group so the
+# two workflows never cancel each other, and one aggregate, `security`, which branch protection
+# requires next to ci.yml's `verify`.
+
+on:
+  push:
+    branches: [main, 'renovate/**']
+  pull_request:
+  merge_group:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # bans/licenses/sources block merges; advisories run separately below so a
+  # newly published advisory can't redden an unchanged PR.
+  deny:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
+        with:
+          command: check bans licenses sources
+
+  advisories:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
+        with:
+          command: check advisories
+
+  # CLEANROOM.md rule 4. Deliberately has NO `paths:` filter and NO job-level `if:`:
+  # GitHub reports a job skipped by a conditional as SUCCESS for required-check
+  # purposes, and a workflow skipped by path filtering leaves its checks Pending
+  # forever — so either shortcut yields a required check that is green, or stuck,
+  # while having verified nothing. The job always runs and decides from the diff.
+  cleanroom-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The gate diffs against the merge base, which a shallow clone does not have.
+          fetch-depth: 0
+      - name: engine-adjacent changes carry their second-reader record
+        env:
+          MERGE_GROUP_BASE: ${{ github.event.merge_group.base_sha }}
+          MERGE_GROUP_HEAD: ${{ github.event.merge_group.head_sha }}
+        run: |
+          set -euo pipefail
+          target=HEAD
+          if [ "$GITHUB_EVENT_NAME" = merge_group ]; then
+            base="$MERGE_GROUP_BASE"
+            target="$MERGE_GROUP_HEAD"
+            git cat-file -e "${base}^{commit}"
+            git cat-file -e "${target}^{commit}"
+          elif [ -n "${GITHUB_BASE_REF:-}" ]; then
+            # FETCH_HEAD, not origin/<ref>: the checkout action fetches the PR merge
+            # ref, so a remote-tracking branch for the base may not exist locally.
+            git fetch --no-tags origin "$GITHUB_BASE_REF"
+            base="$(git merge-base FETCH_HEAD HEAD)"
+          else
+            base="$(git rev-parse HEAD^1)"
+          fi
+          # --no-renames IS LOAD-BEARING. Default rename detection folds a
+          # modify-plus-rename into ONE line naming only the new path, so a
+          # commit that renames a registry while tampering a cited row would
+          # put no registry path in this list at all — the reviewer of the
+          # row binding defeated the first version exactly that way. With
+          # renames off, the canonical path always appears as a deletion.
+          git diff --no-renames --name-only "$base" "$target" > /tmp/changed-paths
+          # Fail CLOSED. An empty set from a diff that failed would otherwise read
+          # as "nothing engine-adjacent was touched" — the gate passing because it
+          # could not look, which is the failure mode this whole job exists for.
+          if [ ! -s /tmp/changed-paths ]; then
+            echo "cleanroom-gate: empty diff against $base — refusing to pass" >&2
+            exit 2
+          fi
+          # The base also feeds the registry-row trigger: an edit to a row a
+          # gated file cites re-opens review of the citing files, and the gate
+          # refuses to judge a registry edit it has no base to diff against.
+          CLEANROOM_BASE="$base" ./tools/cleanroom-gate.sh < /tmp/changed-paths
+      - name: prove the gate can fail (seeded violation)
+        run: |
+          set -euo pipefail
+          # A synthetic change under the first gated prefix, with no record. The
+          # gate must reject it; if it does not, the check above proved nothing.
+          seed="$(grep -Ev '^[[:space:]]*(#|$)' .github/cleanroom-paths.txt | head -n1)seeded-violation.rs"
+          if echo "$seed" | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate accepted a seeded violation — the gate is broken' >&2
+            exit 1
+          fi
+          echo "cleanroom-gate: seeded violation correctly rejected ($seed)"
+      - name: a new record carries an opaque session id (seeded violation)
+        run: |
+          set -euo pipefail
+          seed="$(grep -Ev '^[[:space:]]*(#|$)' .github/cleanroom-paths.txt | head -n1)seeded-session.rs"
+          subject="$(printf '%s\n' "$seed" | ./tools/cleanroom-gate.sh --subject)"
+          record="docs/derivation/reviews/$subject.md"
+          trap 'rm -f "$record"' EXIT
+          write_record() {
+            {
+              printf 'subject: %s\n' "$subject"
+              printf 'reviewer: seeded fresh-context lane\n'
+              if [ -n "${1:-}" ]; then
+                printf 'session: %s\n' "$1"
+              fi
+              printf '%s\n' '- [x] citations' '- [x] framing' '- [x] references' '- [x] leak'
+            } > "$record"
+          }
+
+          write_record
+          out=0
+          msg="$(printf '%s\n' "$seed" | ./tools/cleanroom-gate.sh 2>&1)" || out=$?
+          if [ "$out" -eq 0 ]; then
+            echo 'cleanroom-gate accepted a new record with no session id' >&2
+            exit 1
+          fi
+          echo "$msg" | grep -q "has no valid 'session:' line" || {
+            echo 'the session-less record failed for the wrong reason' >&2
+            printf '%s\n' "$msg" >&2
+            exit 1
+          }
+
+          write_record ../seeded/session
+          if printf '%s\n' "$seed" | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate accepted a session path instead of an opaque id' >&2
+            exit 1
+          fi
+
+          write_record seeded-session-id
+          printf 'session: ../seeded/session\n' >> "$record"
+          if printf '%s\n' "$seed" | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate let an opaque id mask a second path-like session' >&2
+            exit 1
+          fi
+
+          write_record seeded-session-id
+          printf '%s\n' "$seed" | ./tools/cleanroom-gate.sh
+          echo "cleanroom-gate: missing/path/duplicate sessions rejected; one opaque id accepted"
+      - name: a gated module prefix reaches its siblings (seeded violation)
+        run: |
+          set -euo pipefail
+          # The prefixes are matched as strings, not as directories, and
+          # `crates/gwk-tui/src/workspace/` — with the trailing slash it carried
+          # until this branch — matched nothing outside that one directory. So
+          # multiplexer work split into a `workspace-adjacent/` sibling would
+          # have left the gate silent: no error, no diff, no review. Same hole
+          # as `gwk-host` passing while `gwk-pty-host` gates, one level down.
+          #
+          # Hardcoded rather than derived from the file, deliberately. Every
+          # other seed here reads `head -n1` so it keeps working as the list
+          # grows; this one is asserting a property of ONE line, and a derived
+          # seed would silently stop testing it the day that line moved.
+          seed="crates/gwk-tui/src/workspace-adjacent/pane.rs"
+          if echo "$seed" | ./tools/cleanroom-gate.sh; then
+            echo "cleanroom-gate passed $seed — a gated prefix is not reaching its siblings" >&2
+            exit 1
+          fi
+          echo "cleanroom-gate: sibling of a gated module correctly gated ($seed)"
+      - name: every crate is classified (seeded violations)
+        run: |
+          set -euo pipefail
+          # The step above proves the gate reaches a path it was told about.
+          # This one proves it notices a path nobody told it about at all —
+          # the crate that arrives ungated because no one wrote down which
+          # side of the gate it is on. Seeded with an EMPTY path list, like
+          # the capture check, because the change that adds an unclassified
+          # crate is exactly the change whose paths reach no gated prefix.
+          ne=".github/cleanroom-not-engine.txt"
+          cp "$ne" /tmp/not-engine.bak
+          restore() { cp /tmp/not-engine.bak "$ne"; rm -rf crates/seeded-scratch; }
+          trap restore EXIT
+
+          mkdir -p crates/seeded-scratch/src
+          if : | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate passed an unclassified crate — the completeness step is broken' >&2
+            exit 1
+          fi
+          rm -rf crates/seeded-scratch
+          echo "cleanroom-gate: unclassified crate correctly rejected"
+
+          # A line whose path does not exist. This is how a classification
+          # written for one crate gets inherited by a different one later, and
+          # how a crate could be declared not-engine BEFORE it exists — the
+          # naming coin flip with the coin tossed early.
+          printf 'crates/seeded-not-a-dir — seeded: a stale line\n' >> "$ne"
+          if : | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate passed a not-engine line naming no directory — stale lines are free' >&2
+            exit 1
+          fi
+          cp /tmp/not-engine.bak "$ne"
+          echo "cleanroom-gate: stale not-engine line correctly rejected"
+
+          # A path listed as not-engine that a gated prefix already covers.
+          # Whichever file is right, a crate classified both ways makes the
+          # record worth nothing — and "listed as not-engine" is the shape a
+          # future attempt to talk a gated crate out of the gate would take.
+          printf 'crates/gwk-pty — seeded: the engine crate claimed as not-engine\n' >> "$ne"
+          if : | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate passed a crate classified both ways — the files may disagree in silence' >&2
+            exit 1
+          fi
+          cp /tmp/not-engine.bak "$ne"
+          echo "cleanroom-gate: contradictory classification correctly rejected"
+
+          # A path with no rationale. The parser requires one, so this reads as
+          # unclassified rather than as a line — without this seed the
+          # requirement could be deleted and every step above would still pass.
+          sed -i -E 's@^crates/gwk-theme[[:space:]].*@crates/gwk-theme@' "$ne"
+          if : | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate accepted a not-engine path with no rationale' >&2
+            exit 1
+          fi
+          cp /tmp/not-engine.bak "$ne"
+          echo "cleanroom-gate: unjustified not-engine line correctly rejected"
+
+          # The positive control. Four seeds that can only fail would also pass
+          # with the whole check replaced by `exit 1`, which is the failure this
+          # job exists to make impossible.
+          : | ./tools/cleanroom-gate.sh
+          echo "cleanroom-gate: the live tree is fully classified"
+      - name: a direct gwk-pty dependency owes a prefix row (seeded violations)
+        run: |
+          set -euo pipefail
+          # The classification step makes someone decide. This one takes the
+          # decision away where the answer is already known: a crate linking
+          # the PTY engine is gated by that fact, not by whether it got named
+          # `gwk-pty-host` or `gwk-host`. True at HEAD with zero new rows —
+          # `crates/gwk-adapter-` covers three declarants and `crates/gwk-pty`
+          # covers the fourth, gwk-pty-host — so every proof here has to be
+          # seeded.
+          trap 'git checkout -- crates/gwk-theme/Cargo.toml crates/gwk-adapter-claude/Cargo.toml crates/gwk-adapter-codex/Cargo.toml crates/gwk-adapter-opencode/Cargo.toml crates/gwk-pty-host/Cargo.toml' EXIT
+
+          # An ungated crate quietly acquiring the dependency — the shape the
+          # rule is named for.
+          sed -i '/^\[dependencies\]/a gwk-pty.workspace = true' crates/gwk-theme/Cargo.toml
+          if : | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate passed an ungated crate depending on gwk-pty' >&2
+            exit 1
+          fi
+          git checkout -- crates/gwk-theme/Cargo.toml
+          echo "cleanroom-gate: ungated gwk-pty dependent correctly rejected"
+
+          # The same dependency under another name. This is the one shape that
+          # hides from a reader skimming manifests for the string, which is
+          # exactly the reader this gate stands in for.
+          sed -i '/^\[dependencies\]/a hidden = { package = "gwk-pty", path = "../gwk-pty" }' crates/gwk-theme/Cargo.toml
+          if : | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate passed a renamed gwk-pty dependency' >&2
+            exit 1
+          fi
+          git checkout -- crates/gwk-theme/Cargo.toml
+          echo "cleanroom-gate: renamed gwk-pty dependency correctly rejected"
+
+          # The same rename in a TOML LITERAL string. This one was a live bypass:
+          # the check matched only the double-quoted form, so swapping one quote
+          # character linked the PTY engine past the gate — no prefix row, no
+          # second-reader record, no markers. A seed per quote style, because the
+          # thing that broke was a character class, and only a seed that spells it
+          # out can keep it from narrowing again.
+          sed -i "/^\[dependencies\]/a hidden = { package = 'gwk-pty', path = '../gwk-pty' }" crates/gwk-theme/Cargo.toml
+          if : | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate passed a literal-string renamed gwk-pty dependency' >&2
+            exit 1
+          fi
+          git checkout -- crates/gwk-theme/Cargo.toml
+          echo "cleanroom-gate: literal-string renamed gwk-pty dependency correctly rejected"
+
+          # The table form. TOML spells a KEY three ways too — bare, basic, and
+          # literal — and cargo accepts all three wherever the crate name appears,
+          # so each is its own bypass until a seed says otherwise. A check that
+          # knows some spellings of a name is a check with a documented bypass.
+          printf '\n[dependencies.gwk-pty]\nworkspace = true\n' >> crates/gwk-theme/Cargo.toml
+          if : | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate passed a [dependencies.gwk-pty] table' >&2
+            exit 1
+          fi
+          git checkout -- crates/gwk-theme/Cargo.toml
+          echo "cleanroom-gate: [dependencies.gwk-pty] table correctly rejected"
+
+          printf '\n[dependencies."gwk-pty"]\nworkspace = true\n' >> crates/gwk-theme/Cargo.toml
+          if : | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate passed a [dependencies."gwk-pty"] quoted-key table' >&2
+            exit 1
+          fi
+          git checkout -- crates/gwk-theme/Cargo.toml
+          echo "cleanroom-gate: quoted-key gwk-pty table correctly rejected"
+
+          sed -i "/^\[dependencies\]/a 'gwk-pty'.workspace = true" crates/gwk-theme/Cargo.toml
+          if : | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate passed a literal-quoted gwk-pty key' >&2
+            exit 1
+          fi
+          git checkout -- crates/gwk-theme/Cargo.toml
+          echo "cleanroom-gate: literal-quoted gwk-pty key correctly rejected"
+
+          # The positive control, and the only one that can catch the check
+          # being deleted: with no declarant anywhere, a broken detection and a
+          # clean tree look identical, so the gate must treat zero as the
+          # broken one.
+          sed -i 's/^gwk-pty\.workspace = true$/# seeded removal/' crates/gwk-adapter-*/Cargo.toml crates/gwk-pty-host/Cargo.toml
+          if : | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate passed with no gwk-pty declarant at all — a vacuous check' >&2
+            exit 1
+          fi
+          git checkout -- crates/gwk-adapter-claude/Cargo.toml crates/gwk-adapter-codex/Cargo.toml crates/gwk-adapter-opencode/Cargo.toml crates/gwk-pty-host/Cargo.toml
+          echo "cleanroom-gate: an empty declarant set correctly reads as a broken detection"
+
+          : | ./tools/cleanroom-gate.sh
+          echo "cleanroom-gate: every direct gwk-pty dependent carries its prefix row"
+      - name: prove an unregistered capture is rejected (seeded violation)
+        run: |
+          set -euo pipefail
+          # The capture check is the one part of this gate that is NOT driven by
+          # the changed-path list, because captures live under docs/ and a change
+          # touching only one reaches no gated prefix. So it is seeded with an
+          # EMPTY path list: if that still rejects, the check really does run
+          # independently of what the diff happened to contain.
+          # The seed is a DOTFILE IN A SUBDIRECTORY, deliberately. The check was
+          # first written as `for f in "$dir"/*`, which silently skips both —
+          # bash does not glob dotfiles by default and a plain glob does not
+          # descend — so an unregistered capture sat there and the gate passed.
+          # A plain `seeded.txt` would not have caught that, and would not catch
+          # it coming back.
+          mkdir -p docs/derivation/captures/.seeded
+          printf 'not a registered capture\n' > docs/derivation/captures/.seeded/.violation.txt
+          if : | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate accepted an unregistered capture — the gate is broken' >&2
+            rm -rf docs/derivation/captures/.seeded
+            exit 1
+          fi
+          rm -rf docs/derivation/captures/.seeded
+          echo "cleanroom-gate: unregistered capture correctly rejected"
+      - name: prove a hash outside the hash cell does not register a capture (seeded violation)
+        run: |
+          set -euo pipefail
+          # The registry lookup was once `^\|.*${sum}.*\|` — the digest
+          # appearing anywhere in a table row. The round-ten reader registered
+          # an unregistered capture against it two ways: the real digest quoted
+          # in a row's description while the hash cell held a placeholder, and
+          # a hash cell padded around the real digest. Both rows are seeded
+          # here at once — if either shape ever satisfies the lookup again, the
+          # capture reads as registered and this step fails. A row's hash field
+          # has to BE the hash, not contain it.
+          seed="docs/derivation/captures/seeded-cell-anchor.txt"
+          printf 'not a registered capture\n' > "$seed"
+          sum="$(sha256sum "$seed" | cut -d' ' -f1)"
+          {
+            printf '| `CAP-997` | `0000000000000000000000000000000000000000000000000000000000000000` | seeded: the digest %s appears only in this description |\n' "$sum"
+            printf '| `CAP-996` | `aaaa%sbbbb` | seeded: the hash cell merely contains the digest |\n' "$sum"
+          } >> docs/derivation/CAPTURES.md
+          if : | ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate accepted a capture registered outside the hash cell — the gate is broken' >&2
+            rm -f "$seed"
+            git checkout -- docs/derivation/CAPTURES.md
+            exit 1
+          fi
+          rm -f "$seed"
+          git checkout -- docs/derivation/CAPTURES.md
+          echo "cleanroom-gate: hash-outside-the-cell registration correctly rejected"
+      - name: a registry edit with no base is refused (seeded violation)
+        run: |
+          set -euo pipefail
+          # The row trigger needs a base to diff the registries against. Without
+          # one, an edit to a cited row would be judged blind — so the gate must
+          # refuse rather than pass. CI always exports CLEANROOM_BASE; this
+          # proves the refusal actually fires when it is missing.
+          if echo 'docs/derivation/CAPTURES.md' | env -u CLEANROOM_BASE ./tools/cleanroom-gate.sh; then
+            echo 'cleanroom-gate judged a registry edit with no base — the gate is broken' >&2
+            exit 1
+          fi
+          echo "cleanroom-gate: baseless registry edit correctly refused"
+      - name: a cited registry row is part of the reviewed surface (seeded violations)
+        run: |
+          set -euo pipefail
+          # Three proofs in one temp-commit dance, because they share a setup:
+          # (1) editing a row a gated file cites moves the subject the citing
+          # files compute — the binding; (2) a registry-only diff editing that
+          # row demands a second-reader record it does not have — the trigger
+          # that closes the empty-touched fast path; (3) a row nothing cites
+          # stays free to add — the registries' own pre-seeding design goal,
+          # which the two rules above must not break.
+          orig="$(git rev-parse HEAD)"
+          fail() { git reset -q --hard "$orig"; echo "$1" >&2; exit 1; }
+          # Any cited ID will do; discovered rather than hardcoded, so a future
+          # rename of a citing file cannot quietly turn this step into a no-op.
+          # No cited ID anywhere gated would itself be news worth breaking on.
+          mapfile -t pfx < <(grep -Ev '^[[:space:]]*(#|$)' .github/cleanroom-paths.txt)
+          id="$(git grep -hE 'Derivation:[[:space:]]+[A-Za-z0-9._-]+[[:space:]]' HEAD -- "${pfx[@]/%/*}" \
+            | sed -nE 's@.*Derivation:[[:space:]]+([A-Za-z0-9._-]+)[[:space:]].*@\1@p' \
+            | LC_ALL=C sort -u | head -n1)"
+          [ -n "$id" ] || fail 'no Derivation: marker found under any gated prefix — the discovery is broken'
+          citing="$(git grep -lE "Derivation:[[:space:]]+${id}[[:space:]]" HEAD -- "${pfx[@]/%/*}" | sed 's/^HEAD://')"
+          before="$(printf '%s\n' "$citing" | ./tools/cleanroom-gate.sh --subject)"
+          # Append a cell to the ID's row — cells 1 and 2 stay intact, so the
+          # ID and capture checks still pass and ONLY the row binding changes.
+          sed -i -E "/^\|[[:space:]]*\`?${id}\`?[[:space:]]*\|/ s/\|[[:space:]]*\$/| seeded row edit |/" \
+            docs/derivation/CAPTURES.md docs/derivation/SPECS.md
+          git diff --quiet -- docs/derivation/ && fail 'the seeded row edit changed nothing — the seed is broken'
+          git -c user.name=seed -c user.email=seed@invalid commit -qam 'seed: edit a cited row'
+          after="$(printf '%s\n' "$citing" | ./tools/cleanroom-gate.sh --subject)"
+          [ "$before" != "$after" ] || fail 'editing a cited row did not move the subject — the binding is broken'
+          out=0
+          msg="$(printf 'docs/derivation/CAPTURES.md\ndocs/derivation/SPECS.md\n' \
+            | CLEANROOM_BASE="$orig" ./tools/cleanroom-gate.sh 2>&1)" || out=$?
+          [ "$out" -ne 0 ] || fail 'a registry-only edit of a cited row passed with no record — the trigger is broken'
+          echo "$msg" | grep -q 'no second-reader record' \
+            || fail 'the registry-only edit failed for a reason other than the missing record'
+          git reset -q --hard "$orig"
+          # (3) the positive control: an UNCITED row stays free.
+          printf '| `CAP-990` | `0000000000000000000000000000000000000000000000000000000000000000` | seeded: a pre-seeded row nothing cites |\n' >> docs/derivation/CAPTURES.md
+          git -c user.name=seed -c user.email=seed@invalid commit -qam 'seed: pre-seed an uncited row'
+          echo 'docs/derivation/CAPTURES.md' | CLEANROOM_BASE="$orig" ./tools/cleanroom-gate.sh \
+            || fail 'pre-seeding an uncited row was blocked — the trigger over-fires'
+          git reset -q --hard "$orig"
+          # (4) the rename bypass: renaming a registry while tampering its
+          # rows must not collapse the canonical path out of the diff. The
+          # reviewer of this mechanism defeated the first version exactly that
+          # way — rename detection folded modify+rename into one line naming
+          # only the new path, and the gate saw no registry at all. The
+          # --no-renames diff (the same shape the real step above uses) keeps
+          # the canonical path visible as a deletion, which reads as
+          # every-cited-row-removed and demands the review.
+          git mv docs/derivation/SPECS.md docs/derivation/SPECS-moved.md
+          sed -i -E "/^\|/ s/\|[[:space:]]*\$/| seeded rename tamper |/" docs/derivation/SPECS-moved.md
+          git -c user.name=seed -c user.email=seed@invalid commit -qam 'seed: rename a registry and tamper its rows'
+          out=0
+          msg="$(git diff --no-renames --name-only "$orig" HEAD \
+            | CLEANROOM_BASE="$orig" ./tools/cleanroom-gate.sh 2>&1)" || out=$?
+          [ "$out" -ne 0 ] || fail 'a renamed-and-tampered registry passed — the rename bypass is back'
+          echo "$msg" | grep -q 'no second-reader record' \
+            || fail 'the rename+tamper failed for a reason other than the missing record'
+          git reset -q --hard "$orig"
+          echo "cleanroom-gate: cited-row binding, trigger, free pre-seed, and rename bypass all hold"
+      - name: the subject digest does not depend on the locale
+        run: |
+          set -euo pipefail
+          # The digest is order-dependent and `sort` is locale-collated, so this
+          # once produced two different subjects for identical content: a dev box
+          # under en_US.UTF-8 ordered `pins.env` before `README.md` (case folded),
+          # a runner under C put `README.md` first (`R` 0x52 < `p` 0x70). The
+          # record written from one was rejected by the other, and the failure
+          # read as a stale review rather than a broken gate.
+          paths="$(grep -Ev '^[[:space:]]*(#|$)' .github/cleanroom-paths.txt | head -n1)/a.rs
+          $(grep -Ev '^[[:space:]]*(#|$)' .github/cleanroom-paths.txt | head -n1)/README.md"
+          c="$(printf '%s\n' "$paths" | LC_ALL=C ./tools/cleanroom-gate.sh --subject)"
+          u="$(printf '%s\n' "$paths" | LC_ALL=en_US.UTF-8 ./tools/cleanroom-gate.sh --subject)"
+          [ "$c" = "$u" ] || {
+            echo "cleanroom-gate: subject is locale-dependent — C gave $c, en_US.UTF-8 gave $u" >&2
+            exit 1
+          }
+          echo "cleanroom-gate: subject is stable across locales ($c)"
+      - name: prove the marker check can fail (CLEANROOM.md rule 3)
+        run: |
+          set -euo pipefail
+          # The step above seeds a path that does not exist at HEAD, so it exercises
+          # the record lookup and never reaches the source. These seed REAL files
+          # under a gated prefix — the only way to reach the marker parser at all.
+          prefix="$(grep -Ev '^[[:space:]]*(#|$)' .github/cleanroom-paths.txt | head -n1)"
+          dir="${prefix}-seed/src"
+          mkdir -p "$dir"
+
+          printf 'fn seeded() {}\n' > "$dir/no-marker.rs"
+          if echo "$dir/no-marker.rs" | ./tools/cleanroom-gate.sh --markers; then
+            echo 'marker check accepted a gated source file with no Derivation: marker' >&2
+            exit 1
+          fi
+          echo "cleanroom-gate: missing marker correctly rejected"
+
+          # Half two: a marker that cites a source registered nowhere. Without this
+          # seed, resolution could be deleted outright and the step above would
+          # still pass — any string would count as a citation.
+          printf '// Derivation: NOT-A-REAL-SPEC — seeded\nfn seeded() {}\n' > "$dir/unresolved.rs"
+          if echo "$dir/unresolved.rs" | ./tools/cleanroom-gate.sh --markers; then
+            echo 'marker check accepted a citation registered in neither CAPTURES.md nor SPECS.md' >&2
+            exit 1
+          fi
+          echo "cleanroom-gate: unresolved citation correctly rejected"
+
+          # Half three: a path citation, which rule 4's `references` check bans.
+          # This is the shape a well-meaning author reaches for first.
+          printf '// Derivation: docs/derivation/SPECS.md — seeded\nfn seeded() {}\n' > "$dir/by-path.rs"
+          if echo "$dir/by-path.rs" | ./tools/cleanroom-gate.sh --markers; then
+            echo 'marker check accepted a source cited by path' >&2
+            exit 1
+          fi
+          echo "cleanroom-gate: path citation correctly rejected"
+
+          # Half four: `Derivation: none` with no reason. The declaration form is the
+          # one marker that names no registry row, so it is the one an author could
+          # sprinkle to silence this gate — the mandatory reason is what stops that,
+          # and a rule nothing seeds is a rule that quietly stops applying.
+          printf '// Derivation: none\nfn seeded() {}\n' > "$dir/bare-none.rs"
+          if echo "$dir/bare-none.rs" | ./tools/cleanroom-gate.sh --markers; then
+            echo 'marker check accepted a Derivation: none with no reason' >&2
+            exit 1
+          fi
+          echo "cleanroom-gate: unexplained 'none' correctly rejected"
+
+          # Half five: `none` beside a real citation. A file derives nothing or it
+          # names its sources, never both — and this direction is the dangerous one,
+          # because a reviewer who reads the `none` stops looking and never checks
+          # the citation sitting next to it.
+          printf '// Derivation: none — seeded\n// Derivation: ECMA-48 §8.3.14 — seeded\nfn seeded() {}\n' > "$dir/none-plus.rs"
+          if echo "$dir/none-plus.rs" | ./tools/cleanroom-gate.sh --markers; then
+            echo 'marker check accepted a Derivation: none alongside a real citation' >&2
+            exit 1
+          fi
+          echo "cleanroom-gate: contradictory 'none' correctly rejected"
+
+          # Half six: the same contradiction with the citation in a `//!` module doc
+          # comment. The never-both check can only see what cited_ids sees, and the
+          # extractor once recognized only `//` and `#` — so a doc-comment citation
+          # beside a `// Derivation: none` read as a bare declaration and PASSED.
+          # Both orders, because the hole was which line the parser could see at
+          # all, not which one came first.
+          printf '//! Derivation: ECMA-48 §8.3.14 — seeded\n// Derivation: none — seeded\nfn seeded() {}\n' > "$dir/doc-cite-then-none.rs"
+          if echo "$dir/doc-cite-then-none.rs" | ./tools/cleanroom-gate.sh --markers; then
+            echo 'marker check accepted a //! doc-comment citation alongside a Derivation: none' >&2
+            exit 1
+          fi
+          echo "cleanroom-gate: doc-comment citation beside 'none' correctly rejected"
+
+          printf '// Derivation: none — seeded\n//! Derivation: ECMA-48 §8.3.14 — seeded\nfn seeded() {}\n' > "$dir/none-then-doc-cite.rs"
+          if echo "$dir/none-then-doc-cite.rs" | ./tools/cleanroom-gate.sh --markers; then
+            echo 'marker check accepted a Derivation: none alongside a //! doc-comment citation' >&2
+            exit 1
+          fi
+          echo "cleanroom-gate: 'none' beside a doc-comment citation correctly rejected"
+
+          # Half seven: the same defect one comment form over. A `///` outer doc
+          # comment documents the very item a derived construct usually is, so
+          # it is where a marker naturally lands — and the extractor once
+          # recognized only `//`, `//!` and `#`, leaving a `///` line invisible
+          # to every consumer: a `none` written there vanished beside a real
+          # citation instead of tripping the never-both check.
+          printf '/// Derivation: none — seeded\n// Derivation: ECMA-48 §8.3.14 — seeded\nfn seeded() {}\n' > "$dir/outer-none-beside-cite.rs"
+          if echo "$dir/outer-none-beside-cite.rs" | ./tools/cleanroom-gate.sh --markers; then
+            echo 'marker check accepted a /// Derivation: none alongside a real citation' >&2
+            exit 1
+          fi
+          echo "cleanroom-gate: outer-doc 'none' beside a citation correctly rejected"
+
+          # Half eight: four-plus slashes. The slash run is unbounded for the
+          # same reason `///` is recognized at all — a line the extractor
+          # cannot see is a line the never-both check cannot judge, and a
+          # `////` citation once stood beside a `none` and passed as a clean
+          # declaration.
+          printf '//// Derivation: ECMA-48 §8.3.14 — seeded\n// Derivation: none — seeded\nfn seeded() {}\n' > "$dir/four-slash-cite-beside-none.rs"
+          if echo "$dir/four-slash-cite-beside-none.rs" | ./tools/cleanroom-gate.sh --markers; then
+            echo 'marker check accepted a //// citation alongside a Derivation: none' >&2
+            exit 1
+          fi
+          echo "cleanroom-gate: four-slash citation beside 'none' correctly rejected"
+
+          # Half nine: a reason spelled entirely in punctuation. The mandatory
+          # reason is what keeps the `none` form from being a gate silencer,
+          # and `— —` satisfied the something-follows check while saying
+          # nothing.
+          printf '// Derivation: none — —\nfn seeded() {}\n' > "$dir/punctuation-reason.rs"
+          if echo "$dir/punctuation-reason.rs" | ./tools/cleanroom-gate.sh --markers; then
+            echo 'marker check accepted a Derivation: none with a punctuation-only reason' >&2
+            exit 1
+          fi
+          echo "cleanroom-gate: punctuation-only 'none' reason correctly rejected"
+
+          # The positive control. Seeds that can only ever fail would also pass with
+          # the whole parser replaced by `exit 1`, which is the failure this job
+          # exists to make impossible. Four of them now: a citation, a declaration,
+          # and a doc-comment citation standing alone in each doc form (`//!` and
+          # `///`) — the doc-form ones pin their fixes to the SHARED extractor,
+          # because a second none-side scan that merely fails the contradiction
+          # would still read these files as unmarked and reject them.
+          printf '// Derivation: ECMA-48 §8.3.14 — seeded\nfn seeded() {}\n' > "$dir/ok.rs"
+          echo "$dir/ok.rs" | ./tools/cleanroom-gate.sh --markers
+          echo "cleanroom-gate: registered citation correctly accepted"
+
+          printf '// Derivation: none — seeded: this file derives nothing\nfn seeded() {}\n' > "$dir/ok-none.rs"
+          echo "$dir/ok-none.rs" | ./tools/cleanroom-gate.sh --markers
+          echo "cleanroom-gate: explained 'none' correctly accepted"
+
+          printf '//! Derivation: ECMA-48 §8.3.14 — seeded\nfn seeded() {}\n' > "$dir/ok-doc-cite.rs"
+          echo "$dir/ok-doc-cite.rs" | ./tools/cleanroom-gate.sh --markers
+          echo "cleanroom-gate: doc-comment citation correctly accepted"
+
+          printf '/// Derivation: ECMA-48 §8.3.14 — seeded\nfn seeded() {}\n' > "$dir/ok-outer-doc-cite.rs"
+          echo "$dir/ok-outer-doc-cite.rs" | ./tools/cleanroom-gate.sh --markers
+          echo "cleanroom-gate: outer-doc-comment citation correctly accepted"
+          rm -rf "${prefix}-seed"
+
+  # Hosted CI enforces the GENERIC pattern set only — the estate-specific extension
+  # (tools/leak-scan.local) is untracked by design and exists solely on operator
+  # machines as a local pre-commit/pre-push control. Seeds below therefore trip the
+  # generic patterns, and are split so this file never contains a matching literal.
+  leak-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: ./tools/leak-scan.sh
+      - run: ./tools/check-claims.sh
+      - name: prove every current-stage mirror is compared (seeded violation)
+        run: |
+          set -euo pipefail
+          mirror=site/content/docs/quickstart.mdx
+          cp "$mirror" /tmp/quickstart.mdx
+          trap 'cp /tmp/quickstart.mdx "$mirror"' EXIT
+          current="$(grep -oE 'stage [0-9] of 6' README.md | grep -oE '[0-9]' | head -n1)"
+          bumped=$((current % 6 + 1))
+          sed -i -E "s/stage ${current} of 6/stage ${bumped} of 6/" "$mirror"
+          if ./tools/check-claims.sh; then
+            echo "check-claims accepted a bumped current-stage mirror ($mirror)" >&2
+            exit 1
+          fi
+          cp /tmp/quickstart.mdx "$mirror"
+          ./tools/check-claims.sh
+          echo "check-claims: bumped current-stage mirror correctly rejected"
+      - name: prove an unlisted crate is caught (seeded violation)
+        run: |
+          set -euo pipefail
+          probe=crates/gwk-seeded-probe
+          trap 'rm -rf "$probe"' EXIT
+
+          # A crate on disk and on NEITHER hand-maintained surface. This is the
+          # case the gate used to accept: it compared the README table against
+          # the landing-page array and nothing against `crates/`, so two
+          # omissions agreeing read as a clean census. gwk-context-compiler
+          # shipped exactly this way. Seeding a crate is the only arm that
+          # distinguishes the rule from the one it replaced — every other
+          # disagreement was already caught.
+          mkdir -p "$probe"
+          printf '[package]\nname = "gwk-seeded-probe"\nversion = "0.0.0"\npublish = false\n' \
+            > "$probe/Cargo.toml"
+          out=""
+          if out="$(./tools/check-claims.sh 2>&1)"; then
+            echo 'check-claims accepted a crate listed on neither surface — the census is broken' >&2
+            exit 1
+          fi
+          grep -q 'disagrees with crates/' <<<"$out" || {
+            echo "the seeded crate was rejected, but not by the crates/ comparison:" >&2
+            printf '%s\n' "$out" >&2
+            exit 1
+          }
+          rm -rf "$probe"
+          ./tools/check-claims.sh
+          echo "check-claims: an unlisted crate correctly rejected"
+      - name: prove the gate can fail (seeded violation)
+        run: |
+          seed=$(printf 'creds at /ho%s/example/data' 'me')
+          if echo "$seed" | ./tools/leak-scan.sh --stdin; then
+            echo 'leak-scan accepted a seeded violation — the gate is broken' >&2
+            exit 1
+          fi
+      # The internal-id tier reads the tracked tree only, so its seed has to be a tracked
+      # file: intent-to-add makes it visible to `git ls-files` without a commit. The
+      # failure must also name the seeded file, because any other hit would fail the scan
+      # without proving that this tier caught anything.
+      - name: prove the internal-id tier can fail (seeded tracked file)
+        shell: bash
+        run: |
+          set -euo pipefail
+          seed_file=tools/.leak-seed-id.txt
+          trap 'git rm -q --cached -f "$seed_file" 2>/dev/null || true; rm -f "$seed_file"' EXIT
+          printf 'see ruling R%s\n' 15 > "$seed_file"
+          git add -N "$seed_file"
+          out=""
+          if out="$(./tools/leak-scan.sh 2>&1)"; then
+            echo 'leak-scan accepted a seeded internal id in a tracked file: the id tier is broken' >&2
+            exit 1
+          fi
+          grep -qF "$seed_file" <<<"$out" || {
+            echo 'the scan failed, but not on the seeded file:' >&2
+            printf '%s\n' "$out" >&2
+            exit 1
+          }
+          echo 'leak-scan: seeded internal id correctly rejected'
+
+  # Commit messages and every line added or deleted inside the PR range publish
+  # too — the final tracked tree is not the whole exposure. Same seeded proof.
+  # Direct pushes to main (including the very first publication push, which
+  # carries the entire history) get their pushed range scanned as well. Merge
+  # groups use the payload's explicit parent/head range rather than guessing
+  # from a temporary queue ref.
+  commit-messages:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Range scans (pushed BEFORE..AFTER content, PR message + patch) must never be
+    # skipped. A per-SHA group with cancel-in-progress:false keeps back-to-back
+    # pushes from superseding each other's scan, so no pushed range goes unscanned.
+    # (The workflow-level concurrency still governs the run; this job opts its own
+    # group out of cancellation.)
+    concurrency:
+      group: commit-messages-${{ github.sha }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: scan PR commit messages
+        if: github.event_name == 'pull_request'
+        # explicit bash = -o pipefail, so a git-log failure fails the gate
+        # instead of feeding the scan empty stdin (fail-open otherwise).
+        shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git log --format=%B "origin/${BASE_REF}..HEAD" | ./tools/leak-scan.sh --stdin
+      - name: scan PR commit content (every commit patch, intermediate included)
+        if: github.event_name == 'pull_request'
+        # The range diff nets an add-then-remove to zero; scanning each commit's
+        # patch catches a value that lived only in an intermediate PR commit. A
+        # separate `git diff --unified=0` leg used to run first and is gone: every
+        # line of a range diff is a `+` in some commit's patch inside that same
+        # range, so it was strictly subsumed by this step — and keeping it meant
+        # maintaining the added-lines filter in a second place, which is the drift
+        # the one-pattern-list rule exists to prevent.
+        #
+        # --history, not a hand-rolled `git log -p | --stdin`: the added-lines
+        # filter that keeps a REMOVAL of a leaked term from reddening the gate
+        # lives inside --history. Inlining the pipeline here bypassed it, so CI
+        # would have gone red on exactly the commits that clean a leak up.
+        shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          ./tools/leak-scan.sh --history "origin/${BASE_REF}..HEAD"
+      - name: scan pushed commit messages and content
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after }}
+        run: |
+          if [[ -z "$BEFORE" || "$BEFORE" =~ ^0+$ ]]; then
+            # Branch creation / first publication: there is no before SHA, so the
+            # pushed range is the full history of the pushed SHA — messages AND content.
+            git log --format=%B "$AFTER" | ./tools/leak-scan.sh --stdin
+            ./tools/leak-scan.sh --history "$AFTER"
+          else
+            git log --format=%B "${BEFORE}..${AFTER}" | ./tools/leak-scan.sh --stdin
+            ./tools/leak-scan.sh --history "${BEFORE}..${AFTER}"
+          fi
+      - name: scan merge-group commit messages and content
+        if: github.event_name == 'merge_group'
+        shell: bash
+        env:
+          BASE: ${{ github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+        run: |
+          set -euo pipefail
+          git cat-file -e "${BASE}^{commit}"
+          git cat-file -e "${HEAD_SHA}^{commit}"
+          git log --format=%B "${BASE}..${HEAD_SHA}" | ./tools/leak-scan.sh --stdin
+          ./tools/leak-scan.sh --history "${BASE}..${HEAD_SHA}"
+      - name: prove the gate can fail (seeded violation)
+        run: |
+          seed=$(printf 'see claude.ai/code/ses%s_EXAMPLE' 'sion')
+          if echo "$seed" | ./tools/leak-scan.sh --stdin; then
+            echo 'commit-message scan accepted a seeded violation — the gate is broken' >&2
+            exit 1
+          fi
+      - name: prove an intermediate-commit leak trips the content scan (seeded)
+        shell: bash
+        run: |
+          # A value added then removed nets to zero in the tree AND the range diff,
+          # but the content scan reads every commit's patch. Build a scratch repo
+          # whose leak lives only in the MIDDLE commit; the literal is split so this
+          # file never contains a matching string.
+          tmp=$(mktemp -d)
+          git -C "$tmp" init -q
+          git -C "$tmp" config user.email ci@example.com
+          git -C "$tmp" config user.name ci
+          seed=$(printf '/ho%s/example/data' 'me')
+          printf 'clean\n'      > "$tmp/f"; git -C "$tmp" add f; git -C "$tmp" commit -qm base
+          printf '%s\n' "$seed" > "$tmp/f"; git -C "$tmp" add f; git -C "$tmp" commit -qm intermediate
+          printf 'clean\n'      > "$tmp/f"; git -C "$tmp" add f; git -C "$tmp" commit -qm cleanup
+          if git -C "$tmp" log -p --diff-merges=first-parent | ./tools/leak-scan.sh --stdin; then
+            echo 'content scan missed an intermediate-commit leak — the gate is broken' >&2
+            exit 1
+          fi
+
+  # The second required context, next to ci.yml's `verify`, and built the same way:
+  # `if: always()` so a failed dependency cannot turn this job into a skip that GitHub
+  # reports as success, and the count asserted by the same script `verify` runs (its
+  # seeded self-test lives in `verify`). `advisories` is absent for the reason `verify`
+  # gives: it is `continue-on-error: true`, so its result reads success either way.
+  security:
+    if: always()
+    needs:
+      - cleanroom-gate
+      - commit-messages
+      - deny
+      - leak-scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: every gate green
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          EXPECTED_GATES: 4
+        run: printf '%s' "$NEEDS" | ./tools/verify-gates.sh

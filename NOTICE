@@ -1,0 +1,11 @@
+GridWork
+Copyright 2026 GridWork Digital LLC
+
+This product includes software developed by GridWork Digital LLC (https://gridwork.dev).
+
+Licensed under the Apache License, Version 2.0. See LICENSE for the full text.
+
+Third-party material:
+- crates/gwk-pty/fixtures vendors terminal test fixtures from ghostty (MIT, Copyright (c)
+  2024 Mitchell Hashimoto, Ghostty contributors). The notice is retained verbatim in
+  crates/gwk-pty/fixtures/LICENSE-ghostty; the source revision is in PROVENANCE.md there.

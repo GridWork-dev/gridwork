@@ -1,0 +1,3 @@
+# Single-maintainer project: every path is owned by the maintainer account.
+# "Require review from Code Owners" stays off so the maintainer can merge their own PRs.
+*   @GridWork-dev
