@@ -1,0 +1,15 @@
+// gridwork.sh: the static export served by Workers static assets. No Worker script, so every
+// request is an asset read; `_headers` in `out/` applies natively. The live site serves
+// /docs and redirects /docs/ to it, hence drop-trailing-slash.
+{
+  "$schema": "https://unpkg.com/wrangler@4/config-schema.json",
+  "name": "gridwork-site",
+  "compatibility_date": "2026-09-25",
+  "assets": {
+    "directory": "./out",
+    "not_found_handling": "404-page",
+    "html_handling": "drop-trailing-slash",
+  },
+  "workers_dev": true,
+  "preview_urls": false,
+}
