@@ -63,10 +63,12 @@ branch_prefix = "feature/"
 #
 #     git diff --cached --no-renames --name-only | ./tools/cleanroom-gate.sh
 #
-# CI is `.github/workflows/ci.yml` — 21 jobs plus the `verify` aggregator.
-# Branch protection requires exactly one context, `verify`, which aggregates 18
-# of the 21; the other three — `perf-attempt`, `perf-retry`, `advisories` — are
-# `continue-on-error` and cannot fail anything.
+# CI is `.github/workflows/ci.yml` — 16 jobs plus the `verify` aggregator — and
+# `.github/workflows/security.yml` — 5 jobs plus the `security` aggregator.
+# Branch protection requires two contexts: `verify`, which aggregates 14 of the
+# 16, and `security`, which aggregates 4 of the 5. The other three —
+# `perf-attempt`, `perf-retry`, `advisories` — are `continue-on-error` and
+# cannot fail anything.
 #
 # Code scanning lives outside the file and does not count the way it reads. Five
 # languages are configured, but `javascript` and `typescript` share one
