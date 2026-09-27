@@ -97,7 +97,6 @@ bun run build
 cd ..
 ./tools/check-theme-sync.sh
 ./tools/check-claims.sh
-docker build -f site/Dockerfile .
 ```
 
 **`cargo deny check` is stricter locally than the merge gate.** CI splits it: bans,

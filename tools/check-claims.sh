@@ -45,21 +45,24 @@ fi
 # C1 already existed. The constraint is the source because it is what Renovate itself
 # resolves against. Counted rather than `need`ed: ci.yml states the version three
 # times and a bare grep passes on one surviving match, so a partial rewrite — the
-# likely shape of a hand-edit — would read clean.
+# likely shape of a hand-edit — would read clean. site.yml, the static-site deploy,
+# states it once more; each workflow is checked on its own.
 bun=$(grep -oE '"bun": "[0-9.]+"' renovate.json | grep -oE '[0-9.]+' || true)
 if [ -z "$bun" ]; then
   echo "check-claims: no bun constraint in renovate.json — cannot pin bun" >&2
   fail=1
 else
-  bun_seen=$(grep -cE 'bun-version:' .github/workflows/ci.yml || true)
-  bun_pinned=$(grep -cE "bun-version: \"${bun//./\\.}\"" .github/workflows/ci.yml || true)
-  if [ "$bun_seen" -eq 0 ]; then
-    echo "check-claims: no bun-version input in ci.yml — the bun pin has no subject" >&2
-    fail=1
-  elif [ "$bun_seen" -ne "$bun_pinned" ]; then
-    echo "check-claims: bun $bun pinned in $bun_pinned of $bun_seen ci.yml bun-version inputs" >&2
-    fail=1
-  fi
+  for wf in .github/workflows/ci.yml .github/workflows/site.yml; do
+    bun_seen=$(grep -cE 'bun-version:' "$wf" || true)
+    bun_pinned=$(grep -cE "bun-version: \"${bun//./\\.}\"" "$wf" || true)
+    if [ "$bun_seen" -eq 0 ]; then
+      echo "check-claims: no bun-version input in $wf — the bun pin has no subject" >&2
+      fail=1
+    elif [ "$bun_seen" -ne "$bun_pinned" ]; then
+      echo "check-claims: bun $bun pinned in $bun_pinned of $bun_seen $wf bun-version inputs" >&2
+      fail=1
+    fi
+  done
 fi
 
 # C2 — the install command, future-tensed everywhere until the crate publishes
