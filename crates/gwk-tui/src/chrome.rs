@@ -238,10 +238,10 @@ impl ChromeTheme {
         // window between checking a size and reading the file.
         let mut text = String::new();
         std::fs::File::open(path)
-            .map_err(&unreadable)?
+            .map_err(unreadable)?
             .take(MAX_THEME_BYTES + 1)
             .read_to_string(&mut text)
-            .map_err(&unreadable)?;
+            .map_err(unreadable)?;
         if text.len() as u64 > MAX_THEME_BYTES {
             return Err(ChromeError::TooLarge {
                 path: display,

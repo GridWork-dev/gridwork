@@ -1331,6 +1331,9 @@ impl PtyHub {
     }
 
     fn next_generation(&self) -> Result<PtySessionGeneration, PtyRefusal> {
+        // Rust 1.99 deprecates `fetch_update` in favour of `try_update`, which is newer
+        // than the 1.94 MSRV. Same semantics; switch when the MSRV moves past it.
+        #[allow(deprecated)]
         let counter = self
             .generations
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
