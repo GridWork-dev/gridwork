@@ -1,7 +1,8 @@
 {
   // The house formatter floor (SPEC house-standards D2c). This file is COPIED VERBATIM
   // into every repo — oxfmt has no `extends`, so uniformity is by identical bytes, not by
-  // inheritance. Changing it here means changing it in five places.
+  // inheritance. Changing it here means changing it in five places, except that the
+  // ignorePatterns list may differ for each repo's locally pinned artifacts.
   "$schema": "./node_modules/oxfmt/configuration_schema.json",
 
   // These ARE oxfmt's upstream defaults, pinned explicitly on purpose. oxfmt is beta; an
