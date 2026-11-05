@@ -86,6 +86,32 @@
       "description": "The bun version is one claim restated on eight surfaces, and Renovate reaches them through three different managers, so no single bot PR can move all of them. Its own tool-constraint updater owns constraints.bun above; npm owns @types/bun in contracts/ and site/ and the packageManager field in site/package.json; the github-actions manager owns the three bun-version uses-with inputs in ci.yml and the one in site.yml. Until the site became a static export on Workers, a fourth manager, dockerfile, owned two oven/bun image pins in site/Dockerfile, which is where oven/bun below comes from; it stays listed so a reintroduced image falls under the same rule. Each package name here is copied from Renovate's own PR tables — #193 listed bun as tool-constraint and as packageManager, and @types/bun as devDependencies; #177 listed bun as uses-with; and #197, which merged while this PR was open, listed node as final for this very Dockerfile, so the dockerfile manager is demonstrably active on that file and names a FROM by its image name — oven/bun is that same shape two stages up. An earlier revision of this caption called oven/bun inferred, on the grounds that Renovate had never proposed a change to site/Dockerfile. That was wrong twice over: it was checked against local refs rather than the forge, and #197 was already open when it was checked. #193 moved four of the eight to 1.4.0 and automerged unattended on green, leaving ci.yml and the Dockerfile at 1.3.14. Nothing went red, because a partial move of a claim that spans managers is invisible to any gate scoped to one of them. This rule therefore matches by package name rather than by manager, since the manager is the axis that splits the claim — and the first revision of it stopped there, which was half an answer. Package name is a second axis that splits the same claim again, because one tool does not have one package name: each manager resolves it under whichever name its own datasource looks it up by. The npm surfaces are bun and @types/bun, the Dockerfile surface is the image oven/bun, and the renovate-config manager that owns constraints.bun above resolves it on github-releases as oven-sh/bun — the repository, not the image. That fourth name was missing, so #199 proposed constraints.bun 1.3.14 to 1.4.0 while the other three surfaces stayed correctly suppressed in the same Renovate run. That asymmetry is also the evidence: a dependency dashboard showing one rule applied to some of a claim's surfaces and not others distinguishes a missing name from a stale config read, which the timing otherwise invited, since #199 was opened barely two minutes after this rule merged. depName is bun on all four; matchPackageNames matches packageName, so the display name is not what has to be listed. Raising bun is a deliberate edit to all eight surfaces at once, and it is not a dependency bump.",
       "matchPackageNames": ["bun", "@types/bun", "oven/bun", "oven-sh/bun"],
       "enabled": false
+    },
+    {
+      "description": "unicode-width, unicode-segmentation and unicode-properties each carry their own copy of the Unicode tables, and gwk-text asserts at compile time that all three report the same version as its own UNICODE_VERSION. Moving one of them alone is a guaranteed compile error in every job that builds gwk-text, which is how unicode-width 0.2.3 turned the weekly batch into a wall of red. They therefore leave the weekly batch and move as one group, never automerged, together with a deliberate edit to UNICODE_VERSION.",
+      "matchPackageNames": ["unicode-width", "unicode-segmentation", "unicode-properties"],
+      "groupName": "unicode tables",
+      "groupSlug": "unicode-tables",
+      "automerge": false
+    },
+    {
+      "description": "unicode-width is held at 0.2.2 until unicode-segmentation and unicode-properties publish tables for the same Unicode version as its newer releases. Lift this cap in the same change that moves all three and UNICODE_VERSION in gwk-text.",
+      "matchPackageNames": ["unicode-width"],
+      "allowedVersions": "<=0.2.2"
+    },
+    {
+      "description": "libghostty-vt is one claim on three surfaces: the exact pin in Cargo.toml, and LIBGHOSTTY_VT_VERSION and GHOSTTY_COMMIT in crates/gwk-pty/pins.env, which the pty job checks against each other. Renovate can only reach the first, so every update it proposes is wrong by construction. Raising it is a deliberate edit to all three at once.",
+      "matchPackageNames": ["libghostty-vt"],
+      "enabled": false
+    },
+    {
+      "description": "A major release of agent-client-protocol changes the protocol surface gwk-adapter-opencode is written against (since 3.0, AcpAgentConfig, which the adapter imports, sits behind the opt-in, non-default process feature), so it needs a hand change rather than a lock bump. Majors leave the weekly batch for a group of their own and wait for approval on the dependency dashboard. The own group is what keeps the batch moving: Renovate requires dashboard approval for a whole branch when any one upgrade in it does, so a major left in the batch would hold every other update behind the approval box. Minors and patches within the current major still ride the batch.",
+      "matchPackageNames": ["agent-client-protocol"],
+      "matchUpdateTypes": ["major"],
+      "groupName": "agent-client-protocol major",
+      "groupSlug": "agent-client-protocol-major",
+      "automerge": false,
+      "dependencyDashboardApproval": true
     }
   ]
 }
