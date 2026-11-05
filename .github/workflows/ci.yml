@@ -18,7 +18,7 @@ env:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -178,7 +178,7 @@ jobs:
           echo "cargo.lock carries exactly one ratatui-core; the seeded second one is counted"
 
   unicode-conformance:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -228,7 +228,7 @@ jobs:
   # each case creates and initializes its own database plus the runtime role.
   # Keep this separate so service failures do not read as Rust regressions.
   kernel-integration:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     services:
       postgres:
@@ -287,7 +287,7 @@ jobs:
     continue-on-error: true
     outputs:
       outcome: ${{ steps.verdict.outputs.outcome }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     services:
       postgres:
@@ -337,7 +337,7 @@ jobs:
     continue-on-error: true
     outputs:
       outcome: ${{ steps.verdict.outputs.outcome }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     services:
       postgres:
@@ -384,7 +384,7 @@ jobs:
   perf:
     needs: [perf-attempt, perf-retry]
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -434,7 +434,7 @@ jobs:
   # when GHOSTTY_SOURCE_DIR is unset, so leaving it unset is a silent network
   # build — which is exactly the failure the ruling exists to prevent.
   pty:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -710,7 +710,7 @@ jobs:
   # the same pins, cache, and materialize steps as `pty`, one script so the two
   # cannot drift.
   pty-host:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -780,7 +780,7 @@ jobs:
   # Zig-requiring crate that `cargo tree -p gridwork` renders in a shape the grep
   # does not match would slip past the graph check and fail here.
   zig-free:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -839,7 +839,7 @@ jobs:
   # silently stops covering the next crate someone adds, which is the same
   # failure shape as a check that cannot fail.
   package:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -938,7 +938,7 @@ jobs:
           done < /tmp/no-sibling
 
   msrv:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -957,7 +957,7 @@ jobs:
 
   # The DDL is contract: it must apply clean against the pinned postgres major.
   schema:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     services:
       postgres:
@@ -1005,7 +1005,7 @@ jobs:
   # source exactly (xtask --check), decode at runtime under bun, typecheck
   # under exactOptionalPropertyTypes, and stay in sync with the site tokens.
   contract:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1055,7 +1055,7 @@ jobs:
   # The site must install with Bun, generate Fumadocs sources, build Next's
   # standalone output, and serve the production routes with the header floor.
   site:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1252,7 +1252,7 @@ jobs:
   # rather than left as scripts someone runs by hand, which is the state `typecheck`
   # sat in until #120 — configured, documented, and never once invoked by CI.
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1392,7 +1392,7 @@ jobs:
       - test
       - unicode-conformance
       - zig-free
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
