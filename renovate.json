@@ -105,7 +105,7 @@
       "enabled": false
     },
     {
-      "description": "A major release of agent-client-protocol changes the protocol surface gwk-adapter-opencode is written against (since 3.0 the crate has no default features, and AcpAgentConfig, which the adapter imports, sits behind the opt-in process feature), so it needs a hand change rather than a lock bump. Majors leave the weekly batch for a group of their own and wait for approval on the dependency dashboard. The own group is what keeps the batch moving: Renovate requires dashboard approval for a whole branch when any one upgrade in it does, so a major left in the batch would hold every other update behind the approval box. Minors and patches within the current major still ride the batch.",
+      "description": "A major release of agent-client-protocol changes the protocol surface gwk-adapter-opencode is written against (since 3.0, AcpAgentConfig, which the adapter imports, sits behind the opt-in, non-default process feature), so it needs a hand change rather than a lock bump. Majors leave the weekly batch for a group of their own and wait for approval on the dependency dashboard. The own group is what keeps the batch moving: Renovate requires dashboard approval for a whole branch when any one upgrade in it does, so a major left in the batch would hold every other update behind the approval box. Minors and patches within the current major still ride the batch.",
       "matchPackageNames": ["agent-client-protocol"],
       "matchUpdateTypes": ["major"],
       "groupName": "agent-client-protocol major",
