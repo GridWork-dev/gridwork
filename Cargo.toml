@@ -158,7 +158,7 @@ tracing = "0.1.44"
 # transitively before gwk-text named them. The exact width and segmentation
 # pins prevent peer resolution drift; gwk-text's compile-time version gate also
 # checks the properties table against the same declared Unicode release.
-unicode-properties = "0.1.4"
+unicode-properties = "0.1.5"
 unicode-segmentation = "=1.13.3"
 unicode-width = "=0.2.2"
 # The YAML Organization's maintained fork of the archived `serde_yaml`, and the
