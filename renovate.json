@@ -112,6 +112,13 @@
       "groupSlug": "agent-client-protocol-major",
       "automerge": false,
       "dependencyDashboardApproval": true
+    },
+    {
+      "description": "specta, specta-serde and specta-typescript generate contracts/bindings.ts, which the contract job compares byte for byte. Renovate cannot regenerate that file, and a new specta release can change the generated types, as rc.27 did by dropping the null from optional fields. They therefore leave the weekly batch and move as one group, never automerged, together with a regenerated and reviewed bindings file.",
+      "matchPackageNames": ["specta", "specta-serde", "specta-typescript"],
+      "groupName": "specta contract",
+      "groupSlug": "specta-contract",
+      "automerge": false
     }
   ]
 }
