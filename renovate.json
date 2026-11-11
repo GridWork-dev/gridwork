@@ -119,6 +119,11 @@
       "groupName": "specta contract",
       "groupSlug": "specta-contract",
       "automerge": false
+    },
+    {
+      "description": "specta is held at 2.0.0-rc.25, and specta-serde and specta-typescript at 0.0.12, the versions released alongside it. They are capped together because xtask pins the two exporters to the exact versions that pair with the specta pin, so moving one alone does not build. rc.27, with 0.0.14 of the other two, changed the generated contract rather than just its output: it dropped the `?: never` exclusion markers from every tagged union arm in contracts/bindings.ts, keeping them only on arms that have no tag field, and it dropped the null from optional fields on the serialize side. The first loosens a public contract, and the second breaks the two-way envelope guard in contracts/decode.test.ts. No changelog entry names either change, no exporter option restores the markers, and rc.28 reworked the TypeScript output again, so the release-candidate line is not yet a target to follow. Lift this cap when specta publishes a stable 2.0.0, or when upstream states that dropping the markers is intended and will stay, and lift it in the same change that regenerates bindings.ts and updates the decode.test.ts guard.",
+      "matchPackageNames": ["specta", "specta-serde", "specta-typescript"],
+      "allowedVersions": "/^(2\\.0\\.0-rc\\.25|0\\.0\\.12)$/"
     }
   ]
 }
