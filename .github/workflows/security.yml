@@ -24,7 +24,7 @@ jobs:
   # bans/licenses/sources block merges; advisories run separately below so a
   # newly published advisory can't redden an unchanged PR.
   deny:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -35,7 +35,7 @@ jobs:
           command: check bans licenses sources
 
   advisories:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     continue-on-error: true
     steps:
@@ -52,7 +52,7 @@ jobs:
   # forever — so either shortcut yields a required check that is green, or stuck,
   # while having verified nothing. The job always runs and decides from the diff.
   cleanroom-gate:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -612,7 +612,7 @@ jobs:
   # machines as a local pre-commit/pre-push control. Seeds below therefore trip the
   # generic patterns, and are split so this file never contains a matching literal.
   leak-scan:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -703,7 +703,7 @@ jobs:
   # groups use the payload's explicit parent/head range rather than guessing
   # from a temporary queue ref.
   commit-messages:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     # Range scans (pushed BEFORE..AFTER content, PR message + patch) must never be
     # skipped. A per-SHA group with cancel-in-progress:false keeps back-to-back
@@ -813,7 +813,7 @@ jobs:
       - commit-messages
       - deny
       - leak-scan
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
